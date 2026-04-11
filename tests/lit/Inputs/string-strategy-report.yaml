@@ -1,0 +1,8 @@
+seed: 5150
+default_level: none
+overrides:
+  - name: leak_shared
+    level: none
+targets:
+  - match: main
+    level: light

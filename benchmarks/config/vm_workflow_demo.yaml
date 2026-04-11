@@ -1,0 +1,18 @@
+seed: 20240601
+default_level: none
+overrides:
+  - name: classify_byte
+    level: vm
+  - name: route_score
+    level: vm
+block_split:
+  max_splits_per_function: 1
+  min_instructions_per_block: 2
+string_encoding:
+  min_string_length: 2
+  max_strings_per_module: 64
+  prefer_lazy_decode: true
+  allow_ctor_fallback: true
+constant_encoding:
+  max_constants_per_function: 4
+  min_bit_width: 8

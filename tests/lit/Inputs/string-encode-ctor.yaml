@@ -1,0 +1,10 @@
+seed: 9001
+default_level: none
+overrides:
+  - name: get_plain
+    level: none
+  - name: leak_secret
+    level: none
+targets:
+  - match: main
+    level: light

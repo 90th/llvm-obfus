@@ -1,0 +1,5 @@
+seed: 8080
+default_level: none
+targets:
+  - match: verify_like
+    level: strong

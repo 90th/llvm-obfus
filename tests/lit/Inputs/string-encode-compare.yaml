@@ -1,0 +1,5 @@
+seed: 2024
+default_level: none
+targets:
+  - match: main
+    level: light

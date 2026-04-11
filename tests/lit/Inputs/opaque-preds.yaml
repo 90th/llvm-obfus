@@ -1,0 +1,5 @@
+seed: 333
+default_level: none
+targets:
+  - match: check
+    level: strong

@@ -1,0 +1,5 @@
+seed: 9001
+default_level: none
+targets:
+  - match: fold_value
+    level: vm

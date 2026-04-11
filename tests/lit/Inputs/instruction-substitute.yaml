@@ -1,0 +1,5 @@
+seed: 111
+default_level: none
+targets:
+  - match: value
+    level: strong

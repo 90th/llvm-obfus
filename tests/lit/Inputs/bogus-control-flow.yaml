@@ -1,0 +1,5 @@
+seed: 222
+default_level: none
+targets:
+  - match: branchy
+    level: strong

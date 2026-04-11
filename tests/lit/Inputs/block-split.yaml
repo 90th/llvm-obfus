@@ -1,0 +1,8 @@
+seed: 7
+default_level: none
+targets:
+  - match: split_me
+    level: strong
+block_split:
+  max_splits_per_function: 1
+  min_instructions_per_block: 3

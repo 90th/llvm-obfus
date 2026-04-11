@@ -1,0 +1,19 @@
+seed: 4242
+default_level: none
+targets:
+  - match: branch_phi
+    level: vm
+  - match: select_cmp
+    level: vm
+  - match: call_memory
+    level: vm
+  - match: gep_load
+    level: vm
+  - match: switch_score
+    level: vm
+  - match: mixed_width
+    level: vm
+  - match: float_mix
+    level: vm
+  - match: vector_mix
+    level: vm

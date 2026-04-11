@@ -1,0 +1,13 @@
+seed: 1337
+default_level: none
+overrides:
+  - name: add
+    level: light
+targets:
+  - match: main
+    level: light
+  - match: add
+    level: strong
+block_split:
+  max_splits_per_function: 1
+  min_instructions_per_block: 2
