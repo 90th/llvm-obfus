@@ -30,6 +30,13 @@ entry:
   ret i32 %b
 }
 
+define i32 @strong_vm_me(i32 %x) {
+entry:
+  %a = xor i32 %x, 8738
+  %b = add nsw i32 %a, 17
+  ret i32 %b
+}
+
 define i32 @main() {
 entry:
   %result = call i32 @first_char(ptr @.secret)
@@ -39,6 +46,9 @@ entry:
 ; CHECK-DAG: "count":3,"detail":"eligible: 3 virtual instruction(s) across 1 block(s)","pass":"vm","status":"applied","target_kind":"function","target_name":"vm_me"
 ; CHECK-DAG: "count":0,"detail":"suppressed after vm","pass":"constant_encoding","status":"skipped","target_kind":"function","target_name":"vm_me"
 ; CHECK-DAG: "count":0,"detail":"suppressed after vm","pass":"block_split","status":"skipped","target_kind":"function","target_name":"vm_me"
+; CHECK-DAG: "count":3,"detail":"eligible: 3 virtual instruction(s) across 1 block(s)","pass":"vm","status":"applied","target_kind":"function","target_name":"strong_vm_me"
+; CHECK-DAG: "count":1,"detail":"1 split(s) available","pass":"block_split","status":"applied","target_kind":"function","target_name":"strong_vm_me"
+; CHECK-DAG: "count":1,"detail":"1 constant(s) available","pass":"constant_encoding","status":"applied","target_kind":"function","target_name":"strong_vm_me"
 ; CHECK-DAG: "count":1,"detail":"1 split(s) available","pass":"block_split","status":"applied","target_kind":"function","target_name":"split_me"
 ; CHECK-DAG: "count":0,"detail":"policy disallows split","pass":"block_split","status":"skipped","target_kind":"function","target_name":"keep_plain"
 ; CHECK-DAG: "count":1,"detail":"1 constant(s) available","pass":"constant_encoding","status":"applied","target_kind":"function","target_name":"main"

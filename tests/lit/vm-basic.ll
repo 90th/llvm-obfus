@@ -17,6 +17,7 @@ entry:
   ret i32 %ret
 }
 
+; CHECK: @__obf_vm_target_fold_value = private global ptr @fold_value
 ; CHECK-LABEL: define i32 @fold_value(i32 %value)
 ; CHECK: entry.obf.vm:
 ; CHECK: %obf.vm.pc = alloca i32
@@ -25,3 +26,7 @@ entry:
 ; CHECK: switch i32 %obf.vm.pc.load
 ; CHECK: trap.obf.vm:
 ; CHECK: call void @llvm.trap()
+; CHECK: %obf.vm.const = xor i32
+; CHECK-LABEL: define i32 @main()
+; CHECK: %fold_value.obf.indirect = load ptr, ptr @__obf_vm_target_fold_value
+; CHECK: call i32 %fold_value.obf.indirect(i32 0)

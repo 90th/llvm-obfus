@@ -77,7 +77,7 @@ string_encoding:
   allow_ctor_fallback: true
 ```
 
-four protection levels:
+five protection levels:
 
 | level | you get |
 |-------|---------|
@@ -85,6 +85,7 @@ four protection levels:
 | `light` | strings + constants + block split |
 | `strong` | everything except VM |
 | `vm` | virtualized into a bytecode interpreter |
+| `strong_vm` | strong + VM |
 
 policy precedence: **override > annotation > target rule > auto-analysis > default**
 
@@ -94,6 +95,8 @@ source annotations work too:
 __attribute__((annotate("obf:strong")))
 int check_license(const char *key) { ... }
 ```
+
+`strong_vm` is the loud one: strong classical transforms first, then VM.
 
 ## test
 

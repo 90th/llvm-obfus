@@ -148,6 +148,7 @@ entry:
 ; CHECK: entry.obf.vm:
 ; CHECK: dispatch.obf.vm:
 ; CHECK: br i1
+; CHECK: %obf.vm.const
 ; CHECK-LABEL: define i32 @call_memory(ptr %src, ptr %dst)
 ; CHECK: call i32 @bump(i32
 ; CHECK: load i32, ptr

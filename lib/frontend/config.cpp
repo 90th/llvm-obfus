@@ -19,6 +19,7 @@ template <> struct ScalarEnumerationTraits<obf::protection_level> {
     io.enumCase(level, "light", obf::protection_level::light);
     io.enumCase(level, "strong", obf::protection_level::strong);
     io.enumCase(level, "vm", obf::protection_level::vm);
+    io.enumCase(level, "strong_vm", obf::protection_level::strong_vm);
   }
 };
 

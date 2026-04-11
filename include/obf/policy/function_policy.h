@@ -9,6 +9,7 @@ enum class protection_level {
   light,
   strong,
   vm,
+  strong_vm,
 };
 
 struct function_policy {
@@ -34,6 +35,8 @@ constexpr std::string_view to_string(protection_level level) {
     return "strong";
   case protection_level::vm:
     return "vm";
+  case protection_level::strong_vm:
+    return "strong_vm";
   }
 
   return "none";

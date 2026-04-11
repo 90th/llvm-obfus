@@ -133,6 +133,10 @@ std::optional<protection_level> parse_protection_level(llvm::StringRef text) {
     return protection_level::vm;
   }
 
+  if (normalized.equals_insensitive("strong_vm")) {
+    return protection_level::strong_vm;
+  }
+
   return std::nullopt;
 }
 
@@ -170,6 +174,17 @@ function_policy make_function_policy(protection_level level) {
             .allow_bogus_control_flow = false,
             .allow_opaque_predicates = false,
             .allow_flattening = false,
+            .allow_split = true,
+            .allow_indirect_calls = true,
+            .allow_vm = true};
+  case protection_level::strong_vm:
+    return {.level = level,
+            .allow_string_encoding = true,
+            .allow_constant_encoding = true,
+            .allow_instruction_substitution = true,
+            .allow_bogus_control_flow = true,
+            .allow_opaque_predicates = true,
+            .allow_flattening = true,
             .allow_split = true,
             .allow_indirect_calls = true,
             .allow_vm = true};
@@ -233,6 +248,10 @@ policy_decision select_policy(const llvm::Module &module,
         decision.policy = make_function_policy(protection_level::light);
         append_detail(decision.detail,
                       "risky features downgraded strong to light");
+      } else if (decision.policy.level == protection_level::strong_vm) {
+        decision.policy = make_function_policy(protection_level::light);
+        append_detail(decision.detail,
+                      "risky features downgraded strong_vm to light");
       }
 
       decision.policy.allow_flattening = false;
@@ -249,6 +268,9 @@ policy_decision select_policy(const llvm::Module &module,
     if (decision.policy.level == protection_level::vm) {
       decision.policy = make_function_policy(protection_level::strong);
       append_detail(decision.detail, "address-taken forced vm to strong");
+    } else if (decision.policy.level == protection_level::strong_vm) {
+      decision.policy = make_function_policy(protection_level::strong);
+      append_detail(decision.detail, "address-taken forced strong_vm to strong");
     }
 
     decision.policy.allow_vm = false;

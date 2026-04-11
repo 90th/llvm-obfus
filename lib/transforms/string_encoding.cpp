@@ -68,6 +68,13 @@ struct string_strategy_plan {
   llvm::SmallVector<classified_string_use, 8> inline_uses;
 };
 
+struct descriptor_layout {
+  unsigned base_index = 0;
+  unsigned state_index = 1;
+  unsigned length_index = 2;
+  unsigned seed_index = 3;
+};
+
 int merge_group_for_shape(string_helper_shape shape) {
   switch (shape) {
   case string_helper_shape::lazy_flag_unrolled_v0:
@@ -202,7 +209,7 @@ classified_string_use classify_instruction_use(llvm::Instruction &instruction,
 
   if (llvm::isa<llvm::PHINode>(instruction)) {
     use.kind = string_use_kind::phi_operand;
-    use.rewriteable = false;
+    use.rewriteable = true;
     return use;
   }
 
@@ -313,6 +320,11 @@ std::uint64_t hash_string(llvm::StringRef text, std::uint64_t seed) {
   }
 
   return hash;
+}
+
+std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
+  seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+  return seed;
 }
 
 std::uint8_t derive_key_byte_constant(std::uint64_t seed, std::size_t index) {
@@ -586,6 +598,81 @@ void diversify_lazy_helper_shapes(std::vector<string_strategy_plan> &plans,
   }
 }
 
+void apply_string_encoding_limit(std::vector<string_strategy_plan> &plans,
+                                 const string_encoding_options &options) {
+  std::size_t encoded_count = 0;
+  for (string_strategy_plan &plan : plans) {
+    if (!plan.result.applied) {
+      continue;
+    }
+
+    if (encoded_count >= options.max_strings_per_module) {
+      plan.result.mode = string_encoding_mode::skipped;
+      plan.result.strategy_kind = string_strategy_kind::none;
+      plan.result.helper_shape = string_helper_shape::none;
+      plan.result.key_schedule = string_key_schedule_kind::seeded_byte_xor_v0;
+      plan.result.merge_group = -1;
+      plan.result.descriptor_index = -1;
+      plan.result.applied = false;
+      plan.result.rewritten_use_count = 0;
+      plan.result.detail = "max_strings_per_module reached";
+      plan.lazy_uses.clear();
+      plan.inline_uses.clear();
+      continue;
+    }
+
+    ++encoded_count;
+  }
+}
+
+std::uint64_t descriptor_order_key(const string_strategy_plan &plan,
+                                   std::uint64_t module_seed) {
+  const std::uint64_t merge_group =
+      static_cast<std::uint64_t>(plan.result.merge_group + 1);
+  return mix_seed(mix_seed(module_seed, merge_group), plan.seed);
+}
+
+void assign_lazy_descriptor_indices(std::vector<string_strategy_plan> &plans,
+                                    std::uint64_t module_seed) {
+  llvm::DenseMap<int, std::vector<std::size_t>> groups;
+  for (std::size_t index = 0; index < plans.size(); ++index) {
+    string_strategy_plan &plan = plans[index];
+    if (plan.result.mode != string_encoding_mode::lazy_decode ||
+        !plan.result.applied || plan.result.merge_group < 0) {
+      plan.result.descriptor_index = -1;
+      continue;
+    }
+
+    groups[plan.result.merge_group].push_back(index);
+  }
+
+  for (auto &group_entry : groups) {
+    auto &indices = group_entry.second;
+    std::sort(indices.begin(), indices.end(),
+              [&](std::size_t lhs, std::size_t rhs) {
+                const std::uint64_t lhs_key =
+                    descriptor_order_key(plans[lhs], module_seed);
+                const std::uint64_t rhs_key =
+                    descriptor_order_key(plans[rhs], module_seed);
+                if (lhs_key != rhs_key) {
+                  return lhs_key < rhs_key;
+                }
+
+                if (plans[lhs].seed != plans[rhs].seed) {
+                  return plans[lhs].seed < plans[rhs].seed;
+                }
+
+                return plans[lhs].result.global_name <
+                       plans[rhs].result.global_name;
+              });
+
+    for (std::size_t table_index = 0; table_index < indices.size(); ++table_index) {
+      plans[indices[table_index]].result.descriptor_index =
+          static_cast<int>(table_index);
+    }
+  }
+}
+
 void encode_global_initializer(llvm::GlobalVariable &global, std::uint64_t seed) {
   const auto *data =
       llvm::cast<llvm::ConstantDataSequential>(global.getInitializer());
@@ -681,15 +768,40 @@ llvm::Value *emit_seeded_key_byte_runtime(llvm::IRBuilder<> &builder,
       key_byte);
 }
 
-llvm::StructType *get_string_descriptor_type(llvm::LLVMContext &context) {
+descriptor_layout get_descriptor_layout(string_helper_shape shape) {
+  switch (shape) {
+  case string_helper_shape::lazy_flag_unrolled_v0:
+    return {.base_index = 2, .state_index = 0, .length_index = 1, .seed_index = 3};
+  case string_helper_shape::lazy_flag_reverse_v1:
+    return {.base_index = 1, .state_index = 2, .length_index = 3, .seed_index = 0};
+  case string_helper_shape::lazy_cached_pointer_v3:
+    return {.base_index = 3, .state_index = 1, .length_index = 0, .seed_index = 2};
+  default:
+    return {};
+  }
+}
+
+llvm::StructType *get_string_descriptor_type(llvm::LLVMContext &context,
+                                             string_helper_shape shape) {
   llvm::Type *ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type *i64_type = llvm::Type::getInt64Ty(context);
-  return llvm::StructType::get(ptr_type, ptr_type, i64_type, i64_type);
+  switch (shape) {
+  case string_helper_shape::lazy_flag_unrolled_v0:
+    return llvm::StructType::get(ptr_type, i64_type, ptr_type, i64_type);
+  case string_helper_shape::lazy_flag_reverse_v1:
+    return llvm::StructType::get(i64_type, ptr_type, ptr_type, i64_type);
+  case string_helper_shape::lazy_cached_pointer_v3:
+    return llvm::StructType::get(i64_type, ptr_type, i64_type, ptr_type);
+  default:
+    return llvm::StructType::get(ptr_type, ptr_type, i64_type, i64_type);
+  }
 }
 
 llvm::Value *load_descriptor_field(llvm::IRBuilder<> &builder, llvm::Value *descriptor,
-                                   unsigned field_index, llvm::Type *field_type) {
-  llvm::StructType *descriptor_type = get_string_descriptor_type(builder.getContext());
+                                   string_helper_shape shape, unsigned field_index,
+                                   llvm::Type *field_type) {
+  llvm::StructType *descriptor_type =
+      get_string_descriptor_type(builder.getContext(), shape);
   llvm::Value *field_ptr = builder.CreateInBoundsGEP(
       descriptor_type, descriptor,
       {llvm::ConstantInt::get(llvm::Type::getInt64Ty(builder.getContext()), 0),
@@ -700,16 +812,21 @@ llvm::Value *load_descriptor_field(llvm::IRBuilder<> &builder, llvm::Value *desc
 llvm::Constant *create_descriptor_initializer(llvm::LLVMContext &context,
                                               const string_strategy_plan &plan,
                                               llvm::GlobalVariable &state_global) {
-  llvm::StructType *descriptor_type = get_string_descriptor_type(context);
-  return llvm::ConstantStruct::get(
-      descriptor_type,
-      llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(
-          plan.global, llvm::PointerType::getUnqual(context)),
-      llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(
-          &state_global, llvm::PointerType::getUnqual(context)),
-      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context),
-                             get_string_length(*plan.global)),
-      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), plan.seed));
+  llvm::StructType *descriptor_type =
+      get_string_descriptor_type(context, plan.result.helper_shape);
+  const descriptor_layout layout = get_descriptor_layout(plan.result.helper_shape);
+
+  llvm::SmallVector<llvm::Constant *, 4> fields(4, nullptr);
+  fields[layout.base_index] = llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(
+      plan.global, llvm::PointerType::getUnqual(context));
+  fields[layout.state_index] = llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(
+      &state_global, llvm::PointerType::getUnqual(context));
+  fields[layout.length_index] = llvm::ConstantInt::get(
+      llvm::Type::getInt64Ty(context), get_string_length(*plan.global));
+  fields[layout.seed_index] =
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), plan.seed);
+
+  return llvm::ConstantStruct::get(descriptor_type, fields);
 }
 
 llvm::Constant *create_descriptor_table_ptr(llvm::GlobalVariable &table,
@@ -735,6 +852,9 @@ llvm::Function *get_or_create_flag_family_helper(llvm::Module &module,
   llvm::Type *ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type *i1_type = llvm::Type::getInt1Ty(context);
   llvm::Type *i64_type = llvm::Type::getInt64Ty(context);
+  const string_helper_shape shape = reverse ? string_helper_shape::lazy_flag_reverse_v1
+                                            : string_helper_shape::lazy_flag_unrolled_v0;
+  const descriptor_layout layout = get_descriptor_layout(shape);
   llvm::FunctionType *type = llvm::FunctionType::get(ptr_type, {ptr_type}, false);
   llvm::Function *decoder = llvm::Function::Create(
       type, llvm::GlobalValue::InternalLinkage, name, module);
@@ -751,16 +871,20 @@ llvm::Function *get_or_create_flag_family_helper(llvm::Module &module,
   llvm::BasicBlock *done = llvm::BasicBlock::Create(context, "done", decoder);
 
   llvm::IRBuilder<> builder(entry);
-  llvm::Value *base_ptr = load_descriptor_field(builder, descriptor, 0, ptr_type);
-  llvm::Value *state_raw = load_descriptor_field(builder, descriptor, 1, ptr_type);
-  llvm::Value *length = load_descriptor_field(builder, descriptor, 2, i64_type);
-  llvm::Value *seed = load_descriptor_field(builder, descriptor, 3, i64_type);
+  llvm::Value *state_raw =
+      load_descriptor_field(builder, descriptor, shape, layout.state_index, ptr_type);
   llvm::Value *state_ptr = builder.CreatePointerCast(
       state_raw, llvm::PointerType::getUnqual(context));
   llvm::Value *already_decoded = builder.CreateLoad(i1_type, state_ptr);
   builder.CreateCondBr(already_decoded, done, decode);
 
   builder.SetInsertPoint(decode);
+  llvm::Value *base_ptr =
+      load_descriptor_field(builder, descriptor, shape, layout.base_index, ptr_type);
+  llvm::Value *length =
+      load_descriptor_field(builder, descriptor, shape, layout.length_index, i64_type);
+  llvm::Value *seed =
+      load_descriptor_field(builder, descriptor, shape, layout.seed_index, i64_type);
   builder.CreateBr(loop);
 
   builder.SetInsertPoint(loop);
@@ -790,7 +914,9 @@ llvm::Function *get_or_create_flag_family_helper(llvm::Module &module,
   builder.CreateBr(done);
 
   builder.SetInsertPoint(done);
-  builder.CreateRet(base_ptr);
+  llvm::Value *result_ptr =
+      load_descriptor_field(builder, descriptor, shape, layout.base_index, ptr_type);
+  builder.CreateRet(result_ptr);
   return decoder;
 }
 
@@ -803,6 +929,8 @@ llvm::Function *get_or_create_cached_family_helper(llvm::Module &module) {
   llvm::LLVMContext &context = module.getContext();
   llvm::Type *ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type *i64_type = llvm::Type::getInt64Ty(context);
+  constexpr string_helper_shape shape = string_helper_shape::lazy_cached_pointer_v3;
+  const descriptor_layout layout = get_descriptor_layout(shape);
   llvm::FunctionType *type = llvm::FunctionType::get(ptr_type, {ptr_type}, false);
   llvm::Function *decoder = llvm::Function::Create(
       type, llvm::GlobalValue::InternalLinkage, name, module);
@@ -818,10 +946,8 @@ llvm::Function *get_or_create_cached_family_helper(llvm::Module &module) {
   llvm::BasicBlock *done = llvm::BasicBlock::Create(context, "done", decoder);
 
   llvm::IRBuilder<> builder(entry);
-  llvm::Value *base_ptr = load_descriptor_field(builder, descriptor, 0, ptr_type);
-  llvm::Value *cache_raw = load_descriptor_field(builder, descriptor, 1, ptr_type);
-  llvm::Value *length = load_descriptor_field(builder, descriptor, 2, i64_type);
-  llvm::Value *seed = load_descriptor_field(builder, descriptor, 3, i64_type);
+  llvm::Value *cache_raw =
+      load_descriptor_field(builder, descriptor, shape, layout.state_index, ptr_type);
   llvm::Value *cache_ptr = builder.CreatePointerCast(
       cache_raw, llvm::PointerType::getUnqual(context));
   llvm::Value *cached = builder.CreateLoad(ptr_type, cache_ptr);
@@ -830,6 +956,12 @@ llvm::Function *get_or_create_cached_family_helper(llvm::Module &module) {
   builder.CreateCondBr(is_cached, done, decode);
 
   builder.SetInsertPoint(decode);
+  llvm::Value *base_ptr =
+      load_descriptor_field(builder, descriptor, shape, layout.base_index, ptr_type);
+  llvm::Value *length =
+      load_descriptor_field(builder, descriptor, shape, layout.length_index, i64_type);
+  llvm::Value *seed =
+      load_descriptor_field(builder, descriptor, shape, layout.seed_index, i64_type);
   builder.CreateBr(loop);
 
   builder.SetInsertPoint(loop);
@@ -895,6 +1027,23 @@ void rewrite_lazy_uses(llvm::Function &family_helper, llvm::Constant *descriptor
                        llvm::ArrayRef<classified_string_use> uses) {
   for (const classified_string_use &use : uses) {
     if (use.instruction == nullptr) {
+      continue;
+    }
+
+    if (auto *phi = llvm::dyn_cast<llvm::PHINode>(use.instruction)) {
+      llvm::BasicBlock *incoming_block = phi->getIncomingBlock(use.operand_index);
+      if (incoming_block == nullptr) {
+        continue;
+      }
+
+      llvm::Instruction *insert_before = incoming_block->getTerminator();
+      if (insert_before == nullptr) {
+        continue;
+      }
+
+      llvm::IRBuilder<> builder(insert_before);
+      llvm::CallInst *decoded_ptr = builder.CreateCall(&family_helper, {descriptor_ptr});
+      phi->setIncomingValue(use.operand_index, decoded_ptr);
       continue;
     }
 
@@ -1002,6 +1151,8 @@ std::vector<string_encoding_result> build_string_results(
       classify_candidates(module, get_seed, options, module_seed);
   std::vector<string_strategy_plan> plans = select_plans(candidates, options);
   diversify_lazy_helper_shapes(plans, module_seed);
+  apply_string_encoding_limit(plans, options);
+  assign_lazy_descriptor_indices(plans, module_seed);
 
   std::vector<string_encoding_result> results;
   results.reserve(plans.size());
@@ -1022,18 +1173,21 @@ std::vector<string_encoding_result> build_string_results(
       groups[plan.result.merge_group].push_back(index);
     }
 
-    llvm::StructType *descriptor_type = get_string_descriptor_type(module.getContext());
     for (auto &group_entry : groups) {
       auto &indices = group_entry.second;
       std::sort(indices.begin(), indices.end(), [&](std::size_t lhs, std::size_t rhs) {
-        return plans[lhs].seed < plans[rhs].seed;
+        return plans[lhs].result.descriptor_index <
+               plans[rhs].result.descriptor_index;
       });
+
+      const string_helper_shape table_shape = plans[indices.front()].result.helper_shape;
+      llvm::StructType *descriptor_type =
+          get_string_descriptor_type(module.getContext(), table_shape);
 
       llvm::SmallVector<llvm::Constant *, 8> initializers;
       initializers.reserve(indices.size());
       for (std::size_t table_index = 0; table_index < indices.size(); ++table_index) {
         const std::size_t plan_index = indices[table_index];
-        plans[plan_index].result.descriptor_index = static_cast<int>(table_index);
         initializers.push_back(create_descriptor_initializer(
             module.getContext(), plans[plan_index], *state_globals[plan_index]));
       }
@@ -1052,21 +1206,10 @@ std::vector<string_encoding_result> build_string_results(
     }
   }
 
-  std::size_t encoded_count = 0;
   for (std::size_t plan_index = 0; plan_index < plans.size(); ++plan_index) {
     string_strategy_plan &plan = plans[plan_index];
     if (plan.global == nullptr) {
       continue;
-    }
-
-    if (plan.result.applied && encoded_count >= options.max_strings_per_module) {
-      plan.result.mode = string_encoding_mode::skipped;
-      plan.result.strategy_kind = string_strategy_kind::none;
-      plan.result.helper_shape = string_helper_shape::none;
-      plan.result.applied = false;
-      plan.result.rewritten_use_count = 0;
-      plan.result.detail = "max_strings_per_module reached";
-      plan.lazy_uses.clear();
     }
 
     if (apply_changes && plan.result.applied) {
@@ -1082,9 +1225,6 @@ std::vector<string_encoding_result> build_string_results(
             create_ctor_decoder(module, *plan.global, plan.seed);
         llvm::appendToGlobalCtors(module, decoder, options.ctor_priority);
       }
-      ++encoded_count;
-    } else if (plan.result.applied) {
-      ++encoded_count;
     }
 
     results.push_back(std::move(plan.result));

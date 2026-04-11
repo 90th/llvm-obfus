@@ -153,6 +153,38 @@ void store_slot(llvm::IRBuilder<> &builder,
   builder.CreateStore(value, slot_allocas[slot]);
 }
 
+bool should_obfuscate_vm_constant(const llvm::ConstantInt &constant) {
+  if (constant.getType()->isIntegerTy(1)) {
+    return false;
+  }
+
+  const llvm::APInt &value = constant.getValue();
+  return !(value.isZero() || value.isOne() || value.isAllOnes());
+}
+
+llvm::Value *materialize_constant(llvm::IRBuilder<> &builder,
+                                  const llvm::Constant &constant) {
+  if (const auto *integer = llvm::dyn_cast<llvm::ConstantInt>(&constant)) {
+    if (!should_obfuscate_vm_constant(*integer)) {
+      return const_cast<llvm::ConstantInt *>(integer);
+    }
+
+    const llvm::APInt &value = integer->getValue();
+    const std::uint64_t salt = static_cast<std::uint64_t>(value.getBitWidth()) * 131ULL;
+    const std::uint64_t word = value.getLimitedValue();
+    const llvm::APInt key(value.getBitWidth(),
+                          (word ^ 0x9e3779b97f4a7c15ULL) + salt,
+                          /*isSigned=*/false, /*implicitTrunc=*/true);
+    const llvm::APInt encoded = value ^ key;
+    return llvm::BinaryOperator::CreateXor(
+        llvm::ConstantInt::get(integer->getType(), encoded),
+        llvm::ConstantInt::get(integer->getType(), key), "obf.vm.const",
+        builder.GetInsertPoint());
+  }
+
+  return const_cast<llvm::Constant *>(&constant);
+}
+
 llvm::Value *materialize_value(llvm::IRBuilder<> &builder,
                                const llvm::SmallVectorImpl<llvm::AllocaInst *> &slot_allocas,
                                const bytecode_program &program,
@@ -161,7 +193,7 @@ llvm::Value *materialize_value(llvm::IRBuilder<> &builder,
     return load_slot(builder, slot_allocas, program, value.slot);
   }
 
-  return const_cast<llvm::Constant *>(value.constant);
+  return materialize_constant(builder, *value.constant);
 }
 
 llvm::Value *emit_binary(llvm::IRBuilder<> &builder,

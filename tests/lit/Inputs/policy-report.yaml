@@ -8,6 +8,8 @@ targets:
     level: vm
   - match: annotated
     level: light
+  - match: strong_vm_fn
+    level: strong_vm
 block_split:
   max_splits_per_function: 1
   min_instructions_per_block: 2

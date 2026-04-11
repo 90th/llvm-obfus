@@ -8,6 +8,8 @@ targets:
     level: strong
   - match: vm_me
     level: vm
+  - match: strong_vm_me
+    level: strong_vm
   - match: main
     level: strong
 block_split:
