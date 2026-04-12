@@ -65,6 +65,12 @@ template <> struct MappingTraits<obf::constant_encoding_config> {
   }
 };
 
+template <> struct MappingTraits<obf::mba_config> {
+  static void mapping(IO &io, obf::mba_config &config) {
+    io.mapOptional("depth", config.depth, std::uint32_t{1});
+  }
+};
+
 template <> struct MappingTraits<obf::obfuscation_config> {
   static void mapping(IO &io, obf::obfuscation_config &config) {
     io.mapOptional("seed", config.seed, std::uint64_t{0});
@@ -75,6 +81,7 @@ template <> struct MappingTraits<obf::obfuscation_config> {
     io.mapOptional("block_split", config.block_split);
     io.mapOptional("string_encoding", config.string_encoding);
     io.mapOptional("constant_encoding", config.constant_encoding);
+    io.mapOptional("mba", config.mba);
   }
 };
 
@@ -139,6 +146,7 @@ std::string summarize_config(const obfuscation_config &config) {
          << config.constant_encoding.max_constants_per_function << '\n';
   stream << "constant_encoding.min_bit_width: "
          << config.constant_encoding.min_bit_width << '\n';
+  stream << "mba.depth: " << config.mba.depth << '\n';
 
   return output;
 }

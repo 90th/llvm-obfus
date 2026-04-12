@@ -144,11 +144,16 @@ entry:
   ret i32 %ret
 }
 
+; CHECK: @__obf_vm_bc_branch_phi = private unnamed_addr constant [{{[0-9]+}} x i8] c"
+; CHECK: @__obf_vm_bc_switch_score = private unnamed_addr constant [{{[0-9]+}} x i8] c"
 ; CHECK-LABEL: define i32 @branch_phi(i32 %x)
 ; CHECK: entry.obf.vm:
-; CHECK: dispatch.obf.vm:
-; CHECK: br i1
-; CHECK: %obf.vm.const
+; CHECK: %obf.vm.state = alloca i64
+; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
+; CHECK: load i8, ptr @__obf_vm_bc_branch_phi
+; CHECK: %obf.vm.integrity.byte = load i8, ptr getelementptr inbounds
+; CHECK: %obf.vm.integrity.fold = xor i64
+; CHECK: indirectbr ptr %obf.vm.dispatch.target
 ; CHECK-LABEL: define i32 @call_memory(ptr %src, ptr %dst)
 ; CHECK: call i32 @bump(i32
 ; CHECK: load i32, ptr

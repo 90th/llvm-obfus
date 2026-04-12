@@ -38,6 +38,10 @@ struct constant_encoding_config {
   std::uint32_t min_bit_width = 8;
 };
 
+struct mba_config {
+  std::uint32_t depth = 1;
+};
+
 struct obfuscation_config {
   std::uint64_t seed = 0;
   protection_level default_level = protection_level::none;
@@ -46,6 +50,7 @@ struct obfuscation_config {
   block_split_config block_split;
   string_encoding_config string_encoding;
   constant_encoding_config constant_encoding;
+  mba_config mba;
 };
 
 llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path);

@@ -1,9 +1,15 @@
 #include "obf/transforms/constant_encoding.h"
 
+#include "obf/transforms/mba.h"
+
+#include "llvm/ADT/Hashing.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 
 #include <cstdint>
 #include <string>
@@ -69,6 +75,58 @@ llvm::APInt derive_key(unsigned bit_width, std::uint64_t seed) {
   return key;
 }
 
+std::uint64_t derive_opaque_seed(const llvm::Function &function,
+                                 std::uint64_t seed) {
+  seed = mix_seed(seed,
+                  static_cast<std::uint64_t>(llvm::hash_value(function.getName())));
+  if (seed == 0) {
+    seed = 0x5aa55aa55aa55aa5ULL;
+  }
+
+  return seed;
+}
+
+llvm::AllocaInst *get_or_create_opaque_seed_slot(llvm::Function &function,
+                                                 std::uint64_t seed) {
+  for (llvm::Instruction &instruction : function.getEntryBlock()) {
+    auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction);
+    if (alloca != nullptr && alloca->getName() == "obf.const.seed.slot" &&
+        alloca->getAllocatedType()->isIntegerTy(64)) {
+      return alloca;
+    }
+  }
+
+  llvm::IRBuilder<> builder(&*function.getEntryBlock().getFirstInsertionPt());
+  auto *slot = builder.CreateAlloca(builder.getInt64Ty(), nullptr,
+                                    "obf.const.seed.slot");
+  auto *store = builder.CreateStore(builder.getInt64(seed), slot);
+  store->setVolatile(true);
+  return slot;
+}
+
+llvm::Value *build_opaque_mask(llvm::IRBuilder<> &builder,
+                               llvm::AllocaInst *opaque_seed_slot,
+                               std::uint64_t opaque_seed_base,
+                               llvm::IntegerType *type, const llvm::APInt &key,
+                               const mba::builder_context &mba_context,
+                               std::uint64_t salt) {
+  auto *seed_load = builder.CreateLoad(builder.getInt64Ty(), opaque_seed_slot,
+                                       "obf.const.seed");
+  seed_load->setVolatile(true);
+
+  llvm::Value *typed_seed = seed_load;
+  if (typed_seed->getType() != type) {
+    typed_seed = builder.CreateZExtOrTrunc(typed_seed, type, "obf.const.seed.cast");
+  }
+
+  const llvm::APInt base_seed(type->getBitWidth(), opaque_seed_base,
+                              /*isSigned=*/false, /*implicitTrunc=*/true);
+  const llvm::APInt delta = key ^ base_seed;
+  return mba::create_xor(builder, typed_seed,
+                         llvm::ConstantInt::get(type, delta), mba_context,
+                         salt, "obf.const.mask");
+}
+
 constant_encoding_result analyze_impl(const llvm::Function &function,
                                       const constant_encoding_options &options) {
   if (function.isDeclaration()) {
@@ -130,40 +188,65 @@ constant_encoding_result run_constant_encoding(llvm::Function &function,
 
   std::size_t encoded_count = 0;
   std::uint64_t local_seed = seed;
+  const std::uint64_t opaque_seed_base = derive_opaque_seed(function, seed);
+
+  llvm::SmallVector<llvm::Instruction *, 64> original_instructions;
   for (llvm::BasicBlock &block : function) {
     for (llvm::Instruction &instruction : block) {
+      original_instructions.push_back(&instruction);
+    }
+  }
+
+  llvm::AllocaInst *opaque_seed_slot =
+      get_or_create_opaque_seed_slot(function, opaque_seed_base);
+  if (opaque_seed_slot == nullptr) {
+    return analysis;
+  }
+
+  const mba::builder_context mba_context =
+      [&] {
+        mba::builder_context ctx =
+            mba::get_or_create_builder_context(function, "obf.const.mba",
+                                               opaque_seed_base);
+        ctx.depth = options.mba_depth;
+        return ctx;
+      }();
+
+  for (llvm::Instruction *instruction : original_instructions) {
+    if (instruction == nullptr || instruction == opaque_seed_slot ||
+        encoded_count >= options.max_constants_per_function) {
+      continue;
+    }
+
+    for (unsigned operand_index = 0; operand_index < instruction->getNumOperands();
+         ++operand_index) {
       if (encoded_count >= options.max_constants_per_function) {
-        return {.encoded_count = encoded_count,
-                .detail = std::to_string(encoded_count) +
-                          " constant(s) encoded"};
+        break;
       }
 
-      for (unsigned operand_index = 0; operand_index < instruction.getNumOperands();
-           ++operand_index) {
-        if (encoded_count >= options.max_constants_per_function) {
-          break;
-        }
-
-        auto *constant =
-            llvm::dyn_cast<llvm::ConstantInt>(instruction.getOperand(operand_index));
-        if (constant == nullptr ||
-            !is_supported_constant_operand(instruction, operand_index, *constant,
-                                           options)) {
-          continue;
-        }
-
-        local_seed = mix_seed(local_seed,
-                              static_cast<std::uint64_t>(encoded_count + 1));
-        const llvm::APInt key = derive_key(constant->getBitWidth(), local_seed);
-        const llvm::APInt encoded = constant->getValue() ^ key;
-
-        llvm::Value *decoded = llvm::BinaryOperator::CreateXor(
-            llvm::ConstantInt::get(constant->getType(), encoded),
-            llvm::ConstantInt::get(constant->getType(), key), "obf.const",
-            instruction.getIterator());
-        instruction.setOperand(operand_index, decoded);
-        ++encoded_count;
+      auto *constant =
+          llvm::dyn_cast<llvm::ConstantInt>(instruction->getOperand(operand_index));
+      if (constant == nullptr ||
+          !is_supported_constant_operand(*instruction, operand_index, *constant,
+                                         options)) {
+        continue;
       }
+
+      local_seed = mix_seed(local_seed,
+                            static_cast<std::uint64_t>(encoded_count + 1));
+      const llvm::APInt key = derive_key(constant->getBitWidth(), local_seed);
+      const llvm::APInt encoded = constant->getValue() ^ key;
+
+      llvm::IRBuilder<> builder(instruction);
+      llvm::Value *mask = build_opaque_mask(
+          builder, opaque_seed_slot, opaque_seed_base,
+          llvm::cast<llvm::IntegerType>(constant->getType()), key, mba_context,
+          local_seed ^ static_cast<std::uint64_t>(operand_index + 1));
+      llvm::Value *decoded = mba::create_xor(
+          builder, llvm::ConstantInt::get(constant->getType(), encoded), mask,
+          mba_context, local_seed ^ 0xd6e8feb86659fd93ULL, "obf.const");
+      instruction->setOperand(operand_index, decoded);
+      ++encoded_count;
     }
   }
 

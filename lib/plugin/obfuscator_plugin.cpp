@@ -12,10 +12,14 @@
 #include "obf/vm/candidate_analysis.h"
 #include "obf/vm/virtualize.h"
 
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Verifier.h"
@@ -144,6 +148,7 @@ build_constant_encoding_options(const obfuscation_config &config,
         std::min<std::size_t>(options.max_constants_per_function, 2);
   }
 
+  options.mba_depth = config.mba.depth;
   return options;
 }
 
@@ -160,7 +165,7 @@ build_control_flattening_options(const obfuscation_config &,
 }
 
 instruction_substitution_options
-build_instruction_substitution_options(const obfuscation_config &,
+build_instruction_substitution_options(const obfuscation_config &config,
                                        const policy_decision &decision) {
   instruction_substitution_options options;
   if (has_strong_classical(decision.policy.level)) {
@@ -169,6 +174,7 @@ build_instruction_substitution_options(const obfuscation_config &,
     options.max_substitutions_per_function = 2;
   }
 
+  options.mba_depth = config.mba.depth;
   return options;
 }
 
@@ -456,6 +462,23 @@ bool apply_block_split_stage(
   return changed;
 }
 
+llvm::APInt derive_vm_target_key(const llvm::Function &function,
+                                 llvm::IntegerType *ptr_int_type) {
+  std::uint64_t key_word =
+      static_cast<std::uint64_t>(llvm::hash_value(function.getName()));
+  key_word ^= static_cast<std::uint64_t>(ptr_int_type->getBitWidth()) << 32;
+  return llvm::APInt(ptr_int_type->getBitWidth(),
+                     key_word == 0 ? 0xa55aa55aULL : key_word,
+                     /*isSigned=*/false, /*implicitTrunc=*/true);
+}
+
+/// Sentinel stored in the lazy-resolution slot to indicate "not yet resolved".
+/// Using ~key guarantees decoding would yield all-ones (never a valid code
+/// pointer), while being trivially distinguishable from any real encoded target.
+llvm::APInt derive_vm_target_sentinel(const llvm::APInt &key) {
+  return ~key;
+}
+
 llvm::GlobalVariable *get_or_create_vm_target_global(llvm::Function &function) {
   llvm::Module *module = function.getParent();
   if (module == nullptr) {
@@ -464,15 +487,35 @@ llvm::GlobalVariable *get_or_create_vm_target_global(llvm::Function &function) {
 
   const std::string global_name =
       ("__obf_vm_target_" + function.getName()).str();
+  const llvm::DataLayout &data_layout = module->getDataLayout();
+  auto *ptr_int_type =
+      data_layout.getIntPtrType(module->getContext(), function.getAddressSpace());
+  const llvm::APInt key = derive_vm_target_key(function, ptr_int_type);
+  const llvm::APInt sentinel = derive_vm_target_sentinel(key);
+
   if (llvm::GlobalVariable *existing = module->getNamedGlobal(global_name)) {
     return existing;
   }
 
-  llvm::Type *ptr_type = llvm::PointerType::getUnqual(module->getContext());
-  llvm::Constant *initializer = llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(
-      &function, llvm::cast<llvm::PointerType>(ptr_type));
-  return new llvm::GlobalVariable(*module, ptr_type, false,
-                                  llvm::GlobalValue::PrivateLinkage, initializer,
+  auto *target_global = new llvm::GlobalVariable(
+      *module, ptr_int_type, false, llvm::GlobalValue::PrivateLinkage,
+      llvm::ConstantInt::get(ptr_int_type, sentinel), global_name);
+  return target_global;
+}
+
+llvm::GlobalVariable *
+get_or_create_vm_decode_key_global(llvm::Module &module,
+                                   llvm::IntegerType *ptr_int_type,
+                                   llvm::StringRef callee_name,
+                                   const llvm::APInt &key) {
+  const std::string global_name = ("__obf_vm_key_" + callee_name).str();
+  if (auto *existing = module.getNamedGlobal(global_name)) {
+    return existing;
+  }
+
+  return new llvm::GlobalVariable(module, ptr_int_type, /*isConstant=*/false,
+                                  llvm::GlobalValue::PrivateLinkage,
+                                  llvm::ConstantInt::get(ptr_int_type, key),
                                   global_name);
 }
 
@@ -481,6 +524,23 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function) {
   if (target_global == nullptr) {
     return false;
   }
+
+  llvm::Module *module = function.getParent();
+  if (module == nullptr) {
+    return false;
+  }
+
+  auto *ptr_int_type = llvm::cast<llvm::IntegerType>(target_global->getValueType());
+  const llvm::APInt key = derive_vm_target_key(function, ptr_int_type);
+  const llvm::APInt sentinel = derive_vm_target_sentinel(key);
+
+  // Compile-time salt for runtime-context mixing (distinct from key).
+  const std::uint64_t raw_salt =
+      static_cast<std::uint64_t>(llvm::hash_value(function.getName())) *
+      0x9E3779B97F4A7C15ULL;
+  const llvm::APInt salt(ptr_int_type->getBitWidth(),
+                         raw_salt == 0 ? 0xC6EF3720ULL : raw_salt,
+                         /*isSigned=*/false, /*implicitTrunc=*/true);
 
   llvm::SmallVector<llvm::CallBase *, 16> call_sites;
   for (llvm::User *user : function.users()) {
@@ -492,12 +552,89 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function) {
     call_sites.push_back(call);
   }
 
+  // Declare llvm.returnaddress intrinsic for runtime-context dependency.
+  llvm::Function *retaddr_fn = llvm::Intrinsic::getOrInsertDeclaration(
+      module, llvm::Intrinsic::returnaddress);
+
   bool changed = false;
   for (llvm::CallBase *call : call_sites) {
-    llvm::IRBuilder<> builder(call);
-    llvm::Value *indirect_target =
-        builder.CreateLoad(target_global->getValueType(), target_global,
-                           function.getName() + ".obf.indirect");
+    llvm::Function *caller = call->getFunction();
+    if (caller == nullptr) {
+      continue;
+    }
+
+    // Per-callee module-level key global (avoids alloca/domination issues
+    // when control flattening hoists only leading allocas).
+    llvm::GlobalVariable *decode_key_global = get_or_create_vm_decode_key_global(
+        *module, ptr_int_type, function.getName(), key);
+
+    // Split the block at the call to create room for the lazy-resolution
+    // sentinel check and resolve path.
+    llvm::BasicBlock *orig_bb = call->getParent();
+    llvm::BasicBlock *call_bb = orig_bb->splitBasicBlock(
+        call->getIterator(), (function.getName() + ".obf.call").str());
+    orig_bb->getTerminator()->eraseFromParent();
+
+    llvm::BasicBlock *resolve_bb = llvm::BasicBlock::Create(
+        module->getContext(), (function.getName() + ".obf.resolve").str(),
+        caller, call_bb);
+
+    // --- Entry tail: load slot, compare against sentinel, branch ---
+    llvm::IRBuilder<> entry_builder(orig_bb);
+    auto *encoded_check = entry_builder.CreateLoad(
+        ptr_int_type, target_global, /*isVolatile=*/true,
+        function.getName() + ".obf.check");
+    auto *sentinel_const = llvm::ConstantInt::get(ptr_int_type, sentinel);
+    auto *is_unresolved = entry_builder.CreateICmpEQ(
+        encoded_check, sentinel_const,
+        function.getName() + ".obf.unresolved");
+    entry_builder.CreateCondBr(is_unresolved, resolve_bb, call_bb);
+
+    // --- Resolve block: compute encoded target with runtime context, store ---
+    llvm::IRBuilder<> resolve_builder(resolve_bb);
+    auto *retaddr = resolve_builder.CreateCall(
+        retaddr_fn, {resolve_builder.getInt32(0)},
+        function.getName() + ".obf.retaddr");
+    auto *retaddr_int = resolve_builder.CreatePtrToInt(
+        retaddr, ptr_int_type,
+        function.getName() + ".obf.retaddr.int");
+    auto *target_int = resolve_builder.CreatePtrToInt(
+        &function, ptr_int_type,
+        function.getName() + ".obf.real.int");
+    auto *salt_const = llvm::ConstantInt::get(ptr_int_type, salt);
+    auto *runtime_key = resolve_builder.CreateXor(
+        retaddr_int, salt_const,
+        function.getName() + ".obf.rkey");
+    auto *mixed = resolve_builder.CreateXor(
+        target_int, runtime_key,
+        function.getName() + ".obf.mixed");
+    auto *unmixed = resolve_builder.CreateXor(
+        mixed, runtime_key,
+        function.getName() + ".obf.unmixed");
+    auto *key_const = llvm::ConstantInt::get(ptr_int_type, key);
+    auto *new_encoded = resolve_builder.CreateXor(
+        unmixed, key_const,
+        function.getName() + ".obf.resolved");
+    resolve_builder.CreateStore(new_encoded, target_global, /*isVolatile=*/true);
+    resolve_builder.CreateBr(call_bb);
+
+    // --- Call block: merge encoded value, decode, indirect-call ---
+    llvm::IRBuilder<> call_builder(call);
+    auto *encoded_phi = call_builder.CreatePHI(
+        ptr_int_type, 2,
+        function.getName() + ".obf.encoded");
+    encoded_phi->addIncoming(encoded_check, orig_bb);
+    encoded_phi->addIncoming(new_encoded, resolve_bb);
+
+    auto *opaque_key = call_builder.CreateLoad(
+        ptr_int_type, decode_key_global, /*isVolatile=*/true,
+        function.getName() + ".obf.key");
+    llvm::Value *decoded_target =
+        call_builder.CreateXor(encoded_phi, opaque_key,
+                               function.getName() + ".obf.decoded");
+    llvm::Value *indirect_target = call_builder.CreateIntToPtr(
+        decoded_target, call->getCalledOperand()->getType(),
+        function.getName() + ".obf.indirect");
     call->setCalledOperand(indirect_target);
     changed = true;
   }
@@ -522,8 +659,11 @@ bool rewrite_calls_to_virtualized_functions(
 
 llvm::StringSet<>
 apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
+               const obfuscation_config &config,
                const protection_level *only_level = nullptr) {
   llvm::StringSet<> virtualized_functions;
+
+  const vm::virtualization_options vm_options{.mba_depth = config.mba.depth};
 
   for (const function_pipeline_state &state : states) {
     if (state.function == nullptr || state.function->isDeclaration() ||
@@ -536,7 +676,7 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
     }
 
     const vm::virtualization_result result =
-        vm::run_virtualization(*state.function);
+        vm::run_virtualization(*state.function, vm_options);
     if (result.virtualized) {
       virtualized_functions.insert(state.function->getName());
     }
@@ -580,7 +720,8 @@ bool apply_constant_encoding_stage(
 
   for (const function_pipeline_state &state : states) {
     if (should_skip_function(state, skip_functions) ||
-        !state.report.decision.policy.allow_constant_encoding) {
+        !state.report.decision.policy.allow_constant_encoding ||
+        state.report.decision.policy.level == protection_level::strong_vm) {
       continue;
     }
 
@@ -602,7 +743,8 @@ bool apply_instruction_substitution_stage(
 
   for (const function_pipeline_state &state : states) {
     if (should_skip_function(state, skip_functions) ||
-        !state.report.decision.policy.allow_instruction_substitution) {
+        !state.report.decision.policy.allow_instruction_substitution ||
+        state.report.decision.policy.level == protection_level::strong_vm) {
       continue;
     }
 
@@ -752,7 +894,7 @@ public:
     const llvm::SmallVector<function_pipeline_state, 32> states =
         build_pipeline_state(module, config);
 
-    const llvm::StringSet<> virtualized_functions = apply_vm_stage(states);
+    const llvm::StringSet<> virtualized_functions = apply_vm_stage(states, config);
     bool changed = !virtualized_functions.empty();
     changed |= rewrite_calls_to_virtualized_functions(module, virtualized_functions);
     if (!changed) {
@@ -872,7 +1014,7 @@ public:
 
     // Phase 1: VM for vm-only functions (not strong_vm).
     constexpr protection_level vm_level = protection_level::vm;
-    const llvm::StringSet<> vm_only = apply_vm_stage(states, &vm_level);
+    const llvm::StringSet<> vm_only = apply_vm_stage(states, config, &vm_level);
     changed |= !vm_only.empty();
     changed |= rewrite_calls_to_virtualized_functions(module, vm_only);
 
@@ -900,7 +1042,7 @@ public:
     // Phase 4: VM for strong_vm functions after classical transforms.
     constexpr protection_level strong_vm_level = protection_level::strong_vm;
     const llvm::StringSet<> strong_vm_virtualized =
-        apply_vm_stage(states, &strong_vm_level);
+        apply_vm_stage(states, config, &strong_vm_level);
     changed |= !strong_vm_virtualized.empty();
     changed |= rewrite_calls_to_virtualized_functions(module, strong_vm_virtualized);
 

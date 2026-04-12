@@ -52,6 +52,7 @@ add_library(obf_core
   lib/transforms/constant_encoding.cpp
   lib/transforms/control_flattening.cpp
   lib/transforms/instruction_substitution.cpp
+  lib/transforms/mba.cpp
   lib/transforms/opaque_predicates.cpp
   lib/transforms/string_encoding.cpp
   lib/vm/candidate_analysis.cpp
