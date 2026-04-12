@@ -266,11 +266,18 @@ std::uint64_t derive_vm_bytecode_seed(const llvm::Function &function,
   return seed == 0 ? 0x4f1bbcdc6762d5f1ULL : seed;
 }
 
+std::uint64_t derive_vm_return_key(const llvm::Function &function,
+                                   const bytecode_program &program) {
+  return mix_seed(derive_vm_opaque_seed(function, program),
+                  0xdeadbeefcafebabeULL);
+}
+
 struct bytecode_layout {
   std::uint32_t header_offset = 0;
   std::uint32_t fallthrough_target_offset = invalid_slot;
   std::vector<std::uint32_t> edge_target_offsets;
   std::uint32_t integrity_probe_range = 0;
+  std::uint64_t expected_post_header_state = 0;
 };
 
 struct serialized_bytecode_program {
@@ -419,6 +426,8 @@ serialized_bytecode_program serialize_bytecode_program(
             integrity_fold_state(header_state, serialized.bytes[probe_offset]);
       }
     }
+
+    layout.expected_post_header_state = header_state;
 
     const auto append_target_segment = [&](std::uint32_t target_instruction) {
       std::uint64_t segment_state = header_state;
@@ -810,6 +819,19 @@ void rewrite_function_body(llvm::Function &function,
         llvm::ConstantDataArray::get(context, serialized.bytes),
         ("__obf_vm_bc_" + function.getName()).str());
     bytecode_global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  }
+
+  // Create return-key global for integer-returning functions.
+  // The caller-side rewriter looks this up by name to decode return values.
+  llvm::GlobalVariable *retkey_global = nullptr;
+  if (function.getReturnType()->isIntegerTy()) {
+    const std::uint64_t retkey_value =
+        derive_vm_return_key(function, program);
+    retkey_global = new llvm::GlobalVariable(
+        *function.getParent(), entry_builder.getInt64Ty(),
+        /*isConstant=*/false, llvm::GlobalValue::PrivateLinkage,
+        entry_builder.getInt64(retkey_value),
+        ("__obf_vm_retkey_" + function.getName()).str());
   }
 
   auto *state_slot = entry_builder.CreateAlloca(entry_builder.getInt64Ty(), nullptr,
@@ -1434,11 +1456,45 @@ void rewrite_function_body(llvm::Function &function,
       if (instruction.operands.empty()) {
         builder.CreateRetVoid();
       } else {
-        builder.CreateRet(
+        llvm::Value *ret_val =
             materialize_value(builder, slot_allocas, current_slot_mapping, program,
                               instruction.operands[0], opaque_seed,
                               opaque_seed_base, mba_context,
-                              0x18000 + static_cast<std::uint64_t>(instruction_index)));
+                              0x18000 + static_cast<std::uint64_t>(instruction_index));
+        // Encode the return value if this function returns an integer type
+        // and we have a retkey global.  Encoding:
+        //   encoded = ret_val ^ trunc(retkey ^ (state ^ expected_state))
+        // Under normal (untampered) execution state == expected_state, so the
+        // poison term cancels and the caller sees ret_val ^ trunc(retkey).
+        // If bytecode was tampered, state diverges and garbage propagates.
+        if (retkey_global != nullptr && ret_val->getType()->isIntegerTy()) {
+          const std::uint64_t ret_salt =
+              0x1a000 + static_cast<std::uint64_t>(instruction_index) * 16;
+          auto *state_load = builder.CreateLoad(builder.getInt64Ty(), state_slot,
+                                                "obf.vm.ret.state");
+          state_load->setVolatile(true);
+          auto *expected_const = builder.getInt64(
+              serialized.layouts[instruction_index].expected_post_header_state);
+          llvm::Value *poison = mba::create_xor(
+              builder, state_load, expected_const, mba_context,
+              ret_salt + 1, "obf.vm.ret.poison");
+          auto *retkey_load = builder.CreateLoad(builder.getInt64Ty(),
+                                                 retkey_global,
+                                                 "obf.vm.ret.retkey");
+          retkey_load->setVolatile(true);
+          llvm::Value *full_key = mba::create_xor(
+              builder, retkey_load, poison, mba_context,
+              ret_salt + 2, "obf.vm.ret.fullkey");
+          llvm::Value *key_trunc = full_key;
+          if (ret_val->getType() != builder.getInt64Ty()) {
+            key_trunc = builder.CreateTrunc(full_key, ret_val->getType(),
+                                            "obf.vm.ret.key.trunc");
+          }
+          ret_val = mba::create_xor(
+              builder, ret_val, key_trunc, mba_context,
+              ret_salt + 3, "obf.vm.ret.encoded");
+        }
+        builder.CreateRet(ret_val);
       }
       break;
     }

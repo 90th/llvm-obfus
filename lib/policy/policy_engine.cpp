@@ -180,12 +180,12 @@ function_policy make_function_policy(protection_level level) {
   case protection_level::strong_vm:
     return {.level = level,
             .allow_string_encoding = true,
-            .allow_constant_encoding = true,
+            .allow_constant_encoding = false,
             .allow_instruction_substitution = true,
-            .allow_bogus_control_flow = true,
-            .allow_opaque_predicates = true,
+            .allow_bogus_control_flow = false,
+            .allow_opaque_predicates = false,
             .allow_flattening = true,
-            .allow_split = true,
+            .allow_split = false,
             .allow_indirect_calls = true,
             .allow_vm = true};
   }
@@ -278,7 +278,9 @@ policy_decision select_policy(const llvm::Module &module,
 
   if (decision.policy.level != protection_level::none) {
     decision.policy.allow_string_encoding = true;
-    decision.policy.allow_constant_encoding = true;
+    if (decision.policy.level != protection_level::strong_vm) {
+      decision.policy.allow_constant_encoding = true;
+    }
   }
 
   return decision;

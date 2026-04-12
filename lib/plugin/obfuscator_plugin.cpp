@@ -239,6 +239,9 @@ build_transform_reports(llvm::Module &module,
     const bool suppressed_by_vm =
         virtualized_functions.contains(function->getName()) &&
         state.report.decision.policy.level != protection_level::strong_vm;
+    const bool deferred_to_vm_hardening =
+        virtualized_functions.contains(function->getName()) &&
+        state.report.decision.policy.level == protection_level::strong_vm;
 
     const vm::candidate_result vm_result = vm::analyze_candidate(*function);
     if (!state.report.decision.policy.allow_vm) {
@@ -295,6 +298,10 @@ build_transform_reports(llvm::Module &module,
       reports.push_back(make_transform_report(
           "instruction_substitution", "function", function->getName(), false,
           "suppressed after vm", 0));
+    } else if (deferred_to_vm_hardening) {
+      reports.push_back(make_transform_report(
+          "instruction_substitution", "function", function->getName(), false,
+          "deferred to vm hardening", 0));
     } else if (!state.report.decision.policy.allow_instruction_substitution) {
       reports.push_back(make_transform_report(
           "instruction_substitution", "function", function->getName(), false,
@@ -316,6 +323,10 @@ build_transform_reports(llvm::Module &module,
       reports.push_back(make_transform_report("control_flattening", "function",
                                               function->getName(), false,
                                               "suppressed after vm", 0));
+    } else if (deferred_to_vm_hardening) {
+      reports.push_back(make_transform_report("control_flattening", "function",
+                                              function->getName(), false,
+                                              "deferred to vm hardening", 0));
     } else if (!state.report.decision.policy.allow_flattening) {
       reports.push_back(make_transform_report(
           "control_flattening", "function", function->getName(), false,
@@ -519,7 +530,8 @@ get_or_create_vm_decode_key_global(llvm::Module &module,
                                   global_name);
 }
 
-bool rewrite_calls_to_virtualized_function(llvm::Function &function) {
+bool rewrite_calls_to_virtualized_function(llvm::Function &function,
+                                           std::uint32_t mba_depth) {
   llvm::GlobalVariable *target_global = get_or_create_vm_target_global(function);
   if (target_global == nullptr) {
     return false;
@@ -636,6 +648,49 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function) {
         decoded_target, call->getCalledOperand()->getType(),
         function.getName() + ".obf.indirect");
     call->setCalledOperand(indirect_target);
+
+    // Decode entangled return value for integer-returning functions.
+    // The VM encodes: ret_val ^ trunc(retkey ^ (state ^ expected_state)).
+    // Under normal execution the poison term cancels, so the caller sees
+    // ret_val ^ trunc(retkey).  We decode by XOR-ing with trunc(retkey)
+    // again.  The volatile load of the retkey global keeps this opaque to
+    // the optimizer; MBA noise is already present on the VM encoding side.
+    // We intentionally avoid mba::create_xor here because its alloca-based
+    // seed slots conflict with later control flattening (domination).
+    llvm::Type *call_ret_type = call->getType();
+    if (call_ret_type->isIntegerTy()) {
+      llvm::GlobalVariable *retkey_global = module->getNamedGlobal(
+          ("__obf_vm_retkey_" + function.getName()).str());
+      if (retkey_global != nullptr) {
+        // Collect existing uses of the call result BEFORE inserting
+        // the decode value, so the decode's own references are excluded.
+        llvm::SmallVector<llvm::Use *, 16> original_uses;
+        for (llvm::Use &use : call->uses()) {
+          original_uses.push_back(&use);
+        }
+
+        // Insert decode instructions after the call.
+        llvm::IRBuilder<> decode_builder(call->getNextNode());
+        auto *retkey_load = decode_builder.CreateLoad(
+            decode_builder.getInt64Ty(), retkey_global, /*isVolatile=*/true,
+            function.getName() + ".obf.retkey");
+        llvm::Value *retkey_trunc = retkey_load;
+        if (call_ret_type != decode_builder.getInt64Ty()) {
+          retkey_trunc = decode_builder.CreateTrunc(
+              retkey_load, call_ret_type,
+              function.getName() + ".obf.retkey.trunc");
+        }
+        llvm::Value *decoded_ret = decode_builder.CreateXor(
+            call, retkey_trunc,
+            function.getName() + ".obf.retdec");
+
+        // Patch original uses to consume the decoded value.
+        for (llvm::Use *use : original_uses) {
+          use->set(decoded_ret);
+        }
+      }
+    }
+
     changed = true;
   }
 
@@ -643,7 +698,8 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function) {
 }
 
 bool rewrite_calls_to_virtualized_functions(
-    llvm::Module &module, const llvm::StringSet<> &virtualized_functions) {
+    llvm::Module &module, const llvm::StringSet<> &virtualized_functions,
+    std::uint32_t mba_depth) {
   bool changed = false;
   for (const auto &entry : virtualized_functions) {
     llvm::Function *function = module.getFunction(entry.getKey());
@@ -651,7 +707,7 @@ bool rewrite_calls_to_virtualized_functions(
       continue;
     }
 
-    changed |= rewrite_calls_to_virtualized_function(*function);
+    changed |= rewrite_calls_to_virtualized_function(*function, mba_depth);
   }
 
   return changed;
@@ -757,6 +813,35 @@ bool apply_instruction_substitution_stage(
   return changed;
 }
 
+bool apply_instruction_substitution_to_functions(
+    llvm::Module &module,
+    const llvm::SmallVectorImpl<function_pipeline_state> &states,
+    const obfuscation_config &config,
+    const llvm::StringSet<> &function_names) {
+  bool changed = false;
+
+  for (const auto &entry : function_names) {
+    llvm::Function *function = module.getFunction(entry.getKey());
+    if (function == nullptr || function->isDeclaration()) {
+      continue;
+    }
+
+    const auto state_it = llvm::find_if(states, [&](const function_pipeline_state &state) {
+      return state.function == function;
+    });
+    if (state_it == states.end() ||
+        !state_it->report.decision.policy.allow_instruction_substitution) {
+      continue;
+    }
+
+    const instruction_substitution_options options =
+        build_instruction_substitution_options(config, state_it->report.decision);
+    changed |= run_instruction_substitution(*function, options).substitution_count > 0;
+  }
+
+  return changed;
+}
+
 bool apply_opaque_predicate_stage(
     const llvm::SmallVectorImpl<function_pipeline_state> &states,
     const obfuscation_config &config,
@@ -801,6 +886,37 @@ llvm::StringSet<> apply_control_flattening_stage(
   return flattened_functions;
 }
 
+llvm::StringSet<> apply_control_flattening_to_functions(
+    llvm::Module &module,
+    const llvm::SmallVectorImpl<function_pipeline_state> &states,
+    const obfuscation_config &config,
+    const llvm::StringSet<> &function_names) {
+  llvm::StringSet<> flattened_functions;
+
+  for (const auto &entry : function_names) {
+    llvm::Function *function = module.getFunction(entry.getKey());
+    if (function == nullptr || function->isDeclaration()) {
+      continue;
+    }
+
+    const auto state_it = llvm::find_if(states, [&](const function_pipeline_state &state) {
+      return state.function == function;
+    });
+    if (state_it == states.end() || !state_it->report.decision.policy.allow_flattening) {
+      continue;
+    }
+
+    const control_flattening_options options =
+        build_control_flattening_options(config, state_it->report.decision);
+    const control_flattening_result result = run_control_flattening(*function, options);
+    if (result.flattened) {
+      flattened_functions.insert(function->getName());
+    }
+  }
+
+  return flattened_functions;
+}
+
 bool apply_bogus_control_flow_stage(
     const llvm::SmallVectorImpl<function_pipeline_state> &states,
     const obfuscation_config &config,
@@ -817,6 +933,34 @@ bool apply_bogus_control_flow_stage(
         build_bogus_control_flow_options(config, state.report.decision);
     changed |= run_bogus_control_flow(*state.function, options)
                    .insertion_count > 0;
+  }
+
+  return changed;
+}
+
+bool apply_bogus_control_flow_to_functions(
+    llvm::Module &module,
+    const llvm::SmallVectorImpl<function_pipeline_state> &states,
+    const obfuscation_config &config,
+    const llvm::StringSet<> &function_names) {
+  bool changed = false;
+
+  for (const auto &entry : function_names) {
+    llvm::Function *function = module.getFunction(entry.getKey());
+    if (function == nullptr || function->isDeclaration()) {
+      continue;
+    }
+
+    const auto state_it = llvm::find_if(states, [&](const function_pipeline_state &state) {
+      return state.function == function;
+    });
+    if (state_it == states.end() || !state_it->report.decision.policy.allow_bogus_control_flow) {
+      continue;
+    }
+
+    const bogus_control_flow_options options =
+        build_bogus_control_flow_options(config, state_it->report.decision);
+    changed |= run_bogus_control_flow(*function, options).insertion_count > 0;
   }
 
   return changed;
@@ -896,7 +1040,8 @@ public:
 
     const llvm::StringSet<> virtualized_functions = apply_vm_stage(states, config);
     bool changed = !virtualized_functions.empty();
-    changed |= rewrite_calls_to_virtualized_functions(module, virtualized_functions);
+    changed |= rewrite_calls_to_virtualized_functions(module, virtualized_functions,
+                                                       config.mba.depth);
     if (!changed) {
       return llvm::PreservedAnalyses::all();
     }
@@ -1012,26 +1157,41 @@ public:
 
     bool changed = false;
 
-    // Phase 1: VM for vm-only functions (not strong_vm).
+    // Phase 1: VM for vm-only functions and strong_vm functions on pristine IR.
     constexpr protection_level vm_level = protection_level::vm;
     const llvm::StringSet<> vm_only = apply_vm_stage(states, config, &vm_level);
     changed |= !vm_only.empty();
-    changed |= rewrite_calls_to_virtualized_functions(module, vm_only);
+    changed |= rewrite_calls_to_virtualized_functions(module, vm_only,
+                                                       config.mba.depth);
 
-    // Phase 2: Classical transforms, skipping vm-virtualized functions.
-    // strong_vm functions participate here alongside strong/light.
+    constexpr protection_level strong_vm_level = protection_level::strong_vm;
+    const llvm::StringSet<> strong_vm_virtualized =
+        apply_vm_stage(states, config, &strong_vm_level);
+    changed |= !strong_vm_virtualized.empty();
+    changed |= rewrite_calls_to_virtualized_functions(module, strong_vm_virtualized,
+                                                       config.mba.depth);
+
+    // Phase 2: Classical transforms for non-VM functions only.
     changed |= apply_string_encoding_stage(module, states, config);
-    changed |= apply_constant_encoding_stage(states, config, &vm_only);
-    changed |= apply_instruction_substitution_stage(states, config, &vm_only);
-    changed |= apply_opaque_predicate_stage(states, config, &vm_only);
-    const llvm::StringSet<> flattened_functions =
-        apply_control_flattening_stage(states, config, &vm_only);
-    changed |= !flattened_functions.empty();
-    changed |= apply_bogus_control_flow_stage(states, config, &vm_only);
-
-    // Phase 3: Block split for remaining classical functions before strong_vm VM.
-    llvm::StringSet<> block_split_skips;
+    llvm::StringSet<> all_vm_virtualized;
     for (const auto &entry : vm_only) {
+      all_vm_virtualized.insert(entry.getKey());
+    }
+    for (const auto &entry : strong_vm_virtualized) {
+      all_vm_virtualized.insert(entry.getKey());
+    }
+
+    changed |= apply_constant_encoding_stage(states, config, &all_vm_virtualized);
+    changed |= apply_instruction_substitution_stage(states, config, &all_vm_virtualized);
+    changed |= apply_opaque_predicate_stage(states, config, &all_vm_virtualized);
+    const llvm::StringSet<> flattened_functions =
+        apply_control_flattening_stage(states, config, &all_vm_virtualized);
+    changed |= !flattened_functions.empty();
+    changed |= apply_bogus_control_flow_stage(states, config, &all_vm_virtualized);
+
+    // Phase 3: Block split for remaining classical functions only.
+    llvm::StringSet<> block_split_skips;
+    for (const auto &entry : all_vm_virtualized) {
       block_split_skips.insert(entry.getKey());
     }
     for (const auto &entry : flattened_functions) {
@@ -1039,12 +1199,15 @@ public:
     }
     changed |= apply_block_split_stage(states, config, &block_split_skips);
 
-    // Phase 4: VM for strong_vm functions after classical transforms.
-    constexpr protection_level strong_vm_level = protection_level::strong_vm;
-    const llvm::StringSet<> strong_vm_virtualized =
-        apply_vm_stage(states, config, &strong_vm_level);
-    changed |= !strong_vm_virtualized.empty();
-    changed |= rewrite_calls_to_virtualized_functions(module, strong_vm_virtualized);
+    // Phase 4: Harden only the generated VM infrastructure for strong_vm.
+    llvm::StringSet<> strong_vm_flattened =
+        apply_control_flattening_to_functions(module, states, config,
+                                              strong_vm_virtualized);
+    changed |= !strong_vm_flattened.empty();
+    changed |= apply_instruction_substitution_to_functions(
+        module, states, config, strong_vm_virtualized);
+    changed |= apply_bogus_control_flow_to_functions(module, states, config,
+                                                     strong_vm_virtualized);
 
     if (!changed) {
       return llvm::PreservedAnalyses::all();

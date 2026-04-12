@@ -1,0 +1,9 @@
+seed: 7777
+default_level: none
+targets:
+  - match: encode_i32
+    level: vm
+  - match: encode_i1
+    level: vm
+  - match: encode_i64
+    level: vm

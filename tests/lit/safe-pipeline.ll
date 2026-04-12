@@ -38,6 +38,7 @@ entry:
 
 ; CHECK: @.secret = private unnamed_addr global [7 x i8]
 ; CHECK: @__obf_vm_bc_fold_value = private unnamed_addr constant [{{[0-9]+}} x i8] c"
+; CHECK: @__obf_vm_retkey_fold_value = private global i64 {{-?[0-9]+}}
 ; CHECK: @__obf_vm_target_fold_value = private global i{{[0-9]+}} {{-?[0-9]+}}
 ; CHECK-NOT: @llvm.global_ctors
 ; CHECK: @__obf_{{cached|decoded}}__secret = internal global
@@ -66,5 +67,9 @@ entry:
 ; CHECK: fold_value.obf.call:
 ; CHECK: %fold_value.obf.key = load volatile i{{[0-9]+}}, ptr @__obf_vm_key_fold_value
 ; CHECK: %fold_value.obf.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.decoded to ptr
+; Caller-side return decode.
+; CHECK: %fold_value.obf.retkey = load volatile i64, ptr @__obf_vm_retkey_fold_value
+; CHECK: %fold_value.obf.retkey.trunc = trunc i64 %fold_value.obf.retkey to i32
+; CHECK: %fold_value.obf.retdec = xor i32
 ; CHECK-NOT: define private void @__obf_vm_init_fold_value
 ; CHECK: define internal ptr @__obf_family_

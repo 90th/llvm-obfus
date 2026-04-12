@@ -19,6 +19,7 @@ entry:
 }
 
 ; CHECK: @__obf_vm_bc_fold_value = private unnamed_addr constant [{{[0-9]+}} x i8] c"
+; CHECK: @__obf_vm_retkey_fold_value = private global i64 {{-?[0-9]+}}
 ; CHECK: @__obf_vm_target_fold_value = private global i{{[0-9]+}} {{-?[0-9]+}}
 ; CHECK-NOT: @llvm.global_ctors
 ; CHECK-LABEL: define i32 @fold_value(i32 %value)
@@ -33,6 +34,11 @@ entry:
 ; CHECK: %obf.vm.integrity.byte = load i8, ptr getelementptr inbounds
 ; CHECK: %obf.vm.integrity.state = load volatile i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.integrity.fold = xor i64
+; Entangled return: VM must NOT return plaintext; encoded via retkey+state.
+; CHECK: %obf.vm.ret.state = load volatile i64, ptr %obf.vm.state
+; CHECK: %obf.vm.ret.retkey = load volatile i64, ptr @__obf_vm_retkey_fold_value
+; CHECK: %obf.vm.ret.key.trunc = trunc i64 %obf.vm.ret.fullkey to i32
+; CHECK: ret i32 %obf.vm.ret.encoded
 ; CHECK: %obf.vm.dispatch.encoded = load volatile i64, ptr %obf.vm.dispatch.slot
 ; CHECK: indirectbr ptr %obf.vm.dispatch.target
 ; CHECK-LABEL: define i32 @main()
@@ -47,6 +53,12 @@ entry:
 ; CHECK: %fold_value.obf.key = load volatile i{{[0-9]+}}, ptr @__obf_vm_key_fold_value
 ; CHECK: %fold_value.obf.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.decoded to ptr
 ; CHECK: call i32 %fold_value.obf.indirect(i32 0)
+; Caller-side return decode: volatile retkey load + XOR.
+; CHECK: %fold_value.obf.retkey = load volatile i64, ptr @__obf_vm_retkey_fold_value
+; CHECK: %fold_value.obf.retkey.trunc = trunc i64 %fold_value.obf.retkey to i32
+; CHECK: %fold_value.obf.retdec = xor i32
+; Plain icmp on raw call result must be gone — compare uses decoded value.
+; CHECK: icmp eq i32 %fold_value.obf.retdec,
 ; CHECK-NOT: define private void @__obf_vm_init_fold_value
 
 ; INST-LABEL: define i32 @fold_value(i32 %value)
@@ -55,9 +67,13 @@ entry:
 ; INST: %obf.vm.state = alloca i64
 ; INST: load volatile i64, ptr %obf.vm.seed
 ; INST: load volatile i64, ptr %obf.vm.state
+; INST: %obf.vm.ret.state = load volatile i64, ptr %obf.vm.state
+; INST: %obf.vm.ret.retkey = load volatile i64, ptr @__obf_vm_retkey_fold_value
 ; INST: indirectbr ptr %obf.vm.dispatch.target
 ; INST-LABEL: define i32 @main()
 ; INST: %fold_value.obf.check = load volatile i{{[0-9]+}}, ptr @__obf_vm_target_fold_value
 ; INST: br i1
 ; INST: %fold_value.obf.key = load volatile i{{[0-9]+}}, ptr @__obf_vm_key_fold_value
 ; INST: %fold_value.obf.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.decoded to ptr
+; INST: %fold_value.obf.retkey = load volatile i64, ptr @__obf_vm_retkey_fold_value
+; INST: %fold_value.obf.retdec = xor i32

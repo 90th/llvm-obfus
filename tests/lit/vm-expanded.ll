@@ -145,7 +145,15 @@ entry:
 }
 
 ; CHECK: @__obf_vm_bc_branch_phi = private unnamed_addr constant [{{[0-9]+}} x i8] c"
-; CHECK: @__obf_vm_bc_switch_score = private unnamed_addr constant [{{[0-9]+}} x i8] c"
+; Retkey globals only for integer-returning functions (interleaved with bytecode globals).
+; CHECK: @__obf_vm_retkey_branch_phi = private global i64 {{-?[0-9]+}}
+; CHECK: @__obf_vm_retkey_select_cmp = private global i64 {{-?[0-9]+}}
+; CHECK: @__obf_vm_retkey_call_memory = private global i64 {{-?[0-9]+}}
+; CHECK: @__obf_vm_retkey_gep_load = private global i64 {{-?[0-9]+}}
+; CHECK: @__obf_vm_retkey_switch_score = private global i64 {{-?[0-9]+}}
+; CHECK: @__obf_vm_retkey_mixed_width = private global i64 {{-?[0-9]+}}
+; CHECK-NOT: @__obf_vm_retkey_float_mix
+; CHECK-NOT: @__obf_vm_retkey_vector_mix
 ; CHECK-LABEL: define i32 @branch_phi(i32 %x)
 ; CHECK: entry.obf.vm:
 ; CHECK: %obf.vm.state = alloca i64
