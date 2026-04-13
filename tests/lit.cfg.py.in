@@ -8,7 +8,9 @@ config.test_exec_root = "@CMAKE_CURRENT_BINARY_DIR@/tests"
 
 config.substitutions.append(("%opt", "@LLVM_TOOLS_BINARY_DIR@/opt"))
 config.substitutions.append(("%FileCheck", "@LLVM_TOOLS_BINARY_DIR@/FileCheck"))
-config.substitutions.append(("%lli", "@LLVM_TOOLS_BINARY_DIR@/lli"))
+config.substitutions.append(
+    ("%lli", "@LLVM_TOOLS_BINARY_DIR@/lli --extra-object=@CMAKE_CURRENT_BINARY_DIR@/obf_entropy_anchor.o")
+)
 config.substitutions.append(
     ("%obf_plugin", "@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@")
 )

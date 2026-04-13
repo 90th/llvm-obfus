@@ -144,33 +144,38 @@ entry:
   ret i32 %ret
 }
 
-; CHECK: @__obf_vm_bc_branch_phi = private unnamed_addr constant [{{[0-9]+}} x i8] c"
+; CHECK-DAG: @__obf_vm_bc_branch_phi = private unnamed_addr constant [{{[0-9]+}} x i8] c"
 ; Retkey globals only for integer-returning functions (interleaved with bytecode globals).
-; CHECK: @__obf_vm_retkey_branch_phi = private global i64 {{-?[0-9]+}}
-; CHECK: @__obf_vm_retkey_select_cmp = private global i64 {{-?[0-9]+}}
-; CHECK: @__obf_vm_retkey_call_memory = private global i64 {{-?[0-9]+}}
-; CHECK: @__obf_vm_retkey_gep_load = private global i64 {{-?[0-9]+}}
-; CHECK: @__obf_vm_retkey_switch_score = private global i64 {{-?[0-9]+}}
-; CHECK: @__obf_vm_retkey_mixed_width = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @__obf_vm_retkey_branch_phi = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @__obf_vm_retkey_select_cmp = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @__obf_vm_retkey_call_memory = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @__obf_vm_retkey_gep_load = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @__obf_vm_retkey_switch_score = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @__obf_vm_retkey_mixed_width = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; CHECK-NOT: @__obf_vm_retkey_float_mix
 ; CHECK-NOT: @__obf_vm_retkey_vector_mix
 ; CHECK-LABEL: define i32 @branch_phi(i32 %x)
+; CHECK: entry.obf.vm.wrapper:
+; CHECK: %branch_phi.obf.wrapper.call = call i32 @__obf_vm_impl_branch_phi(i32 %x, i64 %branch_phi.obf.wrapper.token)
+; CHECK-LABEL: define <2 x i32> @vector_mix(<2 x i32> %a, <2 x i32> %b)
+; CHECK: add <2 x i32>
+; CHECK-LABEL: define i32 @__obf_vm_impl_branch_phi(i32 %x, i64 %obf.hidden_token)
 ; CHECK: entry.obf.vm:
 ; CHECK: %obf.vm.state = alloca i64
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
-; CHECK: load i8, ptr @__obf_vm_bc_branch_phi
+; CHECK: %obf.entropy.direct = load i64, ptr @__obf_entropy_anchor
 ; CHECK: %obf.vm.integrity.byte = load i8, ptr getelementptr inbounds
 ; CHECK: %obf.vm.integrity.fold = xor i64
 ; CHECK: indirectbr ptr %obf.vm.dispatch.target
-; CHECK-LABEL: define i32 @call_memory(ptr %src, ptr %dst)
+; CHECK-LABEL: define i32 @__obf_vm_impl_call_memory(ptr %src, ptr %dst, i64 %obf.hidden_token)
 ; CHECK: call i32 @bump(i32
 ; CHECK: load i32, ptr
 ; CHECK: store i32
-; CHECK-LABEL: define i32 @gep_load(ptr %base, i32 %index)
+; CHECK-LABEL: define i32 @__obf_vm_impl_gep_load(ptr %base, i32 %index, i64 %obf.hidden_token)
 ; CHECK: getelementptr inbounds i32, ptr
-; CHECK-LABEL: define i32 @switch_score(i32 %tag, i32 %base)
+; CHECK-LABEL: define i32 @__obf_vm_impl_switch_score(i32 %tag, i32 %base, i64 %obf.hidden_token)
 ; CHECK: vm.switch.default.
-; CHECK-LABEL: define float @float_mix(float %x, float %y)
+; CHECK-LABEL: define float @__obf_vm_impl_float_mix(float %x, float %y, i64 %obf.hidden_token)
 ; CHECK: fcmp ogt float
-; CHECK-LABEL: define <2 x i32> @vector_mix(<2 x i32> %a, <2 x i32> %b)
-; CHECK: add <2 x i32>

@@ -86,41 +86,18 @@ std::uint64_t derive_opaque_seed(const llvm::Function &function,
   return seed;
 }
 
-llvm::AllocaInst *get_or_create_opaque_seed_slot(llvm::Function &function,
-                                                 std::uint64_t seed) {
-  for (llvm::Instruction &instruction : function.getEntryBlock()) {
-    auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction);
-    if (alloca != nullptr && alloca->getName() == "obf.const.seed.slot" &&
-        alloca->getAllocatedType()->isIntegerTy(64)) {
-      return alloca;
-    }
-  }
-
-  llvm::IRBuilder<> builder(&*function.getEntryBlock().getFirstInsertionPt());
-  auto *slot = builder.CreateAlloca(builder.getInt64Ty(), nullptr,
-                                    "obf.const.seed.slot");
-  auto *store = builder.CreateStore(builder.getInt64(seed), slot);
-  store->setVolatile(true);
-  return slot;
-}
-
 llvm::Value *build_opaque_mask(llvm::IRBuilder<> &builder,
-                               llvm::AllocaInst *opaque_seed_slot,
                                std::uint64_t opaque_seed_base,
                                llvm::IntegerType *type, const llvm::APInt &key,
                                const mba::builder_context &mba_context,
                                std::uint64_t salt) {
-  auto *seed_load = builder.CreateLoad(builder.getInt64Ty(), opaque_seed_slot,
-                                       "obf.const.seed");
-  seed_load->setVolatile(true);
-
-  llvm::Value *typed_seed = seed_load;
-  if (typed_seed->getType() != type) {
-    typed_seed = builder.CreateZExtOrTrunc(typed_seed, type, "obf.const.seed.cast");
-  }
-
   const llvm::APInt base_seed(type->getBitWidth(), opaque_seed_base,
                               /*isSigned=*/false, /*implicitTrunc=*/true);
+  mba::builder_context seed_context = mba_context;
+  seed_context.seed_base = opaque_seed_base;
+  llvm::Value *typed_seed = mba::create_opaque_integer(
+      builder, type, seed_context, base_seed, salt ^ 0x55aa55aaULL,
+      "obf.const.seed");
   const llvm::APInt delta = key ^ base_seed;
   return mba::create_xor(builder, typed_seed,
                          llvm::ConstantInt::get(type, delta), mba_context,
@@ -197,12 +174,6 @@ constant_encoding_result run_constant_encoding(llvm::Function &function,
     }
   }
 
-  llvm::AllocaInst *opaque_seed_slot =
-      get_or_create_opaque_seed_slot(function, opaque_seed_base);
-  if (opaque_seed_slot == nullptr) {
-    return analysis;
-  }
-
   const mba::builder_context mba_context =
       [&] {
         mba::builder_context ctx =
@@ -213,8 +184,7 @@ constant_encoding_result run_constant_encoding(llvm::Function &function,
       }();
 
   for (llvm::Instruction *instruction : original_instructions) {
-    if (instruction == nullptr || instruction == opaque_seed_slot ||
-        encoded_count >= options.max_constants_per_function) {
+    if (instruction == nullptr || encoded_count >= options.max_constants_per_function) {
       continue;
     }
 
@@ -239,7 +209,7 @@ constant_encoding_result run_constant_encoding(llvm::Function &function,
 
       llvm::IRBuilder<> builder(instruction);
       llvm::Value *mask = build_opaque_mask(
-          builder, opaque_seed_slot, opaque_seed_base,
+          builder, opaque_seed_base,
           llvm::cast<llvm::IntegerType>(constant->getType()), key, mba_context,
           local_seed ^ static_cast<std::uint64_t>(operand_index + 1));
       llvm::Value *decoded = mba::create_xor(

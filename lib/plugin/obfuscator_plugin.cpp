@@ -7,6 +7,8 @@
 #include "obf/transforms/constant_encoding.h"
 #include "obf/transforms/control_flattening.h"
 #include "obf/transforms/instruction_substitution.h"
+#include "obf/transforms/mba.h"
+#include "obf/transforms/opaque_gep.h"
 #include "obf/transforms/opaque_predicates.h"
 #include "obf/transforms/string_encoding.h"
 #include "obf/vm/candidate_analysis.h"
@@ -25,6 +27,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -51,6 +54,22 @@ struct function_pipeline_state {
   llvm::Function *function = nullptr;
   function_report_entry report;
 };
+
+struct virtualized_call_site {
+  llvm::CallBase *call = nullptr;
+  std::uint64_t hidden_token = 0;
+};
+
+struct virtualized_function_binding {
+  llvm::Function *interface_function = nullptr;
+  llvm::Function *implementation_function = nullptr;
+  const function_pipeline_state *state = nullptr;
+  llvm::SmallVector<virtualized_call_site, 8> call_sites;
+  std::uint64_t wrapper_token = 0;
+};
+
+using virtualized_function_map =
+    llvm::StringMap<virtualized_function_binding>;
 
 obfuscation_config load_active_config() {
   if (obf_config_path.empty()) {
@@ -174,6 +193,13 @@ build_instruction_substitution_options(const obfuscation_config &config,
     options.max_substitutions_per_function = 2;
   }
 
+  options.mba_depth = config.mba.depth;
+  return options;
+}
+
+opaque_gep_options build_opaque_gep_options(const obfuscation_config &config,
+                                            const policy_decision &) {
+  opaque_gep_options options;
   options.mba_depth = config.mba.depth;
   return options;
 }
@@ -473,6 +499,164 @@ bool apply_block_split_stage(
   return changed;
 }
 
+std::uint64_t mix_vm_handshake_seed(std::uint64_t seed, std::uint64_t salt) {
+  seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+  return seed;
+}
+
+std::uint64_t derive_vm_hidden_token(llvm::StringRef callee_name,
+                                     llvm::StringRef caller_name,
+                                     std::uint64_t ordinal) {
+  std::uint64_t seed =
+      static_cast<std::uint64_t>(llvm::hash_value(callee_name));
+  seed = mix_vm_handshake_seed(
+      seed, static_cast<std::uint64_t>(llvm::hash_value(caller_name)));
+  seed = mix_vm_handshake_seed(seed, ordinal + 1);
+  return seed == 0 ? 0xa55aa55aa55aa55aULL : seed;
+}
+
+std::uint64_t derive_vm_wrapper_token(llvm::StringRef function_name) {
+  return derive_vm_hidden_token(function_name, function_name, 0x51f15eedULL);
+}
+
+llvm::Value *build_hidden_token_value(llvm::IRBuilder<> &builder,
+                                      llvm::Function &owner,
+                                      llvm::StringRef prefix,
+                                      std::uint64_t token,
+                                      std::uint32_t mba_depth,
+                                      std::uint64_t salt) {
+  mba::builder_context context =
+      mba::get_or_create_builder_context(owner, prefix, token ^ salt);
+  context.depth = mba_depth;
+  return mba::create_opaque_integer(builder, builder.getInt64Ty(), context,
+                                    llvm::APInt(64, token), salt,
+                                    (prefix + ".token").str());
+}
+
+llvm::Function *clone_vm_implementation(llvm::Function &interface_function) {
+  llvm::Module *module = interface_function.getParent();
+  if (module == nullptr) {
+    return nullptr;
+  }
+
+  llvm::SmallVector<llvm::Type *, 8> parameter_types;
+  parameter_types.reserve(interface_function.arg_size() + 1);
+  for (llvm::Argument &argument : interface_function.args()) {
+    parameter_types.push_back(argument.getType());
+  }
+  parameter_types.push_back(llvm::Type::getInt64Ty(module->getContext()));
+
+  auto *implementation_type = llvm::FunctionType::get(
+      interface_function.getReturnType(), parameter_types, /*isVarArg=*/false);
+  auto *implementation_function = llvm::Function::Create(
+      implementation_type, llvm::GlobalValue::ExternalLinkage,
+      ("__obf_vm_impl_" + interface_function.getName()).str(), module);
+  implementation_function->setCallingConv(interface_function.getCallingConv());
+  implementation_function->setAttributes(interface_function.getAttributes());
+  implementation_function->setDSOLocal(true);
+
+  llvm::ValueToValueMapTy value_map;
+  auto implementation_arg = implementation_function->arg_begin();
+  for (llvm::Argument &argument : interface_function.args()) {
+    implementation_arg->setName(argument.getName());
+    value_map[&argument] = &*implementation_arg++;
+  }
+  implementation_arg->setName("obf.hidden_token");
+
+  llvm::SmallVector<llvm::ReturnInst *, 8> returns;
+  llvm::CloneFunctionInto(implementation_function, &interface_function, value_map,
+                          llvm::CloneFunctionChangeType::LocalChangesOnly,
+                          returns);
+  return implementation_function;
+}
+
+void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
+                                  llvm::Function &implementation_function,
+                                  std::uint64_t wrapper_token,
+                                  std::uint32_t mba_depth) {
+  interface_function.deleteBody();
+
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(
+      interface_function.getContext(), "entry.obf.vm.wrapper",
+      &interface_function);
+  llvm::IRBuilder<> builder(entry);
+  llvm::Value *hidden_token = build_hidden_token_value(
+      builder, interface_function,
+      (interface_function.getName() + ".obf.wrapper").str(), wrapper_token,
+      mba_depth, 0x6000ULL);
+
+  llvm::SmallVector<llvm::Value *, 8> arguments;
+  arguments.reserve(interface_function.arg_size() + 1);
+  for (llvm::Argument &argument : interface_function.args()) {
+    arguments.push_back(&argument);
+  }
+  arguments.push_back(hidden_token);
+
+  auto *call = builder.CreateCall(implementation_function.getFunctionType(),
+                                  &implementation_function, arguments,
+                                  interface_function.getReturnType()->isVoidTy()
+                                      ? ""
+                                      : (interface_function.getName() +
+                                         ".obf.wrapper.call")
+                                            .str());
+  call->setCallingConv(interface_function.getCallingConv());
+  call->setAttributes(implementation_function.getAttributes());
+  if (interface_function.getReturnType()->isVoidTy()) {
+    builder.CreateRetVoid();
+  } else {
+    builder.CreateRet(call);
+  }
+}
+
+virtualized_function_binding
+prepare_virtualized_function_binding(const function_pipeline_state &state,
+                                     std::uint32_t mba_depth) {
+  virtualized_function_binding binding;
+  llvm::Function *interface_function = state.function;
+  if (interface_function == nullptr || interface_function->isDeclaration()) {
+    return binding;
+  }
+
+  llvm::SmallVector<llvm::CallBase *, 16> direct_call_sites;
+  for (llvm::User *user : interface_function->users()) {
+    auto *call = llvm::dyn_cast<llvm::CallBase>(user);
+    if (call == nullptr ||
+        call->getCalledOperand()->stripPointerCasts() != interface_function) {
+      continue;
+    }
+    direct_call_sites.push_back(call);
+  }
+
+  llvm::Function *implementation_function =
+      clone_vm_implementation(*interface_function);
+  if (implementation_function == nullptr) {
+    return binding;
+  }
+
+  binding.interface_function = interface_function;
+  binding.implementation_function = implementation_function;
+  binding.state = &state;
+  binding.wrapper_token = derive_vm_wrapper_token(interface_function->getName());
+
+  std::uint64_t callsite_ordinal = 0;
+  for (llvm::CallBase *call : direct_call_sites) {
+    llvm::Function *caller = call->getFunction();
+    if (caller == nullptr) {
+      continue;
+    }
+
+    binding.call_sites.push_back(
+        {.call = call,
+         .hidden_token = derive_vm_hidden_token(interface_function->getName(),
+                                                caller->getName(),
+                                                callsite_ordinal++)});
+  }
+
+  rewrite_vm_interface_wrapper(*interface_function, *implementation_function,
+                               binding.wrapper_token, mba_depth);
+  return binding;
+}
+
 llvm::APInt derive_vm_target_key(const llvm::Function &function,
                                  llvm::IntegerType *ptr_int_type) {
   std::uint64_t key_word =
@@ -530,8 +714,15 @@ get_or_create_vm_decode_key_global(llvm::Module &module,
                                   global_name);
 }
 
-bool rewrite_calls_to_virtualized_function(llvm::Function &function,
-                                           std::uint32_t mba_depth) {
+bool rewrite_calls_to_virtualized_function(
+    const virtualized_function_binding &binding, std::uint32_t mba_depth) {
+  if (binding.interface_function == nullptr ||
+      binding.implementation_function == nullptr) {
+    return false;
+  }
+
+  llvm::Function &function = *binding.interface_function;
+  llvm::Function &implementation_function = *binding.implementation_function;
   llvm::GlobalVariable *target_global = get_or_create_vm_target_global(function);
   if (target_global == nullptr) {
     return false;
@@ -554,22 +745,13 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function,
                          raw_salt == 0 ? 0xC6EF3720ULL : raw_salt,
                          /*isSigned=*/false, /*implicitTrunc=*/true);
 
-  llvm::SmallVector<llvm::CallBase *, 16> call_sites;
-  for (llvm::User *user : function.users()) {
-    auto *call = llvm::dyn_cast<llvm::CallBase>(user);
-    if (call == nullptr || call->getCalledOperand()->stripPointerCasts() != &function) {
+  bool changed = false;
+  std::size_t callsite_index = 0;
+  for (const virtualized_call_site &site : binding.call_sites) {
+    llvm::CallBase *call = site.call;
+    if (call == nullptr) {
       continue;
     }
-
-    call_sites.push_back(call);
-  }
-
-  // Declare llvm.returnaddress intrinsic for runtime-context dependency.
-  llvm::Function *retaddr_fn = llvm::Intrinsic::getOrInsertDeclaration(
-      module, llvm::Intrinsic::returnaddress);
-
-  bool changed = false;
-  for (llvm::CallBase *call : call_sites) {
     llvm::Function *caller = call->getFunction();
     if (caller == nullptr) {
       continue;
@@ -593,8 +775,12 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function,
 
     // --- Entry tail: load slot, compare against sentinel, branch ---
     llvm::IRBuilder<> entry_builder(orig_bb);
+    llvm::Value *hidden_token = build_hidden_token_value(
+        entry_builder, *caller, (function.getName() + ".obf.call").str(),
+        site.hidden_token, mba_depth,
+        0x700000ULL + static_cast<std::uint64_t>(callsite_index++));
     auto *encoded_check = entry_builder.CreateLoad(
-        ptr_int_type, target_global, /*isVolatile=*/true,
+        ptr_int_type, target_global,
         function.getName() + ".obf.check");
     auto *sentinel_const = llvm::ConstantInt::get(ptr_int_type, sentinel);
     auto *is_unresolved = entry_builder.CreateICmpEQ(
@@ -602,20 +788,26 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function,
         function.getName() + ".obf.unresolved");
     entry_builder.CreateCondBr(is_unresolved, resolve_bb, call_bb);
 
-    // --- Resolve block: compute encoded target with runtime context, store ---
+    // --- Resolve block: encode the implementation target and cache it ---
     llvm::IRBuilder<> resolve_builder(resolve_bb);
-    auto *retaddr = resolve_builder.CreateCall(
-        retaddr_fn, {resolve_builder.getInt32(0)},
-        function.getName() + ".obf.retaddr");
-    auto *retaddr_int = resolve_builder.CreatePtrToInt(
-        retaddr, ptr_int_type,
-        function.getName() + ".obf.retaddr.int");
     auto *target_int = resolve_builder.CreatePtrToInt(
-        &function, ptr_int_type,
+        &implementation_function, ptr_int_type,
         function.getName() + ".obf.real.int");
+    llvm::Value *token_int = hidden_token;
+    if (token_int->getType() != ptr_int_type) {
+      token_int = resolve_builder.CreateZExtOrTrunc(
+          token_int, ptr_int_type, function.getName() + ".obf.token.cast");
+    }
+    const std::string token_name = (function.getName() + ".obf.token").str();
+    token_int = mba::entangle_value(
+        resolve_builder, token_int,
+        mba::builder_context{.entropy_anchor = mba::get_or_create_entropy_anchor(*module),
+                             .seed_base = site.hidden_token,
+                             .depth = mba_depth},
+        0x710000ULL + site.hidden_token, token_name);
     auto *salt_const = llvm::ConstantInt::get(ptr_int_type, salt);
     auto *runtime_key = resolve_builder.CreateXor(
-        retaddr_int, salt_const,
+        token_int, salt_const,
         function.getName() + ".obf.rkey");
     auto *mixed = resolve_builder.CreateXor(
         target_int, runtime_key,
@@ -627,7 +819,7 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function,
     auto *new_encoded = resolve_builder.CreateXor(
         unmixed, key_const,
         function.getName() + ".obf.resolved");
-    resolve_builder.CreateStore(new_encoded, target_global, /*isVolatile=*/true);
+    resolve_builder.CreateStore(new_encoded, target_global);
     resolve_builder.CreateBr(call_bb);
 
     // --- Call block: merge encoded value, decode, indirect-call ---
@@ -639,40 +831,47 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function,
     encoded_phi->addIncoming(new_encoded, resolve_bb);
 
     auto *opaque_key = call_builder.CreateLoad(
-        ptr_int_type, decode_key_global, /*isVolatile=*/true,
+        ptr_int_type, decode_key_global,
         function.getName() + ".obf.key");
     llvm::Value *decoded_target =
-        call_builder.CreateXor(encoded_phi, opaque_key,
-                               function.getName() + ".obf.decoded");
+        mba::create_xor(call_builder, encoded_phi, opaque_key,
+                        mba::builder_context{.entropy_anchor = mba::get_or_create_entropy_anchor(*module),
+                                             .seed_base = site.hidden_token ^ key.getLimitedValue(),
+                                             .depth = mba_depth},
+                        0x720000ULL + site.hidden_token,
+                        (function.getName() + ".obf.decoded").str());
     llvm::Value *indirect_target = call_builder.CreateIntToPtr(
         decoded_target, call->getCalledOperand()->getType(),
         function.getName() + ".obf.indirect");
-    call->setCalledOperand(indirect_target);
+
+    llvm::SmallVector<llvm::Use *, 16> original_uses;
+    for (llvm::Use &use : call->uses()) {
+      original_uses.push_back(&use);
+    }
+
+    llvm::SmallVector<llvm::Value *, 8> arguments;
+    arguments.reserve(call->arg_size() + 1);
+    for (llvm::Use &argument : call->args()) {
+      arguments.push_back(argument.get());
+    }
+    arguments.push_back(hidden_token);
+
+    auto *rewritten_call = call_builder.CreateCall(
+        implementation_function.getFunctionType(), indirect_target, arguments,
+        call->getType()->isVoidTy() ? "" : function.getName() + ".obf.callsite");
+    rewritten_call->setCallingConv(call->getCallingConv());
+    rewritten_call->setAttributes(implementation_function.getAttributes());
 
     // Decode entangled return value for integer-returning functions.
-    // The VM encodes: ret_val ^ trunc(retkey ^ (state ^ expected_state)).
-    // Under normal execution the poison term cancels, so the caller sees
-    // ret_val ^ trunc(retkey).  We decode by XOR-ing with trunc(retkey)
-    // again.  The volatile load of the retkey global keeps this opaque to
-    // the optimizer; MBA noise is already present on the VM encoding side.
-    // We intentionally avoid mba::create_xor here because its alloca-based
-    // seed slots conflict with later control flattening (domination).
-    llvm::Type *call_ret_type = call->getType();
+    llvm::Type *call_ret_type = rewritten_call->getType();
     if (call_ret_type->isIntegerTy()) {
       llvm::GlobalVariable *retkey_global = module->getNamedGlobal(
           ("__obf_vm_retkey_" + function.getName()).str());
       if (retkey_global != nullptr) {
-        // Collect existing uses of the call result BEFORE inserting
-        // the decode value, so the decode's own references are excluded.
-        llvm::SmallVector<llvm::Use *, 16> original_uses;
-        for (llvm::Use &use : call->uses()) {
-          original_uses.push_back(&use);
-        }
-
         // Insert decode instructions after the call.
-        llvm::IRBuilder<> decode_builder(call->getNextNode());
+        llvm::IRBuilder<> decode_builder(call);
         auto *retkey_load = decode_builder.CreateLoad(
-            decode_builder.getInt64Ty(), retkey_global, /*isVolatile=*/true,
+            decode_builder.getInt64Ty(), retkey_global,
             function.getName() + ".obf.retkey");
         llvm::Value *retkey_trunc = retkey_load;
         if (call_ret_type != decode_builder.getInt64Ty()) {
@@ -680,16 +879,31 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function,
               retkey_load, call_ret_type,
               function.getName() + ".obf.retkey.trunc");
         }
-        llvm::Value *decoded_ret = decode_builder.CreateXor(
-            call, retkey_trunc,
-            function.getName() + ".obf.retdec");
+        mba::builder_context decode_context = mba::get_or_create_builder_context(
+            *caller, (function.getName() + ".obf.ret").str(),
+            site.hidden_token ^ 0x730000ULL);
+        decode_context.depth = mba_depth;
+        llvm::Value *decoded_ret = mba::create_xor(
+            decode_builder, rewritten_call, retkey_trunc, decode_context,
+            0x730000ULL + site.hidden_token,
+            (function.getName() + ".obf.retdec").str());
 
         // Patch original uses to consume the decoded value.
         for (llvm::Use *use : original_uses) {
           use->set(decoded_ret);
         }
+      } else {
+        for (llvm::Use *use : original_uses) {
+          use->set(rewritten_call);
+        }
+      }
+    } else {
+      for (llvm::Use *use : original_uses) {
+        use->set(rewritten_call);
       }
     }
+
+    call->eraseFromParent();
 
     changed = true;
   }
@@ -698,28 +912,21 @@ bool rewrite_calls_to_virtualized_function(llvm::Function &function,
 }
 
 bool rewrite_calls_to_virtualized_functions(
-    llvm::Module &module, const llvm::StringSet<> &virtualized_functions,
+    llvm::Module &, const virtualized_function_map &virtualized_functions,
     std::uint32_t mba_depth) {
   bool changed = false;
   for (const auto &entry : virtualized_functions) {
-    llvm::Function *function = module.getFunction(entry.getKey());
-    if (function == nullptr || function->isDeclaration()) {
-      continue;
-    }
-
-    changed |= rewrite_calls_to_virtualized_function(*function, mba_depth);
+    changed |= rewrite_calls_to_virtualized_function(entry.second, mba_depth);
   }
 
   return changed;
 }
 
-llvm::StringSet<>
+virtualized_function_map
 apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
                const obfuscation_config &config,
                const protection_level *only_level = nullptr) {
-  llvm::StringSet<> virtualized_functions;
-
-  const vm::virtualization_options vm_options{.mba_depth = config.mba.depth};
+  virtualized_function_map virtualized_functions;
 
   for (const function_pipeline_state &state : states) {
     if (state.function == nullptr || state.function->isDeclaration() ||
@@ -731,10 +938,28 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
       continue;
     }
 
+    if (!vm::analyze_candidate(*state.function).eligible) {
+      continue;
+    }
+
+    virtualized_function_binding binding =
+        prepare_virtualized_function_binding(state, config.mba.depth);
+    if (binding.implementation_function == nullptr) {
+      continue;
+    }
+
+    vm::virtualization_options vm_options{.mba_depth = config.mba.depth,
+                                          .hidden_token_handshake = true,
+                                          .symbol_tag = state.function->getName().str()};
+    vm_options.valid_hidden_tokens.push_back(binding.wrapper_token);
+    for (const virtualized_call_site &site : binding.call_sites) {
+      vm_options.valid_hidden_tokens.push_back(site.hidden_token);
+    }
+
     const vm::virtualization_result result =
-        vm::run_virtualization(*state.function, vm_options);
+        vm::run_virtualization(*binding.implementation_function, vm_options);
     if (result.virtualized) {
-      virtualized_functions.insert(state.function->getName());
+      virtualized_functions[state.function->getName()] = std::move(binding);
     }
   }
 
@@ -813,30 +1038,70 @@ bool apply_instruction_substitution_stage(
   return changed;
 }
 
-bool apply_instruction_substitution_to_functions(
-    llvm::Module &module,
+bool apply_opaque_gep_stage(
     const llvm::SmallVectorImpl<function_pipeline_state> &states,
     const obfuscation_config &config,
-    const llvm::StringSet<> &function_names) {
+    const llvm::StringSet<> *skip_functions = nullptr) {
   bool changed = false;
 
-  for (const auto &entry : function_names) {
-    llvm::Function *function = module.getFunction(entry.getKey());
+  for (const function_pipeline_state &state : states) {
+    if (should_skip_function(state, skip_functions) ||
+        !state.report.decision.policy.allow_opaque_gep) {
+      continue;
+    }
+
+    const opaque_gep_options options =
+        build_opaque_gep_options(config, state.report.decision);
+    changed |= run_opaque_gep(*state.function, options).lowered_count > 0;
+  }
+
+  return changed;
+}
+
+bool apply_instruction_substitution_to_functions(
+    const virtualized_function_map &virtualized_functions,
+    const obfuscation_config &config) {
+  bool changed = false;
+
+  for (const auto &entry : virtualized_functions) {
+    llvm::Function *function = entry.second.implementation_function;
     if (function == nullptr || function->isDeclaration()) {
       continue;
     }
 
-    const auto state_it = llvm::find_if(states, [&](const function_pipeline_state &state) {
-      return state.function == function;
-    });
-    if (state_it == states.end() ||
-        !state_it->report.decision.policy.allow_instruction_substitution) {
+    if (entry.second.state == nullptr ||
+        !entry.second.state->report.decision.policy.allow_instruction_substitution) {
       continue;
     }
 
     const instruction_substitution_options options =
-        build_instruction_substitution_options(config, state_it->report.decision);
+        build_instruction_substitution_options(config,
+                                              entry.second.state->report.decision);
     changed |= run_instruction_substitution(*function, options).substitution_count > 0;
+  }
+
+  return changed;
+}
+
+bool apply_opaque_gep_to_functions(
+    const virtualized_function_map &virtualized_functions,
+    const obfuscation_config &config) {
+  bool changed = false;
+
+  for (const auto &entry : virtualized_functions) {
+    llvm::Function *function = entry.second.implementation_function;
+    if (function == nullptr || function->isDeclaration()) {
+      continue;
+    }
+
+    if (entry.second.state == nullptr ||
+        !entry.second.state->report.decision.policy.allow_opaque_gep) {
+      continue;
+    }
+
+    const opaque_gep_options options =
+        build_opaque_gep_options(config, entry.second.state->report.decision);
+    changed |= run_opaque_gep(*function, options).lowered_count > 0;
   }
 
   return changed;
@@ -887,27 +1152,24 @@ llvm::StringSet<> apply_control_flattening_stage(
 }
 
 llvm::StringSet<> apply_control_flattening_to_functions(
-    llvm::Module &module,
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const llvm::StringSet<> &function_names) {
+    const virtualized_function_map &virtualized_functions,
+    const obfuscation_config &config) {
   llvm::StringSet<> flattened_functions;
 
-  for (const auto &entry : function_names) {
-    llvm::Function *function = module.getFunction(entry.getKey());
+  for (const auto &entry : virtualized_functions) {
+    llvm::Function *function = entry.second.implementation_function;
     if (function == nullptr || function->isDeclaration()) {
       continue;
     }
 
-    const auto state_it = llvm::find_if(states, [&](const function_pipeline_state &state) {
-      return state.function == function;
-    });
-    if (state_it == states.end() || !state_it->report.decision.policy.allow_flattening) {
+    if (entry.second.state == nullptr ||
+        !entry.second.state->report.decision.policy.allow_flattening) {
       continue;
     }
 
     const control_flattening_options options =
-        build_control_flattening_options(config, state_it->report.decision);
+        build_control_flattening_options(config,
+                                         entry.second.state->report.decision);
     const control_flattening_result result = run_control_flattening(*function, options);
     if (result.flattened) {
       flattened_functions.insert(function->getName());
@@ -939,31 +1201,40 @@ bool apply_bogus_control_flow_stage(
 }
 
 bool apply_bogus_control_flow_to_functions(
-    llvm::Module &module,
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const llvm::StringSet<> &function_names) {
+    const virtualized_function_map &virtualized_functions,
+    const obfuscation_config &config) {
   bool changed = false;
 
-  for (const auto &entry : function_names) {
-    llvm::Function *function = module.getFunction(entry.getKey());
+  for (const auto &entry : virtualized_functions) {
+    llvm::Function *function = entry.second.implementation_function;
     if (function == nullptr || function->isDeclaration()) {
       continue;
     }
 
-    const auto state_it = llvm::find_if(states, [&](const function_pipeline_state &state) {
-      return state.function == function;
-    });
-    if (state_it == states.end() || !state_it->report.decision.policy.allow_bogus_control_flow) {
+    if (entry.second.state == nullptr ||
+        !entry.second.state->report.decision.policy.allow_bogus_control_flow) {
       continue;
     }
 
     const bogus_control_flow_options options =
-        build_bogus_control_flow_options(config, state_it->report.decision);
+        build_bogus_control_flow_options(config,
+                                         entry.second.state->report.decision);
     changed |= run_bogus_control_flow(*function, options).insertion_count > 0;
   }
 
   return changed;
+}
+
+llvm::StringSet<> collect_virtualized_function_names(
+    const virtualized_function_map &virtualized_functions) {
+  llvm::StringSet<> names;
+  for (const auto &entry : virtualized_functions) {
+    names.insert(entry.getKey());
+    if (entry.second.implementation_function != nullptr) {
+      names.insert(entry.second.implementation_function->getName());
+    }
+  }
+  return names;
 }
 
 } // namespace
@@ -1038,10 +1309,11 @@ public:
     const llvm::SmallVector<function_pipeline_state, 32> states =
         build_pipeline_state(module, config);
 
-    const llvm::StringSet<> virtualized_functions = apply_vm_stage(states, config);
+    const virtualized_function_map virtualized_functions =
+        apply_vm_stage(states, config);
     bool changed = !virtualized_functions.empty();
     changed |= rewrite_calls_to_virtualized_functions(module, virtualized_functions,
-                                                       config.mba.depth);
+                                                      config.mba.depth);
     if (!changed) {
       return llvm::PreservedAnalyses::all();
     }
@@ -1080,6 +1352,24 @@ public:
         build_pipeline_state(module, config);
 
     const bool changed = apply_instruction_substitution_stage(states, config);
+    if (!changed) {
+      return llvm::PreservedAnalyses::all();
+    }
+
+    verify_changed_module(module);
+    return llvm::PreservedAnalyses::none();
+  }
+};
+
+class opaque_gep_pass : public llvm::PassInfoMixin<opaque_gep_pass> {
+public:
+  llvm::PreservedAnalyses run(llvm::Module &module,
+                              llvm::ModuleAnalysisManager &) {
+    const obfuscation_config config = load_active_config();
+    const llvm::SmallVector<function_pipeline_state, 32> states =
+        build_pipeline_state(module, config);
+
+    const bool changed = apply_opaque_gep_stage(states, config);
     if (!changed) {
       return llvm::PreservedAnalyses::all();
     }
@@ -1159,29 +1449,29 @@ public:
 
     // Phase 1: VM for vm-only functions and strong_vm functions on pristine IR.
     constexpr protection_level vm_level = protection_level::vm;
-    const llvm::StringSet<> vm_only = apply_vm_stage(states, config, &vm_level);
+    const virtualized_function_map vm_only = apply_vm_stage(states, config, &vm_level);
     changed |= !vm_only.empty();
     changed |= rewrite_calls_to_virtualized_functions(module, vm_only,
-                                                       config.mba.depth);
+                                                      config.mba.depth);
 
     constexpr protection_level strong_vm_level = protection_level::strong_vm;
-    const llvm::StringSet<> strong_vm_virtualized =
+    const virtualized_function_map strong_vm_virtualized =
         apply_vm_stage(states, config, &strong_vm_level);
     changed |= !strong_vm_virtualized.empty();
     changed |= rewrite_calls_to_virtualized_functions(module, strong_vm_virtualized,
-                                                       config.mba.depth);
+                                                      config.mba.depth);
 
     // Phase 2: Classical transforms for non-VM functions only.
     changed |= apply_string_encoding_stage(module, states, config);
-    llvm::StringSet<> all_vm_virtualized;
-    for (const auto &entry : vm_only) {
-      all_vm_virtualized.insert(entry.getKey());
-    }
-    for (const auto &entry : strong_vm_virtualized) {
+    llvm::StringSet<> all_vm_virtualized = collect_virtualized_function_names(vm_only);
+    const llvm::StringSet<> strong_vm_names =
+        collect_virtualized_function_names(strong_vm_virtualized);
+    for (const auto &entry : strong_vm_names) {
       all_vm_virtualized.insert(entry.getKey());
     }
 
     changed |= apply_constant_encoding_stage(states, config, &all_vm_virtualized);
+    changed |= apply_opaque_gep_stage(states, config, &all_vm_virtualized);
     changed |= apply_instruction_substitution_stage(states, config, &all_vm_virtualized);
     changed |= apply_opaque_predicate_stage(states, config, &all_vm_virtualized);
     const llvm::StringSet<> flattened_functions =
@@ -1200,14 +1490,14 @@ public:
     changed |= apply_block_split_stage(states, config, &block_split_skips);
 
     // Phase 4: Harden only the generated VM infrastructure for strong_vm.
+    changed |= apply_opaque_gep_to_functions(strong_vm_virtualized, config);
     llvm::StringSet<> strong_vm_flattened =
-        apply_control_flattening_to_functions(module, states, config,
-                                              strong_vm_virtualized);
+        apply_control_flattening_to_functions(strong_vm_virtualized, config);
     changed |= !strong_vm_flattened.empty();
-    changed |= apply_instruction_substitution_to_functions(
-        module, states, config, strong_vm_virtualized);
-    changed |= apply_bogus_control_flow_to_functions(module, states, config,
-                                                     strong_vm_virtualized);
+    changed |=
+        apply_instruction_substitution_to_functions(strong_vm_virtualized, config);
+    changed |= apply_bogus_control_flow_to_functions(strong_vm_virtualized,
+                                                     config);
 
     if (!changed) {
       return llvm::PreservedAnalyses::all();
@@ -1255,6 +1545,11 @@ llvmGetPassPluginInfo() {
 
                   if (name == "obf-instruction-substitute") {
                     module_pm.addPass(obf::instruction_substitution_pass());
+                    return true;
+                  }
+
+                  if (name == "obf-opaque-gep") {
+                    module_pm.addPass(obf::opaque_gep_pass());
                     return true;
                   }
 

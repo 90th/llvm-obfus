@@ -46,7 +46,13 @@ entry:
 
 ; CHECK-LABEL: define i1 @verify_like
 ; CHECK: obf.flat.setup:
-; CHECK: %obf.state = alloca i32
-; CHECK: br label %obf.flat.dispatch
+; CHECK-NOT: %obf.state = alloca i32
 ; CHECK: obf.flat.dispatch:
-; CHECK: switch i32
+; CHECK: %obf.state = phi i32
+; CHECK-SAME: %obf.flat.state.next
+; CHECK: %obf.flat.val = phi i64
+; CHECK: switch i32 %obf.state
+; CHECK: entry:
+; CHECK: br i1 %len_ok, label %obf.flat.edge, label %obf.flat.edge
+; CHECK: loop:
+; CHECK: %ptr = getelementptr inbounds i8, ptr %p, i64 %obf.flat.val

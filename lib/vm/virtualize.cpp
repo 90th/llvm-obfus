@@ -272,6 +272,47 @@ std::uint64_t derive_vm_return_key(const llvm::Function &function,
                   0xdeadbeefcafebabeULL);
 }
 
+llvm::Value *build_hidden_token_seed(llvm::IRBuilder<> &builder,
+                                     llvm::Argument *hidden_token_arg,
+                                     std::uint64_t canonical_seed,
+                                     llvm::ArrayRef<std::uint64_t> valid_tokens,
+                                     const mba::builder_context &mba_context,
+                                     std::uint64_t salt,
+                                     llvm::StringRef name) {
+  if (hidden_token_arg == nullptr) {
+    return builder.getInt64(canonical_seed);
+  }
+
+  llvm::Value *hidden_token = hidden_token_arg;
+  if (hidden_token->getType() != builder.getInt64Ty()) {
+    hidden_token = builder.CreateZExtOrTrunc(hidden_token, builder.getInt64Ty(),
+                                             "obf.vm.token.cast");
+  }
+
+  llvm::Value *selected = mba::entangle_value(
+      builder, hidden_token, mba_context, salt ^ 0xabcddcbaULL,
+      (name + ".fallback").str());
+  for (std::size_t token_index = 0; token_index < valid_tokens.size(); ++token_index) {
+    llvm::Value *token_const = mba::create_opaque_integer(
+        builder, builder.getInt64Ty(), mba_context,
+        llvm::APInt(64, valid_tokens[token_index]),
+        salt + static_cast<std::uint64_t>(token_index) * 8 + 1,
+        (name + ".token").str());
+    llvm::Value *seed_const = mba::create_opaque_integer(
+        builder, builder.getInt64Ty(), mba_context,
+        llvm::APInt(64, canonical_seed),
+        salt + static_cast<std::uint64_t>(token_index) * 8 + 2,
+        (name + ".seed").str());
+    llvm::Value *match = builder.CreateICmpEQ(hidden_token, token_const,
+                                              (name + ".match").str());
+    selected = builder.CreateSelect(match, seed_const, selected,
+                                    name.empty() ? "obf.vm.token.seed"
+                                                 : name);
+  }
+
+  return selected;
+}
+
 struct bytecode_layout {
   std::uint32_t header_offset = 0;
   std::uint32_t fallthrough_target_offset = invalid_slot;
@@ -464,25 +505,19 @@ serialized_bytecode_program serialize_bytecode_program(
 }
 
 llvm::Value *build_opaque_vm_mask(llvm::IRBuilder<> &builder,
-                                  llvm::AllocaInst *opaque_seed_slot,
+                                  llvm::AllocaInst *,
                                   std::uint64_t opaque_seed_base,
                                   llvm::IntegerType *type,
                                   const llvm::APInt &key,
                                   const mba::builder_context &mba_context,
                                   std::uint64_t salt) {
-  auto *seed_load = builder.CreateLoad(
-      llvm::cast<llvm::IntegerType>(opaque_seed_slot->getAllocatedType()),
-      opaque_seed_slot, "obf.vm.seed.load");
-  seed_load->setVolatile(true);
-
-  llvm::Value *typed_seed = seed_load;
-  if (typed_seed->getType() != type) {
-    typed_seed =
-        builder.CreateZExtOrTrunc(typed_seed, type, "obf.vm.seed.cast");
-  }
-
   const llvm::APInt base_seed(type->getBitWidth(), opaque_seed_base,
                               /*isSigned=*/false, /*implicitTrunc=*/true);
+  mba::builder_context seed_context = mba_context;
+  seed_context.seed_base = opaque_seed_base;
+  llvm::Value *typed_seed = mba::create_opaque_integer(
+      builder, type, seed_context, base_seed, salt ^ 0x51f15eedULL,
+      "obf.vm.seed");
   const llvm::APInt delta = key ^ base_seed;
   return mba::create_xor(builder, typed_seed,
                          llvm::ConstantInt::get(type, delta), mba_context, salt,
@@ -730,12 +765,15 @@ void apply_edge_assignments(
 
 void rewrite_function_body(llvm::Function &function,
                            const bytecode_program &program,
-                           std::uint32_t mba_depth) {
+                           const virtualization_options &options) {
   llvm::LLVMContext &context = function.getContext();
+  const std::string symbol_tag =
+      options.symbol_tag.empty() ? function.getName().str() : options.symbol_tag;
   const llvm::AttributeList preserved_attributes =
       build_preserved_function_attributes(function);
 
   function.setAttributes(preserved_attributes);
+  function.addFnAttr("instcombine-no-verify-fixpoint");
 
   llvm::SmallVector<llvm::BasicBlock *, 8> old_blocks;
   old_blocks.reserve(function.size());
@@ -781,24 +819,17 @@ void rewrite_function_body(llvm::Function &function,
       derive_vm_opaque_seed(function, program);
   const std::vector<slot_cell_mapping> slot_mappings =
       build_slot_cell_mappings(program, opaque_seed_base);
-  auto *opaque_seed =
-      entry_builder.CreateAlloca(entry_builder.getInt64Ty(), nullptr,
-                                 "obf.vm.seed");
-  auto *opaque_seed_store =
-      entry_builder.CreateStore(entry_builder.getInt64(opaque_seed_base),
-                                opaque_seed);
-  opaque_seed_store->setVolatile(true);
-  auto *opaque_seed_peer =
-      entry_builder.CreateAlloca(entry_builder.getInt64Ty(), nullptr,
-                                 "obf.vm.seed.peer");
-  auto *opaque_seed_peer_store =
-      entry_builder.CreateStore(entry_builder.getInt64(opaque_seed_base),
-                                opaque_seed_peer);
-  opaque_seed_peer_store->setVolatile(true);
-  const mba::builder_context mba_context{.seed_slot_a = opaque_seed,
-                                          .seed_slot_b = opaque_seed_peer,
-                                          .seed_base = opaque_seed_base,
-                                          .depth = mba_depth};
+  llvm::AllocaInst *opaque_seed = nullptr;
+  llvm::GlobalVariable *entropy_anchor =
+      mba::get_or_create_entropy_anchor(*function.getParent());
+  const mba::builder_context mba_context{.entropy_anchor = entropy_anchor,
+                                         .seed_base = opaque_seed_base,
+                                         .depth = options.mba_depth};
+
+  llvm::Argument *hidden_token_arg = nullptr;
+  if (options.hidden_token_handshake && function.arg_size() > 0) {
+    hidden_token_arg = &*std::prev(function.arg_end());
+  }
 
   const std::uint64_t bytecode_seed =
       derive_vm_bytecode_seed(function, program);
@@ -817,7 +848,7 @@ void rewrite_function_body(llvm::Function &function,
         *function.getParent(), bytecode_type, true,
         llvm::GlobalValue::PrivateLinkage,
         llvm::ConstantDataArray::get(context, serialized.bytes),
-        ("__obf_vm_bc_" + function.getName()).str());
+        "__obf_vm_bc_" + symbol_tag);
     bytecode_global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   }
 
@@ -831,7 +862,7 @@ void rewrite_function_body(llvm::Function &function,
         *function.getParent(), entry_builder.getInt64Ty(),
         /*isConstant=*/false, llvm::GlobalValue::PrivateLinkage,
         entry_builder.getInt64(retkey_value),
-        ("__obf_vm_retkey_" + function.getName()).str());
+        "__obf_vm_retkey_" + symbol_tag);
   }
 
   auto *state_slot = entry_builder.CreateAlloca(entry_builder.getInt64Ty(), nullptr,
@@ -845,10 +876,14 @@ void rewrite_function_body(llvm::Function &function,
     entry_slot_mapping = slot_mappings[entry_instruction];
   }
   auto *state_store = entry_builder.CreateStore(
-      entry_builder.getInt64(program.instructions.empty() ? bytecode_seed
-                                                          : entry_states[entry_instruction]),
+      build_hidden_token_seed(
+          entry_builder, hidden_token_arg,
+          program.instructions.empty() ? bytecode_seed
+                                       : entry_states[entry_instruction],
+          options.valid_hidden_tokens, mba_context, 0x3100,
+          "obf.vm.token.state"),
       state_slot);
-  state_store->setVolatile(true);
+  (void)state_store;
 
   llvm::AllocaInst *dispatch_table = nullptr;
   llvm::ArrayType *dispatch_table_type = nullptr;
@@ -873,14 +908,22 @@ void rewrite_function_body(llvm::Function &function,
   const auto build_dispatch_key = [&](llvm::IRBuilder<> &builder,
                                       llvm::Value *dispatch_index,
                                       std::uint64_t salt) {
-    auto *seed_load = builder.CreateLoad(builder.getInt64Ty(), opaque_seed,
-                                         "obf.vm.dispatch.seed");
-    seed_load->setVolatile(true);
-
-    llvm::Value *typed_seed = seed_load;
-    if (typed_seed->getType() != ptr_int_type) {
-      typed_seed = builder.CreateZExtOrTrunc(typed_seed, ptr_int_type,
-                                             "obf.vm.dispatch.seed.cast");
+    llvm::Value *typed_seed = nullptr;
+    if (hidden_token_arg != nullptr) {
+      typed_seed = hidden_token_arg;
+      if (typed_seed->getType() != ptr_int_type) {
+        typed_seed = builder.CreateZExtOrTrunc(typed_seed, ptr_int_type,
+                                               "obf.vm.dispatch.seed.cast");
+      }
+      typed_seed = mba::entangle_value(builder, typed_seed, mba_context,
+                                       salt ^ 0x7000ULL,
+                                       "obf.vm.dispatch.seed");
+    } else {
+      typed_seed = mba::create_opaque_integer(
+          builder, ptr_int_type, mba_context,
+          llvm::APInt(ptr_int_type->getBitWidth(), opaque_seed_base,
+                      /*isSigned=*/false, /*implicitTrunc=*/true),
+          salt ^ 0x7000ULL, "obf.vm.dispatch.seed");
     }
 
     llvm::Value *typed_index = dispatch_index;
@@ -934,7 +977,6 @@ void rewrite_function_body(llvm::Function &function,
         builder.CreateLoad(builder.getInt8Ty(), slot, "obf.vm.bc.enc");
     auto *state_load = builder.CreateLoad(builder.getInt64Ty(), state_slot,
                                           "obf.vm.bc.state.load");
-    state_load->setVolatile(true);
     llvm::Value *rotated = builder.CreateOr(
         builder.CreateLShr(state_load, builder.getInt64(13), "obf.vm.bc.shr"),
         builder.CreateShl(state_load, builder.getInt64(51), "obf.vm.bc.shl"),
@@ -954,8 +996,7 @@ void rewrite_function_body(llvm::Function &function,
         builder.CreateShl(state_load, builder.getInt64(8), "obf.vm.bc.state.shift"),
         builder.CreateZExt(decoded, builder.getInt64Ty(), "obf.vm.bc.state.byte"),
         "obf.vm.bc.state.next");
-    auto *store = builder.CreateStore(next_state, state_slot);
-    store->setVolatile(true);
+    (void)builder.CreateStore(next_state, state_slot);
     return decoded;
   };
 
@@ -1033,7 +1074,6 @@ void rewrite_function_body(llvm::Function &function,
         {jump_builder.getInt32(0), dispatch_index}, "obf.vm.dispatch.slot");
     auto *encoded_target = jump_builder.CreateLoad(ptr_int_type, dispatch_slot,
                                                    "obf.vm.dispatch.encoded");
-    encoded_target->setVolatile(true);
     llvm::Value *key = build_dispatch_key(jump_builder, dispatch_index, salt);
     llvm::Value *decoded_target = mba::create_xor(
         jump_builder, encoded_target, key, mba_context, salt + 1,
@@ -1108,7 +1148,6 @@ void rewrite_function_body(llvm::Function &function,
         auto *integrity_state = builder.CreateLoad(builder.getInt64Ty(),
                                                    state_slot,
                                                    "obf.vm.integrity.state");
-        integrity_state->setVolatile(true);
         llvm::Value *rotated = builder.CreateOr(
             builder.CreateLShr(integrity_state, builder.getInt64(7),
                                "obf.vm.integrity.shr"),
@@ -1124,8 +1163,7 @@ void rewrite_function_body(llvm::Function &function,
             integrity_state,
             builder.CreateAdd(rotated, scaled, "obf.vm.integrity.sum"),
             "obf.vm.integrity.fold");
-        auto *integrity_store = builder.CreateStore(folded, state_slot);
-        integrity_store->setVolatile(true);
+        (void)builder.CreateStore(folded, state_slot);
       }
     }
 
@@ -1472,7 +1510,6 @@ void rewrite_function_body(llvm::Function &function,
               0x1a000 + static_cast<std::uint64_t>(instruction_index) * 16;
           auto *state_load = builder.CreateLoad(builder.getInt64Ty(), state_slot,
                                                 "obf.vm.ret.state");
-          state_load->setVolatile(true);
           auto *expected_const = builder.getInt64(
               serialized.layouts[instruction_index].expected_post_header_state);
           llvm::Value *poison = mba::create_xor(
@@ -1481,7 +1518,6 @@ void rewrite_function_body(llvm::Function &function,
           auto *retkey_load = builder.CreateLoad(builder.getInt64Ty(),
                                                  retkey_global,
                                                  "obf.vm.ret.retkey");
-          retkey_load->setVolatile(true);
           llvm::Value *full_key = mba::create_xor(
               builder, retkey_load, poison, mba_context,
               ret_salt + 2, "obf.vm.ret.fullkey");
@@ -1517,7 +1553,7 @@ virtualization_result run_virtualization(llvm::Function &function,
     return {.virtualized = false, .detail = analysis.detail};
   }
 
-  rewrite_function_body(function, program, options.mba_depth);
+  rewrite_function_body(function, program, options);
   return {.virtualized = true,
           .instruction_count = analysis.instruction_count,
           .detail = std::to_string(analysis.instruction_count) +

@@ -17,6 +17,7 @@ struct function_policy {
   bool allow_string_encoding = false;
   bool allow_constant_encoding = false;
   bool allow_instruction_substitution = false;
+  bool allow_opaque_gep = false;
   bool allow_bogus_control_flow = false;
   bool allow_opaque_predicates = false;
   bool allow_flattening = false;

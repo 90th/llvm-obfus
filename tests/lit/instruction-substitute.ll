@@ -17,10 +17,14 @@ entry:
   ret i32 %ret
 }
 
+; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; CHECK-LABEL: define i32 @value
-; CHECK: %obf.mba.seed.a = alloca i64
 ; CHECK: %obf.mba.add.xor = xor i32 %x, %y
 ; CHECK: %obf.mba.add.and = and i32 %x, %y
+; CHECK: %obf.entropy.direct = load i64, ptr @__obf_entropy_anchor
+; CHECK: %obf.entropy.ref = load ptr, ptr @__obf_entropy_anchor_ref
+; CHECK: store i64 %obf.entropy.direct, ptr %obf.entropy.ref
 ; CHECK: %obf.mba.add.carry = add i32 %obf.mba.add.and, %obf.mba.add.carry.mask
 ; CHECK: %sum = add i32 %obf.mba.add.xor.mask, %obf.mba.add.carry
 ; CHECK: %mix = sub i32 %obf.mba.xor.left, %obf.mba.xor.right

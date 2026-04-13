@@ -53,6 +53,7 @@ add_library(obf_core
   lib/transforms/control_flattening.cpp
   lib/transforms/instruction_substitution.cpp
   lib/transforms/mba.cpp
+  lib/transforms/opaque_gep.cpp
   lib/transforms/opaque_predicates.cpp
   lib/transforms/string_encoding.cpp
   lib/vm/candidate_analysis.cpp
@@ -75,6 +76,14 @@ add_executable(obf-driver
 llvm_update_compile_flags(obf-driver)
 target_include_directories(obf-driver PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(obf-driver PRIVATE obf_core ${OBF_LLVM_LIBS})
+
+set(OBF_ENTROPY_ANCHOR_OBJ "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.o")
+add_custom_command(
+  OUTPUT "${OBF_ENTROPY_ANCHOR_OBJ}"
+  COMMAND "${OBF_CLANG}" -c "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_OBJ}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c"
+  VERBATIM)
+add_custom_target(obf-entropy-anchor-runtime ALL DEPENDS "${OBF_ENTROPY_ANCHOR_OBJ}")
 
 enable_testing()
 
@@ -118,9 +127,9 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
 
   add_custom_command(
     OUTPUT "${obfuscated_bin}"
-    COMMAND "${compiler}" "${obfuscated_ll}" -O0 -o "${obfuscated_bin}"
+    COMMAND "${compiler}" "${obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
     COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
-    DEPENDS "${obfuscated_ll}"
+    DEPENDS "${obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
     VERBATIM)
 
   add_custom_target("${target_name}_bench" DEPENDS "${baseline_bin}" "${obfuscated_bin}")
@@ -169,9 +178,9 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
 
   add_custom_command(
     OUTPUT "${obfuscated_bin}"
-    COMMAND "${compiler}" "${linked_obfuscated_ll}" -O0 -o "${obfuscated_bin}"
+    COMMAND "${compiler}" "${linked_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
     COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
-    DEPENDS "${linked_obfuscated_ll}"
+    DEPENDS "${linked_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
     VERBATIM)
 
   add_custom_target("${target_name}_bench" DEPENDS "${baseline_bin}" "${obfuscated_bin}")

@@ -1,9 +1,11 @@
 #include "obf/transforms/mba.h"
 
 #include "llvm/ADT/Hashing.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 
 #include <cstdint>
@@ -28,32 +30,6 @@ std::uint64_t derive_function_seed(const llvm::Function &function,
   return seed == 0 ? 0xa55aa55aa55aa55aULL : seed;
 }
 
-llvm::AllocaInst *find_seed_slot(llvm::Function &function, llvm::StringRef name) {
-  for (llvm::Instruction &instruction : function.getEntryBlock()) {
-    auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction);
-    if (alloca != nullptr && alloca->getName() == name &&
-        alloca->getAllocatedType()->isIntegerTy(64)) {
-      return alloca;
-    }
-  }
-
-  return nullptr;
-}
-
-llvm::AllocaInst *get_or_create_seed_slot(llvm::Function &function,
-                                          llvm::StringRef name,
-                                          std::uint64_t seed) {
-  if (llvm::AllocaInst *existing = find_seed_slot(function, name)) {
-    return existing;
-  }
-
-  llvm::IRBuilder<> builder(&*function.getEntryBlock().getFirstInsertionPt());
-  auto *slot = builder.CreateAlloca(builder.getInt64Ty(), nullptr, name);
-  auto *store = builder.CreateStore(builder.getInt64(seed), slot);
-  store->setVolatile(true);
-  return slot;
-}
-
 bool is_supported_type(const llvm::Type *type) {
   if (type->isIntegerTy()) {
     return true;
@@ -63,52 +39,133 @@ bool is_supported_type(const llvm::Type *type) {
   return vector_type != nullptr && vector_type->getElementType()->isIntegerTy();
 }
 
-llvm::Value *cast_zero_to_type(llvm::IRBuilder<> &builder, llvm::Value *zero64,
-                               llvm::Type *target_type) {
+llvm::Value *cast_i64_to_type(llvm::IRBuilder<> &builder, llvm::Value *value64,
+                              llvm::Type *target_type, llvm::StringRef name_prefix) {
   if (auto *integer_type = llvm::dyn_cast<llvm::IntegerType>(target_type)) {
     if (integer_type->getBitWidth() < 64) {
-      return builder.CreateTrunc(zero64, integer_type, "obf.mba.zero");
+      return builder.CreateTrunc(value64, integer_type,
+                                 (name_prefix + ".trunc").str());
     }
 
     if (integer_type->getBitWidth() > 64) {
-      return builder.CreateZExt(zero64, integer_type, "obf.mba.zero");
+      return builder.CreateZExt(value64, integer_type,
+                                (name_prefix + ".zext").str());
     }
 
-    return zero64;
+    return value64;
   }
 
   auto *vector_type = llvm::cast<llvm::FixedVectorType>(target_type);
   auto *element_type = llvm::cast<llvm::IntegerType>(vector_type->getElementType());
-  llvm::Value *element_zero = zero64;
+  llvm::Value *element_value = value64;
   if (element_type->getBitWidth() < 64) {
-    element_zero = builder.CreateTrunc(zero64, element_type, "obf.mba.zero.elt");
+    element_value = builder.CreateTrunc(value64, element_type,
+                                        (name_prefix + ".elt.trunc").str());
   } else if (element_type->getBitWidth() > 64) {
-    element_zero = builder.CreateZExt(zero64, element_type, "obf.mba.zero.elt");
+    element_value = builder.CreateZExt(value64, element_type,
+                                       (name_prefix + ".elt.zext").str());
   }
 
-  return builder.CreateVectorSplat(vector_type->getElementCount(), element_zero,
-                                   "obf.mba.zero.vec");
+  return builder.CreateVectorSplat(vector_type->getElementCount(), element_value,
+                                   (name_prefix + ".vec").str());
 }
+
+llvm::Constant *constant_i64_to_type(llvm::Type *target_type, std::uint64_t word) {
+  if (auto *integer_type = llvm::dyn_cast<llvm::IntegerType>(target_type)) {
+    return llvm::ConstantInt::get(
+        integer_type,
+        llvm::APInt(integer_type->getBitWidth(), word, false, true));
+  }
+
+  auto *vector_type = llvm::cast<llvm::FixedVectorType>(target_type);
+  auto *element_type = llvm::cast<llvm::IntegerType>(vector_type->getElementType());
+  llvm::Constant *element = llvm::ConstantInt::get(
+      element_type,
+      llvm::APInt(element_type->getBitWidth(), word, false, true));
+  return llvm::ConstantVector::getSplat(vector_type->getElementCount(), element);
+}
+
+llvm::GlobalVariable *get_or_create_entropy_anchor_ref(llvm::Module &module) {
+  if (llvm::GlobalVariable *existing =
+          module.getNamedGlobal("__obf_entropy_anchor_ref")) {
+    return existing;
+  }
+
+  auto *ref = new llvm::GlobalVariable(
+      module, llvm::PointerType::get(module.getContext(), 0),
+      /*isConstant=*/false, llvm::GlobalValue::ExternalLinkage,
+      /*Initializer=*/nullptr, "__obf_entropy_anchor_ref");
+  ref->setExternallyInitialized(true);
+  ref->setAlignment(llvm::Align(8));
+  return ref;
+}
+
+struct entropy_pair {
+  llvm::Value *direct = nullptr;
+  llvm::Value *indirect = nullptr;
+};
+
+entropy_pair load_entropy_anchor_pair(llvm::IRBuilder<> &builder,
+                                      llvm::GlobalVariable *entropy_anchor,
+                                      llvm::StringRef name) {
+  llvm::Module *module = entropy_anchor->getParent();
+  auto *anchor_ref = get_or_create_entropy_anchor_ref(*module);
+  llvm::Value *direct = builder.CreateLoad(builder.getInt64Ty(), entropy_anchor,
+                                           (name + ".direct").str());
+  llvm::Value *ref_ptr = builder.CreateLoad(anchor_ref->getValueType(), anchor_ref,
+                                            (name + ".ref").str());
+  builder.CreateStore(direct, ref_ptr);
+  llvm::Value *indirect = builder.CreateLoad(builder.getInt64Ty(), entropy_anchor,
+                                             (name + ".indirect").str());
+  return {.direct = direct, .indirect = indirect};
+}
+
+llvm::Value *entangle_value_impl(llvm::IRBuilder<> &builder, llvm::Value *value,
+                                 const builder_context &context,
+                                 std::uint64_t salt, llvm::StringRef name);
 
 llvm::Value *build_opaque_zero(llvm::IRBuilder<> &builder,
                                const builder_context &context,
                                llvm::Type *target_type, std::uint64_t salt) {
-  auto *lhs_load = builder.CreateLoad(builder.getInt64Ty(), context.seed_slot_a,
-                                      "obf.mba.seed.a");
-  lhs_load->setVolatile(true);
-  auto *rhs_load = builder.CreateLoad(builder.getInt64Ty(), context.seed_slot_b,
-                                      "obf.mba.seed.b");
-  rhs_load->setVolatile(true);
+  if (context.entropy_anchor == nullptr || !is_supported_type(target_type)) {
+    return llvm::Constant::getNullValue(target_type);
+  }
 
-  const std::uint64_t salt_word = mix_seed(context.seed_base, salt);
-  llvm::Value *mixed_lhs = builder.CreateXor(
-      lhs_load, llvm::ConstantInt::get(builder.getInt64Ty(), salt_word),
-      "obf.mba.mix.a");
-  llvm::Value *mixed_rhs = builder.CreateXor(
-      rhs_load, llvm::ConstantInt::get(builder.getInt64Ty(), salt_word),
-      "obf.mba.mix.b");
-  llvm::Value *zero64 = builder.CreateXor(mixed_lhs, mixed_rhs, "obf.mba.zero64");
-  return cast_zero_to_type(builder, zero64, target_type);
+  const entropy_pair entropy =
+      load_entropy_anchor_pair(builder, context.entropy_anchor, "obf.entropy");
+  llvm::Value *entropy_a =
+      cast_i64_to_type(builder, entropy.direct, target_type, "obf.entropy.a.cast");
+  llvm::Value *entropy_b =
+      cast_i64_to_type(builder, entropy.indirect, target_type, "obf.entropy.b.cast");
+  llvm::Constant *mask = constant_i64_to_type(
+      target_type, mix_seed(context.seed_base, salt ^ 0x13579bdfULL));
+  llvm::Value *lhs = builder.CreateXor(entropy_a, mask, "obf.entropy.mix.a");
+  llvm::Value *rhs = builder.CreateXor(entropy_b, mask, "obf.entropy.mix.b");
+  return builder.CreateXor(lhs, rhs, "obf.mba.zero");
+}
+
+llvm::Value *entangle_value_impl(llvm::IRBuilder<> &builder, llvm::Value *value,
+                                 const builder_context &context,
+                                 std::uint64_t salt, llvm::StringRef name) {
+  if (context.entropy_anchor == nullptr || !is_supported_type(value->getType())) {
+    return value;
+  }
+
+  const entropy_pair entropy =
+      load_entropy_anchor_pair(builder, context.entropy_anchor, "obf.entropy");
+  llvm::Value *entropy_a =
+      cast_i64_to_type(builder, entropy.direct, value->getType(), "obf.entropy.a.cast");
+  llvm::Value *entropy_b =
+      cast_i64_to_type(builder, entropy.indirect, value->getType(), "obf.entropy.b.cast");
+
+  llvm::Constant *mask = constant_i64_to_type(
+      value->getType(), mix_seed(context.seed_base, salt ^ 0x13579bdfULL));
+  llvm::Value *left = builder.CreateXor(
+      value, builder.CreateXor(entropy_a, mask, "obf.entropy.mix.a"),
+      "obf.entropy.left");
+  return builder.CreateXor(
+      left, builder.CreateXor(entropy_b, mask, "obf.entropy.mix.b"),
+      name.empty() ? "obf.entropy.value" : name);
 }
 
 llvm::Value *mask_with_zero_add(llvm::IRBuilder<> &builder, llvm::Value *value,
@@ -281,15 +338,45 @@ llvm::Value *create_xor_impl(llvm::IRBuilder<> &builder, llvm::Value *lhs,
 
 } // namespace
 
+llvm::GlobalVariable *get_or_create_entropy_anchor(llvm::Module &module) {
+  if (llvm::GlobalVariable *existing =
+          module.getNamedGlobal("__obf_entropy_anchor")) {
+    return existing;
+  }
+
+  auto *anchor = new llvm::GlobalVariable(
+      module, llvm::Type::getInt64Ty(module.getContext()), /*isConstant=*/false,
+      llvm::GlobalValue::ExternalLinkage,
+      /*Initializer=*/nullptr,
+      "__obf_entropy_anchor");
+  anchor->setExternallyInitialized(true);
+  anchor->setAlignment(llvm::Align(8));
+  return anchor;
+}
+
 builder_context get_or_create_builder_context(llvm::Function &function,
                                               llvm::StringRef prefix,
                                               std::uint64_t seed_base) {
-  const std::uint64_t seed = derive_function_seed(function, prefix, seed_base);
-  const std::string slot_a_name = (prefix + ".seed.a").str();
-  const std::string slot_b_name = (prefix + ".seed.b").str();
-  return {.seed_slot_a = get_or_create_seed_slot(function, slot_a_name, seed),
-          .seed_slot_b = get_or_create_seed_slot(function, slot_b_name, seed),
-          .seed_base = seed};
+  llvm::Module *module = function.getParent();
+  return {.entropy_anchor = module == nullptr ? nullptr
+                                              : get_or_create_entropy_anchor(*module),
+          .seed_base = derive_function_seed(function, prefix, seed_base)};
+}
+
+llvm::Value *entangle_value(llvm::IRBuilder<> &builder, llvm::Value *value,
+                            const builder_context &context,
+                            std::uint64_t salt, llvm::StringRef name) {
+  return entangle_value_impl(builder, value, context, salt, name);
+}
+
+llvm::Value *create_opaque_integer(llvm::IRBuilder<> &builder,
+                                   llvm::IntegerType *type,
+                                   const builder_context &context,
+                                   const llvm::APInt &value,
+                                   std::uint64_t salt,
+                                   llvm::StringRef name) {
+  return entangle_value_impl(builder, llvm::ConstantInt::get(type, value), context,
+                             salt, name.empty() ? "obf.seed" : name);
 }
 
 llvm::Value *create_add(llvm::IRBuilder<> &builder, llvm::Value *lhs,
