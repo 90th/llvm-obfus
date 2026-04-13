@@ -205,24 +205,26 @@ opaque_gep_options build_opaque_gep_options(const obfuscation_config &config,
 }
 
 bogus_control_flow_options
-build_bogus_control_flow_options(const obfuscation_config &,
+build_bogus_control_flow_options(const obfuscation_config &config,
                                  const policy_decision &decision) {
   bogus_control_flow_options options;
   if (has_strong_classical(decision.policy.level)) {
     options.max_insertions_per_function = 2;
   }
 
+  options.mba_depth = config.mba.depth;
   return options;
 }
 
 opaque_predicate_options
-build_opaque_predicate_options(const obfuscation_config &,
+build_opaque_predicate_options(const obfuscation_config &config,
                                const policy_decision &decision) {
   opaque_predicate_options options;
   if (has_strong_classical(decision.policy.level)) {
     options.max_insertions_per_function = 2;
   }
 
+  options.mba_depth = config.mba.depth;
   return options;
 }
 

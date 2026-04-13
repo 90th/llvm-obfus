@@ -22,9 +22,14 @@ entry:
   ret i32 %ret
 }
 
+; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; CHECK-LABEL: define i32 @check
-; CHECK: %obf.opaque.dec = sub i32 %x, 1
-; CHECK: %obf.opaque.mul = mul i32 %x, %obf.opaque.dec
-; CHECK: %obf.opaque.and = and i32 %obf.opaque.mul, 1
-; CHECK: %obf.opaque.true = icmp eq i32 %obf.opaque.and, 0
+; CHECK: %obf.opaque.entropy = load i64, ptr @__obf_entropy_anchor
+; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] = {{(add|sub|xor) i64}}
+; CHECK: [[EXPRB:%obf\.opaque\.expr\.b[^ ]*]] = {{(add|sub|xor) i64}}
+; CHECK: %obf.opaque.true = icmp eq i64 [[EXPRA]], [[EXPRB]]
 ; CHECK: %obf.opaque.cond = and i1 %gt, %obf.opaque.true
+; CHECK-NOT: %obf.opaque.dec =
+; CHECK-NOT: %obf.opaque.mul =
+; CHECK-NOT: %obf.opaque.and =

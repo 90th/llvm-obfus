@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace llvm {
@@ -11,6 +12,7 @@ namespace obf {
 
 struct bogus_control_flow_options {
   std::size_t max_insertions_per_function = 1;
+  std::uint32_t mba_depth = 1;
 };
 
 struct bogus_control_flow_result {
