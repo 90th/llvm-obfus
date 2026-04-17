@@ -6,6 +6,7 @@
 #include "obf/transforms/bogus_control_flow.h"
 #include "obf/transforms/constant_encoding.h"
 #include "obf/transforms/control_flattening.h"
+#include "obf/transforms/function_outlining.h"
 #include "obf/transforms/instruction_substitution.h"
 #include "obf/transforms/mba.h"
 #include "obf/transforms/opaque_gep.h"
@@ -204,6 +205,20 @@ opaque_gep_options build_opaque_gep_options(const obfuscation_config &config,
   return options;
 }
 
+function_outlining_options
+build_function_outlining_options(const obfuscation_config &config,
+                                 const policy_decision &decision) {
+  function_outlining_options options;
+  options.mba_depth = config.mba.depth;
+  options.seed = decision.seed;
+  if (has_strong_classical(decision.policy.level)) {
+    options.min_cluster_size = 2;
+    options.max_cluster_size = 4;
+  }
+
+  return options;
+}
+
 bogus_control_flow_options
 build_bogus_control_flow_options(const obfuscation_config &config,
                                  const policy_decision &decision) {
@@ -369,6 +384,30 @@ build_transform_reports(llvm::Module &module,
       reports.push_back(make_transform_report(
           "control_flattening", "function", function->getName(),
           result.flattened, result.detail, result.state_count));
+    }
+
+    if (suppressed_by_vm) {
+      reports.push_back(make_transform_report("function_outlining", "function",
+                                              function->getName(), false,
+                                              "suppressed after vm", 0));
+    } else if (deferred_to_vm_hardening) {
+      reports.push_back(make_transform_report("function_outlining", "function",
+                                              function->getName(), false,
+                                              "deferred to vm hardening", 0));
+    } else if (!state.report.decision.policy.allow_function_outlining) {
+      reports.push_back(make_transform_report(
+          "function_outlining", "function", function->getName(), false,
+          function->isDeclaration() ? "declaration"
+                                    : "policy disallows function outlining",
+          0));
+    } else {
+      const function_outlining_options options =
+          build_function_outlining_options(config, state.report.decision);
+      const function_outlining_result result =
+          analyze_function_outlining(*function, options);
+      reports.push_back(make_transform_report(
+          "function_outlining", "function", function->getName(),
+          result.shard_count > 0, result.detail, result.shard_count));
     }
 
     if (suppressed_by_vm) {
@@ -1109,6 +1148,51 @@ bool apply_opaque_gep_to_functions(
   return changed;
 }
 
+bool apply_function_outlining_stage(
+    const llvm::SmallVectorImpl<function_pipeline_state> &states,
+    const obfuscation_config &config,
+    const llvm::StringSet<> *skip_functions = nullptr) {
+  bool changed = false;
+
+  for (const function_pipeline_state &state : states) {
+    if (should_skip_function(state, skip_functions) ||
+        !state.report.decision.policy.allow_function_outlining) {
+      continue;
+    }
+
+    const function_outlining_options options =
+        build_function_outlining_options(config, state.report.decision);
+    changed |= run_function_outlining(*state.function, options).shard_count > 0;
+  }
+
+  return changed;
+}
+
+bool apply_function_outlining_to_functions(
+    const virtualized_function_map &virtualized_functions,
+    const obfuscation_config &config) {
+  bool changed = false;
+
+  for (const auto &entry : virtualized_functions) {
+    llvm::Function *function = entry.second.implementation_function;
+    if (function == nullptr || function->isDeclaration()) {
+      continue;
+    }
+
+    if (entry.second.state == nullptr ||
+        !entry.second.state->report.decision.policy.allow_function_outlining) {
+      continue;
+    }
+
+    const function_outlining_options options =
+        build_function_outlining_options(config,
+                                         entry.second.state->report.decision);
+    changed |= run_function_outlining(*function, options).shard_count > 0;
+  }
+
+  return changed;
+}
+
 bool apply_opaque_predicate_stage(
     const llvm::SmallVectorImpl<function_pipeline_state> &states,
     const obfuscation_config &config,
@@ -1381,6 +1465,25 @@ public:
   }
 };
 
+class function_outlining_pass
+    : public llvm::PassInfoMixin<function_outlining_pass> {
+public:
+  llvm::PreservedAnalyses run(llvm::Module &module,
+                              llvm::ModuleAnalysisManager &) {
+    const obfuscation_config config = load_active_config();
+    const llvm::SmallVector<function_pipeline_state, 32> states =
+        build_pipeline_state(module, config);
+
+    const bool changed = apply_function_outlining_stage(states, config);
+    if (!changed) {
+      return llvm::PreservedAnalyses::all();
+    }
+
+    verify_changed_module(module);
+    return llvm::PreservedAnalyses::none();
+  }
+};
+
 class control_flattening_pass
     : public llvm::PassInfoMixin<control_flattening_pass> {
 public:
@@ -1479,6 +1582,7 @@ public:
     const llvm::StringSet<> flattened_functions =
         apply_control_flattening_stage(states, config, &all_vm_virtualized);
     changed |= !flattened_functions.empty();
+    changed |= apply_function_outlining_stage(states, config, &all_vm_virtualized);
     changed |= apply_bogus_control_flow_stage(states, config, &all_vm_virtualized);
 
     // Phase 3: Block split for remaining classical functions only.
@@ -1496,6 +1600,7 @@ public:
     llvm::StringSet<> strong_vm_flattened =
         apply_control_flattening_to_functions(strong_vm_virtualized, config);
     changed |= !strong_vm_flattened.empty();
+    changed |= apply_function_outlining_to_functions(strong_vm_virtualized, config);
     changed |=
         apply_instruction_substitution_to_functions(strong_vm_virtualized, config);
     changed |= apply_bogus_control_flow_to_functions(strong_vm_virtualized,
@@ -1552,6 +1657,11 @@ llvmGetPassPluginInfo() {
 
                   if (name == "obf-opaque-gep") {
                     module_pm.addPass(obf::opaque_gep_pass());
+                    return true;
+                  }
+
+                  if (name == "obf-function-outline") {
+                    module_pm.addPass(obf::function_outlining_pass());
                     return true;
                   }
 

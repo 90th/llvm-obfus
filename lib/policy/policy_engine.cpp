@@ -150,6 +150,7 @@ function_policy make_function_policy(protection_level level) {
             .allow_constant_encoding = true,
             .allow_instruction_substitution = false,
             .allow_opaque_gep = false,
+            .allow_function_outlining = false,
             .allow_bogus_control_flow = false,
             .allow_opaque_predicates = false,
             .allow_flattening = false,
@@ -162,6 +163,7 @@ function_policy make_function_policy(protection_level level) {
             .allow_constant_encoding = true,
             .allow_instruction_substitution = true,
             .allow_opaque_gep = true,
+            .allow_function_outlining = true,
             .allow_bogus_control_flow = true,
             .allow_opaque_predicates = true,
             .allow_flattening = true,
@@ -174,6 +176,7 @@ function_policy make_function_policy(protection_level level) {
             .allow_constant_encoding = true,
             .allow_instruction_substitution = false,
             .allow_opaque_gep = false,
+            .allow_function_outlining = false,
             .allow_bogus_control_flow = false,
             .allow_opaque_predicates = false,
             .allow_flattening = false,
@@ -186,6 +189,7 @@ function_policy make_function_policy(protection_level level) {
             .allow_constant_encoding = false,
             .allow_instruction_substitution = true,
             .allow_opaque_gep = true,
+            .allow_function_outlining = true,
             .allow_bogus_control_flow = false,
             .allow_opaque_predicates = false,
             .allow_flattening = true,
@@ -260,6 +264,7 @@ policy_decision select_policy(const llvm::Module &module,
 
       decision.policy.allow_flattening = false;
       decision.policy.allow_instruction_substitution = false;
+      decision.policy.allow_function_outlining = false;
       decision.policy.allow_bogus_control_flow = false;
       decision.policy.allow_opaque_predicates = false;
       decision.policy.allow_split = false;

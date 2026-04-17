@@ -49,6 +49,8 @@ std::string format_feature_report(llvm::StringRef module_name,
         entry.decision.policy.allow_constant_encoding;
     policy_json["allow_instruction_substitution"] =
         entry.decision.policy.allow_instruction_substitution;
+    policy_json["allow_function_outlining"] =
+        entry.decision.policy.allow_function_outlining;
     policy_json["allow_bogus_control_flow"] =
         entry.decision.policy.allow_bogus_control_flow;
     policy_json["allow_opaque_predicates"] =

@@ -51,6 +51,7 @@ add_library(obf_core
   lib/transforms/bogus_control_flow.cpp
   lib/transforms/constant_encoding.cpp
   lib/transforms/control_flattening.cpp
+  lib/transforms/function_outlining.cpp
   lib/transforms/instruction_substitution.cpp
   lib/transforms/mba.cpp
   lib/transforms/opaque_gep.cpp
