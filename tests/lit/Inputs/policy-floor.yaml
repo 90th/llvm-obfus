@@ -1,0 +1,8 @@
+seed: 2025
+default_level: none
+overrides:
+  - name: forced_control
+    level: none
+targets:
+  - match: forced_string
+    level: none

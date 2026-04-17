@@ -1,5 +1,5 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-lazy-phi.yaml -passes=obf-string-encode -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-lazy-phi.yaml -passes=obf-string-encode -S %s -o %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-lazy-phi.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o - | %FileCheck %s
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-lazy-phi.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o %t
 ; RUN: %lli %t
 
 @.secret = private unnamed_addr constant [7 x i8] c"secret\00"
@@ -31,7 +31,9 @@ merge:
 
 ; CHECK: @.secret = private unnamed_addr global [7 x i8]
 ; CHECK-NOT: @llvm.global_ctors = appending global
+; CHECK-NOT: @__obf_get_cfg_state
+; CHECK-NOT: @__obf_get_expected_cfg_state
 ; CHECK: use_secret:
-; CHECK: call ptr @__obf_family_
+; CHECK: call ptr @__obf_family_{{.*}}(ptr {{.*}}, i32 0, i32 0)
 ; CHECK: phi ptr
-; CHECK: define internal ptr @__obf_family_
+; CHECK: define internal ptr @__obf_family_{{.*}}(ptr %desc, i32 %cfg_state, i32 %expected_state)

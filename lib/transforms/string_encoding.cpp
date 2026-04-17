@@ -24,6 +24,10 @@ namespace obf {
 
 namespace {
 
+constexpr llvm::StringRef kCfgStatePlaceholderName = "__obf_get_cfg_state";
+constexpr llvm::StringRef kExpectedCfgStatePlaceholderName =
+    "__obf_get_expected_cfg_state";
+
 enum class string_use_kind {
   call_argument,
   compare_call_operand,
@@ -56,6 +60,7 @@ struct string_use_summary {
 struct classified_string_candidate {
   llvm::GlobalVariable *global = nullptr;
   std::uint64_t seed = 0;
+  bool has_high_security_use = false;
   string_use_summary summary;
   string_encoding_result result;
 };
@@ -63,6 +68,7 @@ struct classified_string_candidate {
 struct string_strategy_plan {
   llvm::GlobalVariable *global = nullptr;
   std::uint64_t seed = 0;
+  bool isolate_lazy_helper = false;
   string_encoding_result result;
   llvm::SmallVector<classified_string_use, 8> lazy_uses;
   llvm::SmallVector<classified_string_use, 8> inline_uses;
@@ -339,6 +345,27 @@ std::uint8_t derive_key_byte_constant(std::uint64_t seed, std::size_t index) {
   return byte;
 }
 
+llvm::Function *get_or_create_cfg_state_placeholder(llvm::Module &module,
+                                                    llvm::StringRef name) {
+  if (llvm::Function *existing = module.getFunction(name)) {
+    return existing;
+  }
+
+  llvm::FunctionType *type =
+      llvm::FunctionType::get(llvm::Type::getInt32Ty(module.getContext()), false);
+  return llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage, name,
+                                module);
+}
+
+llvm::Value *create_cfg_state_placeholder_call(llvm::IRBuilder<> &builder,
+                                               llvm::Module &module,
+                                               bool expected_state) {
+  llvm::Function *placeholder = get_or_create_cfg_state_placeholder(
+      module, expected_state ? kExpectedCfgStatePlaceholderName
+                             : kCfgStatePlaceholderName);
+  return builder.CreateCall(placeholder);
+}
+
 std::string sanitize_name(llvm::StringRef name) {
   std::string result;
   result.reserve(name.size());
@@ -386,10 +413,16 @@ bool should_inline_stack_decode(const llvm::GlobalVariable &global,
          summary.protected_uses.size() <= 2;
 }
 
+bool is_high_security_level(protection_level level) {
+  return level == protection_level::strong ||
+         level == protection_level::strong_vm;
+}
+
 classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
-                                              protected_function_seed_lookup get_seed,
-                                              const string_encoding_options &options,
-                                              std::uint64_t module_seed) {
+                                               protected_function_seed_lookup get_seed,
+                                               protected_function_level_lookup get_level,
+                                               const string_encoding_options &options,
+                                               std::uint64_t module_seed) {
   classified_string_candidate candidate;
   candidate.global = &global;
   candidate.result.global_name = global.getName().str();
@@ -426,8 +459,24 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
   for (const llvm::Function *function : candidate.summary.protected_functions) {
     const std::optional<std::uint64_t> seed = get_seed(function->getName());
     if (seed.has_value()) {
-      candidate.seed ^= *seed;
+      candidate.seed = mix_seed(candidate.seed, *seed);
+      candidate.seed = mix_seed(candidate.seed,
+                                hash_string(function->getName(), *seed));
     }
+
+    const std::optional<protection_level> level = get_level(function->getName());
+    if (level.has_value() && is_high_security_level(*level)) {
+      candidate.has_high_security_use = true;
+    }
+  }
+
+  candidate.seed =
+      mix_seed(candidate.seed, static_cast<std::uint64_t>(get_string_length(global)));
+  candidate.seed = mix_seed(
+      candidate.seed,
+      static_cast<std::uint64_t>(candidate.summary.protected_uses.size() + 1));
+  if (candidate.seed == 0) {
+    candidate.seed = 0xa55aa55aa55aa55aULL;
   }
 
   return candidate;
@@ -435,9 +484,11 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
 
 string_key_schedule_kind select_key_schedule(string_helper_shape shape) {
   switch (shape) {
+  case string_helper_shape::lazy_flag_unrolled_v0:
+  case string_helper_shape::lazy_flag_reverse_v1:
   case string_helper_shape::lazy_counter_chunked_v2:
   case string_helper_shape::lazy_cached_pointer_v3:
-    return string_key_schedule_kind::mixed_runtime_byte_xor_v1;
+    return string_key_schedule_kind::cfg_path_byte_xor_v2;
   default:
     return string_key_schedule_kind::seeded_byte_xor_v0;
   }
@@ -485,7 +536,7 @@ string_strategy_plan select_strategy(const classified_string_candidate &candidat
     plan.result.mode = string_encoding_mode::inline_stack_decode;
     plan.result.strategy_kind = string_strategy_kind::inline_stack_decode;
     plan.result.helper_shape = string_helper_shape::none;
-    plan.result.key_schedule = string_key_schedule_kind::seeded_byte_xor_v0;
+    plan.result.key_schedule = string_key_schedule_kind::cfg_path_byte_xor_v2;
     plan.result.merge_group = -1;
     plan.result.rewritten_use_count = candidate.summary.protected_uses.size();
     plan.result.detail = std::to_string(plan.result.rewritten_use_count) +
@@ -503,10 +554,14 @@ string_strategy_plan select_strategy(const classified_string_candidate &candidat
     plan.result.strategy_kind = string_strategy_kind::helper_lazy_decode;
     plan.result.helper_shape = string_helper_shape::lazy_flag_unrolled_v0;
     plan.result.key_schedule = select_key_schedule(plan.result.helper_shape);
-    plan.result.merge_group = merge_group_for_shape(plan.result.helper_shape);
+    plan.isolate_lazy_helper = candidate.has_high_security_use;
+    plan.result.merge_group =
+        plan.isolate_lazy_helper ? -1
+                                 : merge_group_for_shape(plan.result.helper_shape);
     plan.result.rewritten_use_count = candidate.summary.protected_uses.size();
     plan.result.detail = std::to_string(plan.result.rewritten_use_count) +
-                         " lazy use(s)";
+                         (plan.isolate_lazy_helper ? " isolated lazy use(s)"
+                                                   : " lazy use(s)");
     plan.lazy_uses = candidate.summary.protected_uses;
     return plan;
   }
@@ -537,6 +592,7 @@ discover_string_candidates(llvm::Module &module);
 
 std::vector<classified_string_candidate>
 classify_candidates(llvm::Module &module, protected_function_seed_lookup get_seed,
+                    protected_function_level_lookup get_level,
                     const string_encoding_options &options,
                     std::uint64_t module_seed) {
   std::vector<classified_string_candidate> candidates;
@@ -546,7 +602,7 @@ classify_candidates(llvm::Module &module, protected_function_seed_lookup get_see
   for (llvm::GlobalVariable *global : globals) {
     if (global != nullptr) {
       candidates.push_back(
-          classify_candidate(*global, get_seed, options, module_seed));
+          classify_candidate(*global, get_seed, get_level, options, module_seed));
     }
   }
 
@@ -572,6 +628,10 @@ void diversify_lazy_helper_shapes(std::vector<string_strategy_plan> &plans,
       string_helper_shape::lazy_flag_reverse_v1,
       string_helper_shape::lazy_cached_pointer_v3,
   };
+  constexpr string_helper_shape kHighSecurityShapes[] = {
+      string_helper_shape::lazy_flag_unrolled_v0,
+      string_helper_shape::lazy_flag_reverse_v1,
+  };
 
   std::vector<string_strategy_plan *> lazy_plans;
   lazy_plans.reserve(plans.size());
@@ -589,12 +649,21 @@ void diversify_lazy_helper_shapes(std::vector<string_strategy_plan> &plans,
   const std::size_t start_index = module_seed % std::size(kShapes);
   for (std::size_t index = 0; index < lazy_plans.size(); ++index) {
     string_strategy_plan &plan = *lazy_plans[index];
-    const std::size_t shape_index =
-        (start_index + index + (plan.seed % std::size(kShapes))) %
-        std::size(kShapes);
-    plan.result.helper_shape = kShapes[shape_index];
+    if (plan.isolate_lazy_helper) {
+      const std::size_t shape_index =
+          (index + (plan.seed % std::size(kHighSecurityShapes))) %
+          std::size(kHighSecurityShapes);
+      plan.result.helper_shape = kHighSecurityShapes[shape_index];
+    } else {
+      const std::size_t shape_index =
+          (start_index + index + (plan.seed % std::size(kShapes))) %
+          std::size(kShapes);
+      plan.result.helper_shape = kShapes[shape_index];
+    }
     plan.result.key_schedule = select_key_schedule(plan.result.helper_shape);
-    plan.result.merge_group = merge_group_for_shape(plan.result.helper_shape);
+    plan.result.merge_group =
+        plan.isolate_lazy_helper ? -1
+                                 : merge_group_for_shape(plan.result.helper_shape);
   }
 }
 
@@ -768,6 +837,54 @@ llvm::Value *emit_seeded_key_byte_runtime(llvm::IRBuilder<> &builder,
       key_byte);
 }
 
+llvm::Value *emit_cfg_state_mask_byte_runtime(llvm::IRBuilder<> &builder,
+                                              llvm::Value *cfg_state_value,
+                                              llvm::Value *expected_state_value,
+                                              llvm::Value *index_value) {
+  llvm::LLVMContext &context = builder.getContext();
+  llvm::Type *i8_type = llvm::Type::getInt8Ty(context);
+  llvm::Type *i32_type = llvm::Type::getInt32Ty(context);
+  llvm::Type *i64_type = llvm::Type::getInt64Ty(context);
+
+  llvm::Value *cfg_state32 = builder.CreateZExtOrTrunc(cfg_state_value, i32_type);
+  llvm::Value *expected_state32 =
+      builder.CreateZExtOrTrunc(expected_state_value, i32_type);
+  llvm::Value *state_delta =
+      builder.CreateXor(cfg_state32, expected_state32, "obf.str.state.delta");
+  llvm::Value *delta_is_zero = builder.CreateICmpEQ(
+      state_delta, llvm::ConstantInt::get(i32_type, 0), "obf.str.state.match");
+
+  llvm::Value *delta64 = builder.CreateZExt(state_delta, i64_type);
+  llvm::Value *index64 = builder.CreateZExtOrTrunc(index_value, i64_type);
+  llvm::Value *mixed = builder.CreateXor(
+      delta64,
+      builder.CreateAdd(llvm::ConstantInt::get(i64_type, 0x7f4a7c159e3779b9ULL),
+                        builder.CreateMul(index64,
+                                          llvm::ConstantInt::get(i64_type, 257))),
+      "obf.str.state.mix");
+  llvm::Value *shift = builder.CreateMul(
+      builder.CreateAnd(index64, llvm::ConstantInt::get(i64_type, 7)),
+      llvm::ConstantInt::get(i64_type, 8));
+  llvm::Value *shifted = builder.CreateLShr(mixed, shift, "obf.str.state.shift");
+  llvm::Value *raw_mask = builder.CreateTrunc(shifted, i8_type, "obf.str.state.raw");
+  llvm::Value *forced_mask = builder.CreateOr(
+      raw_mask, llvm::ConstantInt::get(i8_type, 1), "obf.str.state.mask");
+  return builder.CreateSelect(delta_is_zero, llvm::ConstantInt::get(i8_type, 0),
+                              forced_mask, "obf.str.state.key");
+}
+
+llvm::Value *emit_path_key_byte_runtime(llvm::IRBuilder<> &builder,
+                                        llvm::Value *seed_value,
+                                        llvm::Value *index_value,
+                                        llvm::Value *cfg_state_value,
+                                        llvm::Value *expected_state_value) {
+  llvm::Value *base_key =
+      emit_seeded_key_byte_runtime(builder, seed_value, index_value);
+  llvm::Value *state_key = emit_cfg_state_mask_byte_runtime(
+      builder, cfg_state_value, expected_state_value, index_value);
+  return builder.CreateXor(base_key, state_key, "obf.str.key");
+}
+
 descriptor_layout get_descriptor_layout(string_helper_shape shape) {
   switch (shape) {
   case string_helper_shape::lazy_flag_unrolled_v0:
@@ -840,10 +957,9 @@ llvm::Constant *create_descriptor_table_ptr(llvm::GlobalVariable &table,
       array_type, &table, indices);
 }
 
-llvm::Function *get_or_create_flag_family_helper(llvm::Module &module,
-                                                 bool reverse) {
-  const llvm::StringRef name =
-      reverse ? "__obf_family_flag_reverse_v1" : "__obf_family_flag_v0";
+llvm::Function *create_flag_family_helper(llvm::Module &module,
+                                          llvm::StringRef name,
+                                          bool reverse) {
   if (llvm::Function *existing = module.getFunction(name)) {
     return existing;
   }
@@ -851,17 +967,23 @@ llvm::Function *get_or_create_flag_family_helper(llvm::Module &module,
   llvm::LLVMContext &context = module.getContext();
   llvm::Type *ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type *i1_type = llvm::Type::getInt1Ty(context);
+  llvm::Type *i32_type = llvm::Type::getInt32Ty(context);
   llvm::Type *i64_type = llvm::Type::getInt64Ty(context);
   const string_helper_shape shape = reverse ? string_helper_shape::lazy_flag_reverse_v1
                                             : string_helper_shape::lazy_flag_unrolled_v0;
   const descriptor_layout layout = get_descriptor_layout(shape);
-  llvm::FunctionType *type = llvm::FunctionType::get(ptr_type, {ptr_type}, false);
+  llvm::FunctionType *type =
+      llvm::FunctionType::get(ptr_type, {ptr_type, i32_type, i32_type}, false);
   llvm::Function *decoder = llvm::Function::Create(
       type, llvm::GlobalValue::InternalLinkage, name, module);
 
   auto arg_it = decoder->arg_begin();
   llvm::Argument *descriptor = &*arg_it++;
   descriptor->setName("desc");
+  llvm::Argument *cfg_state = &*arg_it++;
+  cfg_state->setName("cfg_state");
+  llvm::Argument *expected_state = &*arg_it++;
+  expected_state->setName("expected_state");
 
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", decoder);
   llvm::BasicBlock *decode = llvm::BasicBlock::Create(context, "decode", decoder);
@@ -902,7 +1024,8 @@ llvm::Function *get_or_create_flag_family_helper(llvm::Module &module,
   llvm::Value *pointer = create_runtime_byte_pointer(builder, base_ptr, effective_index);
   llvm::Value *loaded = builder.CreateLoad(llvm::Type::getInt8Ty(context), pointer);
   llvm::Value *decoded = builder.CreateXor(
-      loaded, emit_seeded_key_byte_runtime(builder, seed, effective_index));
+      loaded, emit_path_key_byte_runtime(builder, seed, effective_index, cfg_state,
+                                         expected_state));
   builder.CreateStore(decoded, pointer);
   llvm::Value *next_index =
       builder.CreateAdd(index, llvm::ConstantInt::get(i64_type, 1));
@@ -920,23 +1043,37 @@ llvm::Function *get_or_create_flag_family_helper(llvm::Module &module,
   return decoder;
 }
 
-llvm::Function *get_or_create_cached_family_helper(llvm::Module &module) {
-  constexpr llvm::StringRef name = "__obf_family_cached_v3";
+llvm::Function *get_or_create_flag_family_helper(llvm::Module &module,
+                                                 bool reverse) {
+  const llvm::StringRef name =
+      reverse ? "__obf_family_flag_reverse_v1" : "__obf_family_flag_v0";
+  return create_flag_family_helper(module, name, reverse);
+}
+
+llvm::Function *create_cached_family_helper(llvm::Module &module,
+                                            llvm::StringRef name) {
   if (llvm::Function *existing = module.getFunction(name)) {
     return existing;
   }
 
   llvm::LLVMContext &context = module.getContext();
   llvm::Type *ptr_type = llvm::PointerType::getUnqual(context);
+  llvm::Type *i32_type = llvm::Type::getInt32Ty(context);
   llvm::Type *i64_type = llvm::Type::getInt64Ty(context);
   constexpr string_helper_shape shape = string_helper_shape::lazy_cached_pointer_v3;
   const descriptor_layout layout = get_descriptor_layout(shape);
-  llvm::FunctionType *type = llvm::FunctionType::get(ptr_type, {ptr_type}, false);
+  llvm::FunctionType *type =
+      llvm::FunctionType::get(ptr_type, {ptr_type, i32_type, i32_type}, false);
   llvm::Function *decoder = llvm::Function::Create(
       type, llvm::GlobalValue::InternalLinkage, name, module);
 
   auto arg_it = decoder->arg_begin();
   llvm::Argument *descriptor = &*arg_it++;
+  descriptor->setName("desc");
+  llvm::Argument *cfg_state = &*arg_it++;
+  cfg_state->setName("cfg_state");
+  llvm::Argument *expected_state = &*arg_it++;
+  expected_state->setName("expected_state");
 
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", decoder);
   llvm::BasicBlock *decode = llvm::BasicBlock::Create(context, "decode", decoder);
@@ -974,7 +1111,8 @@ llvm::Function *get_or_create_cached_family_helper(llvm::Module &module) {
   llvm::Value *pointer = create_runtime_byte_pointer(builder, base_ptr, index);
   llvm::Value *loaded = builder.CreateLoad(llvm::Type::getInt8Ty(context), pointer);
   llvm::Value *decoded = builder.CreateXor(
-      loaded, emit_seeded_key_byte_runtime(builder, seed, index));
+      loaded,
+      emit_path_key_byte_runtime(builder, seed, index, cfg_state, expected_state));
   builder.CreateStore(decoded, pointer);
   llvm::Value *next_index =
       builder.CreateAdd(index, llvm::ConstantInt::get(i64_type, 1));
@@ -991,6 +1129,11 @@ llvm::Function *get_or_create_cached_family_helper(llvm::Module &module) {
   result->addIncoming(base_ptr, finalize);
   builder.CreateRet(result);
   return decoder;
+}
+
+llvm::Function *get_or_create_cached_family_helper(llvm::Module &module) {
+  constexpr llvm::StringRef name = "__obf_family_cached_v3";
+  return create_cached_family_helper(module, name);
 }
 
 llvm::GlobalVariable *create_lazy_state_global(llvm::Module &module,
@@ -1023,8 +1166,29 @@ llvm::Function *get_or_create_lazy_family_helper(llvm::Module &module,
   }
 }
 
+llvm::Function *create_isolated_lazy_helper(llvm::Module &module,
+                                            const string_strategy_plan &plan) {
+  const std::string helper_name =
+      make_decoder_name(plan.global->getName(), "__obf_lazy_") +
+      "_" + to_string(plan.result.helper_shape);
+  switch (plan.result.helper_shape) {
+  case string_helper_shape::lazy_flag_reverse_v1:
+    return create_flag_family_helper(module, helper_name, true);
+  case string_helper_shape::lazy_cached_pointer_v3:
+    return create_cached_family_helper(module, helper_name);
+  case string_helper_shape::lazy_flag_unrolled_v0:
+  default:
+    return create_flag_family_helper(module, helper_name, false);
+  }
+}
+
 void rewrite_lazy_uses(llvm::Function &family_helper, llvm::Constant *descriptor_ptr,
                        llvm::ArrayRef<classified_string_use> uses) {
+  llvm::Module *module = family_helper.getParent();
+  if (module == nullptr) {
+    return;
+  }
+
   for (const classified_string_use &use : uses) {
     if (use.instruction == nullptr) {
       continue;
@@ -1042,13 +1206,22 @@ void rewrite_lazy_uses(llvm::Function &family_helper, llvm::Constant *descriptor
       }
 
       llvm::IRBuilder<> builder(insert_before);
-      llvm::CallInst *decoded_ptr = builder.CreateCall(&family_helper, {descriptor_ptr});
+      llvm::Value *cfg_state =
+          create_cfg_state_placeholder_call(builder, *module, false);
+      llvm::Value *expected_state =
+          create_cfg_state_placeholder_call(builder, *module, true);
+      llvm::CallInst *decoded_ptr = builder.CreateCall(
+          &family_helper, {descriptor_ptr, cfg_state, expected_state});
       phi->setIncomingValue(use.operand_index, decoded_ptr);
       continue;
     }
 
     llvm::IRBuilder<> builder(use.instruction);
-    llvm::CallInst *decoded_ptr = builder.CreateCall(&family_helper, {descriptor_ptr});
+    llvm::Value *cfg_state = create_cfg_state_placeholder_call(builder, *module, false);
+    llvm::Value *expected_state =
+        create_cfg_state_placeholder_call(builder, *module, true);
+    llvm::CallInst *decoded_ptr =
+        builder.CreateCall(&family_helper, {descriptor_ptr, cfg_state, expected_state});
     use.instruction->setOperand(use.operand_index, decoded_ptr);
   }
 }
@@ -1062,7 +1235,9 @@ llvm::AllocaInst *create_entry_buffer(llvm::Function &function, llvm::Type *buff
 }
 
 void emit_stack_decode_stores(llvm::IRBuilder<> &builder, llvm::GlobalVariable &global,
-                              std::uint64_t seed, llvm::AllocaInst &buffer) {
+                              std::uint64_t seed, llvm::AllocaInst &buffer,
+                              llvm::Value *cfg_state_value,
+                              llvm::Value *expected_state_value) {
   llvm::LLVMContext &context = builder.getContext();
   llvm::Type *i64_type = llvm::Type::getInt64Ty(context);
   llvm::Type *i8_type = llvm::Type::getInt8Ty(context);
@@ -1075,7 +1250,11 @@ void emit_stack_decode_stores(llvm::IRBuilder<> &builder, llvm::GlobalVariable &
         {llvm::ConstantInt::get(i64_type, 0), llvm::ConstantInt::get(i64_type, index)});
     llvm::Value *loaded = builder.CreateLoad(i8_type, src);
     llvm::Value *decoded = builder.CreateXor(
-        loaded, llvm::ConstantInt::get(i8_type, derive_key_byte_constant(seed, index)));
+        loaded,
+        emit_path_key_byte_runtime(builder,
+                                   llvm::ConstantInt::get(i64_type, seed),
+                                   llvm::ConstantInt::get(i64_type, index),
+                                   cfg_state_value, expected_state_value));
     builder.CreateStore(decoded, dst);
   }
 }
@@ -1117,7 +1296,17 @@ void rewrite_inline_stack_uses(llvm::GlobalVariable &global, std::uint64_t seed,
     llvm::AllocaInst *buffer =
         create_entry_buffer(*function, buffer_type, "obf.inline.str");
     llvm::IRBuilder<> before_builder(use.instruction);
-    emit_stack_decode_stores(before_builder, global, seed, *buffer);
+    llvm::Module *module = function->getParent();
+    if (module == nullptr) {
+      continue;
+    }
+
+    llvm::Value *cfg_state =
+        create_cfg_state_placeholder_call(before_builder, *module, false);
+    llvm::Value *expected_state =
+        create_cfg_state_placeholder_call(before_builder, *module, true);
+    emit_stack_decode_stores(before_builder, global, seed, *buffer, cfg_state,
+                             expected_state);
 
     llvm::Value *decoded_ptr = before_builder.CreateInBoundsGEP(
         buffer_type, buffer,
@@ -1143,12 +1332,24 @@ discover_string_candidates(llvm::Module &module) {
   return globals;
 }
 
+llvm::GlobalVariable *create_standalone_descriptor_global(
+    llvm::Module &module, const string_strategy_plan &plan,
+    llvm::GlobalVariable &state_global) {
+  llvm::StructType *descriptor_type =
+      get_string_descriptor_type(module.getContext(), plan.result.helper_shape);
+  return new llvm::GlobalVariable(
+      module, descriptor_type, true, llvm::GlobalValue::InternalLinkage,
+      create_descriptor_initializer(module.getContext(), plan, state_global),
+      make_decoder_name(plan.global->getName(), "__obf_desc_"));
+}
+
 std::vector<string_encoding_result> build_string_results(
     llvm::Module &module, protected_function_seed_lookup get_seed,
+    protected_function_level_lookup get_level,
     const string_encoding_options &options, std::uint64_t module_seed,
     bool apply_changes) {
   std::vector<classified_string_candidate> candidates =
-      classify_candidates(module, get_seed, options, module_seed);
+      classify_candidates(module, get_seed, get_level, options, module_seed);
   std::vector<string_strategy_plan> plans = select_plans(candidates, options);
   diversify_lazy_helper_shapes(plans, module_seed);
   apply_string_encoding_limit(plans, options);
@@ -1165,11 +1366,14 @@ std::vector<string_encoding_result> build_string_results(
     for (std::size_t index = 0; index < plans.size(); ++index) {
       string_strategy_plan &plan = plans[index];
       if (plan.result.mode != string_encoding_mode::lazy_decode ||
-          !plan.result.applied || plan.result.merge_group < 0) {
+          !plan.result.applied) {
         continue;
       }
 
       state_globals[index] = create_lazy_state_global(module, plan);
+      if (plan.result.merge_group < 0) {
+        continue;
+      }
       groups[plan.result.merge_group].push_back(index);
     }
 
@@ -1204,6 +1408,19 @@ std::vector<string_encoding_result> build_string_results(
             create_descriptor_table_ptr(*table, plans[plan_index].result.descriptor_index);
       }
     }
+
+    for (std::size_t index = 0; index < plans.size(); ++index) {
+      string_strategy_plan &plan = plans[index];
+      if (plan.result.mode != string_encoding_mode::lazy_decode ||
+          !plan.result.applied || descriptor_ptrs[index] != nullptr ||
+          state_globals[index] == nullptr) {
+        continue;
+      }
+
+      llvm::GlobalVariable *descriptor =
+          create_standalone_descriptor_global(module, plan, *state_globals[index]);
+      descriptor_ptrs[index] = descriptor;
+    }
   }
 
   for (std::size_t plan_index = 0; plan_index < plans.size(); ++plan_index) {
@@ -1217,8 +1434,10 @@ std::vector<string_encoding_result> build_string_results(
       if (plan.result.mode == string_encoding_mode::inline_stack_decode) {
         rewrite_inline_stack_uses(*plan.global, plan.seed, plan.inline_uses);
       } else if (plan.result.mode == string_encoding_mode::lazy_decode) {
-        llvm::Function *family_helper =
-            get_or_create_lazy_family_helper(module, plan.result.helper_shape);
+        llvm::Function *family_helper = plan.isolate_lazy_helper
+                                            ? create_isolated_lazy_helper(module, plan)
+                                            : get_or_create_lazy_family_helper(
+                                                  module, plan.result.helper_shape);
         rewrite_lazy_uses(*family_helper, descriptor_ptrs[plan_index], plan.lazy_uses);
       } else if (plan.result.mode == string_encoding_mode::global_ctor) {
         llvm::Function *decoder =
@@ -1290,6 +1509,8 @@ std::string to_string(string_key_schedule_kind schedule) {
     return "seeded_byte_xor_v0";
   case string_key_schedule_kind::mixed_runtime_byte_xor_v1:
     return "mixed_runtime_byte_xor_v1";
+  case string_key_schedule_kind::cfg_path_byte_xor_v2:
+    return "cfg_path_byte_xor_v2";
   }
 
   return "seeded_byte_xor_v0";
@@ -1298,19 +1519,22 @@ std::string to_string(string_key_schedule_kind schedule) {
 std::vector<string_encoding_result>
 analyze_string_encoding(const llvm::Module &module,
                         protected_function_seed_lookup get_seed,
+                        protected_function_level_lookup get_level,
                         const string_encoding_options &options,
                         std::uint64_t module_seed) {
   llvm::Module &mutable_module = const_cast<llvm::Module &>(module);
-  return build_string_results(mutable_module, get_seed, options, module_seed,
-                              false);
+  return build_string_results(mutable_module, get_seed, get_level, options,
+                              module_seed, false);
 }
 
 std::vector<string_encoding_result>
 run_string_encoding(llvm::Module &module,
                     protected_function_seed_lookup get_seed,
+                    protected_function_level_lookup get_level,
                     const string_encoding_options &options,
                     std::uint64_t module_seed) {
-  return build_string_results(module, get_seed, options, module_seed, true);
+  return build_string_results(module, get_seed, get_level, options, module_seed,
+                              true);
 }
 
 } // namespace obf

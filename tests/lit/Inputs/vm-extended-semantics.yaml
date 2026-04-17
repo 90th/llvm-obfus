@@ -1,0 +1,5 @@
+seed: 314159
+default_level: none
+targets:
+  - match: extended_semantics
+    level: vm

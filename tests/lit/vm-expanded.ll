@@ -160,7 +160,8 @@ entry:
 ; CHECK: entry.obf.vm.wrapper:
 ; CHECK: %branch_phi.obf.wrapper.call = call i32 @__obf_vm_impl_branch_phi(i32 %x, i64 %branch_phi.obf.wrapper.token)
 ; CHECK-LABEL: define <2 x i32> @vector_mix(<2 x i32> %a, <2 x i32> %b)
-; CHECK: add <2 x i32>
+; CHECK: entry.obf.vm.wrapper:
+; CHECK: %vector_mix.obf.wrapper.call = call <2 x i32> @__obf_vm_impl_vector_mix(<2 x i32> %a, <2 x i32> %b, i64 %vector_mix.obf.wrapper.token)
 ; CHECK-LABEL: define i32 @__obf_vm_impl_branch_phi(i32 %x, i64 %obf.hidden_token)
 ; CHECK: entry.obf.vm:
 ; CHECK: %obf.vm.state = alloca i64
@@ -168,7 +169,7 @@ entry:
 ; CHECK: %obf.entropy.direct = load i64, ptr @__obf_entropy_anchor
 ; CHECK: %obf.vm.integrity.byte = load i8, ptr getelementptr inbounds
 ; CHECK: %obf.vm.integrity.fold = xor i64
-; CHECK: indirectbr ptr %obf.vm.dispatch.target
+; CHECK: indirectbr ptr
 ; CHECK-LABEL: define i32 @__obf_vm_impl_call_memory(ptr %src, ptr %dst, i64 %obf.hidden_token)
 ; CHECK: call i32 @bump(i32
 ; CHECK: load i32, ptr
@@ -179,3 +180,5 @@ entry:
 ; CHECK: vm.switch.default.
 ; CHECK-LABEL: define float @__obf_vm_impl_float_mix(float %x, float %y, i64 %obf.hidden_token)
 ; CHECK: fcmp ogt float
+; CHECK-LABEL: define <2 x i32> @__obf_vm_impl_vector_mix(<2 x i32> %a, <2 x i32> %b, i64 %obf.hidden_token)
+; CHECK: add <2 x i32>

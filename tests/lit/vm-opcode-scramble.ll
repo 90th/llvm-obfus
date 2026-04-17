@@ -1,0 +1,36 @@
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/vm-opcode-scramble.yaml -passes=obf-vm -S %s -o - | %FileCheck %s
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/vm-opcode-scramble.yaml -passes=obf-vm -S %s -o %t
+; RUN: %lli %t
+
+define i32 @alpha_add(i32 %x) {
+entry:
+  %sum = add i32 %x, 5
+  ret i32 %sum
+}
+
+define i32 @beta_add(i32 %x) {
+entry:
+  %sum = add i32 %x, 5
+  ret i32 %sum
+}
+
+define i32 @main() {
+entry:
+  %a = call i32 @alpha_add(i32 7)
+  %b = call i32 @beta_add(i32 7)
+  %ok1 = icmp eq i32 %a, 12
+  %ok2 = icmp eq i32 %b, 12
+  %ok = and i1 %ok1, %ok2
+  %ret = select i1 %ok, i32 0, i32 1
+  ret i32 %ret
+}
+
+; CHECK-LABEL: define i32 @__obf_vm_impl_alpha_add(i32 %x, i64 %obf.hidden_token)
+; CHECK: {{^vm\.0:}}
+; CHECK: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[ALPHA_OP:-?[0-9]+]]
+; CHECK: {{^vm\.exec\.0:}}
+; CHECK-LABEL: define i32 @__obf_vm_impl_beta_add(i32 %x, i64 %obf.hidden_token)
+; CHECK: {{^vm\.0:}}
+; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[ALPHA_OP]]
+; CHECK: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[BETA_OP:-?[0-9]+]]
+; CHECK: {{^vm\.exec\.0:}}

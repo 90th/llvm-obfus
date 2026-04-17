@@ -1,10 +1,9 @@
-seed: 424242
 default_level: none
 overrides:
   - name: parse_mode
-    level: vm
+    level: strong_vm
   - name: fold_value
-    level: vm
+    level: strong_vm
 block_split:
   max_splits_per_function: 1
   min_instructions_per_block: 2

@@ -1,0 +1,7 @@
+seed: 6060
+default_level: none
+targets:
+  - match: alpha_add
+    level: vm
+  - match: beta_add
+    level: vm

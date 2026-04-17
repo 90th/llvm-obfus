@@ -73,7 +73,8 @@ std::vector<handler_info> collect_handler_infos(llvm::Function &function,
     llvm::BasicBlock *handler = case_handle.getCaseSuccessor();
     if (handler == nullptr || handler == entry_handler ||
         handler == dispatch->getParent() || is_terminal_handler(*handler) ||
-        handler->getName().starts_with("obf.flat.edge")) {
+        handler->getName().starts_with("obf.flat.edge") ||
+        handler->getName().starts_with("obf.flat.decoy")) {
       continue;
     }
 

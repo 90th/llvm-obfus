@@ -2,6 +2,7 @@
 
 #include "obf/transforms/mba.h"
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -13,6 +14,10 @@
 namespace obf {
 
 namespace {
+
+constexpr llvm::StringRef kCfgStatePlaceholderName = "__obf_get_cfg_state";
+constexpr llvm::StringRef kExpectedCfgStatePlaceholderName =
+    "__obf_get_expected_cfg_state";
 
 llvm::Value *build_entropy_mba_predicate(llvm::IRBuilder<> &builder,
                                          llvm::Function &function,
@@ -91,7 +96,44 @@ opaque_predicate_result analyze_impl(const llvm::Function &function,
                     " opaque predicate site(s) available"};
 }
 
+bool cleanup_cfg_state_placeholder(llvm::Module &module, llvm::StringRef name) {
+  llvm::Function *placeholder = module.getFunction(name);
+  if (placeholder == nullptr) {
+    return false;
+  }
+
+  llvm::SmallVector<llvm::CallBase *, 8> calls;
+  for (llvm::User *user : placeholder->users()) {
+    if (auto *call = llvm::dyn_cast<llvm::CallBase>(user)) {
+      calls.push_back(call);
+    }
+  }
+
+  for (llvm::CallBase *call : calls) {
+    if (call == nullptr) {
+      continue;
+    }
+
+    call->replaceAllUsesWith(llvm::Constant::getNullValue(call->getType()));
+    call->eraseFromParent();
+  }
+
+  const bool changed = !calls.empty();
+  if (placeholder->use_empty() && placeholder->isDeclaration()) {
+    placeholder->eraseFromParent();
+  }
+
+  return changed;
+}
+
 } // namespace
+
+bool RunCfgStateCleanup(llvm::Module &module) {
+  bool changed = false;
+  changed |= cleanup_cfg_state_placeholder(module, kCfgStatePlaceholderName);
+  changed |= cleanup_cfg_state_placeholder(module, kExpectedCfgStatePlaceholderName);
+  return changed;
+}
 
 opaque_predicate_result
 analyze_opaque_predicates(const llvm::Function &function,

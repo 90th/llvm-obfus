@@ -52,7 +52,15 @@ entry:
 ; CHECK-SAME: %obf.flat.state.next
 ; CHECK: %obf.flat.val = phi i64
 ; CHECK: switch i32 %obf.state
+; CHECK: i32 {{-?[0-9][0-9][0-9][0-9][0-9]+}}, label %entry
+; CHECK: i32 {{-?[0-9][0-9][0-9][0-9][0-9]+}}, label %obf.flat.decoy
 ; CHECK: entry:
 ; CHECK: br i1 %len_ok, label %obf.flat.edge, label %obf.flat.edge
 ; CHECK: loop:
 ; CHECK: %ptr = getelementptr inbounds i8, ptr %p, i64 %obf.flat.val
+; CHECK: obf.flat.decoy:
+; CHECK: obf.flat.decoy.loop:
+; CHECK: %obf.flat.decoy.true = icmp eq i64
+; CHECK: br i1 %obf.flat.decoy.true, label %obf.flat.decoy.loop, label %obf.flat.decoy.trap
+; CHECK: obf.flat.decoy.trap:
+; CHECK: call void @llvm.trap()

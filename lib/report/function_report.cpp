@@ -43,6 +43,10 @@ std::string format_feature_report(llvm::StringRef module_name,
     policy_json["source"] = std::string(to_string(entry.decision.source));
     policy_json["detail"] = entry.decision.detail;
     policy_json["seed"] = "0x" + llvm::utohexstr(entry.decision.seed, true);
+    if (entry.decision.minimum_security_floor.has_value()) {
+      policy_json["minimum_security_floor"] =
+          std::string(to_string(*entry.decision.minimum_security_floor));
+    }
     policy_json["allow_string_encoding"] =
         entry.decision.policy.allow_string_encoding;
     policy_json["allow_constant_encoding"] =

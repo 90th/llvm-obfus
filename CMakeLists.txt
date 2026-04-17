@@ -7,6 +7,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# -----------------------------------------------------------------------------
+# Dynamic Seed Generation
+# Injects entropy at compile time to mutate the structural generation per build
+# -----------------------------------------------------------------------------
+string(RANDOM LENGTH 16 ALPHABET "0123456789" BUILD_SEED)
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_program(OBF_LIT lit REQUIRED)
 
@@ -51,6 +57,8 @@ add_library(obf_core
   lib/transforms/bogus_control_flow.cpp
   lib/transforms/constant_encoding.cpp
   lib/transforms/control_flattening.cpp
+  lib/transforms/artifact_cleanup.cpp
+  lib/transforms/entropy_initialization.cpp
   lib/transforms/function_outlining.cpp
   lib/transforms/instruction_substitution.cpp
   lib/transforms/mba.cpp
@@ -78,11 +86,15 @@ llvm_update_compile_flags(obf-driver)
 target_include_directories(obf-driver PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(obf-driver PRIVATE obf_core ${OBF_LLVM_LIBS})
 
+set(OBF_ENTROPY_ANCHOR_LL "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.ll")
+set(OBF_ENTROPY_ANCHOR_RANDOMIZED_LL "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.randomized.ll")
 set(OBF_ENTROPY_ANCHOR_OBJ "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.o")
 add_custom_command(
   OUTPUT "${OBF_ENTROPY_ANCHOR_OBJ}"
-  COMMAND "${OBF_CLANG}" -c "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_OBJ}"
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c"
+  COMMAND "${OBF_CLANG}" -std=c17 -O0 -S -emit-llvm "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_LL}"
+  COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" -passes=obf-entropy-init -S "${OBF_ENTROPY_ANCHOR_LL}" -o "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}"
+  COMMAND "${OBF_CLANG}" -c "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}" -o "${OBF_ENTROPY_ANCHOR_OBJ}"
+  DEPENDS obf_plugin "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c"
   VERBATIM)
 add_custom_target(obf-entropy-anchor-runtime ALL DEPENDS "${OBF_ENTROPY_ANCHOR_OBJ}")
 
@@ -102,6 +114,7 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
   set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/${target_name}")
   set(baseline_ll "${output_dir}/${target_name}.baseline.ll")
   set(obfuscated_ll "${output_dir}/${target_name}.obfuscated.ll")
+  set(cleaned_ll "${output_dir}/${target_name}.obfuscated.cleaned.ll")
   set(baseline_bin "${output_dir}/${target_name}.baseline")
   set(obfuscated_bin "${output_dir}/${target_name}.obfuscated")
 
@@ -112,11 +125,18 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
     DEPENDS "${source_file}"
     VERBATIM)
 
+  # Added dynamic --obf-seed insertion to the optimizer run
   add_custom_command(
     OUTPUT "${obfuscated_ll}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
-    COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" -passes=obf-safe-pipeline -S "${baseline_ll}" -o "${obfuscated_ll}"
+    COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${BUILD_SEED}" -passes=obf-safe-pipeline -S "${baseline_ll}" -o "${obfuscated_ll}"
     DEPENDS obf_plugin "${baseline_ll}" "${config_file}"
+    VERBATIM)
+
+  add_custom_command(
+    OUTPUT "${cleaned_ll}"
+    COMMAND "${OBF_OPT}" "-passes=globalopt,instcombine<no-verify-fixpoint>,dse" -S "${obfuscated_ll}" -o "${cleaned_ll}"
+    DEPENDS "${obfuscated_ll}"
     VERBATIM)
 
   add_custom_command(
@@ -128,9 +148,9 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
 
   add_custom_command(
     OUTPUT "${obfuscated_bin}"
-    COMMAND "${compiler}" "${obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
+    COMMAND "${compiler}" "${cleaned_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
     COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
-    DEPENDS "${obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
+    DEPENDS "${cleaned_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
     VERBATIM)
 
   add_custom_target("${target_name}_bench" DEPENDS "${baseline_bin}" "${obfuscated_bin}")
@@ -142,6 +162,7 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
   set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/${target_name}")
   set(linked_baseline_ll "${output_dir}/${target_name}.baseline.ll")
   set(linked_obfuscated_ll "${output_dir}/${target_name}.obfuscated.ll")
+  set(linked_cleaned_ll "${output_dir}/${target_name}.obfuscated.cleaned.ll")
   set(baseline_bin "${output_dir}/${target_name}.baseline")
   set(obfuscated_bin "${output_dir}/${target_name}.obfuscated")
 
@@ -164,10 +185,17 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
     DEPENDS ${source_lls}
     VERBATIM)
 
+  # Added dynamic --obf-seed insertion to the optimizer run
   add_custom_command(
     OUTPUT "${linked_obfuscated_ll}"
-    COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" -passes=obf-safe-pipeline -S "${linked_baseline_ll}" -o "${linked_obfuscated_ll}"
+    COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${BUILD_SEED}" -passes=obf-safe-pipeline -S "${linked_baseline_ll}" -o "${linked_obfuscated_ll}"
     DEPENDS obf_plugin "${linked_baseline_ll}" "${config_file}"
+    VERBATIM)
+
+  add_custom_command(
+    OUTPUT "${linked_cleaned_ll}"
+    COMMAND "${OBF_OPT}" "-passes=globalopt,instcombine<no-verify-fixpoint>,dse" -S "${linked_obfuscated_ll}" -o "${linked_cleaned_ll}"
+    DEPENDS "${linked_obfuscated_ll}"
     VERBATIM)
 
   add_custom_command(
@@ -179,9 +207,9 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
 
   add_custom_command(
     OUTPUT "${obfuscated_bin}"
-    COMMAND "${compiler}" "${linked_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
+    COMMAND "${compiler}" "${linked_cleaned_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
     COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
-    DEPENDS "${linked_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
+    DEPENDS "${linked_cleaned_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
     VERBATIM)
 
   add_custom_target("${target_name}_bench" DEPENDS "${baseline_bin}" "${obfuscated_bin}")
@@ -197,8 +225,8 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
     VERBATIM)
   add_custom_command(
     OUTPUT "${mir_obfuscated}"
-    COMMAND "${OBF_LLC}" -stop-after=finalize-isel "${linked_obfuscated_ll}" -o "${mir_obfuscated}"
-    DEPENDS "${linked_obfuscated_ll}"
+    COMMAND "${OBF_LLC}" -stop-after=finalize-isel "${linked_cleaned_ll}" -o "${mir_obfuscated}"
+    DEPENDS "${linked_cleaned_ll}"
     VERBATIM)
   add_custom_target("${target_name}_mir" DEPENDS "${mir_baseline}" "${mir_obfuscated}")
   list(APPEND OBF_MIR_TARGETS "${target_name}_mir")

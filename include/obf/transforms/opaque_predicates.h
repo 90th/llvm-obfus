@@ -6,6 +6,7 @@
 
 namespace llvm {
 class Function;
+class Module;
 }
 
 namespace obf {
@@ -27,5 +28,7 @@ analyze_opaque_predicates(const llvm::Function &function,
 opaque_predicate_result
 run_opaque_predicates(llvm::Function &function,
                       const opaque_predicate_options &options);
+
+bool RunCfgStateCleanup(llvm::Module &module);
 
 } // namespace obf

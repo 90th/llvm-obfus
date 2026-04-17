@@ -1,8 +1,8 @@
-seed: 13371337
+#seed: 13371337
 default_level: strong
 overrides:
   - name: main
-    level: strong
+    level: strong_vm
 mba:
   depth: 3
 block_split:

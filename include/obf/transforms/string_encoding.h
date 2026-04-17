@@ -1,5 +1,7 @@
 #pragma once
 
+#include "obf/policy/function_policy.h"
+
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 
@@ -41,6 +43,7 @@ enum class string_helper_shape {
 enum class string_key_schedule_kind {
   seeded_byte_xor_v0,
   mixed_runtime_byte_xor_v1,
+  cfg_path_byte_xor_v2,
 };
 
 struct string_encoding_options {
@@ -73,6 +76,8 @@ struct string_encoding_result {
 
 using protected_function_seed_lookup =
     llvm::function_ref<std::optional<std::uint64_t>(llvm::StringRef)>;
+using protected_function_level_lookup =
+    llvm::function_ref<std::optional<protection_level>(llvm::StringRef)>;
 
 std::string to_string(string_encoding_mode mode);
 std::string to_string(string_strategy_kind kind);
@@ -82,12 +87,14 @@ std::string to_string(string_key_schedule_kind schedule);
 std::vector<string_encoding_result>
 analyze_string_encoding(const llvm::Module &module,
                         protected_function_seed_lookup get_seed,
+                        protected_function_level_lookup get_level,
                         const string_encoding_options &options,
                         std::uint64_t module_seed);
 
 std::vector<string_encoding_result>
 run_string_encoding(llvm::Module &module,
                     protected_function_seed_lookup get_seed,
+                    protected_function_level_lookup get_level,
                     const string_encoding_options &options,
                     std::uint64_t module_seed);
 

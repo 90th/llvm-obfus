@@ -35,9 +35,24 @@ bool is_supported_type(const llvm::Type *type) {
     return true;
   }
 
-  const auto *vector_type = llvm::dyn_cast<llvm::FixedVectorType>(type);
-  return vector_type != nullptr &&
-         is_supported_scalar_type(vector_type->getElementType());
+  if (const auto *vector_type = llvm::dyn_cast<llvm::FixedVectorType>(type)) {
+    return is_supported_scalar_type(vector_type->getElementType());
+  }
+
+  if (const auto *array_type = llvm::dyn_cast<llvm::ArrayType>(type)) {
+    return is_supported_type(array_type->getElementType());
+  }
+
+  if (const auto *struct_type = llvm::dyn_cast<llvm::StructType>(type)) {
+    for (llvm::Type *element_type : struct_type->elements()) {
+      if (!is_supported_type(element_type)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  return false;
 }
 
 bool is_supported_gep_source_type(const llvm::Type *type) {
@@ -74,83 +89,198 @@ slot_kind classify_slot_kind(const llvm::Type *type) {
     return slot_kind::pointer;
   }
 
-  return slot_kind::vector;
+  if (llvm::isa<llvm::FixedVectorType>(type)) {
+    return slot_kind::vector;
+  }
+
+  return slot_kind::aggregate;
 }
 
-std::optional<binary_opcode> map_binary_opcode(const llvm::BinaryOperator &instruction) {
+std::optional<opcode> map_binary_opcode(const llvm::BinaryOperator &instruction) {
   switch (instruction.getOpcode()) {
   case llvm::Instruction::Add:
-    return binary_opcode::add;
+    return opcode::add;
   case llvm::Instruction::Sub:
-    return binary_opcode::sub;
+    return opcode::sub;
   case llvm::Instruction::Mul:
-    return binary_opcode::mul;
+    return opcode::mul;
   case llvm::Instruction::UDiv:
-    return binary_opcode::udiv;
+    return opcode::udiv;
   case llvm::Instruction::SDiv:
-    return binary_opcode::sdiv;
+    return opcode::sdiv;
   case llvm::Instruction::URem:
-    return binary_opcode::urem;
+    return opcode::urem;
   case llvm::Instruction::SRem:
-    return binary_opcode::srem;
+    return opcode::srem;
   case llvm::Instruction::Shl:
-    return binary_opcode::shl;
+    return opcode::shl;
   case llvm::Instruction::LShr:
-    return binary_opcode::lshr;
+    return opcode::lshr;
   case llvm::Instruction::AShr:
-    return binary_opcode::ashr;
+    return opcode::ashr;
   case llvm::Instruction::And:
-    return binary_opcode::and_op;
+    return opcode::and_op;
   case llvm::Instruction::Or:
-    return binary_opcode::or_op;
+    return opcode::or_op;
   case llvm::Instruction::Xor:
-    return binary_opcode::xor_op;
+    return opcode::xor_op;
   case llvm::Instruction::FAdd:
-    return binary_opcode::fadd;
+    return opcode::fadd;
   case llvm::Instruction::FSub:
-    return binary_opcode::fsub;
+    return opcode::fsub;
   case llvm::Instruction::FMul:
-    return binary_opcode::fmul;
+    return opcode::fmul;
   case llvm::Instruction::FDiv:
-    return binary_opcode::fdiv;
+    return opcode::fdiv;
   case llvm::Instruction::FRem:
-    return binary_opcode::frem;
+    return opcode::frem;
   default:
     return std::nullopt;
   }
 }
 
-std::optional<cast_opcode> map_cast_opcode(const llvm::CastInst &instruction) {
+std::optional<opcode> map_cast_opcode(const llvm::CastInst &instruction) {
   switch (instruction.getOpcode()) {
   case llvm::Instruction::Trunc:
-    return cast_opcode::trunc;
+    return opcode::trunc;
   case llvm::Instruction::ZExt:
-    return cast_opcode::zext;
+    return opcode::zext;
   case llvm::Instruction::SExt:
-    return cast_opcode::sext;
+    return opcode::sext;
   case llvm::Instruction::FPTrunc:
-    return cast_opcode::fp_trunc;
+    return opcode::fp_trunc;
   case llvm::Instruction::FPExt:
-    return cast_opcode::fp_ext;
+    return opcode::fp_ext;
   case llvm::Instruction::UIToFP:
-    return cast_opcode::ui_to_fp;
+    return opcode::ui_to_fp;
   case llvm::Instruction::SIToFP:
-    return cast_opcode::si_to_fp;
+    return opcode::si_to_fp;
   case llvm::Instruction::FPToUI:
-    return cast_opcode::fp_to_ui;
+    return opcode::fp_to_ui;
   case llvm::Instruction::FPToSI:
-    return cast_opcode::fp_to_si;
+    return opcode::fp_to_si;
   case llvm::Instruction::PtrToInt:
-    return cast_opcode::ptr_to_int;
+    return opcode::ptr_to_int;
   case llvm::Instruction::IntToPtr:
-    return cast_opcode::int_to_ptr;
+    return opcode::int_to_ptr;
   case llvm::Instruction::BitCast:
-    return cast_opcode::bitcast;
+    return opcode::bitcast;
   case llvm::Instruction::AddrSpaceCast:
-    return cast_opcode::addrspace_cast;
+    return opcode::addrspace_cast;
   default:
     return std::nullopt;
   }
+}
+
+std::optional<opcode> map_intrinsic_opcode(const llvm::IntrinsicInst &instruction) {
+  switch (instruction.getIntrinsicID()) {
+  case llvm::Intrinsic::memcpy:
+    return opcode::memcpy_fixed;
+  case llvm::Intrinsic::memmove:
+    return opcode::memmove_fixed;
+  case llvm::Intrinsic::memset:
+    return opcode::memset_fixed;
+  default:
+    return std::nullopt;
+  }
+}
+
+std::optional<opcode> map_icmp_opcode(const llvm::ICmpInst &instruction) {
+  switch (instruction.getPredicate()) {
+  case llvm::CmpInst::ICMP_EQ:
+    return opcode::icmp_eq;
+  case llvm::CmpInst::ICMP_NE:
+    return opcode::icmp_ne;
+  case llvm::CmpInst::ICMP_UGT:
+    return opcode::icmp_ugt;
+  case llvm::CmpInst::ICMP_UGE:
+    return opcode::icmp_uge;
+  case llvm::CmpInst::ICMP_ULT:
+    return opcode::icmp_ult;
+  case llvm::CmpInst::ICMP_ULE:
+    return opcode::icmp_ule;
+  case llvm::CmpInst::ICMP_SGT:
+    return opcode::icmp_sgt;
+  case llvm::CmpInst::ICMP_SGE:
+    return opcode::icmp_sge;
+  case llvm::CmpInst::ICMP_SLT:
+    return opcode::icmp_slt;
+  case llvm::CmpInst::ICMP_SLE:
+    return opcode::icmp_sle;
+  default:
+    return std::nullopt;
+  }
+}
+
+std::optional<opcode> map_fcmp_opcode(const llvm::FCmpInst &instruction) {
+  switch (instruction.getPredicate()) {
+  case llvm::CmpInst::FCMP_FALSE:
+    return opcode::fcmp_false;
+  case llvm::CmpInst::FCMP_OEQ:
+    return opcode::fcmp_oeq;
+  case llvm::CmpInst::FCMP_OGT:
+    return opcode::fcmp_ogt;
+  case llvm::CmpInst::FCMP_OGE:
+    return opcode::fcmp_oge;
+  case llvm::CmpInst::FCMP_OLT:
+    return opcode::fcmp_olt;
+  case llvm::CmpInst::FCMP_OLE:
+    return opcode::fcmp_ole;
+  case llvm::CmpInst::FCMP_ONE:
+    return opcode::fcmp_one;
+  case llvm::CmpInst::FCMP_ORD:
+    return opcode::fcmp_ord;
+  case llvm::CmpInst::FCMP_UNO:
+    return opcode::fcmp_uno;
+  case llvm::CmpInst::FCMP_UEQ:
+    return opcode::fcmp_ueq;
+  case llvm::CmpInst::FCMP_UGT:
+    return opcode::fcmp_ugt;
+  case llvm::CmpInst::FCMP_UGE:
+    return opcode::fcmp_uge;
+  case llvm::CmpInst::FCMP_ULT:
+    return opcode::fcmp_ult;
+  case llvm::CmpInst::FCMP_ULE:
+    return opcode::fcmp_ule;
+  case llvm::CmpInst::FCMP_UNE:
+    return opcode::fcmp_une;
+  case llvm::CmpInst::FCMP_TRUE:
+    return opcode::fcmp_true;
+  default:
+    return std::nullopt;
+  }
+}
+
+opcode classify_load_opcode(const llvm::Type *type) {
+  switch (classify_slot_kind(type)) {
+  case slot_kind::integer:
+    return opcode::load_int;
+  case slot_kind::floating:
+    return opcode::load_float;
+  case slot_kind::pointer:
+    return opcode::load_ptr;
+  case slot_kind::vector:
+  case slot_kind::aggregate:
+    return opcode::load_vector;
+  }
+
+  llvm_unreachable("unsupported load slot kind");
+}
+
+opcode classify_store_opcode(const llvm::Type *type) {
+  switch (classify_slot_kind(type)) {
+  case slot_kind::integer:
+    return opcode::store_int;
+  case slot_kind::floating:
+    return opcode::store_float;
+  case slot_kind::pointer:
+    return opcode::store_ptr;
+  case slot_kind::vector:
+  case slot_kind::aggregate:
+    return opcode::store_vector;
+  }
+
+  llvm_unreachable("unsupported store slot kind");
 }
 
 std::uint32_t encode_fast_math_flags(const llvm::Instruction &instruction) {
@@ -203,12 +333,6 @@ std::uint32_t encode_instruction_flags(const llvm::Instruction &instruction) {
     }
   }
 
-  if (const auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&instruction)) {
-    if (gep->isInBounds()) {
-      flags |= instruction_flag_inbounds;
-    }
-  }
-
   return flags;
 }
 
@@ -257,6 +381,16 @@ candidate_result build_program(const llvm::Function &function,
     for (const llvm::Instruction &instruction : block) {
       if (llvm::isa<llvm::DbgInfoIntrinsic>(&instruction)) {
         continue;
+      }
+
+      if (const auto *intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction)) {
+        switch (intrinsic->getIntrinsicID()) {
+        case llvm::Intrinsic::lifetime_start:
+        case llvm::Intrinsic::lifetime_end:
+          continue;
+        default:
+          break;
+        }
       }
 
       if (!is_supported_type(instruction.getType())) {
@@ -372,6 +506,16 @@ candidate_result build_program(const llvm::Function &function,
         continue;
       }
 
+      if (const auto *intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction)) {
+        switch (intrinsic->getIntrinsicID()) {
+        case llvm::Intrinsic::lifetime_start:
+        case llvm::Intrinsic::lifetime_end:
+          continue;
+        default:
+          break;
+        }
+      }
+
       if (&instruction == block.getTerminator()) {
         break;
       }
@@ -383,14 +527,13 @@ candidate_result build_program(const llvm::Function &function,
       vm_instruction.flags = encode_instruction_flags(instruction);
 
       if (const auto *binary = llvm::dyn_cast<llvm::BinaryOperator>(&instruction)) {
-        const std::optional<binary_opcode> subopcode = map_binary_opcode(*binary);
-        if (!subopcode) {
+        const std::optional<opcode> lowered_opcode = map_binary_opcode(*binary);
+        if (!lowered_opcode) {
           return reject("unsupported binary opcode: " +
                         std::string(binary->getOpcodeName()));
         }
 
-        vm_instruction.op = opcode::binary;
-        vm_instruction.subtype = static_cast<std::uint32_t>(*subopcode);
+        vm_instruction.op = *lowered_opcode;
         const std::optional<value_ref> lhs = lower_value(*binary->getOperand(0), detail);
         const std::optional<value_ref> rhs = lower_value(*binary->getOperand(1), detail);
         if (!lhs || !rhs) {
@@ -398,15 +541,26 @@ candidate_result build_program(const llvm::Function &function,
         }
         vm_instruction.operands.push_back(*lhs);
         vm_instruction.operands.push_back(*rhs);
+      } else if (const auto *fneg = llvm::dyn_cast<llvm::UnaryOperator>(&instruction)) {
+        if (fneg->getOpcode() != llvm::Instruction::FNeg) {
+          return reject("unsupported unary opcode: " +
+                        std::string(fneg->getOpcodeName()));
+        }
+
+        vm_instruction.op = opcode::fneg;
+        const std::optional<value_ref> operand = lower_value(*fneg->getOperand(0), detail);
+        if (!operand) {
+          return reject(detail);
+        }
+        vm_instruction.operands.push_back(*operand);
       } else if (const auto *cast = llvm::dyn_cast<llvm::CastInst>(&instruction)) {
-        const std::optional<cast_opcode> subopcode = map_cast_opcode(*cast);
-        if (!subopcode) {
+        const std::optional<opcode> lowered_opcode = map_cast_opcode(*cast);
+        if (!lowered_opcode) {
           return reject("unsupported cast opcode: " +
                         std::string(cast->getOpcodeName()));
         }
 
-        vm_instruction.op = opcode::cast;
-        vm_instruction.subtype = static_cast<std::uint32_t>(*subopcode);
+        vm_instruction.op = *lowered_opcode;
         const std::optional<value_ref> operand = lower_value(*cast->getOperand(0), detail);
         if (!operand) {
           return reject(detail);
@@ -421,8 +575,12 @@ candidate_result build_program(const llvm::Function &function,
         }
         vm_instruction.operands.push_back(*operand);
       } else if (const auto *icmp = llvm::dyn_cast<llvm::ICmpInst>(&instruction)) {
-        vm_instruction.op = opcode::icmp;
-        vm_instruction.subtype = static_cast<std::uint32_t>(icmp->getPredicate());
+        const std::optional<opcode> lowered_opcode = map_icmp_opcode(*icmp);
+        if (!lowered_opcode) {
+          return reject("unsupported icmp predicate");
+        }
+
+        vm_instruction.op = *lowered_opcode;
         const std::optional<value_ref> lhs = lower_value(*icmp->getOperand(0), detail);
         const std::optional<value_ref> rhs = lower_value(*icmp->getOperand(1), detail);
         if (!lhs || !rhs) {
@@ -431,8 +589,12 @@ candidate_result build_program(const llvm::Function &function,
         vm_instruction.operands.push_back(*lhs);
         vm_instruction.operands.push_back(*rhs);
       } else if (const auto *fcmp = llvm::dyn_cast<llvm::FCmpInst>(&instruction)) {
-        vm_instruction.op = opcode::fcmp;
-        vm_instruction.subtype = static_cast<std::uint32_t>(fcmp->getPredicate());
+        const std::optional<opcode> lowered_opcode = map_fcmp_opcode(*fcmp);
+        if (!lowered_opcode) {
+          return reject("unsupported fcmp predicate");
+        }
+
+        vm_instruction.op = *lowered_opcode;
         const std::optional<value_ref> lhs = lower_value(*fcmp->getOperand(0), detail);
         const std::optional<value_ref> rhs = lower_value(*fcmp->getOperand(1), detail);
         if (!lhs || !rhs) {
@@ -454,12 +616,86 @@ candidate_result build_program(const llvm::Function &function,
         vm_instruction.operands.push_back(*condition);
         vm_instruction.operands.push_back(*true_value);
         vm_instruction.operands.push_back(*false_value);
+      } else if (const auto *extract_element =
+                     llvm::dyn_cast<llvm::ExtractElementInst>(&instruction)) {
+        vm_instruction.op = opcode::extract_element;
+        const std::optional<value_ref> vector =
+            lower_value(*extract_element->getVectorOperand(), detail);
+        const std::optional<value_ref> index =
+            lower_value(*extract_element->getIndexOperand(), detail);
+        if (!vector || !index) {
+          return reject(detail);
+        }
+        vm_instruction.operands.push_back(*vector);
+        vm_instruction.operands.push_back(*index);
+      } else if (const auto *insert_element =
+                     llvm::dyn_cast<llvm::InsertElementInst>(&instruction)) {
+        vm_instruction.op = opcode::insert_element;
+        const std::optional<value_ref> vector =
+            lower_value(*insert_element->getOperand(0), detail);
+        const std::optional<value_ref> element =
+            lower_value(*insert_element->getOperand(1), detail);
+        const std::optional<value_ref> index =
+            lower_value(*insert_element->getOperand(2), detail);
+        if (!vector || !element || !index) {
+          return reject(detail);
+        }
+        vm_instruction.operands.push_back(*vector);
+        vm_instruction.operands.push_back(*element);
+        vm_instruction.operands.push_back(*index);
+      } else if (const auto *shuffle_vector =
+                     llvm::dyn_cast<llvm::ShuffleVectorInst>(&instruction)) {
+        vm_instruction.op = opcode::shuffle_vector;
+        const std::optional<value_ref> lhs =
+            lower_value(*shuffle_vector->getOperand(0), detail);
+        const std::optional<value_ref> rhs =
+            lower_value(*shuffle_vector->getOperand(1), detail);
+        if (!lhs || !rhs) {
+          return reject(detail);
+        }
+        vm_instruction.operands.push_back(*lhs);
+        vm_instruction.operands.push_back(*rhs);
+        for (int mask_index : shuffle_vector->getShuffleMask()) {
+          vm_instruction.case_values.push_back(llvm::ConstantInt::get(
+              llvm::Type::getInt32Ty(function.getContext()), mask_index));
+        }
+      } else if (const auto *extract_value =
+                     llvm::dyn_cast<llvm::ExtractValueInst>(&instruction)) {
+        vm_instruction.op = opcode::extract_value;
+        vm_instruction.type = extract_value->getAggregateOperand()->getType();
+        const std::optional<value_ref> aggregate =
+            lower_value(*extract_value->getAggregateOperand(), detail);
+        if (!aggregate) {
+          return reject(detail);
+        }
+        vm_instruction.operands.push_back(*aggregate);
+        for (unsigned index : extract_value->getIndices()) {
+          vm_instruction.case_values.push_back(llvm::ConstantInt::get(
+              llvm::Type::getInt32Ty(function.getContext()), index));
+        }
+      } else if (const auto *insert_value =
+                     llvm::dyn_cast<llvm::InsertValueInst>(&instruction)) {
+        vm_instruction.op = opcode::insert_value;
+        vm_instruction.type = insert_value->getAggregateOperand()->getType();
+        const std::optional<value_ref> aggregate =
+            lower_value(*insert_value->getAggregateOperand(), detail);
+        const std::optional<value_ref> element =
+            lower_value(*insert_value->getInsertedValueOperand(), detail);
+        if (!aggregate || !element) {
+          return reject(detail);
+        }
+        vm_instruction.operands.push_back(*aggregate);
+        vm_instruction.operands.push_back(*element);
+        for (unsigned index : insert_value->getIndices()) {
+          vm_instruction.case_values.push_back(llvm::ConstantInt::get(
+              llvm::Type::getInt32Ty(function.getContext()), index));
+        }
       } else if (const auto *load = llvm::dyn_cast<llvm::LoadInst>(&instruction)) {
         if (load->isVolatile() || load->isAtomic()) {
           return reject("volatile and atomic loads unsupported");
         }
 
-        vm_instruction.op = opcode::load;
+        vm_instruction.op = classify_load_opcode(load->getType());
         vm_instruction.type = load->getType();
         vm_instruction.immediate = load->getAlign().value();
         const std::optional<value_ref> pointer =
@@ -473,7 +709,7 @@ candidate_result build_program(const llvm::Function &function,
           return reject("volatile and atomic stores unsupported");
         }
 
-        vm_instruction.op = opcode::store;
+        vm_instruction.op = classify_store_opcode(store->getValueOperand()->getType());
         vm_instruction.type = store->getValueOperand()->getType();
         vm_instruction.immediate = store->getAlign().value();
         const std::optional<value_ref> value =
@@ -490,7 +726,7 @@ candidate_result build_program(const llvm::Function &function,
           return reject("unsupported gep source type");
         }
 
-        vm_instruction.op = opcode::gep;
+        vm_instruction.op = gep->isInBounds() ? opcode::gep_inbounds : opcode::gep;
         vm_instruction.type = gep->getSourceElementType();
         const std::optional<value_ref> pointer =
             lower_value(*gep->getPointerOperand(), detail);
@@ -505,6 +741,35 @@ candidate_result build_program(const llvm::Function &function,
             return reject(detail);
           }
           vm_instruction.operands.push_back(*lowered_index);
+        }
+      } else if (const auto *intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction)) {
+        const std::optional<opcode> lowered_opcode = map_intrinsic_opcode(*intrinsic);
+        if (!lowered_opcode) {
+          return reject("unsupported intrinsic: " +
+                        std::string(intrinsic->getCalledFunction()->getName()));
+        }
+
+        if (intrinsic->isVolatile()) {
+          return reject("volatile memory intrinsic unsupported");
+        }
+
+        vm_instruction.op = *lowered_opcode;
+        if (auto *mem_intrinsic = llvm::dyn_cast<llvm::MemIntrinsic>(intrinsic)) {
+          if (!llvm::isa<llvm::ConstantInt>(mem_intrinsic->getLength())) {
+            return reject("dynamic memory intrinsic length unsupported");
+          }
+          vm_instruction.immediate = static_cast<std::uint32_t>(
+              llvm::cast<llvm::ConstantInt>(mem_intrinsic->getLength())
+                  ->getZExtValue());
+        }
+
+        for (const llvm::Use &argument : intrinsic->args()) {
+          const std::optional<value_ref> lowered_argument =
+              lower_value(*argument.get(), detail);
+          if (!lowered_argument) {
+            return reject(detail);
+          }
+          vm_instruction.operands.push_back(*lowered_argument);
         }
       } else if (const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
         if (call->isInlineAsm()) {

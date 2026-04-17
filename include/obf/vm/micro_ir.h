@@ -22,6 +22,7 @@ enum class slot_kind : std::uint8_t {
   floating,
   pointer,
   vector,
+  aggregate,
 };
 
 struct slot_desc {
@@ -41,24 +42,6 @@ struct value_ref {
 };
 
 enum class opcode : std::uint8_t {
-  binary,
-  cast,
-  freeze,
-  icmp,
-  fcmp,
-  select,
-  load,
-  store,
-  gep,
-  call,
-  jump,
-  branch,
-  switch_op,
-  unreachable_op,
-  ret,
-};
-
-enum class binary_opcode : std::uint8_t {
   add,
   sub,
   mul,
@@ -77,9 +60,6 @@ enum class binary_opcode : std::uint8_t {
   fmul,
   fdiv,
   frem,
-};
-
-enum class cast_opcode : std::uint8_t {
   trunc,
   zext,
   sext,
@@ -93,12 +73,64 @@ enum class cast_opcode : std::uint8_t {
   int_to_ptr,
   bitcast,
   addrspace_cast,
+  fneg,
+  freeze,
+  icmp_eq,
+  icmp_ne,
+  icmp_ugt,
+  icmp_uge,
+  icmp_ult,
+  icmp_ule,
+  icmp_sgt,
+  icmp_sge,
+  icmp_slt,
+  icmp_sle,
+  fcmp_false,
+  fcmp_oeq,
+  fcmp_ogt,
+  fcmp_oge,
+  fcmp_olt,
+  fcmp_ole,
+  fcmp_one,
+  fcmp_ord,
+  fcmp_uno,
+  fcmp_ueq,
+  fcmp_ugt,
+  fcmp_uge,
+  fcmp_ult,
+  fcmp_ule,
+  fcmp_une,
+  fcmp_true,
+  select,
+  load_int,
+  load_float,
+  load_ptr,
+  load_vector,
+  store_int,
+  store_float,
+  store_ptr,
+  store_vector,
+  extract_element,
+  insert_element,
+  shuffle_vector,
+  extract_value,
+  insert_value,
+  gep,
+  gep_inbounds,
+  memmove_fixed,
+  memcpy_fixed,
+  memset_fixed,
+  call,
+  jump,
+  branch,
+  switch_op,
+  unreachable_op,
+  ret,
 };
 
 inline constexpr std::uint32_t instruction_flag_nsw = 1U << 0;
 inline constexpr std::uint32_t instruction_flag_nuw = 1U << 1;
 inline constexpr std::uint32_t instruction_flag_exact = 1U << 2;
-inline constexpr std::uint32_t instruction_flag_inbounds = 1U << 3;
 inline constexpr std::uint32_t instruction_flag_fast_reassoc = 1U << 8;
 inline constexpr std::uint32_t instruction_flag_fast_nnan = 1U << 9;
 inline constexpr std::uint32_t instruction_flag_fast_ninf = 1U << 10;

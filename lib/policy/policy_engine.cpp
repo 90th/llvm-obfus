@@ -101,6 +101,66 @@ classify_from_features(const function_features &features, std::string &detail) {
   return std::nullopt;
 }
 
+std::optional<protection_level>
+derive_minimum_security_floor(const function_features &features) {
+  const llvm::StringRef function_name(features.name);
+  if (function_name.starts_with("__obf_") || function_name.starts_with("llvm.")) {
+    return std::nullopt;
+  }
+
+  if (features.cyclomatic_complexity >= 3 && features.instruction_count <= 128 &&
+      !features.address_taken) {
+    return protection_level::strong;
+  }
+
+  if (features.string_ref_count > 0) {
+    return protection_level::light;
+  }
+
+  return std::nullopt;
+}
+
+bool satisfies_security_floor(protection_level selected,
+                             protection_level minimum_floor) {
+  switch (minimum_floor) {
+  case protection_level::none:
+    return true;
+  case protection_level::light:
+    return selected != protection_level::none;
+  case protection_level::strong:
+    return selected == protection_level::strong || selected == protection_level::vm ||
+           selected == protection_level::strong_vm;
+  case protection_level::vm:
+    return selected == protection_level::vm || selected == protection_level::strong_vm;
+  case protection_level::strong_vm:
+    return selected == protection_level::strong_vm;
+  }
+
+  return false;
+}
+
+function_policy promote_to_security_floor(function_policy current,
+                                          protection_level minimum_floor) {
+  if (satisfies_security_floor(current.level, minimum_floor)) {
+    return current;
+  }
+
+  switch (minimum_floor) {
+  case protection_level::light:
+    return make_function_policy(protection_level::light);
+  case protection_level::strong:
+    return make_function_policy(protection_level::strong);
+  case protection_level::vm:
+    return make_function_policy(protection_level::vm);
+  case protection_level::strong_vm:
+    return make_function_policy(protection_level::strong_vm);
+  case protection_level::none:
+    return current;
+  }
+
+  return current;
+}
+
 void append_detail(std::string &detail, llvm::StringRef suffix) {
   if (!detail.empty()) {
     detail += "; ";
@@ -207,6 +267,7 @@ policy_decision select_policy(const llvm::Module &module,
                               llvm::StringRef annotation_text) {
   policy_decision decision;
   decision.seed = derive_seed(module, features.name, config.seed);
+  decision.minimum_security_floor = derive_minimum_security_floor(features);
 
   if (const function_override *override =
           find_explicit_override(config, features.name)) {
@@ -236,14 +297,24 @@ policy_decision select_policy(const llvm::Module &module,
     }
   }
 
+  if (decision.minimum_security_floor.has_value() &&
+      !satisfies_security_floor(decision.policy.level,
+                                *decision.minimum_security_floor)) {
+    decision.policy = promote_to_security_floor(
+        decision.policy, *decision.minimum_security_floor);
+    const std::string floor_detail =
+        "minimum security floor raised to " +
+        std::string(to_string(*decision.minimum_security_floor));
+    append_detail(decision.detail, floor_detail);
+  }
+
   if (features.is_declaration) {
     decision.policy = make_function_policy(protection_level::none);
     append_detail(decision.detail, "declaration forced none");
     return decision;
   }
 
-  if (features.has_exception_edges || features.has_inline_asm ||
-      features.has_vector_ops) {
+  if (features.has_exception_edges || features.has_inline_asm) {
     if (decision.source == policy_source::explicit_override) {
       append_detail(decision.detail,
                     "explicit override kept despite risky features");

@@ -1,0 +1,9 @@
+seed: 777
+default_level: none
+targets:
+  - match: alpha_add
+    level: vm
+  - match: beta_add
+    level: vm
+  - match: flatten_me
+    level: strong

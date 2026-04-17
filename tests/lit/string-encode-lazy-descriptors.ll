@@ -1,5 +1,5 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-lazy-descriptors.yaml -passes=obf-string-encode -S %s -o - | %FileCheck %s --check-prefix=IR
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-lazy-descriptors.yaml -passes=obf-string-encode -S %s -o %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-lazy-descriptors.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o - | %FileCheck %s --check-prefix=IR
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-lazy-descriptors.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o %t
 ; RUN: %lli %t
 
 @.alpha = private unnamed_addr constant [6 x i8] c"alpha\00"
@@ -27,14 +27,13 @@ entry:
   ret i32 %sum
 }
 
-; IR: @__obf_desc_table_0 = internal constant [4 x { ptr, i64, ptr, i64 }]
+; IR-DAG: @__obf_desc_table_{{[0-9]+}} = internal constant [
 ; IR-LABEL: define i32 @main() {
-; IR: call ptr @__obf_family_flag_v0(ptr getelementptr ([4 x { ptr, i64, ptr, i64 }], ptr @__obf_desc_table_0, i64 0, i64 1))
-; IR: call ptr @__obf_family_flag_v0(ptr @__obf_desc_table_0)
-; IR: call ptr @__obf_family_flag_v0(ptr getelementptr ([4 x { ptr, i64, ptr, i64 }], ptr @__obf_desc_table_0, i64 0, i64 3))
-; IR: call ptr @__obf_family_flag_v0(ptr getelementptr ([4 x { ptr, i64, ptr, i64 }], ptr @__obf_desc_table_0, i64 0, i64 2))
-; IR-LABEL: define internal ptr @__obf_family_flag_v0(ptr %desc) {
-; IR: getelementptr inbounds { ptr, i64, ptr, i64 }, ptr %desc, i64 0, i32 0
-; IR: br i1
-; IR: decode:
-; IR: getelementptr inbounds { ptr, i64, ptr, i64 }, ptr %desc, i64 0, i32 2
+; IR-NOT: @__obf_get_cfg_state
+; IR-NOT: @__obf_get_expected_cfg_state
+; IR: call ptr @__obf_family_{{.*}}(ptr {{.*}}, i32 0, i32 0)
+; IR: call ptr @__obf_family_{{.*}}(ptr {{.*}}, i32 0, i32 0)
+; IR: call ptr @__obf_family_{{.*}}(ptr {{.*}}, i32 0, i32 0)
+; IR: call ptr @__obf_family_{{.*}}(ptr {{.*}}, i32 0, i32 0)
+; IR-LABEL: define internal ptr @__obf_family_{{.*}}(ptr %desc, i32 %cfg_state, i32 %expected_state) {
+; IR: %obf.str.state.delta = xor i32 %cfg_state, %expected_state

@@ -30,6 +30,7 @@ struct policy_decision {
   policy_source source = policy_source::default_policy;
   std::string detail;
   std::uint64_t seed = 0;
+  std::optional<protection_level> minimum_security_floor;
 };
 
 constexpr std::string_view to_string(policy_source source) {

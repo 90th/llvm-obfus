@@ -43,7 +43,8 @@ entry:
 ; CHECK: %fold_value.obf.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.decoded to ptr
 ; CHECK: call i32 %fold_value.obf.indirect(i32 0, i64 %fold_value.obf.call.token)
 ; CHECK: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_fold_value
-; CHECK: %fold_value.obf.retkey.trunc = trunc i64 %fold_value.obf.retkey to i32
+; CHECK: %fold_value.obf.retkey.bound = {{(or|sub) i64}}
+; CHECK: %fold_value.obf.retkey.cast = trunc i64 %fold_value.obf.retkey.bound to i32
 ; CHECK: %fold_value.obf.retdec = {{(or|sub) i32}}
 ; CHECK: icmp eq i32 %fold_value.obf.retdec,
 ; CHECK-NOT: define private void @__obf_vm_init_fold_value
@@ -54,13 +55,16 @@ entry:
 ; CHECK: %obf.vm.state = alloca i64
 ; CHECK: %obf.vm.token.state.match = icmp eq i64 %obf.hidden_token,
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
+; CHECK: {{^vm\.0:}}
 ; CHECK: load i8, ptr @__obf_vm_bc_fold_value
 ; CHECK: %obf.vm.integrity.byte = load i8, ptr getelementptr inbounds
 ; CHECK: %obf.vm.integrity.state = load i64, ptr %obf.vm.state
+; CHECK: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, {{-?[0-9]+}}
+; CHECK: indirectbr ptr
+; CHECK: {{^vm\.exec\.0:}}
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_fold_value
 ; CHECK: ret i32 %obf.vm.ret.encoded
-; CHECK: indirectbr ptr %obf.vm.dispatch.target
 
 ; INST-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
 ; INST-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
@@ -74,8 +78,12 @@ entry:
 ; INST: %fold_value.obf.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.decoded to ptr
 ; INST: call i32 %fold_value.obf.indirect(i32 0, i64 %fold_value.obf.call.token)
 ; INST: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_fold_value
+; INST: %fold_value.obf.retkey.bound = {{(or|sub) i64}}
 ; INST: %fold_value.obf.retdec = {{(or|sub) i32}}
 ; INST-LABEL: define i32 @__obf_vm_impl_fold_value(i32 %value, i64 %obf.hidden_token)
 ; INST: %obf.vm.state = alloca i64
+; INST: {{^vm\.0:}}
+; INST: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, {{-?[0-9]+}}
+; INST: indirectbr ptr
+; INST: {{^vm\.exec\.0:}}
 ; INST: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_fold_value
-; INST: indirectbr ptr %obf.vm.dispatch.target

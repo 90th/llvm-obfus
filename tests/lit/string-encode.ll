@@ -1,5 +1,5 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-ctor.yaml -passes=obf-string-encode -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-ctor.yaml -passes=obf-string-encode -S %s -o %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-ctor.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o - | %FileCheck %s
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/string-encode-ctor.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o %t
 ; RUN: %lli %t
 
 @.secret = private unnamed_addr constant [7 x i8] c"secret\00"
@@ -26,6 +26,7 @@ entry:
 
 ; CHECK: @.secret = private unnamed_addr global [7 x i8]
 ; CHECK-NOT: c"secret\00"
-; CHECK: @.plain = private unnamed_addr constant [6 x i8] c"plain\00"
-; CHECK: @llvm.global_ctors = appending global
-; CHECK: define internal void @__obf_decode_
+; CHECK: @.plain = private unnamed_addr global [6 x i8]
+; CHECK-NOT: c"plain\00"
+; CHECK-NOT: @llvm.global_ctors = appending global
+; CHECK: define internal ptr @__obf_family_

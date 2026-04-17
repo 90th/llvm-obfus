@@ -44,5 +44,5 @@ entry:
 ; CHECK-DAG: "detail":"annotation:obf:strong","level":"strong","seed":"0x{{[0-9a-f]+}}","source":"source_annotation"
 ; CHECK-DAG: "detail":"config match:strong_vm_fn","level":"strong_vm","seed":"0x{{[0-9a-f]+}}","source":"config_rule"
 ; CHECK-DAG: "allow_vm":true
-; CHECK-DAG: "detail":"automatic:string-sensitive","level":"light","seed":"0x{{[0-9a-f]+}}","source":"automatic_analysis"
+; CHECK-DAG: "detail":"automatic:string-sensitive"{{.*}}"level":"light"{{.*}}"minimum_security_floor":"light"{{.*}}"seed":"0x{{[0-9a-f]+}}"{{.*}}"source":"automatic_analysis"
 ; CHECK-DAG: "name":"default_fn","policy":{{.*}}"detail":"default","level":"none","seed":"0x{{[0-9a-f]+}}","source":"default"

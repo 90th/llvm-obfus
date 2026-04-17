@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace llvm {
@@ -13,6 +14,8 @@ struct control_flattening_options {
   std::size_t min_blocks = 3;
   std::size_t max_blocks = 12;
   std::size_t max_instructions = 128;
+  std::size_t max_decoy_states = 2;
+  std::uint64_t seed = 0;
 };
 
 struct control_flattening_result {

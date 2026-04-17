@@ -22,4 +22,4 @@ entry:
 }
 
 ; CHECK: "inline_eligible":true{{.*}}"kind":"inline_stack_decode"{{.*}}"compare_call_operand"{{.*}}"target_name":".compare"
-; CHECK: "fallback_reason":"shared_with_unprotected_function"{{.*}}"kind":"helper_global_ctor"{{.*}}"compare_call_operand"{{.*}}"return_operand"{{.*}}"target_name":".shared"
+; CHECK: "detail":"lazy_decode: 3 lazy use(s)"{{.*}}"kind":"helper_lazy_decode"{{.*}}"compare_call_operand"{{.*}}"return_operand"{{.*}}"target_name":".shared"

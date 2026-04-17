@@ -19,11 +19,14 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/Type.h"
+#include "llvm/Support/ErrorHandling.h"
 
+#include <array>
 #include <bit>
 #include <algorithm>
 #include <cstdint>
 #include <numeric>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -151,8 +154,240 @@ using slot_storage = llvm::SmallVector<slot_cells, 16>;
 using slot_cell_mapping = std::vector<std::uint32_t>;
 
 inline constexpr std::uint32_t vm_slot_rotation_cell_count = 3;
+inline constexpr std::size_t vm_opcode_count =
+    static_cast<std::size_t>(opcode::ret) + 1;
+
+struct opcode_permutation {
+  std::array<std::uint8_t, vm_opcode_count> physical_for_logical = {};
+};
 
 std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt);
+std::uint64_t derive_vm_bytecode_seed(const llvm::Function &function,
+                                      const bytecode_program &program);
+
+std::size_t opcode_to_index(opcode op) {
+  return static_cast<std::size_t>(op);
+}
+
+bool is_binary_opcode(opcode op) {
+  switch (op) {
+  case opcode::add:
+  case opcode::sub:
+  case opcode::mul:
+  case opcode::udiv:
+  case opcode::sdiv:
+  case opcode::urem:
+  case opcode::srem:
+  case opcode::shl:
+  case opcode::lshr:
+  case opcode::ashr:
+  case opcode::and_op:
+  case opcode::or_op:
+  case opcode::xor_op:
+  case opcode::fadd:
+  case opcode::fsub:
+  case opcode::fmul:
+  case opcode::fdiv:
+  case opcode::frem:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool is_cast_opcode(opcode op) {
+  switch (op) {
+  case opcode::trunc:
+  case opcode::zext:
+  case opcode::sext:
+  case opcode::fp_trunc:
+  case opcode::fp_ext:
+  case opcode::ui_to_fp:
+  case opcode::si_to_fp:
+  case opcode::fp_to_ui:
+  case opcode::fp_to_si:
+  case opcode::ptr_to_int:
+  case opcode::int_to_ptr:
+  case opcode::bitcast:
+  case opcode::addrspace_cast:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool is_icmp_opcode(opcode op) {
+  switch (op) {
+  case opcode::icmp_eq:
+  case opcode::icmp_ne:
+  case opcode::icmp_ugt:
+  case opcode::icmp_uge:
+  case opcode::icmp_ult:
+  case opcode::icmp_ule:
+  case opcode::icmp_sgt:
+  case opcode::icmp_sge:
+  case opcode::icmp_slt:
+  case opcode::icmp_sle:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool is_fcmp_opcode(opcode op) {
+  switch (op) {
+  case opcode::fcmp_false:
+  case opcode::fcmp_oeq:
+  case opcode::fcmp_ogt:
+  case opcode::fcmp_oge:
+  case opcode::fcmp_olt:
+  case opcode::fcmp_ole:
+  case opcode::fcmp_one:
+  case opcode::fcmp_ord:
+  case opcode::fcmp_uno:
+  case opcode::fcmp_ueq:
+  case opcode::fcmp_ugt:
+  case opcode::fcmp_uge:
+  case opcode::fcmp_ult:
+  case opcode::fcmp_ule:
+  case opcode::fcmp_une:
+  case opcode::fcmp_true:
+    return true;
+  default:
+    return false;
+  }
+}
+
+llvm::CmpInst::Predicate icmp_predicate_for_opcode(opcode op) {
+  if (!is_icmp_opcode(op)) {
+    llvm_unreachable("opcode is not an icmp predicate");
+  }
+
+  switch (op) {
+  case opcode::icmp_eq:
+    return llvm::CmpInst::ICMP_EQ;
+  case opcode::icmp_ne:
+    return llvm::CmpInst::ICMP_NE;
+  case opcode::icmp_ugt:
+    return llvm::CmpInst::ICMP_UGT;
+  case opcode::icmp_uge:
+    return llvm::CmpInst::ICMP_UGE;
+  case opcode::icmp_ult:
+    return llvm::CmpInst::ICMP_ULT;
+  case opcode::icmp_ule:
+    return llvm::CmpInst::ICMP_ULE;
+  case opcode::icmp_sgt:
+    return llvm::CmpInst::ICMP_SGT;
+  case opcode::icmp_sge:
+    return llvm::CmpInst::ICMP_SGE;
+  case opcode::icmp_slt:
+    return llvm::CmpInst::ICMP_SLT;
+  case opcode::icmp_sle:
+    return llvm::CmpInst::ICMP_SLE;
+  default:
+    llvm_unreachable("opcode is not an icmp predicate");
+  }
+}
+
+llvm::CmpInst::Predicate fcmp_predicate_for_opcode(opcode op) {
+  if (!is_fcmp_opcode(op)) {
+    llvm_unreachable("opcode is not an fcmp predicate");
+  }
+
+  switch (op) {
+  case opcode::fcmp_false:
+    return llvm::CmpInst::FCMP_FALSE;
+  case opcode::fcmp_oeq:
+    return llvm::CmpInst::FCMP_OEQ;
+  case opcode::fcmp_ogt:
+    return llvm::CmpInst::FCMP_OGT;
+  case opcode::fcmp_oge:
+    return llvm::CmpInst::FCMP_OGE;
+  case opcode::fcmp_olt:
+    return llvm::CmpInst::FCMP_OLT;
+  case opcode::fcmp_ole:
+    return llvm::CmpInst::FCMP_OLE;
+  case opcode::fcmp_one:
+    return llvm::CmpInst::FCMP_ONE;
+  case opcode::fcmp_ord:
+    return llvm::CmpInst::FCMP_ORD;
+  case opcode::fcmp_uno:
+    return llvm::CmpInst::FCMP_UNO;
+  case opcode::fcmp_ueq:
+    return llvm::CmpInst::FCMP_UEQ;
+  case opcode::fcmp_ugt:
+    return llvm::CmpInst::FCMP_UGT;
+  case opcode::fcmp_uge:
+    return llvm::CmpInst::FCMP_UGE;
+  case opcode::fcmp_ult:
+    return llvm::CmpInst::FCMP_ULT;
+  case opcode::fcmp_ule:
+    return llvm::CmpInst::FCMP_ULE;
+  case opcode::fcmp_une:
+    return llvm::CmpInst::FCMP_UNE;
+  case opcode::fcmp_true:
+    return llvm::CmpInst::FCMP_TRUE;
+  default:
+    llvm_unreachable("opcode is not an fcmp predicate");
+  }
+}
+
+std::uint32_t select_handler_variant(opcode op, std::uint64_t seed_base,
+                                     std::uint64_t salt,
+                                     std::uint32_t variant_count = 2) {
+  if (variant_count <= 1) {
+    return 0;
+  }
+
+  return static_cast<std::uint32_t>(
+      mix_seed(seed_base,
+               salt ^ ((static_cast<std::uint64_t>(opcode_to_index(op)) + 1) *
+                       0x9e3779b97f4a7c15ULL)) %
+      variant_count);
+}
+
+std::uint32_t select_dispatch_variant(std::uint64_t seed_base, std::uint64_t salt,
+                                      std::uint32_t variant_count = 2) {
+  if (variant_count <= 1) {
+    return 0;
+  }
+
+  return static_cast<std::uint32_t>(
+      mix_seed(seed_base, salt ^ 0xd15f57a5a93ULL) % variant_count);
+}
+
+std::mt19937 build_opcode_rng(const llvm::Function &function,
+                             const bytecode_program &program) {
+  const std::uint64_t seed_base = mix_seed(derive_vm_bytecode_seed(function, program),
+                                           0x0f4c0d3aa19b27d5ULL);
+  std::seed_seq seed_words{
+      static_cast<std::uint32_t>(seed_base),
+      static_cast<std::uint32_t>(seed_base >> 32),
+      static_cast<std::uint32_t>(llvm::hash_value(function.getName())),
+      static_cast<std::uint32_t>(program.instructions.size())};
+  return std::mt19937(seed_words);
+}
+
+opcode_permutation build_opcode_permutation(const llvm::Function &function,
+                                            const bytecode_program &program) {
+  opcode_permutation permutation;
+  std::array<std::uint8_t, 256> physical_values = {};
+  std::iota(physical_values.begin(), physical_values.end(), 0);
+
+  std::mt19937 rng = build_opcode_rng(function, program);
+  std::shuffle(physical_values.begin(), physical_values.end(), rng);
+  for (std::size_t logical_index = 0; logical_index < vm_opcode_count;
+       ++logical_index) {
+    permutation.physical_for_logical[logical_index] = physical_values[logical_index];
+  }
+
+  return permutation;
+}
+
+std::uint8_t get_physical_opcode(const opcode_permutation &permutation,
+                                 opcode logical_opcode) {
+  return permutation.physical_for_logical[opcode_to_index(logical_opcode)];
+}
 
 std::vector<slot_cell_mapping>
 build_slot_cell_mappings(const bytecode_program &program, std::uint64_t seed_base) {
@@ -313,8 +548,22 @@ llvm::Value *build_hidden_token_seed(llvm::IRBuilder<> &builder,
   return selected;
 }
 
+struct bytecode_header_chunk {
+  std::uint32_t offset = 0;
+  std::uint8_t size = 0;
+  bool carries_opcode = false;
+};
+
+struct pending_bytecode_header_chunk {
+  std::array<std::uint8_t, 4> decoded_bytes = {};
+  std::uint64_t order_key = 0;
+  std::uint8_t size = 0;
+  bool carries_opcode = false;
+};
+
 struct bytecode_layout {
   std::uint32_t header_offset = 0;
+  std::vector<bytecode_header_chunk> header_chunks;
   std::uint32_t fallthrough_target_offset = invalid_slot;
   std::vector<std::uint32_t> edge_target_offsets;
   std::uint32_t integrity_probe_range = 0;
@@ -416,7 +665,8 @@ build_instruction_entry_states(const bytecode_program &program, std::uint64_t se
 serialized_bytecode_program serialize_bytecode_program(
     const bytecode_program &program,
     llvm::ArrayRef<std::uint32_t> dispatch_index_for_instruction,
-    llvm::ArrayRef<std::uint64_t> entry_states, std::uint64_t seed_base) {
+    llvm::ArrayRef<std::uint64_t> entry_states, std::uint64_t seed_base,
+    const opcode_permutation &opcode_map) {
   serialized_bytecode_program serialized;
   serialized.layouts.resize(program.instructions.size());
 
@@ -427,30 +677,96 @@ serialized_bytecode_program serialize_bytecode_program(
     layout.header_offset = static_cast<std::uint32_t>(serialized.bytes.size());
 
     std::uint64_t header_state = entry_states[instruction_index];
-    append_encoded_u8(serialized.bytes,
-                      static_cast<std::uint8_t>(instruction.op), header_state,
-                      seed_base);
-    append_encoded_u32(serialized.bytes, instruction.subtype, header_state,
-                       seed_base);
-    append_encoded_u32(serialized.bytes, instruction.flags, header_state,
-                       seed_base);
-    append_encoded_u32(serialized.bytes, instruction.immediate, header_state,
-                       seed_base);
-    append_encoded_u32(serialized.bytes, instruction.result_slot, header_state,
-                       seed_base);
-    append_encoded_u8(serialized.bytes,
-                      static_cast<std::uint8_t>(instruction.operands.size()),
-                      header_state, seed_base);
+    std::vector<pending_bytecode_header_chunk> header_chunks;
+    header_chunks.reserve(10 + instruction.operands.size() * 2);
+
+    std::uint64_t chunk_ordinal = 0;
+    const auto next_header_order_key = [&](std::uint64_t salt) {
+      return mix_seed(
+          seed_base,
+          salt ^
+              (static_cast<std::uint64_t>(instruction_index + 1) *
+               0x9e3779b97f4a7c15ULL) ^
+              (++chunk_ordinal * 0x517cc1b727220a95ULL));
+    };
+    const auto append_header_u8 = [&](std::uint8_t decoded, std::uint64_t salt,
+                                      bool carries_opcode = false) {
+      pending_bytecode_header_chunk chunk;
+      chunk.decoded_bytes[0] = decoded;
+      chunk.order_key = next_header_order_key(salt ^ decoded);
+      chunk.size = 1;
+      chunk.carries_opcode = carries_opcode;
+      header_chunks.push_back(chunk);
+    };
+    const auto append_header_u32 = [&](std::uint32_t decoded,
+                                       std::uint64_t salt) {
+      pending_bytecode_header_chunk chunk;
+      for (unsigned byte_index = 0; byte_index < 4; ++byte_index) {
+        chunk.decoded_bytes[byte_index] =
+            static_cast<std::uint8_t>(decoded >> (byte_index * 8));
+      }
+      chunk.order_key = next_header_order_key(salt ^ decoded);
+      chunk.size = 4;
+      header_chunks.push_back(chunk);
+    };
+
+    append_header_u8(get_physical_opcode(opcode_map, instruction.op), 0x4100,
+                     /*carries_opcode=*/true);
+    append_header_u32(instruction.subtype, 0x4200);
+    append_header_u32(instruction.flags, 0x4300);
+    append_header_u32(instruction.immediate, 0x4400);
+    append_header_u32(instruction.result_slot, 0x4500);
+    append_header_u8(static_cast<std::uint8_t>(instruction.operands.size()), 0x4600);
     for (const value_ref &operand : instruction.operands) {
-      append_encoded_u8(serialized.bytes,
-                        static_cast<std::uint8_t>(operand.kind), header_state,
-                        seed_base);
-      append_encoded_u32(serialized.bytes, value_descriptor(operand), header_state,
-                         seed_base);
+      const std::uint64_t operand_salt =
+          0x4700 + static_cast<std::uint64_t>(&operand - instruction.operands.data()) * 2;
+      append_header_u8(static_cast<std::uint8_t>(operand.kind), operand_salt);
+      append_header_u32(value_descriptor(operand), operand_salt + 1);
     }
-    append_encoded_u8(serialized.bytes,
-                      static_cast<std::uint8_t>(instruction.edges.size()),
-                      header_state, seed_base);
+    append_header_u8(static_cast<std::uint8_t>(instruction.edges.size()), 0x4800);
+
+    const std::uint32_t junk_chunk_count =
+        1U + static_cast<std::uint32_t>(
+                 mix_seed(seed_base, 0x4d4554410000ULL + instruction_index) % 3ULL);
+    for (std::uint32_t junk_index = 0; junk_index < junk_chunk_count; ++junk_index) {
+      pending_bytecode_header_chunk chunk;
+      chunk.size = static_cast<std::uint8_t>(
+          1U + mix_seed(seed_base,
+                        0x4d4554411000ULL +
+                            static_cast<std::uint64_t>(instruction_index) * 8 +
+                            junk_index) %
+                    4ULL);
+      chunk.order_key = next_header_order_key(0x4d4554412000ULL + junk_index);
+      for (std::uint8_t byte_index = 0; byte_index < chunk.size; ++byte_index) {
+        chunk.decoded_bytes[byte_index] = static_cast<std::uint8_t>(
+            mix_seed(seed_base,
+                     0x4d4554413000ULL +
+                         static_cast<std::uint64_t>(instruction_index) * 16 +
+                         static_cast<std::uint64_t>(junk_index) * 4 + byte_index) &
+            0xffU);
+      }
+      header_chunks.push_back(chunk);
+    }
+
+    // Shuffle real metadata fields with junk so the bytecode header has no
+    // stable field order.
+    std::stable_sort(
+        header_chunks.begin(), header_chunks.end(),
+        [](const pending_bytecode_header_chunk &lhs,
+           const pending_bytecode_header_chunk &rhs) {
+          return lhs.order_key < rhs.order_key;
+        });
+    layout.header_chunks.reserve(header_chunks.size());
+    for (const pending_bytecode_header_chunk &chunk : header_chunks) {
+      layout.header_chunks.push_back(
+          {.offset = static_cast<std::uint32_t>(serialized.bytes.size()),
+           .size = chunk.size,
+           .carries_opcode = chunk.carries_opcode});
+      for (unsigned byte_index = 0; byte_index < chunk.size; ++byte_index) {
+        append_encoded_u8(serialized.bytes, chunk.decoded_bytes[byte_index],
+                          header_state, seed_base);
+      }
+    }
 
     layout.integrity_probe_range =
         static_cast<std::uint32_t>(serialized.bytes.size());
@@ -582,6 +898,10 @@ llvm::Value *emit_binary(llvm::IRBuilder<> &builder,
                          std::uint64_t opaque_seed_base,
                          const mba::builder_context &mba_context,
                          std::uint64_t salt) {
+  if (!is_binary_opcode(instruction.op)) {
+    llvm_unreachable("opcode is not a binary opcode");
+  }
+
   llvm::Value *const lhs =
       materialize_value(builder, slot_allocas, slot_mapping, program,
                         instruction.operands[0],
@@ -594,75 +914,100 @@ llvm::Value *emit_binary(llvm::IRBuilder<> &builder,
                         salt + 2);
 
   llvm::Value *result = nullptr;
-  const auto subopcode = static_cast<binary_opcode>(instruction.subtype);
-  switch (subopcode) {
-  case binary_opcode::add:
+  const std::uint32_t variant =
+      select_handler_variant(instruction.op, opaque_seed_base, salt);
+  switch (instruction.op) {
+  case opcode::add:
     if (!has_instruction_flag(instruction.flags, instruction_flag_nsw) &&
         !has_instruction_flag(instruction.flags, instruction_flag_nuw)) {
       result = mba::create_add(builder, lhs, rhs, mba_context, salt + 3,
                                "obf.vm.add");
+    } else if (variant == 0) {
+      result = builder.CreateAdd(lhs, rhs, "obf.vm.add");
+    } else if (lhs->getType()->isIntegerTy()) {
+      llvm::Value *sum = builder.CreateAdd(lhs, rhs, "obf.vm.add.variant");
+      result = builder.CreateAdd(
+          sum,
+          mba::create_opaque_integer(builder, llvm::cast<llvm::IntegerType>(sum->getType()),
+                                     mba_context,
+                                     llvm::APInt(sum->getType()->getIntegerBitWidth(), 0),
+                                     salt + 0x41, "obf.vm.add.zero"),
+          "obf.vm.add");
     } else {
       result = builder.CreateAdd(lhs, rhs, "obf.vm.add");
     }
     break;
-  case binary_opcode::sub:
+  case opcode::sub:
     if (!has_instruction_flag(instruction.flags, instruction_flag_nsw) &&
         !has_instruction_flag(instruction.flags, instruction_flag_nuw)) {
       result = mba::create_sub(builder, lhs, rhs, mba_context, salt + 4,
                                "obf.vm.sub");
+    } else if (variant == 0) {
+      result = builder.CreateSub(lhs, rhs, "obf.vm.sub");
+    } else if (lhs->getType()->isIntegerTy()) {
+      llvm::Value *diff = builder.CreateSub(lhs, rhs, "obf.vm.sub.variant");
+      result = builder.CreateXor(
+          diff,
+          mba::create_opaque_integer(builder, llvm::cast<llvm::IntegerType>(diff->getType()),
+                                     mba_context,
+                                     llvm::APInt(diff->getType()->getIntegerBitWidth(), 0),
+                                     salt + 0x42, "obf.vm.sub.zero"),
+          "obf.vm.sub");
     } else {
       result = builder.CreateSub(lhs, rhs, "obf.vm.sub");
     }
     break;
-  case binary_opcode::mul:
+  case opcode::mul:
     result = builder.CreateMul(lhs, rhs, "obf.vm.mul");
     break;
-  case binary_opcode::udiv:
+  case opcode::udiv:
     result = builder.CreateUDiv(lhs, rhs, "obf.vm.udiv");
     break;
-  case binary_opcode::sdiv:
+  case opcode::sdiv:
     result = builder.CreateSDiv(lhs, rhs, "obf.vm.sdiv");
     break;
-  case binary_opcode::urem:
+  case opcode::urem:
     result = builder.CreateURem(lhs, rhs, "obf.vm.urem");
     break;
-  case binary_opcode::srem:
+  case opcode::srem:
     result = builder.CreateSRem(lhs, rhs, "obf.vm.srem");
     break;
-  case binary_opcode::shl:
+  case opcode::shl:
     result = builder.CreateShl(lhs, rhs, "obf.vm.shl");
     break;
-  case binary_opcode::lshr:
+  case opcode::lshr:
     result = builder.CreateLShr(lhs, rhs, "obf.vm.lshr");
     break;
-  case binary_opcode::ashr:
+  case opcode::ashr:
     result = builder.CreateAShr(lhs, rhs, "obf.vm.ashr");
     break;
-  case binary_opcode::and_op:
+  case opcode::and_op:
     result = builder.CreateAnd(lhs, rhs, "obf.vm.and");
     break;
-  case binary_opcode::or_op:
+  case opcode::or_op:
     result = builder.CreateOr(lhs, rhs, "obf.vm.or");
     break;
-  case binary_opcode::xor_op:
+  case opcode::xor_op:
     result = mba::create_xor(builder, lhs, rhs, mba_context, salt + 5,
                              "obf.vm.xor");
     break;
-  case binary_opcode::fadd:
+  case opcode::fadd:
     result = builder.CreateFAdd(lhs, rhs, "obf.vm.fadd");
     break;
-  case binary_opcode::fsub:
+  case opcode::fsub:
     result = builder.CreateFSub(lhs, rhs, "obf.vm.fsub");
     break;
-  case binary_opcode::fmul:
+  case opcode::fmul:
     result = builder.CreateFMul(lhs, rhs, "obf.vm.fmul");
     break;
-  case binary_opcode::fdiv:
+  case opcode::fdiv:
     result = builder.CreateFDiv(lhs, rhs, "obf.vm.fdiv");
     break;
-  case binary_opcode::frem:
+  case opcode::frem:
     result = builder.CreateFRem(lhs, rhs, "obf.vm.frem");
     break;
+  default:
+    llvm_unreachable("opcode is not a binary opcode");
   }
 
   auto *binary = llvm::cast<llvm::BinaryOperator>(result);
@@ -673,11 +1018,11 @@ llvm::Value *emit_binary(llvm::IRBuilder<> &builder,
     binary->setHasNoUnsignedWrap();
   }
   if (has_instruction_flag(instruction.flags, instruction_flag_exact)) {
-    switch (subopcode) {
-    case binary_opcode::udiv:
-    case binary_opcode::sdiv:
-    case binary_opcode::lshr:
-    case binary_opcode::ashr:
+    switch (instruction.op) {
+    case opcode::udiv:
+    case opcode::sdiv:
+    case opcode::lshr:
+    case opcode::ashr:
       binary->setIsExact();
       break;
     default:
@@ -697,6 +1042,10 @@ llvm::Value *emit_cast(llvm::IRBuilder<> &builder,
                        std::uint64_t opaque_seed_base,
                        const mba::builder_context &mba_context,
                        std::uint64_t salt) {
+  if (!is_cast_opcode(instruction.op)) {
+    llvm_unreachable("opcode is not a cast opcode");
+  }
+
   llvm::Value *const operand =
       materialize_value(builder, slot_allocas, slot_mapping, program,
                         instruction.operands[0],
@@ -705,37 +1054,37 @@ llvm::Value *emit_cast(llvm::IRBuilder<> &builder,
   llvm::Type *const destination_type =
       const_cast<llvm::Type *>(program.slots[instruction.result_slot].type);
 
-  switch (static_cast<cast_opcode>(instruction.subtype)) {
-  case cast_opcode::trunc:
+  switch (instruction.op) {
+  case opcode::trunc:
     return builder.CreateTrunc(operand, destination_type, "obf.vm.trunc");
-  case cast_opcode::zext:
+  case opcode::zext:
     return builder.CreateZExt(operand, destination_type, "obf.vm.zext");
-  case cast_opcode::sext:
+  case opcode::sext:
     return builder.CreateSExt(operand, destination_type, "obf.vm.sext");
-  case cast_opcode::fp_trunc:
+  case opcode::fp_trunc:
     return builder.CreateFPTrunc(operand, destination_type, "obf.vm.fptrunc");
-  case cast_opcode::fp_ext:
+  case opcode::fp_ext:
     return builder.CreateFPExt(operand, destination_type, "obf.vm.fpext");
-  case cast_opcode::ui_to_fp:
+  case opcode::ui_to_fp:
     return builder.CreateUIToFP(operand, destination_type, "obf.vm.uitofp");
-  case cast_opcode::si_to_fp:
+  case opcode::si_to_fp:
     return builder.CreateSIToFP(operand, destination_type, "obf.vm.sitofp");
-  case cast_opcode::fp_to_ui:
+  case opcode::fp_to_ui:
     return builder.CreateFPToUI(operand, destination_type, "obf.vm.fptoui");
-  case cast_opcode::fp_to_si:
+  case opcode::fp_to_si:
     return builder.CreateFPToSI(operand, destination_type, "obf.vm.fptosi");
-  case cast_opcode::ptr_to_int:
+  case opcode::ptr_to_int:
     return builder.CreatePtrToInt(operand, destination_type, "obf.vm.ptrtoint");
-  case cast_opcode::int_to_ptr:
+  case opcode::int_to_ptr:
     return builder.CreateIntToPtr(operand, destination_type, "obf.vm.inttoptr");
-  case cast_opcode::bitcast:
+  case opcode::bitcast:
     return builder.CreateBitCast(operand, destination_type, "obf.vm.bitcast");
-  case cast_opcode::addrspace_cast:
+  case opcode::addrspace_cast:
     return builder.CreateAddrSpaceCast(operand, destination_type,
                                        "obf.vm.addrspacecast");
+  default:
+    llvm_unreachable("opcode is not a cast opcode");
   }
-
-  return nullptr;
 }
 
 void apply_edge_assignments(
@@ -833,12 +1182,15 @@ void rewrite_function_body(llvm::Function &function,
 
   const std::uint64_t bytecode_seed =
       derive_vm_bytecode_seed(function, program);
+  const opcode_permutation opcode_map =
+      build_opcode_permutation(function, program);
   const std::vector<std::uint32_t> dispatch_index_for_instruction =
       build_dispatch_index_map(program, bytecode_seed);
   const std::vector<std::uint64_t> entry_states =
       build_instruction_entry_states(program, bytecode_seed);
   const serialized_bytecode_program serialized = serialize_bytecode_program(
-      program, dispatch_index_for_instruction, entry_states, bytecode_seed);
+      program, dispatch_index_for_instruction, entry_states, bytecode_seed,
+      opcode_map);
 
   llvm::GlobalVariable *bytecode_global = nullptr;
   if (!serialized.bytes.empty()) {
@@ -853,16 +1205,27 @@ void rewrite_function_body(llvm::Function &function,
   }
 
   // Create return-key global for integer-returning functions.
-  // The caller-side rewriter looks this up by name to decode return values.
+  // The caller-side rewriter looks this up by name to decode token-bound
+  // return values.
   llvm::GlobalVariable *retkey_global = nullptr;
   if (function.getReturnType()->isIntegerTy()) {
     const std::uint64_t retkey_value =
         derive_vm_return_key(function, program);
-    retkey_global = new llvm::GlobalVariable(
-        *function.getParent(), entry_builder.getInt64Ty(),
-        /*isConstant=*/false, llvm::GlobalValue::PrivateLinkage,
-        entry_builder.getInt64(retkey_value),
-        "__obf_vm_retkey_" + symbol_tag);
+    const std::string retkey_name = "__obf_vm_retkey_" + symbol_tag;
+    retkey_global = function.getParent()->getNamedGlobal(retkey_name);
+    if (retkey_global == nullptr) {
+      retkey_global = new llvm::GlobalVariable(
+          *function.getParent(), entry_builder.getInt64Ty(),
+          /*isConstant=*/false, llvm::GlobalValue::PrivateLinkage,
+          entry_builder.getInt64(retkey_value), retkey_name);
+    } else {
+      if (retkey_global->getValueType() != entry_builder.getInt64Ty()) {
+        llvm_unreachable("vm retkey global has unexpected type");
+      }
+      retkey_global->setInitializer(entry_builder.getInt64(retkey_value));
+      retkey_global->setConstant(false);
+      retkey_global->setLinkage(llvm::GlobalValue::PrivateLinkage);
+    }
   }
 
   auto *state_slot = entry_builder.CreateAlloca(entry_builder.getInt64Ty(), nullptr,
@@ -1017,33 +1380,28 @@ void rewrite_function_body(llvm::Function &function,
   };
 
   const auto consume_metadata = [&](llvm::IRBuilder<> &builder,
-                                    const micro_instruction &instruction,
                                     const bytecode_layout &layout,
-                                    std::uint64_t salt) {
-    std::uint32_t cursor = layout.header_offset;
+                                    std::uint64_t salt) -> llvm::Value * {
     std::uint64_t local_salt = salt;
-    (void)fetch_byte(builder, cursor++, local_salt++);
-    (void)fetch_u32(builder, cursor, local_salt);
-    cursor += 4;
-    local_salt += 4;
-    (void)fetch_u32(builder, cursor, local_salt);
-    cursor += 4;
-    local_salt += 4;
-    (void)fetch_u32(builder, cursor, local_salt);
-    cursor += 4;
-    local_salt += 4;
-    (void)fetch_u32(builder, cursor, local_salt);
-    cursor += 4;
-    local_salt += 4;
-    (void)fetch_byte(builder, cursor++, local_salt++);
-    for (std::size_t operand_index = 0; operand_index < instruction.operands.size();
-         ++operand_index) {
-      (void)fetch_byte(builder, cursor++, local_salt++);
-      (void)fetch_u32(builder, cursor, local_salt);
-      cursor += 4;
-      local_salt += 4;
+    llvm::Value *decoded_opcode = nullptr;
+    for (const bytecode_header_chunk &chunk : layout.header_chunks) {
+      if (chunk.carries_opcode) {
+        decoded_opcode = fetch_byte(builder, chunk.offset, local_salt++);
+        continue;
+      }
+      if (chunk.size == 4) {
+        (void)fetch_u32(builder, chunk.offset, local_salt);
+        local_salt += 4;
+        continue;
+      }
+      for (std::uint32_t byte_index = 0; byte_index < chunk.size; ++byte_index) {
+        (void)fetch_byte(builder, chunk.offset + byte_index, local_salt++);
+      }
     }
-    (void)fetch_byte(builder, cursor, local_salt);
+    if (decoded_opcode != nullptr) {
+      return decoded_opcode;
+    }
+    llvm_unreachable("serialized vm header missing opcode");
   };
 
   const auto decode_target_dispatch = [&](llvm::IRBuilder<> &builder,
@@ -1079,36 +1437,91 @@ void rewrite_function_body(llvm::Function &function,
         jump_builder, encoded_target, key, mba_context, salt + 1,
         "obf.vm.dispatch.target.int");
 
-    llvm::Value *dispatch_target = nullptr;
-    llvm::Value *target_match = nullptr;
-    for (llvm::BasicBlock *instruction_block : instruction_blocks) {
-      llvm::Constant *plain_target = llvm::ConstantExpr::getPtrToInt(
-          llvm::BlockAddress::get(&function, instruction_block), ptr_int_type);
-      llvm::Value *is_match = jump_builder.CreateICmpEQ(
-          decoded_target, plain_target, "obf.vm.dispatch.match");
-      if (dispatch_target == nullptr) {
-        dispatch_target = llvm::BlockAddress::get(&function, instruction_block);
-        target_match = is_match;
-        continue;
+    const std::uint32_t dispatch_variant =
+        select_dispatch_variant(bytecode_seed, salt ^ 0x26000ULL);
+    if (dispatch_variant == 0) {
+      llvm::Value *dispatch_target = nullptr;
+      llvm::Value *target_match = nullptr;
+      for (llvm::BasicBlock *instruction_block : instruction_blocks) {
+        llvm::Constant *plain_target = llvm::ConstantExpr::getPtrToInt(
+            llvm::BlockAddress::get(&function, instruction_block), ptr_int_type);
+        llvm::Value *is_match = jump_builder.CreateICmpEQ(
+            decoded_target, plain_target, "obf.vm.dispatch.match");
+        if (dispatch_target == nullptr) {
+          dispatch_target = llvm::BlockAddress::get(&function, instruction_block);
+          target_match = is_match;
+          continue;
+        }
+
+        target_match =
+            jump_builder.CreateOr(target_match, is_match, "obf.vm.dispatch.any");
+        dispatch_target = jump_builder.CreateSelect(
+            is_match, llvm::BlockAddress::get(&function, instruction_block),
+            dispatch_target, "obf.vm.dispatch.target");
       }
 
-      target_match =
-          jump_builder.CreateOr(target_match, is_match, "obf.vm.dispatch.any");
-      dispatch_target = jump_builder.CreateSelect(
-          is_match, llvm::BlockAddress::get(&function, instruction_block),
-          dispatch_target, "obf.vm.dispatch.target");
+      auto *emit_block = llvm::BasicBlock::Create(
+          context, "dispatch.emit.obf.vm." + std::to_string(dispatch_site_counter++),
+          &function);
+      jump_builder.CreateCondBr(target_match, emit_block, trap_block);
+
+      llvm::IRBuilder<> emit_builder(emit_block);
+      auto *dispatch =
+          emit_builder.CreateIndirectBr(dispatch_target, instruction_blocks.size());
+      for (llvm::BasicBlock *instruction_block : instruction_blocks) {
+        dispatch->addDestination(instruction_block);
+      }
+      return;
     }
 
+    auto *dispatch_switch_block = llvm::BasicBlock::Create(
+        context, "dispatch.switch.obf.vm." + std::to_string(dispatch_site_counter++),
+        &function);
+    jump_builder.CreateBr(dispatch_switch_block);
+
+    llvm::IRBuilder<> switch_builder(dispatch_switch_block);
     auto *emit_block = llvm::BasicBlock::Create(
         context, "dispatch.emit.obf.vm." + std::to_string(dispatch_site_counter++),
         &function);
-    jump_builder.CreateCondBr(target_match, emit_block, trap_block);
+    auto *switch_inst = switch_builder.CreateSwitch(
+        dispatch_index, trap_block, instruction_blocks.size());
+
+    llvm::SmallVector<llvm::BasicBlock *, 16> case_blocks;
+    case_blocks.reserve(instruction_blocks.size());
+    for (std::size_t instruction_index = 0;
+         instruction_index < instruction_blocks.size(); ++instruction_index) {
+      auto *case_block = llvm::BasicBlock::Create(
+          context,
+          "dispatch.case.obf.vm." + std::to_string(dispatch_site_counter++) + "." +
+              std::to_string(instruction_index),
+          &function);
+      switch_inst->addCase(switch_builder.getInt32(
+                               dispatch_index_for_instruction[instruction_index]),
+                           case_block);
+      case_blocks.push_back(case_block);
+    }
 
     llvm::IRBuilder<> emit_builder(emit_block);
+    auto *dispatch_target = emit_builder.CreatePHI(
+        llvm::PointerType::get(context, function.getAddressSpace()),
+        instruction_blocks.size(), "obf.vm.dispatch.target");
     auto *dispatch =
         emit_builder.CreateIndirectBr(dispatch_target, instruction_blocks.size());
     for (llvm::BasicBlock *instruction_block : instruction_blocks) {
       dispatch->addDestination(instruction_block);
+    }
+
+    for (std::size_t instruction_index = 0;
+         instruction_index < instruction_blocks.size(); ++instruction_index) {
+      llvm::BasicBlock *instruction_block = instruction_blocks[instruction_index];
+      llvm::IRBuilder<> case_builder(case_blocks[instruction_index]);
+      llvm::Constant *plain_target = llvm::ConstantExpr::getPtrToInt(
+          llvm::BlockAddress::get(&function, instruction_block), ptr_int_type);
+      llvm::Value *is_match = case_builder.CreateICmpEQ(
+          decoded_target, plain_target, "obf.vm.dispatch.match");
+      case_builder.CreateCondBr(is_match, emit_block, trap_block);
+      dispatch_target->addIncoming(llvm::BlockAddress::get(&function, instruction_block),
+                                   case_blocks[instruction_index]);
     }
   };
 
@@ -1123,12 +1536,13 @@ void rewrite_function_body(llvm::Function &function,
   for (std::size_t instruction_index = 0;
        instruction_index < program.instructions.size(); ++instruction_index) {
     const micro_instruction &instruction = program.instructions[instruction_index];
-    llvm::IRBuilder<> builder(instruction_blocks[instruction_index]);
+    llvm::IRBuilder<> header_builder(instruction_blocks[instruction_index]);
     const bytecode_layout &layout = serialized.layouts[instruction_index];
     const llvm::ArrayRef<std::uint32_t> current_slot_mapping(
         slot_mappings[instruction_index]);
-    consume_metadata(builder, instruction, layout,
-                     0x8000 + static_cast<std::uint64_t>(instruction_index) * 32);
+    llvm::Value *decoded_opcode = consume_metadata(
+        header_builder, layout,
+        0x8000 + static_cast<std::uint64_t>(instruction_index) * 32);
 
     if (layout.integrity_probe_range > 0 && bytecode_global != nullptr) {
       const std::uint32_t num_probes = 2U + static_cast<std::uint32_t>(
@@ -1137,35 +1551,60 @@ void rewrite_function_body(llvm::Function &function,
         const std::uint32_t probe_offset = static_cast<std::uint32_t>(
             mix_seed(bytecode_seed,
                      static_cast<std::uint64_t>(instruction_index) * 0x1337ULL +
-                         probe + 1) %
+                          probe + 1) %
             layout.integrity_probe_range);
-        llvm::Value *byte_ptr = builder.CreateInBoundsGEP(
+        llvm::Value *byte_ptr = header_builder.CreateInBoundsGEP(
             bytecode_global->getValueType(), bytecode_global,
-            {builder.getInt32(0), builder.getInt32(probe_offset)},
+            {header_builder.getInt32(0), header_builder.getInt32(probe_offset)},
             "obf.vm.integrity.ptr");
-        llvm::Value *cipher_byte = builder.CreateLoad(
-            builder.getInt8Ty(), byte_ptr, "obf.vm.integrity.byte");
-        auto *integrity_state = builder.CreateLoad(builder.getInt64Ty(),
-                                                   state_slot,
-                                                   "obf.vm.integrity.state");
-        llvm::Value *rotated = builder.CreateOr(
-            builder.CreateLShr(integrity_state, builder.getInt64(7),
-                               "obf.vm.integrity.shr"),
-            builder.CreateShl(integrity_state, builder.getInt64(57),
-                              "obf.vm.integrity.shl"),
+        llvm::Value *cipher_byte = header_builder.CreateLoad(
+            header_builder.getInt8Ty(), byte_ptr, "obf.vm.integrity.byte");
+        auto *integrity_state = header_builder.CreateLoad(
+            header_builder.getInt64Ty(), state_slot, "obf.vm.integrity.state");
+        llvm::Value *rotated = header_builder.CreateOr(
+            header_builder.CreateLShr(integrity_state, header_builder.getInt64(7),
+                                      "obf.vm.integrity.shr"),
+            header_builder.CreateShl(integrity_state, header_builder.getInt64(57),
+                                     "obf.vm.integrity.shl"),
             "obf.vm.integrity.rot");
-        llvm::Value *extended = builder.CreateZExt(
-            cipher_byte, builder.getInt64Ty(), "obf.vm.integrity.ext");
-        llvm::Value *scaled = builder.CreateMul(
-            extended, builder.getInt64(0x517cc1b727220a95ULL),
+        llvm::Value *extended = header_builder.CreateZExt(
+            cipher_byte, header_builder.getInt64Ty(), "obf.vm.integrity.ext");
+        llvm::Value *scaled = header_builder.CreateMul(
+            extended, header_builder.getInt64(0x517cc1b727220a95ULL),
             "obf.vm.integrity.scale");
-        llvm::Value *folded = builder.CreateXor(
+        llvm::Value *folded = header_builder.CreateXor(
             integrity_state,
-            builder.CreateAdd(rotated, scaled, "obf.vm.integrity.sum"),
+            header_builder.CreateAdd(rotated, scaled, "obf.vm.integrity.sum"),
             "obf.vm.integrity.fold");
-        (void)builder.CreateStore(folded, state_slot);
+        (void)header_builder.CreateStore(folded, state_slot);
       }
     }
+
+    auto *opcode_block = llvm::BasicBlock::Create(
+        context, "vm.exec." + std::to_string(instruction_index), &function);
+    llvm::Value *opcode_match = header_builder.CreateICmpEQ(
+        decoded_opcode,
+        header_builder.getInt8(get_physical_opcode(opcode_map, instruction.op)),
+        "obf.vm.opcode.match");
+    if (select_handler_variant(instruction.op, opaque_seed_base,
+                               0x7d000 + instruction_index) == 0) {
+      header_builder.CreateCondBr(opcode_match, opcode_block, trap_block);
+    } else {
+      llvm::Value *match_word = header_builder.CreateZExt(
+          opcode_match, header_builder.getInt64Ty(), "obf.vm.opcode.match.word");
+      llvm::Value *gated_match = mba::create_xor(
+          header_builder, match_word,
+          mba::create_opaque_integer(
+              header_builder, header_builder.getInt64Ty(), mba_context,
+              llvm::APInt(64, 0), 0x7e000 + instruction_index,
+              "obf.vm.opcode.zero"),
+          mba_context, 0x7f000 + instruction_index, "obf.vm.opcode.gate");
+      llvm::Value *accept = header_builder.CreateICmpNE(
+          gated_match, header_builder.getInt64(0), "obf.vm.opcode.accept");
+      header_builder.CreateCondBr(accept, opcode_block, trap_block);
+    }
+
+    llvm::IRBuilder<> builder(opcode_block);
 
     const auto rotate_to_mapping = [&](llvm::IRBuilder<> &rotation_builder,
                                        std::uint32_t target_instruction) {
@@ -1178,34 +1617,89 @@ void rewrite_function_body(llvm::Function &function,
                         llvm::ArrayRef<std::uint32_t>(slot_mappings[target_instruction]));
     };
 
+    const auto finish_value_in_builder =
+        [&](llvm::IRBuilder<> &finish_builder, llvm::Value *result) {
+          if (instruction.result_slot != invalid_slot) {
+            store_slot(finish_builder, slot_allocas, current_slot_mapping,
+                       instruction.result_slot, result);
+          }
+          if (instruction_index + 1 < slot_mappings.size()) {
+            rotate_to_mapping(finish_builder,
+                              static_cast<std::uint32_t>(instruction_index + 1));
+          }
+          llvm::Value *next_target = decode_target_dispatch(
+              finish_builder, layout.fallthrough_target_offset,
+              0x9000 + static_cast<std::uint64_t>(instruction_index) * 32);
+          emit_dispatch(finish_builder, next_target,
+                        0xa000 + static_cast<std::uint64_t>(instruction_index) * 32);
+        };
+
     const auto finish_value = [&](llvm::Value *result) {
-      if (instruction.result_slot != invalid_slot) {
-        store_slot(builder, slot_allocas, current_slot_mapping,
-                   instruction.result_slot, result);
-      }
-      if (instruction_index + 1 < slot_mappings.size()) {
-        rotate_to_mapping(builder,
-                          static_cast<std::uint32_t>(instruction_index + 1));
-      }
-      llvm::Value *next_target = decode_target_dispatch(
-          builder, layout.fallthrough_target_offset,
-          0x9000 + static_cast<std::uint64_t>(instruction_index) * 32);
-      emit_dispatch(builder, next_target,
-                    0xa000 + static_cast<std::uint64_t>(instruction_index) * 32);
+      finish_value_in_builder(builder, result);
+    };
+
+    const auto emit_in_helper_block = [&](llvm::StringRef name, auto &&emit) {
+      auto *helper_block = llvm::BasicBlock::Create(
+          context, (name + std::to_string(instruction_index)).str(), &function);
+      builder.CreateBr(helper_block);
+      llvm::IRBuilder<> helper_builder(helper_block);
+      emit(helper_builder);
     };
 
     switch (instruction.op) {
-    case opcode::binary:
+    case opcode::add:
+    case opcode::sub:
+    case opcode::mul:
+    case opcode::udiv:
+    case opcode::sdiv:
+    case opcode::urem:
+    case opcode::srem:
+    case opcode::shl:
+    case opcode::lshr:
+    case opcode::ashr:
+    case opcode::and_op:
+    case opcode::or_op:
+    case opcode::xor_op:
+    case opcode::fadd:
+    case opcode::fsub:
+    case opcode::fmul:
+    case opcode::fdiv:
+    case opcode::frem:
       finish_value(emit_binary(builder, slot_allocas, current_slot_mapping,
                                program, instruction, opaque_seed,
                                opaque_seed_base, mba_context,
                                0xb000 + static_cast<std::uint64_t>(instruction_index)));
       break;
-    case opcode::cast:
-      finish_value(emit_cast(builder, slot_allocas, current_slot_mapping,
-                             program, instruction, opaque_seed,
-                             opaque_seed_base, mba_context,
-                             0xc000 + static_cast<std::uint64_t>(instruction_index)));
+    case opcode::trunc:
+    case opcode::zext:
+    case opcode::sext:
+    case opcode::fp_trunc:
+    case opcode::fp_ext:
+    case opcode::ui_to_fp:
+    case opcode::si_to_fp:
+    case opcode::fp_to_ui:
+    case opcode::fp_to_si:
+    case opcode::ptr_to_int:
+    case opcode::int_to_ptr:
+    case opcode::bitcast:
+    case opcode::addrspace_cast:
+      if (select_handler_variant(instruction.op, opaque_seed_base,
+                                 0xc800 + instruction_index) == 0) {
+        finish_value(emit_cast(builder, slot_allocas, current_slot_mapping,
+                               program, instruction, opaque_seed,
+                               opaque_seed_base, mba_context,
+                               0xc000 + static_cast<std::uint64_t>(instruction_index)));
+      } else {
+        emit_in_helper_block(
+            "vm.cast.exec.", [&](llvm::IRBuilder<> &helper_builder) {
+              finish_value_in_builder(
+                  helper_builder,
+                  emit_cast(helper_builder, slot_allocas, current_slot_mapping,
+                            program, instruction, opaque_seed, opaque_seed_base,
+                            mba_context,
+                            0xc000 + static_cast<std::uint64_t>(instruction_index)));
+            });
+      }
       break;
     case opcode::freeze:
       finish_value(builder.CreateFreeze(
@@ -1215,90 +1709,326 @@ void rewrite_function_body(llvm::Function &function,
                             0xd000 + static_cast<std::uint64_t>(instruction_index)),
           "obf.vm.freeze"));
       break;
-    case opcode::icmp:
-      finish_value(builder.CreateICmp(
-          static_cast<llvm::CmpInst::Predicate>(instruction.subtype),
+    case opcode::fneg: {
+      auto *neg = llvm::cast<llvm::Instruction>(builder.CreateFNeg(
           materialize_value(builder, slot_allocas, current_slot_mapping, program,
                             instruction.operands[0], opaque_seed,
                             opaque_seed_base, mba_context,
-                            0xe000 + static_cast<std::uint64_t>(instruction_index)),
-          materialize_value(builder, slot_allocas, current_slot_mapping, program,
-                            instruction.operands[1], opaque_seed,
-                            opaque_seed_base, mba_context,
-                            0xe100 + static_cast<std::uint64_t>(instruction_index)),
-          "obf.vm.icmp"));
+                            0xd080 + static_cast<std::uint64_t>(instruction_index)),
+          "obf.vm.fneg"));
+      apply_fast_math_flags(neg, instruction.flags);
+      finish_value(neg);
       break;
-    case opcode::fcmp: {
-      auto *compare = llvm::cast<llvm::Instruction>(builder.CreateFCmp(
-          static_cast<llvm::CmpInst::Predicate>(instruction.subtype),
-          materialize_value(builder, slot_allocas, current_slot_mapping, program,
-                            instruction.operands[0], opaque_seed,
-                            opaque_seed_base, mba_context,
-                            0xf000 + static_cast<std::uint64_t>(instruction_index)),
-          materialize_value(builder, slot_allocas, current_slot_mapping, program,
-                            instruction.operands[1], opaque_seed,
-                            opaque_seed_base, mba_context,
-                            0xf100 + static_cast<std::uint64_t>(instruction_index)),
-          "obf.vm.fcmp"));
-      apply_fast_math_flags(compare, instruction.flags);
-      finish_value(compare);
+    }
+    case opcode::icmp_eq:
+    case opcode::icmp_ne:
+    case opcode::icmp_ugt:
+    case opcode::icmp_uge:
+    case opcode::icmp_ult:
+    case opcode::icmp_ule:
+    case opcode::icmp_sgt:
+    case opcode::icmp_sge:
+    case opcode::icmp_slt:
+    case opcode::icmp_sle:
+      if (select_handler_variant(instruction.op, opaque_seed_base,
+                                 0xe800 + instruction_index) == 0) {
+        finish_value(builder.CreateICmp(
+            icmp_predicate_for_opcode(instruction.op),
+            materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                              instruction.operands[0], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0xe000 + static_cast<std::uint64_t>(instruction_index)),
+            materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                              instruction.operands[1], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0xe100 + static_cast<std::uint64_t>(instruction_index)),
+            "obf.vm.icmp"));
+      } else {
+        emit_in_helper_block(
+            "vm.icmp.exec.", [&](llvm::IRBuilder<> &helper_builder) {
+              finish_value_in_builder(
+                  helper_builder,
+                  helper_builder.CreateICmp(
+                      icmp_predicate_for_opcode(instruction.op),
+                      materialize_value(helper_builder, slot_allocas,
+                                        current_slot_mapping, program,
+                                        instruction.operands[0], opaque_seed,
+                                        opaque_seed_base, mba_context,
+                                        0xe000 +
+                                            static_cast<std::uint64_t>(instruction_index)),
+                      materialize_value(helper_builder, slot_allocas,
+                                        current_slot_mapping, program,
+                                        instruction.operands[1], opaque_seed,
+                                        opaque_seed_base, mba_context,
+                                        0xe100 +
+                                            static_cast<std::uint64_t>(instruction_index)),
+                      "obf.vm.icmp"));
+            });
+      }
+      break;
+    case opcode::fcmp_false:
+    case opcode::fcmp_oeq:
+    case opcode::fcmp_ogt:
+    case opcode::fcmp_oge:
+    case opcode::fcmp_olt:
+    case opcode::fcmp_ole:
+    case opcode::fcmp_one:
+    case opcode::fcmp_ord:
+    case opcode::fcmp_uno:
+    case opcode::fcmp_ueq:
+    case opcode::fcmp_ugt:
+    case opcode::fcmp_uge:
+    case opcode::fcmp_ult:
+    case opcode::fcmp_ule:
+    case opcode::fcmp_une:
+    case opcode::fcmp_true: {
+      if (select_handler_variant(instruction.op, opaque_seed_base,
+                                 0xf800 + instruction_index) == 0) {
+        auto *compare = llvm::cast<llvm::Instruction>(builder.CreateFCmp(
+            fcmp_predicate_for_opcode(instruction.op),
+            materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                              instruction.operands[0], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0xf000 + static_cast<std::uint64_t>(instruction_index)),
+            materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                              instruction.operands[1], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0xf100 + static_cast<std::uint64_t>(instruction_index)),
+            "obf.vm.fcmp"));
+        apply_fast_math_flags(compare, instruction.flags);
+        finish_value(compare);
+      } else {
+        emit_in_helper_block(
+            "vm.fcmp.exec.", [&](llvm::IRBuilder<> &helper_builder) {
+              auto *compare = llvm::cast<llvm::Instruction>(helper_builder.CreateFCmp(
+                  fcmp_predicate_for_opcode(instruction.op),
+                  materialize_value(helper_builder, slot_allocas,
+                                    current_slot_mapping, program,
+                                    instruction.operands[0], opaque_seed,
+                                    opaque_seed_base, mba_context,
+                                    0xf000 +
+                                        static_cast<std::uint64_t>(instruction_index)),
+                  materialize_value(helper_builder, slot_allocas,
+                                    current_slot_mapping, program,
+                                    instruction.operands[1], opaque_seed,
+                                    opaque_seed_base, mba_context,
+                                    0xf100 +
+                                        static_cast<std::uint64_t>(instruction_index)),
+                  "obf.vm.fcmp"));
+              apply_fast_math_flags(compare, instruction.flags);
+              finish_value_in_builder(helper_builder, compare);
+            });
+      }
       break;
     }
     case opcode::select:
-      finish_value(builder.CreateSelect(
+      if (select_handler_variant(instruction.op, opaque_seed_base,
+                                 0x10000 + instruction_index) == 0) {
+        finish_value(builder.CreateSelect(
+            materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                              instruction.operands[0], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0x10000 + static_cast<std::uint64_t>(instruction_index)),
+            materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                              instruction.operands[1], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0x10100 + static_cast<std::uint64_t>(instruction_index)),
+            materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                              instruction.operands[2], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0x10200 + static_cast<std::uint64_t>(instruction_index)),
+            "obf.vm.select"));
+      } else {
+        auto *true_block = llvm::BasicBlock::Create(
+            context, "vm.select.true." + std::to_string(instruction_index), &function);
+        auto *false_block = llvm::BasicBlock::Create(
+            context, "vm.select.false." + std::to_string(instruction_index), &function);
+        auto *merge_block = llvm::BasicBlock::Create(
+            context, "vm.select.merge." + std::to_string(instruction_index), &function);
+        llvm::Value *condition = materialize_value(
+            builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[0], opaque_seed, opaque_seed_base, mba_context,
+            0x10000 + static_cast<std::uint64_t>(instruction_index));
+        builder.CreateCondBr(condition, true_block, false_block);
+
+        llvm::IRBuilder<> true_builder(true_block);
+        llvm::Value *true_value = materialize_value(
+            true_builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[1], opaque_seed, opaque_seed_base, mba_context,
+            0x10100 + static_cast<std::uint64_t>(instruction_index));
+        true_builder.CreateBr(merge_block);
+
+        llvm::IRBuilder<> false_builder(false_block);
+        llvm::Value *false_value = materialize_value(
+            false_builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[2], opaque_seed, opaque_seed_base, mba_context,
+            0x10200 + static_cast<std::uint64_t>(instruction_index));
+        false_builder.CreateBr(merge_block);
+
+        llvm::IRBuilder<> merge_builder(merge_block);
+        auto *phi = merge_builder.CreatePHI(true_value->getType(), 2, "obf.vm.select.phi");
+        phi->addIncoming(true_value, true_block);
+        phi->addIncoming(false_value, false_block);
+        finish_value_in_builder(merge_builder, phi);
+      }
+      break;
+    case opcode::load_int:
+    case opcode::load_float:
+    case opcode::load_ptr:
+    case opcode::load_vector: {
+      if (select_handler_variant(instruction.op, opaque_seed_base,
+                                 0x11800 + instruction_index) == 0) {
+        auto *load = builder.CreateLoad(
+            const_cast<llvm::Type *>(instruction.type),
+            materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                              instruction.operands[0], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0x11000 + static_cast<std::uint64_t>(instruction_index)),
+            "obf.vm.load");
+        if (instruction.immediate != 0) {
+          load->setAlignment(llvm::Align(instruction.immediate));
+        }
+        finish_value(load);
+      } else {
+        emit_in_helper_block(
+            "vm.load.exec.", [&](llvm::IRBuilder<> &helper_builder) {
+              auto *load = helper_builder.CreateLoad(
+                  const_cast<llvm::Type *>(instruction.type),
+                  materialize_value(helper_builder, slot_allocas,
+                                    current_slot_mapping, program,
+                                    instruction.operands[0], opaque_seed,
+                                    opaque_seed_base, mba_context,
+                                    0x11000 +
+                                        static_cast<std::uint64_t>(instruction_index)),
+                  "obf.vm.load");
+              if (instruction.immediate != 0) {
+                load->setAlignment(llvm::Align(instruction.immediate));
+              }
+              finish_value_in_builder(helper_builder, load);
+            });
+      }
+      break;
+    }
+    case opcode::store_int:
+    case opcode::store_float:
+    case opcode::store_ptr:
+    case opcode::store_vector: {
+      const auto emit_store = [&](llvm::IRBuilder<> &store_builder) {
+        auto *store = store_builder.CreateStore(
+            materialize_value(store_builder, slot_allocas, current_slot_mapping,
+                              program, instruction.operands[0], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0x12000 + static_cast<std::uint64_t>(instruction_index)),
+            materialize_value(store_builder, slot_allocas, current_slot_mapping,
+                              program, instruction.operands[1], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0x12100 + static_cast<std::uint64_t>(instruction_index)));
+        if (instruction.immediate != 0) {
+          store->setAlignment(llvm::Align(instruction.immediate));
+        }
+        if (instruction_index + 1 < slot_mappings.size()) {
+          rotate_to_mapping(store_builder,
+                            static_cast<std::uint32_t>(instruction_index + 1));
+        }
+        llvm::Value *next_target = decode_target_dispatch(
+            store_builder, layout.fallthrough_target_offset,
+            0x12200 + static_cast<std::uint64_t>(instruction_index));
+        emit_dispatch(store_builder, next_target,
+                      0x12300 + static_cast<std::uint64_t>(instruction_index));
+      };
+      if (select_handler_variant(instruction.op, opaque_seed_base,
+                                 0x12800 + instruction_index) == 0) {
+        emit_store(builder);
+      } else {
+        emit_in_helper_block("vm.store.exec.", emit_store);
+      }
+      break;
+    }
+    case opcode::extract_element: {
+      finish_value(builder.CreateExtractElement(
           materialize_value(builder, slot_allocas, current_slot_mapping, program,
                             instruction.operands[0], opaque_seed,
                             opaque_seed_base, mba_context,
-                            0x10000 + static_cast<std::uint64_t>(instruction_index)),
+                            0x12900 + static_cast<std::uint64_t>(instruction_index)),
           materialize_value(builder, slot_allocas, current_slot_mapping, program,
                             instruction.operands[1], opaque_seed,
                             opaque_seed_base, mba_context,
-                            0x10100 + static_cast<std::uint64_t>(instruction_index)),
+                            0x12910 + static_cast<std::uint64_t>(instruction_index)),
+          "obf.vm.extract.element"));
+      break;
+    }
+    case opcode::insert_element: {
+      finish_value(builder.CreateInsertElement(
+          materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                            instruction.operands[0], opaque_seed,
+                            opaque_seed_base, mba_context,
+                            0x12920 + static_cast<std::uint64_t>(instruction_index)),
+          materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                            instruction.operands[1], opaque_seed,
+                            opaque_seed_base, mba_context,
+                            0x12930 + static_cast<std::uint64_t>(instruction_index)),
           materialize_value(builder, slot_allocas, current_slot_mapping, program,
                             instruction.operands[2], opaque_seed,
                             opaque_seed_base, mba_context,
-                            0x10200 + static_cast<std::uint64_t>(instruction_index)),
-          "obf.vm.select"));
-      break;
-    case opcode::load: {
-      auto *load = builder.CreateLoad(
-          const_cast<llvm::Type *>(instruction.type),
-          materialize_value(builder, slot_allocas, current_slot_mapping, program,
-                            instruction.operands[0], opaque_seed,
-                            opaque_seed_base, mba_context,
-                            0x11000 + static_cast<std::uint64_t>(instruction_index)),
-          "obf.vm.load");
-      if (instruction.immediate != 0) {
-        load->setAlignment(llvm::Align(instruction.immediate));
-      }
-      finish_value(load);
+                            0x12940 + static_cast<std::uint64_t>(instruction_index)),
+          "obf.vm.insert.element"));
       break;
     }
-    case opcode::store: {
-      auto *store = builder.CreateStore(
+    case opcode::shuffle_vector: {
+      llvm::SmallVector<int, 8> mask;
+      mask.reserve(instruction.case_values.size());
+      for (const llvm::ConstantInt *mask_value : instruction.case_values) {
+        mask.push_back(mask_value == nullptr ? -1
+                                             : static_cast<int>(mask_value->getSExtValue()));
+      }
+      finish_value(builder.CreateShuffleVector(
           materialize_value(builder, slot_allocas, current_slot_mapping, program,
                             instruction.operands[0], opaque_seed,
                             opaque_seed_base, mba_context,
-                            0x12000 + static_cast<std::uint64_t>(instruction_index)),
+                            0x12950 + static_cast<std::uint64_t>(instruction_index)),
           materialize_value(builder, slot_allocas, current_slot_mapping, program,
                             instruction.operands[1], opaque_seed,
                             opaque_seed_base, mba_context,
-                            0x12100 + static_cast<std::uint64_t>(instruction_index)));
-      if (instruction.immediate != 0) {
-        store->setAlignment(llvm::Align(instruction.immediate));
-      }
-      if (instruction_index + 1 < slot_mappings.size()) {
-        rotate_to_mapping(builder,
-                          static_cast<std::uint32_t>(instruction_index + 1));
-      }
-      llvm::Value *next_target = decode_target_dispatch(
-          builder, layout.fallthrough_target_offset,
-          0x12200 + static_cast<std::uint64_t>(instruction_index));
-      emit_dispatch(builder, next_target,
-                    0x12300 + static_cast<std::uint64_t>(instruction_index));
+                            0x12960 + static_cast<std::uint64_t>(instruction_index)),
+          mask, "obf.vm.shuffle.vector"));
       break;
     }
-    case opcode::gep: {
+    case opcode::extract_value: {
+      llvm::SmallVector<unsigned, 8> indices;
+      indices.reserve(instruction.case_values.size());
+      for (const llvm::ConstantInt *index_value : instruction.case_values) {
+        indices.push_back(index_value == nullptr ? 0U
+                                                 : static_cast<unsigned>(index_value->getZExtValue()));
+      }
+      finish_value(builder.CreateExtractValue(
+          materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                            instruction.operands[0], opaque_seed,
+                            opaque_seed_base, mba_context,
+                            0x12970 + static_cast<std::uint64_t>(instruction_index)),
+          indices, "obf.vm.extract.value"));
+      break;
+    }
+    case opcode::insert_value: {
+      llvm::SmallVector<unsigned, 8> indices;
+      indices.reserve(instruction.case_values.size());
+      for (const llvm::ConstantInt *index_value : instruction.case_values) {
+        indices.push_back(index_value == nullptr ? 0U
+                                                 : static_cast<unsigned>(index_value->getZExtValue()));
+      }
+      finish_value(builder.CreateInsertValue(
+          materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                            instruction.operands[0], opaque_seed,
+                            opaque_seed_base, mba_context,
+                            0x12980 + static_cast<std::uint64_t>(instruction_index)),
+          materialize_value(builder, slot_allocas, current_slot_mapping, program,
+                            instruction.operands[1], opaque_seed,
+                            opaque_seed_base, mba_context,
+                            0x12990 + static_cast<std::uint64_t>(instruction_index)),
+          indices, "obf.vm.insert.value"));
+      break;
+    }
+    case opcode::gep:
+    case opcode::gep_inbounds: {
       llvm::SmallVector<llvm::Value *, 4> indices;
       indices.reserve(instruction.operands.size() - 1);
       for (std::size_t operand_index = 1; operand_index < instruction.operands.size();
@@ -1320,7 +2050,7 @@ void rewrite_function_body(llvm::Function &function,
                             instruction.operands[0], opaque_seed,
                             opaque_seed_base, mba_context,
                             0x13100 + static_cast<std::uint64_t>(instruction_index));
-      if (has_instruction_flag(instruction.flags, instruction_flag_inbounds)) {
+      if (instruction.op == opcode::gep_inbounds) {
         gep = builder.CreateInBoundsGEP(const_cast<llvm::Type *>(instruction.type),
                                         pointer, indices, "obf.vm.gep");
       } else {
@@ -1330,47 +2060,110 @@ void rewrite_function_body(llvm::Function &function,
       finish_value(gep);
       break;
     }
+    case opcode::memmove_fixed:
+    case opcode::memcpy_fixed:
+    case opcode::memset_fixed: {
+      const auto emit_mem = [&](llvm::IRBuilder<> &mem_builder) {
+        if (instruction.op == opcode::memset_fixed) {
+          (void)mem_builder.CreateMemSet(
+              materialize_value(mem_builder, slot_allocas, current_slot_mapping, program,
+                                instruction.operands[0], opaque_seed,
+                                opaque_seed_base, mba_context,
+                                0x13a00 + static_cast<std::uint64_t>(instruction_index)),
+              materialize_value(mem_builder, slot_allocas, current_slot_mapping, program,
+                                instruction.operands[1], opaque_seed,
+                                opaque_seed_base, mba_context,
+                                0x13a10 + static_cast<std::uint64_t>(instruction_index)),
+              instruction.immediate, llvm::MaybeAlign());
+        } else if (instruction.op == opcode::memmove_fixed) {
+          (void)mem_builder.CreateMemMove(
+              materialize_value(mem_builder, slot_allocas, current_slot_mapping, program,
+                                instruction.operands[0], opaque_seed,
+                                opaque_seed_base, mba_context,
+                                0x13a20 + static_cast<std::uint64_t>(instruction_index)),
+              llvm::MaybeAlign(),
+              materialize_value(mem_builder, slot_allocas, current_slot_mapping, program,
+                                instruction.operands[1], opaque_seed,
+                                opaque_seed_base, mba_context,
+                                0x13a30 + static_cast<std::uint64_t>(instruction_index)),
+              llvm::MaybeAlign(), instruction.immediate);
+        } else {
+          (void)mem_builder.CreateMemCpy(
+              materialize_value(mem_builder, slot_allocas, current_slot_mapping, program,
+                                instruction.operands[0], opaque_seed,
+                                opaque_seed_base, mba_context,
+                                0x13a40 + static_cast<std::uint64_t>(instruction_index)),
+              llvm::MaybeAlign(),
+              materialize_value(mem_builder, slot_allocas, current_slot_mapping, program,
+                                instruction.operands[1], opaque_seed,
+                                opaque_seed_base, mba_context,
+                                0x13a50 + static_cast<std::uint64_t>(instruction_index)),
+              llvm::MaybeAlign(), instruction.immediate);
+        }
+        if (instruction_index + 1 < slot_mappings.size()) {
+          rotate_to_mapping(mem_builder,
+                            static_cast<std::uint32_t>(instruction_index + 1));
+        }
+        llvm::Value *next_target = decode_target_dispatch(
+            mem_builder, layout.fallthrough_target_offset,
+            0x13a60 + static_cast<std::uint64_t>(instruction_index));
+        emit_dispatch(mem_builder, next_target,
+                      0x13a70 + static_cast<std::uint64_t>(instruction_index));
+      };
+      if (select_handler_variant(instruction.op, opaque_seed_base,
+                                 0x13a80 + instruction_index) == 0) {
+        emit_mem(builder);
+      } else {
+        emit_in_helper_block("vm.mem.exec.", emit_mem);
+      }
+      break;
+    }
     case opcode::call: {
-      llvm::SmallVector<llvm::Value *, 8> arguments;
-      arguments.reserve(instruction.operands.size() - 1);
-      for (std::size_t operand_index = 1; operand_index < instruction.operands.size();
-           ++operand_index) {
-        arguments.push_back(materialize_value(builder, slot_allocas,
-                                              current_slot_mapping, program,
-                                              instruction.operands[operand_index],
-                                              opaque_seed, opaque_seed_base,
-                                              mba_context,
-                                              0x14000 +
-                                                  static_cast<std::uint64_t>(instruction_index) *
-                                                      16 +
-                                                  operand_index));
-      }
+      const auto emit_call = [&](llvm::IRBuilder<> &call_builder) {
+        llvm::SmallVector<llvm::Value *, 8> arguments;
+        arguments.reserve(instruction.operands.size() - 1);
+        for (std::size_t operand_index = 1;
+             operand_index < instruction.operands.size(); ++operand_index) {
+          arguments.push_back(materialize_value(
+              call_builder, slot_allocas, current_slot_mapping, program,
+              instruction.operands[operand_index], opaque_seed, opaque_seed_base,
+              mba_context,
+              0x14000 + static_cast<std::uint64_t>(instruction_index) * 16 +
+                  operand_index));
+        }
 
-      auto *call = builder.CreateCall(
-          llvm::cast<llvm::FunctionType>(const_cast<llvm::Type *>(instruction.type)),
-          materialize_value(builder, slot_allocas, current_slot_mapping, program,
-                            instruction.operands[0], opaque_seed,
-                            opaque_seed_base, mba_context,
-                            0x14100 + static_cast<std::uint64_t>(instruction_index)),
-          arguments,
-          instruction.result_slot == invalid_slot ? "" : "obf.vm.call");
-      call->setCallingConv(
-          static_cast<llvm::CallingConv::ID>(instruction.subtype));
-      call->setAttributes(instruction.attributes);
-      apply_fast_math_flags(call, instruction.flags);
-      if (instruction.result_slot != invalid_slot) {
-        store_slot(builder, slot_allocas, current_slot_mapping,
-                   instruction.result_slot, call);
+        auto *call = call_builder.CreateCall(
+            llvm::cast<llvm::FunctionType>(const_cast<llvm::Type *>(instruction.type)),
+            materialize_value(call_builder, slot_allocas, current_slot_mapping,
+                              program, instruction.operands[0], opaque_seed,
+                              opaque_seed_base, mba_context,
+                              0x14100 + static_cast<std::uint64_t>(instruction_index)),
+            arguments,
+            instruction.result_slot == invalid_slot ? "" : "obf.vm.call");
+        call->setCallingConv(
+            static_cast<llvm::CallingConv::ID>(instruction.subtype));
+        call->setAttributes(instruction.attributes);
+        apply_fast_math_flags(call, instruction.flags);
+        if (instruction.result_slot != invalid_slot) {
+          store_slot(call_builder, slot_allocas, current_slot_mapping,
+                     instruction.result_slot, call);
+        }
+        if (instruction_index + 1 < slot_mappings.size()) {
+          rotate_to_mapping(call_builder,
+                            static_cast<std::uint32_t>(instruction_index + 1));
+        }
+        llvm::Value *next_target = decode_target_dispatch(
+            call_builder, layout.fallthrough_target_offset,
+            0x14200 + static_cast<std::uint64_t>(instruction_index));
+        emit_dispatch(call_builder, next_target,
+                      0x14300 + static_cast<std::uint64_t>(instruction_index));
+      };
+      if (select_handler_variant(instruction.op, opaque_seed_base,
+                                 0x14800 + instruction_index) == 0) {
+        emit_call(builder);
+      } else {
+        emit_in_helper_block("vm.call.exec.", emit_call);
       }
-      if (instruction_index + 1 < slot_mappings.size()) {
-        rotate_to_mapping(builder,
-                          static_cast<std::uint32_t>(instruction_index + 1));
-      }
-      llvm::Value *next_target = decode_target_dispatch(
-          builder, layout.fallthrough_target_offset,
-          0x14200 + static_cast<std::uint64_t>(instruction_index));
-      emit_dispatch(builder, next_target,
-                    0x14300 + static_cast<std::uint64_t>(instruction_index));
       break;
     }
     case opcode::jump:
@@ -1501,9 +2294,9 @@ void rewrite_function_body(llvm::Function &function,
                               0x18000 + static_cast<std::uint64_t>(instruction_index));
         // Encode the return value if this function returns an integer type
         // and we have a retkey global.  Encoding:
-        //   encoded = ret_val ^ trunc(retkey ^ (state ^ expected_state))
+        //   encoded = ret_val ^ cast(retkey ^ hidden_token ^ (state ^ expected_state))
         // Under normal (untampered) execution state == expected_state, so the
-        // poison term cancels and the caller sees ret_val ^ trunc(retkey).
+        // poison term cancels and the caller sees ret_val ^ cast(retkey ^ hidden_token).
         // If bytecode was tampered, state diverges and garbage propagates.
         if (retkey_global != nullptr && ret_val->getType()->isIntegerTy()) {
           const std::uint64_t ret_salt =
@@ -1518,17 +2311,27 @@ void rewrite_function_body(llvm::Function &function,
           auto *retkey_load = builder.CreateLoad(builder.getInt64Ty(),
                                                  retkey_global,
                                                  "obf.vm.ret.retkey");
+          llvm::Value *token_component = hidden_token_arg != nullptr
+                                             ? static_cast<llvm::Value *>(hidden_token_arg)
+                                             : builder.getInt64(opaque_seed_base);
+          if (token_component->getType() != builder.getInt64Ty()) {
+            token_component = builder.CreateZExtOrTrunc(
+                token_component, builder.getInt64Ty(), "obf.vm.ret.token.cast");
+          }
+          llvm::Value *token_key = mba::create_xor(
+              builder, retkey_load, token_component, mba_context,
+              ret_salt + 2, "obf.vm.ret.tokenkey");
           llvm::Value *full_key = mba::create_xor(
-              builder, retkey_load, poison, mba_context,
-              ret_salt + 2, "obf.vm.ret.fullkey");
+              builder, token_key, poison, mba_context,
+              ret_salt + 3, "obf.vm.ret.fullkey");
           llvm::Value *key_trunc = full_key;
           if (ret_val->getType() != builder.getInt64Ty()) {
-            key_trunc = builder.CreateTrunc(full_key, ret_val->getType(),
-                                            "obf.vm.ret.key.trunc");
+            key_trunc = builder.CreateZExtOrTrunc(
+                full_key, ret_val->getType(), "obf.vm.ret.key.cast");
           }
           ret_val = mba::create_xor(
               builder, ret_val, key_trunc, mba_context,
-              ret_salt + 3, "obf.vm.ret.encoded");
+              ret_salt + 4, "obf.vm.ret.encoded");
         }
         builder.CreateRet(ret_val);
       }

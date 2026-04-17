@@ -36,46 +36,32 @@ entry:
   ret i32 %ret
 }
 
-; CHECK: @.secret = private unnamed_addr global [7 x i8]
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; CHECK-DAG: @__obf_vm_bc_fold_value = private unnamed_addr constant [{{[0-9]+}} x i8] c"
-; CHECK-DAG: @__obf_vm_retkey_fold_value = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
-; CHECK: @__obf_vm_target_fold_value = private global i{{[0-9]+}} {{-?[0-9]+}}
-; CHECK-NOT: @llvm.global_ctors
-; CHECK: @__obf_{{cached|decoded}}__secret = internal global
+; CHECK-DAG: @[[VMBC:_[0-9a-f]+]] = private unnamed_addr constant [{{[0-9]+}} x i8] c"
+; CHECK-DAG: @[[VMRETKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @[[VMTARGET:_[0-9a-f]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
+; CHECK-DAG: @[[VMKEY:_[0-9a-f]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
+; CHECK-NOT: @__obf_vm_
+; CHECK-NOT: @__obf_family_
+; CHECK-NOT: @__obf_cached_
+; CHECK-NOT: @__obf_decoded_
+; CHECK-NOT: !dbg
+; CHECK-NOT: %obf.
 ; CHECK-LABEL: define i32 @value()
-; CHECK: %obf.entropy.direct = load i64, ptr @__obf_entropy_anchor
-; CHECK: %obf.entropy.ref = load ptr, ptr @__obf_entropy_anchor_ref
-; CHECK: store i64 %obf.entropy.direct, ptr %obf.entropy.ref
-; CHECK: %obf.entropy.indirect = load i64, ptr @__obf_entropy_anchor
-; CHECK: %obf.const.mask = {{(sub|or) i32}}
-; CHECK: %obf.const = {{(sub|or) i32}}
-; CHECK: ret i32 %obf.const
-; CHECK-LABEL: define i32 @fold_value(i32 %value)
-; CHECK: %obf.entropy.direct = load i64, ptr @__obf_entropy_anchor
-; CHECK: %obf.entropy.ref = load ptr, ptr @__obf_entropy_anchor_ref
-; CHECK: %fold_value.obf.wrapper.token = xor i64
-; CHECK: call i32 @__obf_vm_impl_fold_value(i32 %value, i64 %fold_value.obf.wrapper.token)
+; CHECK: load i64, ptr @__obf_entropy_anchor
+; CHECK: load ptr, ptr @__obf_entropy_anchor_ref
+; CHECK: ret i32
+; CHECK-LABEL: define i32 @fold_value(i32
+; CHECK: call i32 @[[VMIMPL:_[0-9a-f]+]](i32 %0, i64
 ; CHECK-LABEL: define i32 @main()
-; CHECK: call ptr @__obf_family_
-; CHECK: %fold_value.obf.call.token = xor i64
-; CHECK: %fold_value.obf.check = load i{{[0-9]+}}, ptr @__obf_vm_target_fold_value
-; CHECK: %fold_value.obf.unresolved = icmp eq
-; CHECK: fold_value.obf.resolve:
-; CHECK-NOT: llvm.returnaddress
-; CHECK: store i{{[0-9]+}} %fold_value.obf.resolved, ptr @__obf_vm_target_fold_value
-; CHECK: fold_value.obf.call:
-; CHECK: %fold_value.obf.key = load i{{[0-9]+}}, ptr @__obf_vm_key_fold_value
-; CHECK: %fold_value.obf.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.decoded to ptr
-; CHECK: call i32 %fold_value.obf.indirect(i32 %value, i64 %fold_value.obf.call.token)
-; CHECK: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_fold_value
-; CHECK: %fold_value.obf.retkey.trunc = trunc i64 %fold_value.obf.retkey to i32
-; CHECK: %fold_value.obf.retdec = {{(or|sub) i32}}
-; CHECK-NOT: define private void @__obf_vm_init_fold_value
-; CHECK-LABEL: define i32 @__obf_vm_impl_fold_value(i32 %value, i64 %obf.hidden_token)
-; CHECK: entry.obf.vm:
-; CHECK: %obf.vm.token.state.match = icmp eq i64 %obf.hidden_token,
-; CHECK: load i8, ptr @__obf_vm_bc_fold_value
-; CHECK: indirectbr ptr %obf.vm.dispatch.target
-; CHECK: define internal ptr @__obf_family_
+; CHECK: call ptr @[[STRHELPER:_[0-9a-f]+]](ptr
+; CHECK: load i{{[0-9]+}}, ptr @[[VMTARGET]]
+; CHECK: store i{{[0-9]+}} %{{[^,]+}}, ptr @[[VMTARGET]]
+; CHECK: load i{{[0-9]+}}, ptr @[[VMKEY]]
+; CHECK: call i32 %{{[0-9]+}}(i32 %{{[0-9]+}}, i64 %{{[0-9]+}})
+; CHECK: load i64, ptr @[[VMRETKEY]]
+; CHECK: define i32 @[[VMIMPL]](i32
+; CHECK: load i8, ptr @[[VMBC]]
+; CHECK: indirectbr ptr
+; CHECK: define internal ptr @[[STRHELPER]](ptr
