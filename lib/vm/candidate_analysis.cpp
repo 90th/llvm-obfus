@@ -185,6 +185,27 @@ std::optional<opcode> map_intrinsic_opcode(const llvm::IntrinsicInst &instructio
   }
 }
 
+bool is_integer_min_intrinsic(const llvm::IntrinsicInst &instruction) {
+  switch (instruction.getIntrinsicID()) {
+  case llvm::Intrinsic::umin:
+  case llvm::Intrinsic::smin:
+    return instruction.getType()->isIntegerTy() && instruction.arg_size() == 2;
+  default:
+    return false;
+  }
+}
+
+opcode min_compare_opcode(const llvm::IntrinsicInst &instruction) {
+  switch (instruction.getIntrinsicID()) {
+  case llvm::Intrinsic::umin:
+    return opcode::icmp_ult;
+  case llvm::Intrinsic::smin:
+    return opcode::icmp_slt;
+  default:
+    llvm_unreachable("unexpected integer min intrinsic");
+  }
+}
+
 std::optional<opcode> map_icmp_opcode(const llvm::ICmpInst &instruction) {
   switch (instruction.getPredicate()) {
   case llvm::CmpInst::ICMP_EQ:
@@ -525,6 +546,33 @@ candidate_result build_program(const llvm::Function &function,
                                        ? invalid_slot
                                        : slots.lookup(&instruction);
       vm_instruction.flags = encode_instruction_flags(instruction);
+
+      if (const auto *intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction);
+          intrinsic != nullptr && is_integer_min_intrinsic(*intrinsic)) {
+        const std::optional<value_ref> lhs = lower_value(*intrinsic->getArgOperand(0), detail);
+        const std::optional<value_ref> rhs = lower_value(*intrinsic->getArgOperand(1), detail);
+        if (!lhs || !rhs) {
+          return reject(detail);
+        }
+
+        const std::uint32_t compare_slot = add_slot(program, llvm::Type::getInt1Ty(
+                                                                  function.getContext()));
+
+        micro_instruction compare_instruction;
+        compare_instruction.result_slot = compare_slot;
+        compare_instruction.op = min_compare_opcode(*intrinsic);
+        compare_instruction.operands.push_back(*lhs);
+        compare_instruction.operands.push_back(*rhs);
+        program.instructions.push_back(std::move(compare_instruction));
+
+        vm_instruction.op = opcode::select;
+        vm_instruction.operands.push_back(
+            value_ref{.kind = value_ref_kind::slot, .slot = compare_slot});
+        vm_instruction.operands.push_back(*lhs);
+        vm_instruction.operands.push_back(*rhs);
+        program.instructions.push_back(std::move(vm_instruction));
+        continue;
+      }
 
       if (const auto *binary = llvm::dyn_cast<llvm::BinaryOperator>(&instruction)) {
         const std::optional<opcode> lowered_opcode = map_binary_opcode(*binary);
