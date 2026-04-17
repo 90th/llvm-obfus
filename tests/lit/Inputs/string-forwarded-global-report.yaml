@@ -1,0 +1,5 @@
+seed: 5150
+default_level: none
+targets:
+  - match: main
+    level: light

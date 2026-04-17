@@ -18,6 +18,7 @@
 #include "obf/vm/virtualize.h"
 
 #include "llvm/ADT/Hashing.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
@@ -28,6 +29,7 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -37,6 +39,7 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Transforms/Utils/CodeExtractor.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -53,6 +56,226 @@ namespace {
 bool has_strong_classical(protection_level level) {
   return level == protection_level::strong ||
          level == protection_level::strong_vm;
+}
+
+/// Returns true for functions whose behavior is already sensitive enough that
+/// callers/orchestrators should inherit stronger classical hardening.
+bool is_orchestrator_seed_level(protection_level level) {
+  return level == protection_level::strong || level == protection_level::vm ||
+         level == protection_level::strong_vm;
+}
+
+bool is_orchestrator_promoted_level(protection_level level) {
+  return level != protection_level::none;
+}
+
+bool is_user_pipeline_function(const llvm::Function &function) {
+  const llvm::StringRef name = function.getName();
+  return !name.starts_with("__obf_") && !name.starts_with("llvm.");
+}
+
+bool is_top_level_semantic_function(const llvm::Function &function) {
+  return function.getName() == "main";
+}
+
+bool has_direct_user_pipeline_calls(const llvm::Function &function) {
+  for (const llvm::BasicBlock &block : function) {
+    for (const llvm::Instruction &instruction : block) {
+      const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+      if (call == nullptr) {
+        continue;
+      }
+
+      const llvm::Value *called_operand =
+          call->getCalledOperand()->stripPointerCasts();
+      const auto *callee = llvm::dyn_cast<llvm::Function>(called_operand);
+      if (callee == nullptr || callee == &function || callee->isDeclaration() ||
+          !is_user_pipeline_function(*callee)) {
+        continue;
+      }
+
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool should_prefer_full_function_vm_for_top_level_orchestrator(
+    const llvm::Function &function) {
+  return is_top_level_semantic_function(function) &&
+         has_direct_user_pipeline_calls(function);
+}
+
+enum class orchestrator_observation_kind {
+  top_level,
+  control_flow,
+  call_argument,
+  return_value,
+  memory_sink,
+};
+
+llvm::StringRef
+describe_orchestrator_observation(orchestrator_observation_kind kind) {
+  switch (kind) {
+  case orchestrator_observation_kind::top_level:
+    return "top-level protected call";
+  case orchestrator_observation_kind::control_flow:
+    return "protected result drives control flow";
+  case orchestrator_observation_kind::call_argument:
+    return "protected result escapes through a call";
+  case orchestrator_observation_kind::return_value:
+    return "protected result escapes through a return";
+  case orchestrator_observation_kind::memory_sink:
+    return "protected result escapes through memory";
+  }
+
+  return "protected orchestrator";
+}
+
+void append_policy_detail(std::string &detail, llvm::StringRef suffix) {
+  if (!detail.empty()) {
+    detail += "; ";
+  }
+
+  detail += suffix.str();
+}
+
+function_policy build_orchestrator_promotion_policy(
+    const function_features &features) {
+  function_policy policy = make_function_policy(protection_level::strong);
+  if (!(features.has_exception_edges || features.has_inline_asm)) {
+    return policy;
+  }
+
+  // Keep risky orchestrators on the safest non-none profile. This still gives
+  // them string/constant coverage without re-enabling transforms that tend to
+  // break invoke/asm-heavy wrappers.
+  policy = make_function_policy(protection_level::light);
+  policy.allow_instruction_substitution = false;
+  policy.allow_function_outlining = false;
+  policy.allow_bogus_control_flow = false;
+  policy.allow_opaque_predicates = false;
+  policy.allow_flattening = false;
+  policy.allow_split = false;
+  policy.allow_indirect_calls = false;
+  policy.allow_vm = false;
+  return policy;
+}
+
+std::optional<orchestrator_observation_kind>
+find_protected_result_observation(const llvm::Value &root,
+                                  const llvm::Function &owner) {
+  llvm::SmallVector<const llvm::Value *, 16> worklist;
+  llvm::SmallPtrSet<const llvm::Value *, 32> visited;
+  worklist.push_back(&root);
+
+  while (!worklist.empty()) {
+    const llvm::Value *value = worklist.pop_back_val();
+    if (!visited.insert(value).second) {
+      continue;
+    }
+
+    for (const llvm::User *user : value->users()) {
+      const auto *instruction = llvm::dyn_cast<llvm::Instruction>(user);
+      if (instruction == nullptr || instruction->getFunction() != &owner) {
+        continue;
+      }
+
+      if (const auto *branch = llvm::dyn_cast<llvm::BranchInst>(instruction)) {
+        if (branch->isConditional()) {
+          return orchestrator_observation_kind::control_flow;
+        }
+      }
+
+      if (llvm::isa<llvm::SwitchInst>(instruction) ||
+          llvm::isa<llvm::SelectInst>(instruction) ||
+          llvm::isa<llvm::ICmpInst>(instruction) ||
+          llvm::isa<llvm::FCmpInst>(instruction)) {
+        return orchestrator_observation_kind::control_flow;
+      }
+
+      if (llvm::isa<llvm::ReturnInst>(instruction)) {
+        return orchestrator_observation_kind::return_value;
+      }
+
+      if (const auto *store = llvm::dyn_cast<llvm::StoreInst>(instruction)) {
+        if (store->getValueOperand() == value) {
+          const llvm::Value *pointer = llvm::getUnderlyingObject(
+              store->getPointerOperand()->stripPointerCasts());
+          if (!llvm::isa<llvm::AllocaInst>(pointer)) {
+            return orchestrator_observation_kind::memory_sink;
+          }
+          worklist.push_back(pointer);
+          continue;
+        }
+      }
+
+      if (const auto *call = llvm::dyn_cast<llvm::CallBase>(instruction)) {
+        if (call->getCalledOperand()->stripPointerCasts() != value) {
+          return orchestrator_observation_kind::call_argument;
+        }
+      }
+
+      worklist.push_back(instruction);
+    }
+  }
+
+  return std::nullopt;
+}
+
+struct orchestrator_promotion_reason {
+  llvm::StringRef callee_name;
+  orchestrator_observation_kind observation =
+      orchestrator_observation_kind::top_level;
+};
+
+std::optional<orchestrator_promotion_reason>
+find_orchestrator_promotion_reason(const llvm::Function &function,
+                                   const llvm::StringSet<> &sensitive_functions) {
+  std::optional<llvm::StringRef> first_sensitive_callee;
+
+  for (const llvm::BasicBlock &block : function) {
+    for (const llvm::Instruction &instruction : block) {
+      const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+      if (call == nullptr) {
+        continue;
+      }
+
+      const llvm::Value *called_operand =
+          call->getCalledOperand()->stripPointerCasts();
+      const auto *callee = llvm::dyn_cast<llvm::Function>(called_operand);
+      if (callee == nullptr || !sensitive_functions.contains(callee->getName())) {
+        continue;
+      }
+
+      if (!first_sensitive_callee.has_value()) {
+        first_sensitive_callee = callee->getName();
+      }
+
+      if (is_top_level_semantic_function(function)) {
+        return orchestrator_promotion_reason{
+            .callee_name = callee->getName(),
+            .observation = orchestrator_observation_kind::top_level};
+      }
+
+      if (!call->getType()->isVoidTy()) {
+        if (const auto observation =
+                find_protected_result_observation(*call, function)) {
+          return orchestrator_promotion_reason{.callee_name = callee->getName(),
+                                               .observation = *observation};
+        }
+      }
+    }
+  }
+
+  if (first_sensitive_callee.has_value() && is_top_level_semantic_function(function)) {
+    return orchestrator_promotion_reason{.callee_name = *first_sensitive_callee,
+                                         .observation =
+                                             orchestrator_observation_kind::top_level};
+  }
+
+  return std::nullopt;
 }
 
 llvm::cl::opt<std::string> obf_config_path(
@@ -91,6 +314,59 @@ struct vm_target_candidate {
   const function_pipeline_state *state = nullptr;
   std::size_t nesting_depth = 0;
 };
+
+void apply_orchestrator_policy_promotions(
+    llvm::SmallVectorImpl<function_pipeline_state> &states) {
+  llvm::StringSet<> sensitive_functions;
+  for (const function_pipeline_state &state : states) {
+    if (state.function == nullptr || state.function->isDeclaration() ||
+        !is_user_pipeline_function(*state.function)) {
+      continue;
+    }
+
+    if (is_orchestrator_seed_level(state.report.decision.policy.level)) {
+      sensitive_functions.insert(state.function->getName());
+    }
+  }
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+
+    for (function_pipeline_state &state : states) {
+      llvm::Function *function = state.function;
+      if (function == nullptr || function->isDeclaration() ||
+          !is_user_pipeline_function(*function) ||
+          has_strong_classical(state.report.decision.policy.level)) {
+        continue;
+      }
+
+      const auto reason =
+          find_orchestrator_promotion_reason(*function, sensitive_functions);
+      if (!reason.has_value()) {
+        continue;
+      }
+
+      const function_policy promoted_policy =
+          build_orchestrator_promotion_policy(state.report.features);
+      if (promoted_policy.level == state.report.decision.policy.level) {
+        continue;
+      }
+
+      state.report.decision.policy = promoted_policy;
+      append_policy_detail(
+          state.report.decision.detail,
+          llvm::formatv("orchestrator promotion raised to {0} via protected callee {1} ({2})",
+                        to_string(promoted_policy.level), reason->callee_name,
+                        describe_orchestrator_observation(reason->observation))
+              .str());
+      if (is_orchestrator_promoted_level(promoted_policy.level)) {
+        sensitive_functions.insert(function->getName());
+      }
+      changed = true;
+    }
+  }
+}
 
 obfuscation_config load_active_config() {
   obfuscation_config config;
@@ -134,6 +410,8 @@ build_pipeline_state(llvm::Module &module, const obfuscation_config &config) {
         select_policy(module, report.features, config, report.annotation);
     states.push_back({.function = &function, .report = std::move(report)});
   }
+
+  apply_orchestrator_policy_promotions(states);
 
   return states;
 }
@@ -921,6 +1199,17 @@ discover_vm_targets_for_state(const function_pipeline_state &state,
   }
 
   if (state.report.decision.policy.level == protection_level::strong_vm) {
+    // Top-level orchestrators that still directly coordinate user-defined
+    // helpers are the cases where leaving a residual parent body is most
+    // semantically revealing. Prefer full-function VMization for that narrow
+    // class before attempting regional extraction.
+    if (should_prefer_full_function_vm_for_top_level_orchestrator(*state.function) &&
+        vm::analyze_candidate(*state.function).eligible) {
+      targets.push_back(
+          {.function = state.function, .state = &state, .nesting_depth = 0});
+      return targets;
+    }
+
     const bool extracted_regions = collect_regional_vm_targets(
         *state.function, state, skip_functions, helper_ordinal,
         /*nesting_depth=*/0,

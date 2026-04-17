@@ -135,7 +135,7 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
 
   add_custom_command(
     OUTPUT "${cleaned_ll}"
-    COMMAND "${OBF_OPT}" "-passes=globalopt,instcombine<no-verify-fixpoint>,dse" -S "${obfuscated_ll}" -o "${cleaned_ll}"
+    COMMAND "${OBF_OPT}" "-passes=instcombine<no-verify-fixpoint>,dse" -S "${obfuscated_ll}" -o "${cleaned_ll}"
     DEPENDS "${obfuscated_ll}"
     VERBATIM)
 
@@ -194,7 +194,7 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
 
   add_custom_command(
     OUTPUT "${linked_cleaned_ll}"
-    COMMAND "${OBF_OPT}" "-passes=globalopt,instcombine<no-verify-fixpoint>,dse" -S "${linked_obfuscated_ll}" -o "${linked_cleaned_ll}"
+    COMMAND "${OBF_OPT}" "-passes=instcombine<no-verify-fixpoint>,dse" -S "${linked_obfuscated_ll}" -o "${linked_cleaned_ll}"
     DEPENDS "${linked_obfuscated_ll}"
     VERBATIM)
 

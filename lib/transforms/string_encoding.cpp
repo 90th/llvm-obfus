@@ -35,6 +35,7 @@ enum class string_use_kind {
   phi_operand,
   return_operand,
   address_materialization,
+  forwarded_pointer_load,
   escaped_address,
   generic_operand,
   non_function_use,
@@ -55,6 +56,7 @@ struct string_use_summary {
   llvm::SmallVector<string_use_kind, 8> observed_kinds;
   bool has_non_function_use = false;
   bool has_lazy_blockers = false;
+  bool has_forwarded_pointer_load = false;
 };
 
 struct classified_string_candidate {
@@ -161,6 +163,8 @@ std::string to_string(string_use_kind kind) {
     return "return_operand";
   case string_use_kind::address_materialization:
     return "address_materialization";
+  case string_use_kind::forwarded_pointer_load:
+    return "forwarded_pointer_load";
   case string_use_kind::escaped_address:
     return "escaped_address";
   case string_use_kind::generic_operand:
@@ -180,6 +184,131 @@ bool operand_references_global(llvm::Value *operand,
 
   llvm::Value *underlying = llvm::getUnderlyingObject(operand);
   return underlying == &global;
+}
+
+bool is_local_constant_forwarding_global(const llvm::GlobalVariable &global) {
+  return global.hasInitializer() && global.isConstant() &&
+         !global.isThreadLocal() && global.hasLocalLinkage();
+}
+
+bool is_local_forwarding_alias(const llvm::GlobalAlias &alias) {
+  return alias.hasLocalLinkage();
+}
+
+bool operand_references_value(const llvm::Value *operand, const llvm::Value &value) {
+  if (operand == nullptr) {
+    return false;
+  }
+
+  if (operand == &value) {
+    return true;
+  }
+
+  if (const auto *global = llvm::dyn_cast<llvm::GlobalVariable>(&value)) {
+    return operand_references_global(const_cast<llvm::Value *>(operand), *global);
+  }
+
+  llvm::Value *underlying = llvm::getUnderlyingObject(const_cast<llvm::Value *>(operand));
+  return underlying == &value;
+}
+
+bool collect_forwarded_pointer_load_uses(const llvm::Value &value,
+                                         const llvm::Instruction &instruction,
+                                         bool is_protected,
+                                         string_use_summary &summary) {
+  if (!llvm::isa<llvm::GetElementPtrInst>(instruction) &&
+      !llvm::isa<llvm::BitCastInst>(instruction)) {
+    return false;
+  }
+
+  bool matched_forwarding_operand = false;
+  for (llvm::Value *operand : instruction.operands()) {
+    if (operand_references_value(operand, value)) {
+      matched_forwarding_operand = true;
+      break;
+    }
+  }
+
+  if (!matched_forwarding_operand) {
+    return false;
+  }
+
+  bool handled = false;
+  for (const llvm::User *forward_user : instruction.users()) {
+    const auto *load = llvm::dyn_cast<llvm::LoadInst>(forward_user);
+    if (load == nullptr || !load->getType()->isPointerTy()) {
+      continue;
+    }
+
+    handled = true;
+    add_use_kind(summary.observed_kinds, string_use_kind::forwarded_pointer_load);
+    if (is_protected) {
+      summary.has_forwarded_pointer_load = true;
+    }
+  }
+
+  return handled;
+}
+
+bool has_forwarded_pointer_table_use(const llvm::Value &value,
+                                     protected_function_seed_lookup get_seed,
+                                     llvm::DenseSet<const llvm::User *> &visited) {
+  for (const llvm::User *user : value.users()) {
+    if (!visited.insert(user).second || is_annotation_user(user)) {
+      continue;
+    }
+
+    if (const auto *instruction = llvm::dyn_cast<llvm::Instruction>(user)) {
+      const llvm::Function *function = instruction->getFunction();
+      if (function == nullptr || !get_seed(function->getName()).has_value()) {
+        continue;
+      }
+
+      if (const auto *load = llvm::dyn_cast<llvm::LoadInst>(instruction)) {
+        if (load->getType()->isPointerTy() &&
+            operand_references_value(load->getPointerOperand(), value)) {
+          return true;
+        }
+      }
+
+      if (!llvm::isa<llvm::GetElementPtrInst>(instruction) &&
+          !llvm::isa<llvm::BitCastInst>(instruction)) {
+        continue;
+      }
+
+      for (const llvm::User *forward_user : instruction->users()) {
+        const auto *load = llvm::dyn_cast<llvm::LoadInst>(forward_user);
+        if (load != nullptr && load->getType()->isPointerTy()) {
+          return true;
+        }
+      }
+      continue;
+    }
+
+    if (const auto *forwarding_global = llvm::dyn_cast<llvm::GlobalVariable>(user)) {
+      if (is_local_constant_forwarding_global(*forwarding_global) &&
+          has_forwarded_pointer_table_use(*forwarding_global, get_seed, visited)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (const auto *forwarding_alias = llvm::dyn_cast<llvm::GlobalAlias>(user)) {
+      if (is_local_forwarding_alias(*forwarding_alias) &&
+          has_forwarded_pointer_table_use(*forwarding_alias, get_seed, visited)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (const auto *constant = llvm::dyn_cast<llvm::Constant>(user)) {
+      if (has_forwarded_pointer_table_use(*constant, get_seed, visited)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 bool is_compare_like_call(const llvm::CallBase &call) {
@@ -293,13 +422,33 @@ void collect_string_users(const llvm::Value &value, const llvm::GlobalVariable &
         summary.protected_uses.push_back(std::move(classified));
       }
 
-      if (is_protected && !matched_operand) {
+      const bool handled_forwarded_load =
+          !matched_operand && value.getType()->isPointerTy() &&
+          collect_forwarded_pointer_load_uses(value, *instruction, is_protected,
+                                              summary);
+      if (is_protected && !matched_operand && !handled_forwarded_load) {
         summary.has_lazy_blockers = true;
       }
       continue;
     }
 
-    if (llvm::isa<llvm::GlobalVariable>(user) || llvm::isa<llvm::GlobalAlias>(user)) {
+    if (const auto *forwarding_global = llvm::dyn_cast<llvm::GlobalVariable>(user)) {
+      if (is_local_constant_forwarding_global(*forwarding_global)) {
+        collect_string_users(*forwarding_global, global, get_seed, visited, summary);
+        continue;
+      }
+
+      summary.has_non_function_use = true;
+      add_use_kind(summary.observed_kinds, string_use_kind::non_function_use);
+      continue;
+    }
+
+    if (const auto *forwarding_alias = llvm::dyn_cast<llvm::GlobalAlias>(user)) {
+      if (is_local_forwarding_alias(*forwarding_alias)) {
+        collect_string_users(*forwarding_alias, global, get_seed, visited, summary);
+        continue;
+      }
+
       summary.has_non_function_use = true;
       add_use_kind(summary.observed_kinds, string_use_kind::non_function_use);
       continue;
@@ -441,6 +590,13 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
 
   llvm::DenseSet<const llvm::User *> visited;
   collect_string_users(global, global, get_seed, visited, candidate.summary);
+  llvm::DenseSet<const llvm::User *> forwarded_visited;
+  candidate.summary.has_forwarded_pointer_load =
+      has_forwarded_pointer_table_use(global, get_seed, forwarded_visited);
+  if (candidate.summary.has_forwarded_pointer_load) {
+    add_use_kind(candidate.summary.observed_kinds,
+                 string_use_kind::forwarded_pointer_load);
+  }
 
   candidate.result.protected_use_count = candidate.summary.protected_uses.size();
   candidate.result.unprotected_use_count = candidate.summary.unprotected_functions.size();
@@ -528,6 +684,17 @@ string_strategy_plan select_strategy(const classified_string_candidate &candidat
     plan.result.key_schedule = string_key_schedule_kind::seeded_byte_xor_v0;
     plan.result.detail = "ctor fallback due to unprotected use";
     plan.result.fallback_reason = "shared_with_unprotected_function";
+    return plan;
+  }
+
+  if (candidate.summary.has_forwarded_pointer_load) {
+    plan.result.applied = true;
+    plan.result.mode = string_encoding_mode::global_ctor;
+    plan.result.strategy_kind = string_strategy_kind::helper_global_ctor;
+    plan.result.helper_shape = string_helper_shape::ctor_unrolled_v0;
+    plan.result.key_schedule = string_key_schedule_kind::seeded_byte_xor_v0;
+    plan.result.detail = "ctor fallback due to forwarded pointer table use";
+    plan.result.fallback_reason = "forwarded_pointer_table_use";
     return plan;
   }
 
