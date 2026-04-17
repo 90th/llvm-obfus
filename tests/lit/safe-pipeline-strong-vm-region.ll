@@ -5,7 +5,12 @@
 
 define i32 @strong_vm_region(ptr %out, i32 %x) {
 entry:
+  %scratch = alloca i32
   call void @sink_ext(ptr %out)
+  store i32 0, ptr %scratch
+  br label %logic
+
+logic:
   %gt = icmp sgt i32 %x, 0
   br i1 %gt, label %left, label %right
 
@@ -38,7 +43,12 @@ entry:
 
 define i32 @strong_vm_two_regions(ptr %out, i32 %x, i32 %y) {
 entry:
+  %scratch = alloca i32
   call void @sink_ext(ptr %out)
+  store i32 0, ptr %scratch
+  br label %r1.head
+
+r1.head:
   %xpos = icmp sgt i32 %x, 0
   br i1 %xpos, label %r1.left, label %r1.right
 
@@ -86,38 +96,24 @@ entry:
 ; VM-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
 ; VM-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; VM-LABEL: define i32 @strong_vm_region(ptr %out, i32 %x)
-; VM: call void @__obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}(i32 %x, ptr %out, ptr %v.ce.loc)
+; VM: call void @__obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.loc)
 ; VM-LABEL: define i32 @strong_vm_two_regions(ptr %out, i32 %x, i32 %y)
-; VM: call void @__obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}(i32 %x, ptr %out, ptr %v.ce.loc)
-; VM: call void @__obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}(i32 %v.ce.reload, i32 %y, ptr %w.ce.loc)
-; VM-LABEL: define internal void @__obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}(i32 %x, ptr %out, ptr %v.ce.out) {
+; VM: call void @__obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.loc)
+; VM: call void @__obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}(i32 %{{[^,]+}}, i32 %{{[^,]+}}, ptr %w.ce.loc)
+; VM-LABEL: define internal void @__obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.out) {
 ; VM: load i64, ptr @__obf_vm_target___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
 ; VM: load i64, ptr @__obf_vm_key___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
-; VM: call void %{{[^ ]+}}(ptr %out, i32 %x, ptr %v.ce.ce.loc, i64
-; VM-LABEL: define dso_local void @__obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(ptr %out, i32 %x, ptr %v.ce.ce.out) {
-; VM: call void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(ptr %out, i32 %x, ptr %v.ce.ce.out, i64
-; VM-LABEL: define dso_local void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(ptr %out, i32 %x, ptr %v.ce.ce.out, i64 %obf.hidden_token) #{{[0-9]+}} {
+; VM: call void %{{[^ ]+}}(i32 %x, ptr %v.ce.ce.loc, i64
+; VM-LABEL: define dso_local void @__obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.ce.out) {
+; VM: call void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.ce.out, i64
+; VM-LABEL: define dso_local void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.ce.out, i64 %obf.hidden_token) #{{[0-9]+}} {
 ; VM: load i8, ptr @__obf_vm_bc___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
-; VM: indirectbr ptr
-; VM-LABEL: define internal void @__obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}(i32 %x, ptr %out, ptr %v.ce.out) {
-; VM: call void %{{[^ ]+}}(ptr %out, i32 %x, ptr %v.ce.ce.loc, i64
-; VM-LABEL: define dso_local void @__obf_vm_region___obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(ptr %out, i32 %x, ptr %v.ce.ce.out) {
-; VM: call void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(ptr %out, i32 %x, ptr %v.ce.ce.out, i64
-; VM-LABEL: define internal void @__obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}(i32 %v.ce.reload, i32 %y, ptr %w.ce.out) {
-; VM: call void %{{[^ ]+}}(i32 %v.ce.reload, i32 %y, ptr %w.ce.ce.loc, i64
-; VM-LABEL: define dso_local void @__obf_vm_region___obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(i32 %v.ce.reload, i32 %y, ptr %w.ce.ce.out) {
-; VM: call void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(i32 %v.ce.reload, i32 %y, ptr %w.ce.ce.out, i64
-; VM-LABEL: define dso_local void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(ptr %out, i32 %x, ptr %v.ce.ce.out, i64 %obf.hidden_token) #{{[0-9]+}} {
-; VM: load i8, ptr @__obf_vm_bc___obf_vm_region___obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
-; VM: indirectbr ptr
-; VM-LABEL: define dso_local void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(i32 %v.ce.reload, i32 %y, ptr %w.ce.ce.out, i64 %obf.hidden_token) #{{[0-9]+}} {
-; VM: load i8, ptr @__obf_vm_bc___obf_vm_region___obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
 ; VM: indirectbr ptr
 ; SAFE-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
 ; SAFE-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; SAFE-LABEL: define i32 @strong_vm_region(ptr
 ; SAFE: call void @[[SAFEOUTER:_[0-9a-f]+]](
-; SAFE: define internal void @[[SAFEOUTER]](i32 %0, ptr %1, ptr %2) {
-; SAFE: call void %{{[^ ]+}}(ptr %1, i32 %0, ptr %4, i64
-; SAFE: define dso_local void @[[SAFEVM:_[0-9a-f]+]](ptr %0, i32 %1, ptr %2, i64 %3) #1 {
+; SAFE: define internal void @[[SAFEOUTER]](i32 %{{[^,]+}}, ptr %{{[^)]+}}) {
+; SAFE: call void %{{[^ ]+}}(i32 %{{[^,]+}}, ptr %{{[^,]+}}, i64
+; SAFE: define dso_local void @[[SAFEVM:_[0-9a-f]+]](i32 %{{[^,]+}}, ptr %{{[^,]+}}, i64 %{{[^)]+}}) #1 {
 ; SAFE: indirectbr ptr

@@ -25,6 +25,7 @@
 #include <bit>
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <string>
@@ -156,6 +157,14 @@ using slot_cell_mapping = std::vector<std::uint32_t>;
 inline constexpr std::uint32_t vm_slot_rotation_cell_count = 3;
 inline constexpr std::size_t vm_opcode_count =
     static_cast<std::size_t>(opcode::ret) + 1;
+
+enum class dispatch_backend_variant : std::uint32_t {
+  switch_index = 0,
+  direct_threaded_match = 1,
+  direct_threaded_switch = 2,
+};
+
+inline constexpr std::size_t vm_switch_dispatch_min_instruction_count = 16;
 
 struct opcode_permutation {
   std::array<std::uint8_t, vm_opcode_count> physical_for_logical = {};
@@ -347,13 +356,21 @@ std::uint32_t select_handler_variant(opcode op, std::uint64_t seed_base,
 }
 
 std::uint32_t select_dispatch_variant(std::uint64_t seed_base, std::uint64_t salt,
-                                      std::uint32_t variant_count = 2) {
-  if (variant_count <= 1) {
-    return 0;
+                                      std::size_t instruction_count,
+                                      std::uint32_t variant_count = 3) {
+  if (variant_count <= 1 ||
+      instruction_count >= vm_switch_dispatch_min_instruction_count) {
+    return static_cast<std::uint32_t>(dispatch_backend_variant::switch_index);
   }
 
-  return static_cast<std::uint32_t>(
-      mix_seed(seed_base, salt ^ 0xd15f57a5a93ULL) % variant_count);
+  const std::uint32_t fallback_variant_count = variant_count - 1;
+  if (fallback_variant_count == 0) {
+    return static_cast<std::uint32_t>(dispatch_backend_variant::switch_index);
+  }
+
+  return 1 + static_cast<std::uint32_t>(
+                 mix_seed(seed_base, salt ^ 0xd15f57a5a93ULL) %
+                 fallback_variant_count);
 }
 
 std::mt19937 build_opcode_rng(const llvm::Function &function,
@@ -627,7 +644,8 @@ void append_rekey_state(std::vector<std::uint8_t> &bytes, std::uint64_t target_s
 }
 
 std::vector<std::uint32_t>
-build_dispatch_index_map(const bytecode_program &program, std::uint64_t seed) {
+build_dispatch_index_map(const bytecode_program &program, std::uint64_t seed,
+                         dispatch_backend_variant dispatch_backend) {
   std::vector<std::uint32_t> order(program.instructions.size());
   std::iota(order.begin(), order.end(), 0U);
   std::stable_sort(order.begin(), order.end(), [&](std::uint32_t lhs,
@@ -638,9 +656,35 @@ build_dispatch_index_map(const bytecode_program &program, std::uint64_t seed) {
   });
 
   std::vector<std::uint32_t> dispatch_index_for_instruction(order.size(), 0);
-  for (std::uint32_t dispatch_index = 0; dispatch_index < order.size();
-       ++dispatch_index) {
-    dispatch_index_for_instruction[order[dispatch_index]] = dispatch_index;
+  if (dispatch_backend != dispatch_backend_variant::switch_index) {
+    for (std::uint32_t dispatch_index = 0; dispatch_index < order.size();
+         ++dispatch_index) {
+      dispatch_index_for_instruction[order[dispatch_index]] = dispatch_index;
+    }
+    return dispatch_index_for_instruction;
+  }
+
+  if (order.empty()) {
+    return dispatch_index_for_instruction;
+  }
+
+  const std::uint64_t key_budget = std::max<std::uint64_t>(
+      2ULL, std::numeric_limits<std::uint32_t>::max() /
+                static_cast<std::uint64_t>(order.size()));
+  std::uint64_t current_key =
+      1ULL + (mix_seed(seed, 0x5357495443480001ULL) % key_budget);
+  dispatch_index_for_instruction[order.front()] =
+      static_cast<std::uint32_t>(current_key);
+  for (std::size_t key_index = 1; key_index < order.size(); ++key_index) {
+    const std::uint64_t gap =
+        1ULL +
+        (mix_seed(seed, 0x5357495443481000ULL ^
+                            (static_cast<std::uint64_t>(key_index) *
+                             0x9e3779b97f4a7c15ULL)) %
+         key_budget);
+    current_key += gap;
+    dispatch_index_for_instruction[order[key_index]] =
+        static_cast<std::uint32_t>(current_key);
   }
 
   return dispatch_index_for_instruction;
@@ -1184,8 +1228,12 @@ void rewrite_function_body(llvm::Function &function,
       derive_vm_bytecode_seed(function, program);
   const opcode_permutation opcode_map =
       build_opcode_permutation(function, program);
+  const dispatch_backend_variant dispatch_backend =
+      static_cast<dispatch_backend_variant>(select_dispatch_variant(
+          bytecode_seed, opaque_seed_base ^ 0x26000ULL,
+          program.instructions.size()));
   const std::vector<std::uint32_t> dispatch_index_for_instruction =
-      build_dispatch_index_map(program, bytecode_seed);
+      build_dispatch_index_map(program, bytecode_seed, dispatch_backend);
   const std::vector<std::uint64_t> entry_states =
       build_instruction_entry_states(program, bytecode_seed);
   const serialized_bytecode_program serialized = serialize_bytecode_program(
@@ -1255,6 +1303,9 @@ void rewrite_function_body(llvm::Function &function,
     const llvm::DataLayout &data_layout = function.getParent()->getDataLayout();
     ptr_int_type =
         data_layout.getIntPtrType(context, function.getAddressSpace());
+  }
+  if (!instruction_blocks.empty() &&
+      dispatch_backend != dispatch_backend_variant::switch_index) {
     dispatch_table_type =
         llvm::ArrayType::get(ptr_int_type, instruction_blocks.size());
     dispatch_table = entry_builder.CreateAlloca(dispatch_table_type, nullptr,
@@ -1309,7 +1360,43 @@ void rewrite_function_body(llvm::Function &function,
                            "obf.vm.dispatch.key");
   };
 
-  if (!instruction_blocks.empty()) {
+  const auto build_switch_site_multiplier =
+      [&](std::uint64_t salt) -> std::uint32_t {
+    std::uint32_t multiplier = static_cast<std::uint32_t>(mix_seed(
+        bytecode_seed, 0x5357495443482001ULL ^ salt));
+    multiplier |= 1U;
+    if (multiplier == 1U) {
+      multiplier = 0x9e3779b1U;
+    }
+    return multiplier;
+  };
+
+  const auto build_switch_site_offset = [&](std::uint64_t salt) -> std::uint32_t {
+    return static_cast<std::uint32_t>(mix_seed(
+        bytecode_seed, 0x5357495443482002ULL ^ salt));
+  };
+
+  const auto remap_switch_dispatch_constant =
+      [&](std::uint32_t dispatch_index, std::uint64_t salt) -> std::uint32_t {
+    const std::uint32_t multiplier = build_switch_site_multiplier(salt);
+    const std::uint32_t offset = build_switch_site_offset(salt);
+    return static_cast<std::uint32_t>(
+        static_cast<std::uint64_t>(dispatch_index) * multiplier + offset);
+  };
+
+  const auto remap_switch_dispatch_value =
+      [&](llvm::IRBuilder<> &builder, llvm::Value *dispatch_index,
+          std::uint64_t salt) -> llvm::Value * {
+    const std::uint32_t multiplier = build_switch_site_multiplier(salt);
+    const std::uint32_t offset = build_switch_site_offset(salt);
+    llvm::Value *remapped = builder.CreateMul(
+        dispatch_index, builder.getInt32(multiplier),
+        "obf.vm.dispatch.index.site.mul");
+    return builder.CreateAdd(remapped, builder.getInt32(offset),
+                             "obf.vm.dispatch.index.site");
+  };
+
+  if (!instruction_blocks.empty() && dispatch_table != nullptr) {
     for (std::size_t instruction_index = 0;
          instruction_index < instruction_blocks.size(); ++instruction_index) {
       const std::uint32_t dispatch_index =
@@ -1417,13 +1504,37 @@ void rewrite_function_body(llvm::Function &function,
   const auto emit_dispatch = [&](llvm::IRBuilder<> &builder,
                                  llvm::Value *dispatch_index,
                                  std::uint64_t salt) {
-    auto *jump_block = llvm::BasicBlock::Create(
-        context, "dispatch.jump.obf.vm." + std::to_string(dispatch_site_counter++),
-        &function);
+    if (dispatch_backend == dispatch_backend_variant::switch_index) {
+      llvm::Value *remapped_dispatch_index =
+          remap_switch_dispatch_value(builder, dispatch_index, salt);
+      auto *dispatch_switch_block = llvm::BasicBlock::Create(
+          context, "dispatch.index.switch.obf.vm." +
+                       std::to_string(dispatch_site_counter++),
+          &function);
+      builder.CreateBr(dispatch_switch_block);
+
+      llvm::IRBuilder<> switch_builder(dispatch_switch_block);
+      auto *switch_inst = switch_builder.CreateSwitch(
+          remapped_dispatch_index, trap_block, instruction_blocks.size());
+      for (std::size_t instruction_index = 0;
+           instruction_index < instruction_blocks.size(); ++instruction_index) {
+        switch_inst->addCase(switch_builder.getInt32(
+                                 remap_switch_dispatch_constant(
+                                     dispatch_index_for_instruction[instruction_index],
+                                     salt)),
+                              instruction_blocks[instruction_index]);
+      }
+      return;
+    }
+
     llvm::Value *in_range = builder.CreateICmpULT(
         dispatch_index,
         builder.getInt32(static_cast<std::uint32_t>(instruction_blocks.size())),
         "obf.vm.dispatch.inrange");
+
+    auto *jump_block = llvm::BasicBlock::Create(
+        context, "dispatch.jump.obf.vm." + std::to_string(dispatch_site_counter++),
+        &function);
     builder.CreateCondBr(in_range, jump_block, trap_block);
 
     llvm::IRBuilder<> jump_builder(jump_block);
@@ -1437,9 +1548,7 @@ void rewrite_function_body(llvm::Function &function,
         jump_builder, encoded_target, key, mba_context, salt + 1,
         "obf.vm.dispatch.target.int");
 
-    const std::uint32_t dispatch_variant =
-        select_dispatch_variant(bytecode_seed, salt ^ 0x26000ULL);
-    if (dispatch_variant == 0) {
+    if (dispatch_backend == dispatch_backend_variant::direct_threaded_match) {
       llvm::Value *dispatch_target = nullptr;
       llvm::Value *target_match = nullptr;
       for (llvm::BasicBlock *instruction_block : instruction_blocks) {

@@ -78,35 +78,6 @@ bool is_top_level_semantic_function(const llvm::Function &function) {
   return function.getName() == "main";
 }
 
-bool has_direct_user_pipeline_calls(const llvm::Function &function) {
-  for (const llvm::BasicBlock &block : function) {
-    for (const llvm::Instruction &instruction : block) {
-      const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-      if (call == nullptr) {
-        continue;
-      }
-
-      const llvm::Value *called_operand =
-          call->getCalledOperand()->stripPointerCasts();
-      const auto *callee = llvm::dyn_cast<llvm::Function>(called_operand);
-      if (callee == nullptr || callee == &function || callee->isDeclaration() ||
-          !is_user_pipeline_function(*callee)) {
-        continue;
-      }
-
-      return true;
-    }
-  }
-
-  return false;
-}
-
-bool should_prefer_full_function_vm_for_top_level_orchestrator(
-    const llvm::Function &function) {
-  return is_top_level_semantic_function(function) &&
-         has_direct_user_pipeline_calls(function);
-}
-
 enum class orchestrator_observation_kind {
   top_level,
   control_flow,
@@ -1198,13 +1169,14 @@ discover_vm_targets_for_state(const function_pipeline_state &state,
     return targets;
   }
 
+  const vm::candidate_result whole_function_analysis =
+      vm::analyze_candidate(*state.function);
+
   if (state.report.decision.policy.level == protection_level::strong_vm) {
-    // Top-level orchestrators that still directly coordinate user-defined
-    // helpers are the cases where leaving a residual parent body is most
-    // semantically revealing. Prefer full-function VMization for that narrow
-    // class before attempting regional extraction.
-    if (should_prefer_full_function_vm_for_top_level_orchestrator(*state.function) &&
-        vm::analyze_candidate(*state.function).eligible) {
+    // When the whole function is already VM-eligible, prefer full-function
+    // virtualization over regional extraction so we do not leave a residual
+    // parent body behind unnecessarily.
+    if (whole_function_analysis.eligible) {
       targets.push_back(
           {.function = state.function, .state = &state, .nesting_depth = 0});
       return targets;
@@ -1220,7 +1192,7 @@ discover_vm_targets_for_state(const function_pipeline_state &state,
     }
   }
 
-  if (vm::analyze_candidate(*state.function).eligible) {
+  if (whole_function_analysis.eligible) {
     targets.push_back({.function = state.function, .state = &state, .nesting_depth = 0});
   }
   return targets;
