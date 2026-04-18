@@ -178,6 +178,15 @@ entry:
 ; CHECK: getelementptr inbounds i32, ptr
 ; CHECK-LABEL: define i32 @__obf_vm_impl_switch_score(i32 %tag, i32 %base, i64 %obf.hidden_token)
 ; CHECK: vm.switch.default.
+; CHECK-LABEL: define i16 @__obf_vm_impl_mixed_width(i8 %x, i32 %y, i64 %obf.hidden_token)
+; CHECK: vm.cast.exec.
+; CHECK: %obf.vm.zext.bias =
+; CHECK: %obf.vm.zext.wide = zext i8 %obf.vm.zext.bias to i32
+; CHECK: %obf.vm.zext.signed.shl = shl i32 %{{[^,]+}}, 24
+; CHECK: %obf.vm.zext.signed = ashr i32 %obf.vm.zext.signed.shl, 24
+; CHECK: %obf.vm.zext = add i32
+; CHECK: %obf.vm.trunc.mask = and i32 %{{[^,]+}}, 65535
+; CHECK: %obf.vm.trunc = trunc i32 %obf.vm.trunc.mask to i16
 ; CHECK-LABEL: define float @__obf_vm_impl_float_mix(float %x, float %y, i64 %obf.hidden_token)
 ; CHECK: fcmp ogt float
 ; CHECK-LABEL: define <2 x i32> @__obf_vm_impl_vector_mix(<2 x i32> %a, <2 x i32> %b, i64 %obf.hidden_token)

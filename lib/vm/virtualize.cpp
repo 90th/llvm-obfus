@@ -933,6 +933,243 @@ llvm::Value *materialize_value(llvm::IRBuilder<> &builder,
                               opaque_seed_base, mba_context, salt);
 }
 
+const llvm::Type *value_ref_type(const bytecode_program &program,
+                                 const value_ref &value) {
+  if (value.kind == value_ref_kind::slot) {
+    return program.slots[value.slot].type;
+  }
+
+  return value.constant->getType();
+}
+
+llvm::Value *emit_integer_nonzero_test(
+    llvm::IRBuilder<> &builder, llvm::Value *value,
+    const mba::builder_context &mba_context, std::uint64_t salt) {
+  auto *integer_type = llvm::cast<llvm::IntegerType>(value->getType());
+  llvm::Value *negated = mba::create_sub(
+      builder, llvm::ConstantInt::get(integer_type, 0), value, mba_context,
+      salt + 1, "obf.vm.icmp.nz.neg");
+  llvm::Value *combined = builder.CreateOr(value, negated, "obf.vm.icmp.nz.or");
+  llvm::Value *top_bit = builder.CreateLShr(
+      combined, llvm::ConstantInt::get(integer_type,
+                                       integer_type->getBitWidth() - 1),
+      "obf.vm.icmp.nz.sh");
+  return builder.CreateTrunc(top_bit, builder.getInt1Ty(), "obf.vm.icmp.nz");
+}
+
+llvm::Value *emit_integer_unsigned_lt(
+    llvm::IRBuilder<> &builder, llvm::Value *lhs, llvm::Value *rhs,
+    const mba::builder_context &mba_context, std::uint64_t salt) {
+  auto *integer_type = llvm::cast<llvm::IntegerType>(lhs->getType());
+  auto *wide_type = llvm::IntegerType::get(builder.getContext(),
+                                           integer_type->getBitWidth() + 1);
+  llvm::Value *lhs_ext = builder.CreateZExt(lhs, wide_type, "obf.vm.icmp.ult.lhs");
+  llvm::Value *rhs_ext = builder.CreateZExt(rhs, wide_type, "obf.vm.icmp.ult.rhs");
+  llvm::Value *diff = mba::create_sub(builder, lhs_ext, rhs_ext, mba_context,
+                                      salt + 1, "obf.vm.icmp.ult.diff");
+  llvm::Value *borrow = builder.CreateLShr(
+      diff,
+      llvm::ConstantInt::get(wide_type, integer_type->getBitWidth()),
+      "obf.vm.icmp.ult.borrow");
+  return builder.CreateTrunc(borrow, builder.getInt1Ty(), "obf.vm.icmp.ult");
+}
+
+llvm::Value *emit_integer_icmp(llvm::IRBuilder<> &builder, opcode predicate,
+                               llvm::Value *lhs, llvm::Value *rhs,
+                               const mba::builder_context &mba_context,
+                               std::uint64_t salt) {
+  auto *integer_type = llvm::cast<llvm::IntegerType>(lhs->getType());
+  llvm::Value *result = nullptr;
+  switch (predicate) {
+  case opcode::icmp_eq:
+  case opcode::icmp_ne: {
+    llvm::Value *difference = mba::create_xor(builder, lhs, rhs, mba_context,
+                                              salt + 1, "obf.vm.icmp.eq.diff");
+    llvm::Value *nonzero = emit_integer_nonzero_test(builder, difference,
+                                                     mba_context, salt + 2);
+    result = predicate == opcode::icmp_ne
+                 ? nonzero
+                 : builder.CreateXor(nonzero, builder.getTrue(),
+                                     "obf.vm.icmp.eq");
+    break;
+  }
+  case opcode::icmp_ult:
+    result = emit_integer_unsigned_lt(builder, lhs, rhs, mba_context, salt + 3);
+    break;
+  case opcode::icmp_ugt:
+    result = emit_integer_unsigned_lt(builder, rhs, lhs, mba_context, salt + 4);
+    break;
+  case opcode::icmp_ule:
+    result = builder.CreateXor(
+        emit_integer_unsigned_lt(builder, rhs, lhs, mba_context, salt + 5),
+        builder.getTrue(), "obf.vm.icmp.ule");
+    break;
+  case opcode::icmp_uge:
+    result = builder.CreateXor(
+        emit_integer_unsigned_lt(builder, lhs, rhs, mba_context, salt + 6),
+        builder.getTrue(), "obf.vm.icmp.uge");
+    break;
+  case opcode::icmp_slt:
+  case opcode::icmp_sgt:
+  case opcode::icmp_sle:
+  case opcode::icmp_sge: {
+    llvm::Constant *sign_mask = llvm::ConstantInt::get(
+        integer_type, llvm::APInt::getSignMask(integer_type->getBitWidth()));
+    llvm::Value *lhs_biased = mba::create_xor(builder, lhs, sign_mask,
+                                              mba_context, salt + 7,
+                                              "obf.vm.icmp.signed.lhs");
+    llvm::Value *rhs_biased = mba::create_xor(builder, rhs, sign_mask,
+                                              mba_context, salt + 8,
+                                              "obf.vm.icmp.signed.rhs");
+    switch (predicate) {
+    case opcode::icmp_slt:
+      result = emit_integer_unsigned_lt(builder, lhs_biased, rhs_biased,
+                                        mba_context, salt + 9);
+      break;
+    case opcode::icmp_sgt:
+      result = emit_integer_unsigned_lt(builder, rhs_biased, lhs_biased,
+                                        mba_context, salt + 10);
+      break;
+    case opcode::icmp_sle:
+      result = builder.CreateXor(
+          emit_integer_unsigned_lt(builder, rhs_biased, lhs_biased,
+                                   mba_context, salt + 11),
+          builder.getTrue(), "obf.vm.icmp.sle");
+      break;
+    case opcode::icmp_sge:
+      result = builder.CreateXor(
+          emit_integer_unsigned_lt(builder, lhs_biased, rhs_biased,
+                                   mba_context, salt + 12),
+          builder.getTrue(), "obf.vm.icmp.sge");
+      break;
+    default:
+      llvm_unreachable("unexpected signed integer compare predicate");
+    }
+    break;
+  }
+  default:
+    llvm_unreachable("opcode is not a scalar integer compare predicate");
+  }
+
+  return result;
+}
+
+llvm::Value *emit_integer_sign_recovery(llvm::IRBuilder<> &builder,
+                                        llvm::Value *widened_value,
+                                        unsigned source_bit_width,
+                                        llvm::StringRef name_prefix) {
+  auto *destination_type = llvm::cast<llvm::IntegerType>(widened_value->getType());
+  if (source_bit_width >= destination_type->getBitWidth()) {
+    return widened_value;
+  }
+
+  llvm::Value *shift_amount = llvm::ConstantInt::get(
+      destination_type, destination_type->getBitWidth() - source_bit_width);
+  llvm::Value *shifted =
+      builder.CreateShl(widened_value, shift_amount, (name_prefix + ".shl").str());
+  return builder.CreateAShr(shifted, shift_amount, name_prefix);
+}
+
+llvm::Value *emit_integer_zext(llvm::IRBuilder<> &builder, llvm::Value *operand,
+                               llvm::IntegerType *destination_type,
+                               const mba::builder_context &mba_context,
+                               std::uint64_t salt) {
+  auto *source_type = llvm::cast<llvm::IntegerType>(operand->getType());
+  llvm::Constant *source_bias = llvm::ConstantInt::get(
+      source_type,
+      llvm::APInt::getOneBitSet(source_type->getBitWidth(),
+                                source_type->getBitWidth() - 1));
+  llvm::Value *biased = mba::create_xor(builder, operand, source_bias, mba_context,
+                                        salt + 1, "obf.vm.zext.bias");
+  llvm::Value *widened = builder.CreateZExt(biased, destination_type,
+                                            "obf.vm.zext.wide");
+  widened = mba::create_xor(builder, widened,
+                            llvm::ConstantInt::get(destination_type, 0),
+                            mba_context, salt + 2, "obf.vm.zext.mix");
+  llvm::Value *signed_value = emit_integer_sign_recovery(
+      builder, widened, source_type->getBitWidth(), "obf.vm.zext.signed");
+  llvm::Constant *destination_bias = llvm::ConstantInt::get(
+      destination_type,
+      llvm::APInt::getOneBitSet(destination_type->getBitWidth(),
+                                source_type->getBitWidth() - 1));
+  return mba::create_add(builder, signed_value, destination_bias, mba_context,
+                         salt + 3, "obf.vm.zext");
+}
+
+llvm::Value *emit_integer_sext(llvm::IRBuilder<> &builder, llvm::Value *operand,
+                               llvm::IntegerType *destination_type,
+                               const mba::builder_context &mba_context,
+                               std::uint64_t salt) {
+  auto *source_type = llvm::cast<llvm::IntegerType>(operand->getType());
+  llvm::Value *widened = builder.CreateZExt(operand, destination_type,
+                                            "obf.vm.sext.wide");
+  widened = mba::create_xor(builder, widened,
+                            llvm::ConstantInt::get(destination_type, 0),
+                            mba_context, salt + 1, "obf.vm.sext.mix");
+  return emit_integer_sign_recovery(builder, widened, source_type->getBitWidth(),
+                                    "obf.vm.sext");
+}
+
+llvm::Value *emit_integer_trunc(llvm::IRBuilder<> &builder, llvm::Value *operand,
+                                llvm::IntegerType *destination_type,
+                                const mba::builder_context &mba_context,
+                                std::uint64_t salt) {
+  auto *source_type = llvm::cast<llvm::IntegerType>(operand->getType());
+  llvm::Value *masked = builder.CreateAnd(
+      operand,
+      llvm::ConstantInt::get(
+          source_type,
+          llvm::APInt::getLowBitsSet(source_type->getBitWidth(),
+                                     destination_type->getBitWidth())),
+      "obf.vm.trunc.mask");
+  if (destination_type->isIntegerTy(1)) {
+    masked = mba::create_xor(builder, masked,
+                             llvm::ConstantInt::get(source_type, 0), mba_context,
+                             salt + 1, "obf.vm.trunc.mix");
+    return emit_integer_nonzero_test(builder, masked, mba_context, salt + 2);
+  }
+
+  return builder.CreateTrunc(masked, destination_type, "obf.vm.trunc");
+}
+
+llvm::Value *emit_integer_cast(llvm::IRBuilder<> &builder, opcode cast_opcode,
+                               llvm::Value *operand,
+                               llvm::Type *destination_type,
+                               const mba::builder_context &mba_context,
+                               std::uint64_t salt) {
+  auto *source_type = llvm::dyn_cast<llvm::IntegerType>(operand->getType());
+  auto *destination_integer_type =
+      llvm::dyn_cast<llvm::IntegerType>(destination_type);
+  if (source_type == nullptr || destination_integer_type == nullptr) {
+    return nullptr;
+  }
+
+  switch (cast_opcode) {
+  case opcode::trunc:
+    if (source_type->getBitWidth() > destination_integer_type->getBitWidth()) {
+      return emit_integer_trunc(builder, operand, destination_integer_type,
+                                mba_context, salt + 1);
+    }
+    break;
+  case opcode::zext:
+    if (source_type->getBitWidth() < destination_integer_type->getBitWidth()) {
+      return emit_integer_zext(builder, operand, destination_integer_type,
+                               mba_context, salt + 2);
+    }
+    break;
+  case opcode::sext:
+    if (source_type->getBitWidth() < destination_integer_type->getBitWidth()) {
+      return emit_integer_sext(builder, operand, destination_integer_type,
+                               mba_context, salt + 3);
+    }
+    break;
+  default:
+    break;
+  }
+
+  return nullptr;
+}
+
 llvm::Value *emit_binary(llvm::IRBuilder<> &builder,
                          const slot_storage &slot_allocas,
                          llvm::ArrayRef<std::uint32_t> slot_mapping,
@@ -1097,6 +1334,12 @@ llvm::Value *emit_cast(llvm::IRBuilder<> &builder,
                         salt + 1);
   llvm::Type *const destination_type =
       const_cast<llvm::Type *>(program.slots[instruction.result_slot].type);
+
+  if (llvm::Value *integer_cast = emit_integer_cast(
+          builder, instruction.op, operand, destination_type, mba_context,
+          salt + 2)) {
+    return integer_cast;
+  }
 
   switch (instruction.op) {
   case opcode::trunc:
@@ -1871,40 +2114,42 @@ void rewrite_function_body(llvm::Function &function,
     case opcode::icmp_sge:
     case opcode::icmp_slt:
     case opcode::icmp_sle:
-      if (select_handler_variant(instruction.op, opaque_seed_base,
-                                 0xe800 + instruction_index) == 0) {
-        finish_value(builder.CreateICmp(
-            icmp_predicate_for_opcode(instruction.op),
-            materialize_value(builder, slot_allocas, current_slot_mapping, program,
-                              instruction.operands[0], opaque_seed,
-                              opaque_seed_base, mba_context,
-                              0xe000 + static_cast<std::uint64_t>(instruction_index)),
-            materialize_value(builder, slot_allocas, current_slot_mapping, program,
-                              instruction.operands[1], opaque_seed,
-                              opaque_seed_base, mba_context,
-                              0xe100 + static_cast<std::uint64_t>(instruction_index)),
-            "obf.vm.icmp"));
-      } else {
+      {
+        const auto emit_compare = [&](llvm::IRBuilder<> &compare_builder) {
+          llvm::Value *lhs = materialize_value(
+              compare_builder, slot_allocas, current_slot_mapping, program,
+              instruction.operands[0], opaque_seed, opaque_seed_base,
+              mba_context,
+              0xe000 + static_cast<std::uint64_t>(instruction_index));
+          llvm::Value *rhs = materialize_value(
+              compare_builder, slot_allocas, current_slot_mapping, program,
+              instruction.operands[1], opaque_seed, opaque_seed_base,
+              mba_context,
+              0xe100 + static_cast<std::uint64_t>(instruction_index));
+          if (lhs->getType()->isIntegerTy() && lhs->getType() == rhs->getType()) {
+            return emit_integer_icmp(compare_builder, instruction.op, lhs, rhs,
+                                     mba_context,
+                                     0xe200 + static_cast<std::uint64_t>(instruction_index) *
+                                                 16);
+          }
+          return compare_builder.CreateICmp(
+              icmp_predicate_for_opcode(instruction.op), lhs, rhs,
+              "obf.vm.icmp");
+        };
+
+        if (value_ref_type(program, instruction.operands[0])->isIntegerTy() &&
+            value_ref_type(program, instruction.operands[0]) ==
+                value_ref_type(program, instruction.operands[1])) {
+          finish_value(emit_compare(builder));
+        } else if (select_handler_variant(instruction.op, opaque_seed_base,
+                                          0xe800 + instruction_index) == 0) {
+          finish_value(emit_compare(builder));
+        } else {
         emit_in_helper_block(
             "vm.icmp.exec.", [&](llvm::IRBuilder<> &helper_builder) {
-              finish_value_in_builder(
-                  helper_builder,
-                  helper_builder.CreateICmp(
-                      icmp_predicate_for_opcode(instruction.op),
-                      materialize_value(helper_builder, slot_allocas,
-                                        current_slot_mapping, program,
-                                        instruction.operands[0], opaque_seed,
-                                        opaque_seed_base, mba_context,
-                                        0xe000 +
-                                            static_cast<std::uint64_t>(instruction_index)),
-                      materialize_value(helper_builder, slot_allocas,
-                                        current_slot_mapping, program,
-                                        instruction.operands[1], opaque_seed,
-                                        opaque_seed_base, mba_context,
-                                        0xe100 +
-                                            static_cast<std::uint64_t>(instruction_index)),
-                      "obf.vm.icmp"));
+              finish_value_in_builder(helper_builder, emit_compare(helper_builder));
             });
+        }
       }
       break;
     case opcode::fcmp_false:
@@ -1963,8 +2208,55 @@ void rewrite_function_body(llvm::Function &function,
       break;
     }
     case opcode::select:
-      if (select_handler_variant(instruction.op, opaque_seed_base,
-                                 0x10000 + instruction_index) == 0) {
+      if (instruction.result_slot != invalid_slot &&
+          (program.slots[instruction.result_slot].type->isIntegerTy() ||
+           program.slots[instruction.result_slot].type->isPointerTy()) &&
+          value_ref_type(program, instruction.operands[0])->isIntegerTy(1)) {
+        auto *true_block = llvm::BasicBlock::Create(
+            context, "vm.select.store.true." + std::to_string(instruction_index),
+            &function);
+        auto *false_block = llvm::BasicBlock::Create(
+            context, "vm.select.store.false." + std::to_string(instruction_index),
+            &function);
+        auto *merge_block = llvm::BasicBlock::Create(
+            context, "vm.select.store.merge." + std::to_string(instruction_index),
+            &function);
+        llvm::Value *condition = materialize_value(
+            builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[0], opaque_seed, opaque_seed_base, mba_context,
+            0x10000 + static_cast<std::uint64_t>(instruction_index));
+        builder.CreateCondBr(condition, true_block, false_block);
+
+        llvm::IRBuilder<> true_builder(true_block);
+        llvm::Value *true_value = materialize_value(
+            true_builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[1], opaque_seed, opaque_seed_base, mba_context,
+            0x10100 + static_cast<std::uint64_t>(instruction_index));
+        store_slot(true_builder, slot_allocas, current_slot_mapping,
+                   instruction.result_slot, true_value);
+        true_builder.CreateBr(merge_block);
+
+        llvm::IRBuilder<> false_builder(false_block);
+        llvm::Value *false_value = materialize_value(
+            false_builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[2], opaque_seed, opaque_seed_base, mba_context,
+            0x10200 + static_cast<std::uint64_t>(instruction_index));
+        store_slot(false_builder, slot_allocas, current_slot_mapping,
+                   instruction.result_slot, false_value);
+        false_builder.CreateBr(merge_block);
+
+        llvm::IRBuilder<> merge_builder(merge_block);
+        if (instruction_index + 1 < slot_mappings.size()) {
+          rotate_to_mapping(merge_builder,
+                            static_cast<std::uint32_t>(instruction_index + 1));
+        }
+        llvm::Value *next_target = decode_target_dispatch(
+            merge_builder, layout.fallthrough_target_offset,
+            0x10300 + static_cast<std::uint64_t>(instruction_index));
+        emit_dispatch(merge_builder, next_target,
+                      0x10400 + static_cast<std::uint64_t>(instruction_index));
+      } else if (select_handler_variant(instruction.op, opaque_seed_base,
+                                        0x10000 + instruction_index) == 0) {
         finish_value(builder.CreateSelect(
             materialize_value(builder, slot_allocas, current_slot_mapping, program,
                               instruction.operands[0], opaque_seed,
@@ -2007,7 +2299,8 @@ void rewrite_function_body(llvm::Function &function,
         false_builder.CreateBr(merge_block);
 
         llvm::IRBuilder<> merge_builder(merge_block);
-        auto *phi = merge_builder.CreatePHI(true_value->getType(), 2, "obf.vm.select.phi");
+        auto *phi =
+            merge_builder.CreatePHI(true_value->getType(), 2, "obf.vm.select.phi");
         phi->addIncoming(true_value, true_block);
         phi->addIncoming(false_value, false_block);
         finish_value_in_builder(merge_builder, phi);
