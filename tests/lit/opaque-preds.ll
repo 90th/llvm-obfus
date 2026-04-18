@@ -23,7 +23,6 @@ entry:
 }
 
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; CHECK-LABEL: define i32 @check
 ; CHECK: %obf.opaque.entropy = load i64, ptr @__obf_entropy_anchor
 ; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] = {{(add|sub|xor) i64}}

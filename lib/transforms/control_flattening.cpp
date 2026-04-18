@@ -98,8 +98,22 @@ bool instruction_escapes_block(const llvm::Instruction &instruction) {
       return true;
     }
 
-    if (user_instruction->getParent() != instruction.getParent() ||
-        llvm::isa<llvm::PHINode>(user_instruction)) {
+    if (user_instruction->getParent() == instruction.getParent()) {
+      if (llvm::isa<llvm::PHINode>(user_instruction)) {
+        return true;
+      }
+
+      continue;
+    }
+
+    // Original PHIs are carried explicitly. Re-carrying values that only feed
+    // PHIs in another block creates redundant dispatcher PHI chains and can
+    // corrupt the threaded value after flattening.
+    if (llvm::isa<llvm::PHINode>(user_instruction)) {
+      continue;
+    }
+
+    if (user_instruction->getParent() != instruction.getParent()) {
       return true;
     }
   }
