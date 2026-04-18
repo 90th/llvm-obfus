@@ -178,10 +178,11 @@ entry:
 ; CHECK: load i32, ptr
 ; CHECK: store i32
 ; CHECK-LABEL: define i32 @__obf_vm_impl_gep_load(ptr %base, i32 %index, i64 %obf.hidden_token)
-; CHECK: %obf.vm.ptr.raw{{[0-9]*}} = ptrtoint ptr %obf.vm.slot{{[0-9]*}} to i64
+; CHECK: store i64 %obf.vm.ptr.carrier{{[0-9]*}}, ptr %obf.vm.slot{{[0-9]*}}
+; CHECK: %obf.vm.slot.ptr.raw{{[0-9]*}} = load i64, ptr %obf.vm.slot{{[0-9]*}}
+; CHECK: %obf.vm.slot.ptr.value{{[0-9]*}} = inttoptr i64 %obf.vm.slot.ptr.raw{{[0-9]*}} to ptr
+; CHECK: getelementptr inbounds i32, ptr %obf.vm.slot.ptr.value{{[0-9]*}}, i32
 ; CHECK: %obf.vm.ptr.carrier{{[0-9]*}} =
-; CHECK: %obf.vm.ptr{{[0-9]*}} = inttoptr i64 %obf.vm.ptr.carrier{{[0-9]*}} to ptr
-; CHECK: getelementptr inbounds i32, ptr
 ; CHECK-LABEL: define i32 @__obf_vm_impl_switch_score(i32 %tag, i32 %base, i64 %obf.hidden_token)
 ; CHECK: vm.switch.default.
 ; CHECK-LABEL: define i16 @__obf_vm_impl_mixed_width(i8 %x, i32 %y, i64 %obf.hidden_token)

@@ -159,6 +159,39 @@ inline constexpr std::uint32_t vm_slot_rotation_cell_count = 3;
 inline constexpr std::size_t vm_opcode_count =
     static_cast<std::size_t>(opcode::ret) + 1;
 
+llvm::IntegerType *get_pointer_carrier_type(llvm::IRBuilder<> &builder,
+                                            llvm::Type *type);
+
+llvm::Value *emit_unsigned_integer_width_cast(
+    llvm::IRBuilder<> &builder, llvm::Value *operand,
+    llvm::IntegerType *destination_type,
+    const mba::builder_context &mba_context, std::uint64_t salt);
+
+llvm::Value *load_pointer_carrier_from_memory(
+    llvm::IRBuilder<> &builder, llvm::Value *address, llvm::Type *pointer_type,
+    const mba::builder_context &mba_context, std::uint64_t salt,
+    llvm::MaybeAlign alignment = llvm::MaybeAlign(),
+    llvm::StringRef name_prefix = "obf.vm.ptr.load");
+
+llvm::Value *load_pointer_value_from_memory(
+    llvm::IRBuilder<> &builder, llvm::Value *address, llvm::Type *pointer_type,
+    const mba::builder_context &mba_context, std::uint64_t salt,
+    llvm::MaybeAlign alignment = llvm::MaybeAlign(),
+    llvm::StringRef name_prefix = "obf.vm.ptr.load");
+
+llvm::StoreInst *store_pointer_carrier_to_memory(
+    llvm::IRBuilder<> &builder, llvm::Value *address, llvm::Value *carrier,
+    llvm::Type *pointer_type, const mba::builder_context &mba_context,
+    std::uint64_t salt,
+    llvm::MaybeAlign alignment = llvm::MaybeAlign());
+
+llvm::StoreInst *store_pointer_value_to_memory(
+    llvm::IRBuilder<> &builder, llvm::Value *address, llvm::Value *pointer_value,
+    llvm::Type *pointer_type, llvm::AllocaInst *opaque_seed_slot,
+    std::uint64_t opaque_seed_base, const mba::builder_context &mba_context,
+    std::uint64_t salt,
+    llvm::MaybeAlign alignment = llvm::MaybeAlign());
+
 enum class dispatch_backend_variant : std::uint32_t {
   switch_index = 0,
   direct_threaded_match = 1,
@@ -436,27 +469,55 @@ build_slot_cell_mappings(const bytecode_program &program, std::uint64_t seed_bas
 llvm::Value *load_slot(llvm::IRBuilder<> &builder,
                        const slot_storage &slot_allocas,
                        llvm::ArrayRef<std::uint32_t> slot_mapping,
-                       const bytecode_program &program, std::uint32_t slot) {
+                       const bytecode_program &program, std::uint32_t slot,
+                       const mba::builder_context &mba_context,
+                       std::uint64_t salt) {
   const slot_desc &slot_info = program.slots[slot];
+  llvm::Value *slot_address = slot_allocas[slot][slot_mapping[slot]];
+  if (slot_info.type->isPointerTy()) {
+    if (llvm::Value *pointer_value = load_pointer_value_from_memory(
+            builder, slot_address, const_cast<llvm::Type *>(slot_info.type),
+            mba_context, salt ^ 0x5c0cULL, llvm::MaybeAlign(),
+            "obf.vm.slot.ptr")) {
+      return pointer_value;
+    }
+  }
+
   return builder.CreateLoad(const_cast<llvm::Type *>(slot_info.type),
-                            slot_allocas[slot][slot_mapping[slot]],
-                            "obf.vm.slot");
+                            slot_address, "obf.vm.slot");
 }
 
 void store_slot(llvm::IRBuilder<> &builder,
                 const slot_storage &slot_allocas,
                 llvm::ArrayRef<std::uint32_t> slot_mapping,
-                std::uint32_t slot, llvm::Value *value) {
-  builder.CreateStore(value, slot_allocas[slot][slot_mapping[slot]]);
+                const bytecode_program &program, std::uint32_t slot,
+                llvm::Value *value, llvm::AllocaInst *opaque_seed_slot,
+                std::uint64_t opaque_seed_base,
+                const mba::builder_context &mba_context, std::uint64_t salt) {
+  const slot_desc &slot_info = program.slots[slot];
+  llvm::Value *slot_address = slot_allocas[slot][slot_mapping[slot]];
+  if (slot_info.type->isPointerTy()) {
+    if (store_pointer_value_to_memory(
+            builder, slot_address, value,
+            const_cast<llvm::Type *>(slot_info.type), opaque_seed_slot,
+            opaque_seed_base, mba_context, salt ^ 0x5d0dULL)) {
+      return;
+    }
+  }
+
+  builder.CreateStore(value, slot_address);
 }
 
 void rotate_slot_cells(llvm::IRBuilder<> &builder, const slot_storage &slot_allocas,
                        const bytecode_program &program,
                        llvm::ArrayRef<std::uint32_t> current_mapping,
-                       llvm::ArrayRef<std::uint32_t> target_mapping) {
+                       llvm::ArrayRef<std::uint32_t> target_mapping,
+                       const mba::builder_context &mba_context,
+                       std::uint64_t salt) {
   struct pending_slot_move {
     std::uint32_t slot = invalid_slot;
     llvm::Value *value = nullptr;
+    bool uses_pointer_carrier = false;
   };
 
   llvm::SmallVector<pending_slot_move, 16> pending_moves;
@@ -467,6 +528,20 @@ void rotate_slot_cells(llvm::IRBuilder<> &builder, const slot_storage &slot_allo
     }
 
     const slot_desc &slot_info = program.slots[slot_index];
+    if (slot_info.type->isPointerTy()) {
+      if (llvm::Value *carrier = load_pointer_carrier_from_memory(
+              builder, slot_allocas[slot_index][current_mapping[slot_index]],
+              const_cast<llvm::Type *>(slot_info.type), mba_context,
+              salt + static_cast<std::uint64_t>(slot_index) * 4 + 1,
+              llvm::MaybeAlign(), "obf.vm.rot.ptr")) {
+        pending_moves.push_back(
+            {.slot = static_cast<std::uint32_t>(slot_index),
+             .value = carrier,
+             .uses_pointer_carrier = true});
+        continue;
+      }
+    }
+
     pending_moves.push_back(
         {.slot = static_cast<std::uint32_t>(slot_index),
          .value = builder.CreateLoad(const_cast<llvm::Type *>(slot_info.type),
@@ -475,6 +550,23 @@ void rotate_slot_cells(llvm::IRBuilder<> &builder, const slot_storage &slot_allo
   }
 
   for (const pending_slot_move &move : pending_moves) {
+    if (move.uses_pointer_carrier) {
+      llvm::Type *pointer_type =
+          const_cast<llvm::Type *>(program.slots[move.slot].type);
+      if (store_pointer_carrier_to_memory(
+              builder, slot_allocas[move.slot][target_mapping[move.slot]],
+              move.value, pointer_type, mba_context,
+              salt + static_cast<std::uint64_t>(move.slot) * 4 + 2)) {
+        if (auto *carrier_type = get_pointer_carrier_type(builder, pointer_type)) {
+          (void)store_pointer_carrier_to_memory(
+              builder, slot_allocas[move.slot][current_mapping[move.slot]],
+              llvm::ConstantInt::get(carrier_type, 0), pointer_type, mba_context,
+              salt + static_cast<std::uint64_t>(move.slot) * 4 + 3);
+        }
+        continue;
+      }
+    }
+
     builder.CreateStore(move.value,
                         slot_allocas[move.slot][target_mapping[move.slot]]);
     builder.CreateStore(
@@ -1018,6 +1110,176 @@ llvm::Value *materialize_pointer_value(llvm::IRBuilder<> &builder,
   return builder.CreateIntToPtr(carrier, pointer_type, "obf.vm.ptr");
 }
 
+llvm::Value *load_pointer_carrier_from_memory(
+    llvm::IRBuilder<> &builder, llvm::Value *address, llvm::Type *pointer_type,
+    const mba::builder_context &mba_context, std::uint64_t salt,
+    llvm::MaybeAlign alignment, llvm::StringRef name_prefix) {
+  auto *carrier_type = get_pointer_carrier_type(builder, pointer_type);
+  if (carrier_type == nullptr) {
+    return nullptr;
+  }
+
+  const std::string base_name =
+      name_prefix.empty() ? "obf.vm.ptr.load" : name_prefix.str();
+  auto *load = builder.CreateLoad(carrier_type, address, base_name + ".raw");
+  if (alignment) {
+    load->setAlignment(*alignment);
+  }
+
+  llvm::Value *carrier = emit_unsigned_integer_width_cast(
+      builder, load, carrier_type, mba_context, salt + 1);
+  return carrier != nullptr ? carrier : load;
+}
+
+llvm::Value *load_pointer_value_from_memory(
+    llvm::IRBuilder<> &builder, llvm::Value *address, llvm::Type *pointer_type,
+    const mba::builder_context &mba_context, std::uint64_t salt,
+    llvm::MaybeAlign alignment, llvm::StringRef name_prefix) {
+  auto *typed_pointer = llvm::dyn_cast<llvm::PointerType>(pointer_type);
+  if (typed_pointer == nullptr) {
+    return nullptr;
+  }
+
+  llvm::Value *carrier = load_pointer_carrier_from_memory(
+      builder, address, pointer_type, mba_context, salt, alignment, name_prefix);
+  if (carrier == nullptr) {
+    return nullptr;
+  }
+
+  const std::string base_name =
+      name_prefix.empty() ? "obf.vm.ptr.load" : name_prefix.str();
+  return builder.CreateIntToPtr(carrier, typed_pointer, base_name + ".value");
+}
+
+llvm::StoreInst *store_pointer_carrier_to_memory(
+    llvm::IRBuilder<> &builder, llvm::Value *address, llvm::Value *carrier,
+    llvm::Type *pointer_type, const mba::builder_context &mba_context,
+    std::uint64_t salt, llvm::MaybeAlign alignment) {
+  auto *carrier_type = get_pointer_carrier_type(builder, pointer_type);
+  if (carrier_type == nullptr) {
+    return nullptr;
+  }
+
+  llvm::Value *normalized = emit_unsigned_integer_width_cast(
+      builder, carrier, carrier_type, mba_context, salt + 1);
+  if (normalized == nullptr) {
+    return nullptr;
+  }
+
+  auto *store = builder.CreateStore(normalized, address);
+  if (alignment) {
+    store->setAlignment(*alignment);
+  }
+  return store;
+}
+
+llvm::StoreInst *store_pointer_value_to_memory(
+    llvm::IRBuilder<> &builder, llvm::Value *address, llvm::Value *pointer_value,
+    llvm::Type *pointer_type, llvm::AllocaInst *opaque_seed_slot,
+    std::uint64_t opaque_seed_base, const mba::builder_context &mba_context,
+    std::uint64_t salt, llvm::MaybeAlign alignment) {
+  llvm::Value *carrier = materialize_pointer_carrier(
+      builder, pointer_value, opaque_seed_slot, opaque_seed_base, mba_context,
+      salt ^ 0x5a0aULL);
+  if (carrier == nullptr) {
+    return nullptr;
+  }
+
+  return store_pointer_carrier_to_memory(builder, address, carrier, pointer_type,
+                                         mba_context, salt ^ 0x5b0bULL,
+                                         alignment);
+}
+
+struct non_pointer_memory_access {
+  llvm::AllocaInst *scratch = nullptr;
+  llvm::Align scratch_alignment = llvm::Align(1);
+  std::uint64_t size = 0;
+  llvm::MaybeAlign pointer_alignment;
+
+  [[nodiscard]] bool valid() const { return scratch != nullptr && size != 0; }
+};
+
+non_pointer_memory_access prepare_non_pointer_memory_access(
+    llvm::IRBuilder<> &builder, llvm::Type *value_type,
+    std::uint32_t pointer_alignment, llvm::StringRef scratch_name) {
+  non_pointer_memory_access access;
+  if (value_type == nullptr || value_type->isPointerTy()) {
+    return access;
+  }
+
+  const llvm::DataLayout *data_layout = get_builder_data_layout(builder);
+  llvm::BasicBlock *block = builder.GetInsertBlock();
+  llvm::Function *function = block != nullptr ? block->getParent() : nullptr;
+  if (data_layout == nullptr || function == nullptr || !value_type->isSized()) {
+    return access;
+  }
+
+  llvm::TypeSize storage_size = data_layout->getTypeStoreSize(value_type);
+  if (storage_size.isScalable() || storage_size.getFixedValue() == 0) {
+    return access;
+  }
+
+  llvm::BasicBlock &entry_block = function->getEntryBlock();
+  llvm::IRBuilder<> entry_builder(&entry_block, entry_block.begin());
+  access.scratch = entry_builder.CreateAlloca(value_type, nullptr, scratch_name);
+  access.scratch_alignment = data_layout->getPrefTypeAlign(value_type);
+  access.scratch->setAlignment(access.scratch_alignment);
+  access.size = storage_size.getFixedValue();
+  if (pointer_alignment != 0) {
+    access.pointer_alignment = llvm::Align(pointer_alignment);
+  }
+  return access;
+}
+
+llvm::Value *load_non_pointer_value_from_memory(
+    llvm::IRBuilder<> &builder, llvm::Value *address, llvm::Type *value_type,
+    std::uint32_t pointer_alignment,
+    llvm::StringRef name_prefix = "obf.vm.load.mem") {
+  if (address == nullptr || !address->getType()->isPointerTy()) {
+    return nullptr;
+  }
+
+  const std::string base_name =
+      name_prefix.empty() ? "obf.vm.load.mem" : name_prefix.str();
+  non_pointer_memory_access access = prepare_non_pointer_memory_access(
+      builder, value_type, pointer_alignment, base_name + ".scratch");
+  if (!access.valid()) {
+    return nullptr;
+  }
+
+  (void)builder.CreateMemCpy(access.scratch,
+                             llvm::MaybeAlign(access.scratch_alignment), address,
+                             access.pointer_alignment, access.size);
+  auto *load = builder.CreateLoad(value_type, access.scratch, base_name);
+  load->setAlignment(access.scratch_alignment);
+  return load;
+}
+
+bool store_non_pointer_value_to_memory(
+    llvm::IRBuilder<> &builder, llvm::Value *address, llvm::Value *value,
+    llvm::Type *value_type, std::uint32_t pointer_alignment,
+    llvm::StringRef name_prefix = "obf.vm.store.mem") {
+  if (address == nullptr || value == nullptr || !address->getType()->isPointerTy() ||
+      value_type == nullptr || value->getType() != value_type) {
+    return false;
+  }
+
+  const std::string base_name =
+      name_prefix.empty() ? "obf.vm.store.mem" : name_prefix.str();
+  non_pointer_memory_access access = prepare_non_pointer_memory_access(
+      builder, value_type, pointer_alignment, base_name + ".scratch");
+  if (!access.valid()) {
+    return false;
+  }
+
+  auto *scratch_store = builder.CreateStore(value, access.scratch);
+  scratch_store->setAlignment(access.scratch_alignment);
+  (void)builder.CreateMemCpy(address, access.pointer_alignment, access.scratch,
+                             llvm::MaybeAlign(access.scratch_alignment),
+                             access.size);
+  return true;
+}
+
 llvm::Value *materialize_constant(llvm::IRBuilder<> &builder,
                                   const llvm::Constant &constant,
                                   llvm::AllocaInst *opaque_seed_slot,
@@ -1051,15 +1313,8 @@ llvm::Value *materialize_value(llvm::IRBuilder<> &builder,
                                std::uint64_t salt) {
   if (value.kind == value_ref_kind::slot) {
     llvm::Value *slot_value =
-        load_slot(builder, slot_allocas, slot_mapping, program, value.slot);
-    if (slot_value->getType()->isPointerTy()) {
-      if (llvm::Value *pointer_value = materialize_pointer_value(
-              builder, slot_value, opaque_seed_slot, opaque_seed_base,
-              mba_context, salt ^ 0x5505ULL)) {
-        return pointer_value;
-      }
-    }
-
+        load_slot(builder, slot_allocas, slot_mapping, program, value.slot,
+                  mba_context, salt ^ 0x5505ULL);
     return slot_value;
   }
 
@@ -1088,8 +1343,16 @@ llvm::Value *materialize_pointer_carrier_from_value_ref(
 
   llvm::Value *pointer_value = nullptr;
   if (value.kind == value_ref_kind::slot) {
-    pointer_value =
-        load_slot(builder, slot_allocas, slot_mapping, program, value.slot);
+    const slot_desc &slot_info = program.slots[value.slot];
+    if (llvm::Value *carrier = load_pointer_carrier_from_memory(
+            builder, slot_allocas[value.slot][slot_mapping[value.slot]],
+            const_cast<llvm::Type *>(slot_info.type), mba_context,
+            salt ^ 0x5606ULL, llvm::MaybeAlign(), "obf.vm.ptr.slot")) {
+      return carrier;
+    }
+
+    pointer_value = load_slot(builder, slot_allocas, slot_mapping, program,
+                              value.slot, mba_context, salt ^ 0x5707ULL);
   } else {
     pointer_value = const_cast<llvm::Constant *>(value.constant);
   }
@@ -1641,8 +1904,10 @@ void apply_edge_assignments(
   for (std::size_t assignment_index = 0;
        assignment_index < edge.assignments.size(); ++assignment_index) {
     store_slot(builder, slot_allocas, slot_mapping,
-               edge.assignments[assignment_index].slot,
-               incoming_values[assignment_index]);
+               program, edge.assignments[assignment_index].slot,
+               incoming_values[assignment_index], opaque_seed_slot,
+               opaque_seed_base, mba_context,
+               salt + edge.assignments.size() + assignment_index + 1);
   }
 }
 
@@ -1805,7 +2070,10 @@ void rewrite_function_body(llvm::Function &function,
   std::size_t argument_index = 0;
   for (llvm::Argument &argument : function.args()) {
     store_slot(entry_builder, slot_allocas, entry_slot_mapping,
-               program.argument_slots[argument_index++], &argument);
+               program, program.argument_slots[argument_index], &argument,
+               opaque_seed, opaque_seed_base, mba_context,
+               0x8110 + argument_index);
+    ++argument_index;
   }
 
   std::uint64_t dispatch_site_counter = 0;
@@ -2259,14 +2527,19 @@ void rewrite_function_body(llvm::Function &function,
 
       rotate_slot_cells(rotation_builder, slot_allocas, program,
                         current_slot_mapping,
-                        llvm::ArrayRef<std::uint32_t>(slot_mappings[target_instruction]));
+                        llvm::ArrayRef<std::uint32_t>(slot_mappings[target_instruction]),
+                        mba_context,
+                        0x8200 + static_cast<std::uint64_t>(instruction_index) * 16 +
+                            target_instruction);
     };
 
     const auto finish_value_in_builder =
         [&](llvm::IRBuilder<> &finish_builder, llvm::Value *result) {
           if (instruction.result_slot != invalid_slot) {
             store_slot(finish_builder, slot_allocas, current_slot_mapping,
-                       instruction.result_slot, result);
+                       program, instruction.result_slot, result, opaque_seed,
+                       opaque_seed_base, mba_context,
+                       0x8300 + static_cast<std::uint64_t>(instruction_index) * 16);
           }
           if (instruction_index + 1 < slot_mappings.size()) {
             rotate_to_mapping(finish_builder,
@@ -2494,7 +2767,9 @@ void rewrite_function_body(llvm::Function &function,
             instruction.operands[1], opaque_seed, opaque_seed_base, mba_context,
             0x10100 + static_cast<std::uint64_t>(instruction_index));
         store_slot(true_builder, slot_allocas, current_slot_mapping,
-                   instruction.result_slot, true_value);
+                   program, instruction.result_slot, true_value, opaque_seed,
+                   opaque_seed_base, mba_context,
+                   0x10300 + static_cast<std::uint64_t>(instruction_index));
         true_builder.CreateBr(merge_block);
 
         llvm::IRBuilder<> false_builder(false_block);
@@ -2503,7 +2778,9 @@ void rewrite_function_body(llvm::Function &function,
             instruction.operands[2], opaque_seed, opaque_seed_base, mba_context,
             0x10200 + static_cast<std::uint64_t>(instruction_index));
         store_slot(false_builder, slot_allocas, current_slot_mapping,
-                   instruction.result_slot, false_value);
+                   program, instruction.result_slot, false_value, opaque_seed,
+                   opaque_seed_base, mba_context,
+                   0x10400 + static_cast<std::uint64_t>(instruction_index));
         false_builder.CreateBr(merge_block);
 
         llvm::IRBuilder<> merge_builder(merge_block);
@@ -2569,57 +2846,87 @@ void rewrite_function_body(llvm::Function &function,
       break;
     case opcode::load_int:
     case opcode::load_float:
-    case opcode::load_ptr:
     case opcode::load_vector: {
+      const auto emit_load = [&](llvm::IRBuilder<> &load_builder) {
+        llvm::Value *pointer_address = materialize_value(
+            load_builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[0], opaque_seed, opaque_seed_base, mba_context,
+            0x11000 + static_cast<std::uint64_t>(instruction_index));
+        llvm::Value *load = load_non_pointer_value_from_memory(
+            load_builder, pointer_address,
+            const_cast<llvm::Type *>(instruction.type), instruction.immediate,
+            "obf.vm.load.mem");
+        if (load == nullptr) {
+          auto *direct_load = load_builder.CreateLoad(
+              const_cast<llvm::Type *>(instruction.type), pointer_address,
+              "obf.vm.load");
+          if (instruction.immediate != 0) {
+            direct_load->setAlignment(llvm::Align(instruction.immediate));
+          }
+          load = direct_load;
+        }
+        finish_value_in_builder(load_builder, load);
+      };
       if (select_handler_variant(instruction.op, opaque_seed_base,
                                  0x11800 + instruction_index) == 0) {
-        auto *load = builder.CreateLoad(
-            const_cast<llvm::Type *>(instruction.type),
-            materialize_value(builder, slot_allocas, current_slot_mapping, program,
-                              instruction.operands[0], opaque_seed,
-                              opaque_seed_base, mba_context,
-                              0x11000 + static_cast<std::uint64_t>(instruction_index)),
-            "obf.vm.load");
-        if (instruction.immediate != 0) {
-          load->setAlignment(llvm::Align(instruction.immediate));
-        }
-        finish_value(load);
+        emit_load(builder);
       } else {
-        emit_in_helper_block(
-            "vm.load.exec.", [&](llvm::IRBuilder<> &helper_builder) {
-              auto *load = helper_builder.CreateLoad(
-                  const_cast<llvm::Type *>(instruction.type),
-                  materialize_value(helper_builder, slot_allocas,
-                                    current_slot_mapping, program,
-                                    instruction.operands[0], opaque_seed,
-                                    opaque_seed_base, mba_context,
-                                    0x11000 +
-                                        static_cast<std::uint64_t>(instruction_index)),
-                  "obf.vm.load");
-              if (instruction.immediate != 0) {
-                load->setAlignment(llvm::Align(instruction.immediate));
-              }
-              finish_value_in_builder(helper_builder, load);
-            });
+        emit_in_helper_block("vm.load.exec.", emit_load);
+      }
+      break;
+    }
+    case opcode::load_ptr: {
+      const auto emit_pointer_load = [&](llvm::IRBuilder<> &load_builder) {
+        llvm::Value *pointer_address = materialize_value(
+            load_builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[0], opaque_seed, opaque_seed_base, mba_context,
+            0x11000 + static_cast<std::uint64_t>(instruction_index));
+        llvm::Value *load = load_pointer_value_from_memory(
+            load_builder, pointer_address,
+            const_cast<llvm::Type *>(instruction.type), mba_context,
+            0x11080 + static_cast<std::uint64_t>(instruction_index),
+            instruction.immediate != 0 ? llvm::MaybeAlign(llvm::Align(instruction.immediate))
+                                       : llvm::MaybeAlign(),
+            "obf.vm.load.ptr");
+        if (load == nullptr) {
+          auto *direct_load = load_builder.CreateLoad(
+              const_cast<llvm::Type *>(instruction.type), pointer_address,
+              "obf.vm.load");
+          if (instruction.immediate != 0) {
+            direct_load->setAlignment(llvm::Align(instruction.immediate));
+          }
+          load = direct_load;
+        }
+        finish_value_in_builder(load_builder, load);
+      };
+      if (select_handler_variant(instruction.op, opaque_seed_base,
+                                 0x11800 + instruction_index) == 0) {
+        emit_pointer_load(builder);
+      } else {
+        emit_in_helper_block("vm.load.exec.", emit_pointer_load);
       }
       break;
     }
     case opcode::store_int:
     case opcode::store_float:
-    case opcode::store_ptr:
     case opcode::store_vector: {
       const auto emit_store = [&](llvm::IRBuilder<> &store_builder) {
-        auto *store = store_builder.CreateStore(
-            materialize_value(store_builder, slot_allocas, current_slot_mapping,
-                              program, instruction.operands[0], opaque_seed,
-                              opaque_seed_base, mba_context,
-                              0x12000 + static_cast<std::uint64_t>(instruction_index)),
-            materialize_value(store_builder, slot_allocas, current_slot_mapping,
-                              program, instruction.operands[1], opaque_seed,
-                              opaque_seed_base, mba_context,
-                              0x12100 + static_cast<std::uint64_t>(instruction_index)));
-        if (instruction.immediate != 0) {
-          store->setAlignment(llvm::Align(instruction.immediate));
+        llvm::Value *value = materialize_value(
+            store_builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[0], opaque_seed, opaque_seed_base, mba_context,
+            0x12000 + static_cast<std::uint64_t>(instruction_index));
+        llvm::Value *pointer_address = materialize_value(
+            store_builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[1], opaque_seed, opaque_seed_base, mba_context,
+            0x12100 + static_cast<std::uint64_t>(instruction_index));
+        if (!store_non_pointer_value_to_memory(
+                store_builder, pointer_address, value,
+                const_cast<llvm::Type *>(instruction.type), instruction.immediate,
+                "obf.vm.store.mem")) {
+          auto *store = store_builder.CreateStore(value, pointer_address);
+          if (instruction.immediate != 0) {
+            store->setAlignment(llvm::Align(instruction.immediate));
+          }
         }
         if (instruction_index + 1 < slot_mappings.size()) {
           rotate_to_mapping(store_builder,
@@ -2636,6 +2943,67 @@ void rewrite_function_body(llvm::Function &function,
         emit_store(builder);
       } else {
         emit_in_helper_block("vm.store.exec.", emit_store);
+      }
+      break;
+    }
+    case opcode::store_ptr: {
+      const auto emit_pointer_store = [&](llvm::IRBuilder<> &store_builder) {
+        llvm::Value *pointer_address = materialize_value(
+            store_builder, slot_allocas, current_slot_mapping, program,
+            instruction.operands[1], opaque_seed, opaque_seed_base, mba_context,
+            0x12100 + static_cast<std::uint64_t>(instruction_index));
+        llvm::StoreInst *store = nullptr;
+        if (llvm::Value *carrier = materialize_pointer_carrier_from_value_ref(
+                store_builder, slot_allocas, current_slot_mapping, program,
+                instruction.operands[0], opaque_seed, opaque_seed_base,
+                mba_context, 0x12000 + static_cast<std::uint64_t>(instruction_index))) {
+          store = store_pointer_carrier_to_memory(
+              store_builder, pointer_address, carrier,
+              const_cast<llvm::Type *>(instruction.type), mba_context,
+              0x12080 + static_cast<std::uint64_t>(instruction_index),
+              instruction.immediate != 0 ? llvm::MaybeAlign(llvm::Align(instruction.immediate))
+                                         : llvm::MaybeAlign());
+        }
+        if (store == nullptr) {
+          llvm::Value *value = materialize_value(
+              store_builder, slot_allocas, current_slot_mapping, program,
+              instruction.operands[0], opaque_seed, opaque_seed_base,
+              mba_context,
+              0x12040 + static_cast<std::uint64_t>(instruction_index));
+          store = store_pointer_value_to_memory(
+              store_builder, pointer_address, value,
+              const_cast<llvm::Type *>(instruction.type), opaque_seed,
+              opaque_seed_base, mba_context,
+              0x120c0 + static_cast<std::uint64_t>(instruction_index),
+              instruction.immediate != 0 ? llvm::MaybeAlign(llvm::Align(instruction.immediate))
+                                         : llvm::MaybeAlign());
+        }
+        if (store == nullptr) {
+          llvm::Value *value = materialize_value(
+              store_builder, slot_allocas, current_slot_mapping, program,
+              instruction.operands[0], opaque_seed, opaque_seed_base,
+              mba_context,
+              0x12060 + static_cast<std::uint64_t>(instruction_index));
+          store = store_builder.CreateStore(value, pointer_address);
+          if (instruction.immediate != 0) {
+            store->setAlignment(llvm::Align(instruction.immediate));
+          }
+        }
+        if (instruction_index + 1 < slot_mappings.size()) {
+          rotate_to_mapping(store_builder,
+                            static_cast<std::uint32_t>(instruction_index + 1));
+        }
+        llvm::Value *next_target = decode_target_dispatch(
+            store_builder, layout.fallthrough_target_offset,
+            0x12200 + static_cast<std::uint64_t>(instruction_index));
+        emit_dispatch(store_builder, next_target,
+                      0x12300 + static_cast<std::uint64_t>(instruction_index));
+      };
+      if (select_handler_variant(instruction.op, opaque_seed_base,
+                                 0x12800 + instruction_index) == 0) {
+        emit_pointer_store(builder);
+      } else {
+        emit_in_helper_block("vm.store.exec.", emit_pointer_store);
       }
       break;
     }
@@ -2841,7 +3209,9 @@ void rewrite_function_body(llvm::Function &function,
         apply_fast_math_flags(call, instruction.flags);
         if (instruction.result_slot != invalid_slot) {
           store_slot(call_builder, slot_allocas, current_slot_mapping,
-                     instruction.result_slot, call);
+                     program, instruction.result_slot, call, opaque_seed,
+                     opaque_seed_base, mba_context,
+                     0x14200 + static_cast<std::uint64_t>(instruction_index));
         }
         if (instruction_index + 1 < slot_mappings.size()) {
           rotate_to_mapping(call_builder,
