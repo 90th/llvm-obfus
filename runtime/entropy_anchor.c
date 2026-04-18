@@ -9,6 +9,7 @@
 
 #if !defined(_MSC_VER) && (defined(__i386__) || defined(__x86_64__))
 #include <x86intrin.h>
+#include <cpuid.h>
 #endif
 
 #if !defined(__i386__) && !defined(__x86_64__) && !defined(_M_IX86) && !defined(_M_X64)
@@ -17,6 +18,25 @@
 
 uint64_t __obf_entropy_anchor = 0;
 uint64_t * __obf_entropy_anchor_ref = &__obf_entropy_anchor;
+
+struct ObfEntropyPair {
+  uint64_t direct;
+  uint64_t indirect;
+};
+
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+struct ObfEntropyPair __obf_load_entropy_pair(void) {
+  const uint64_t direct = __obf_entropy_anchor;
+  uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
+  *ref_ptr = direct;
+  const uint64_t indirect = __obf_entropy_anchor;
+  const struct ObfEntropyPair pair = {direct, indirect};
+  return pair;
+}
 
 static uint64_t ReadTimestampEntropy(void) {
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
@@ -34,8 +54,14 @@ static int CpuSupportsRdrand(void) {
   __cpuid(cpu_info, 1);
   return (cpu_info[2] & (1 << 30)) != 0;
 #elif defined(__x86_64__) && (defined(__clang__) || defined(__GNUC__))
-  __builtin_cpu_init();
-  return __builtin_cpu_supports("rdrnd");
+  unsigned int eax = 0;
+  unsigned int ebx = 0;
+  unsigned int ecx = 0;
+  unsigned int edx = 0;
+  if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0) {
+    return 0;
+  }
+  return (ecx & (1u << 30)) != 0;
 #else
   return 0;
 #endif

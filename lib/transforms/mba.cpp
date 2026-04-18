@@ -85,38 +85,85 @@ llvm::Constant *constant_i64_to_type(llvm::Type *target_type, std::uint64_t word
   return llvm::ConstantVector::getSplat(vector_type->getElementCount(), element);
 }
 
-llvm::GlobalVariable *get_or_create_entropy_anchor_ref(llvm::Module &module) {
-  if (llvm::GlobalVariable *existing =
-          module.getNamedGlobal("__obf_entropy_anchor_ref")) {
-    return existing;
-  }
-
-  auto *ref = new llvm::GlobalVariable(
-      module, llvm::PointerType::get(module.getContext(), 0),
-      /*isConstant=*/false, llvm::GlobalValue::ExternalLinkage,
-      /*Initializer=*/nullptr, "__obf_entropy_anchor_ref");
-  ref->setExternallyInitialized(true);
-  ref->setAlignment(llvm::Align(8));
-  return ref;
-}
-
 struct entropy_pair {
   llvm::Value *direct = nullptr;
   llvm::Value *indirect = nullptr;
 };
 
+llvm::Function *get_or_create_entropy_pair_accessor(llvm::Module &module) {
+  auto *pair_type = llvm::StructType::get(module.getContext(),
+                                          {llvm::Type::getInt64Ty(module.getContext()),
+                                           llvm::Type::getInt64Ty(module.getContext())});
+  if (llvm::Function *existing = module.getFunction("__obf_load_entropy_pair")) {
+    if (existing->getReturnType() != pair_type || !existing->arg_empty()) {
+      llvm::report_fatal_error("__obf_load_entropy_pair has unexpected signature");
+    }
+    return existing;
+  }
+
+  auto *function_type = llvm::FunctionType::get(pair_type, /*isVarArg=*/false);
+  auto *function = llvm::Function::Create(function_type,
+                                          llvm::GlobalValue::ExternalLinkage,
+                                          "__obf_load_entropy_pair", module);
+  function->setDoesNotThrow();
+  return function;
+}
+
+llvm::AllocaInst *get_or_create_function_entropy_pair_cache(
+    llvm::Function &function, llvm::Function &accessor) {
+  auto *pair_type = llvm::dyn_cast<llvm::StructType>(accessor.getReturnType());
+  if (pair_type == nullptr) {
+    llvm::report_fatal_error("__obf_load_entropy_pair return type is not a struct");
+  }
+
+  llvm::BasicBlock &entry_block = function.getEntryBlock();
+  for (llvm::Instruction &instruction : entry_block) {
+    auto *alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction);
+    if (alloca == nullptr) {
+      break;
+    }
+
+    if (alloca->getName() == "obf.entropy.cache" &&
+        alloca->getAllocatedType() == pair_type) {
+      return alloca;
+    }
+  }
+
+  auto insert_it = entry_block.begin();
+  while (insert_it != entry_block.end() && llvm::isa<llvm::AllocaInst>(*insert_it)) {
+    ++insert_it;
+  }
+
+  llvm::IRBuilder<> entry_builder(&entry_block, insert_it);
+  auto *cache = entry_builder.CreateAlloca(pair_type, nullptr, "obf.entropy.cache");
+  const llvm::DataLayout &data_layout = function.getParent()->getDataLayout();
+  cache->setAlignment(data_layout.getPrefTypeAlign(pair_type));
+  llvm::Value *pair =
+      entry_builder.CreateCall(&accessor, {}, "obf.entropy.cache.init");
+  auto *store = entry_builder.CreateStore(pair, cache);
+  store->setAlignment(cache->getAlign());
+  return cache;
+}
+
 entropy_pair load_entropy_anchor_pair(llvm::IRBuilder<> &builder,
                                       llvm::GlobalVariable *entropy_anchor,
                                       llvm::StringRef name) {
+  llvm::BasicBlock *block = builder.GetInsertBlock();
+  llvm::Function *function = block != nullptr ? block->getParent() : nullptr;
   llvm::Module *module = entropy_anchor->getParent();
-  auto *anchor_ref = get_or_create_entropy_anchor_ref(*module);
-  llvm::Value *direct = builder.CreateLoad(builder.getInt64Ty(), entropy_anchor,
-                                           (name + ".direct").str());
-  llvm::Value *ref_ptr = builder.CreateLoad(anchor_ref->getValueType(), anchor_ref,
-                                            (name + ".ref").str());
-  builder.CreateStore(direct, ref_ptr);
-  llvm::Value *indirect = builder.CreateLoad(builder.getInt64Ty(), entropy_anchor,
-                                             (name + ".indirect").str());
+  if (module == nullptr || function == nullptr) {
+    return {};
+  }
+
+  llvm::Function *accessor = get_or_create_entropy_pair_accessor(*module);
+  llvm::AllocaInst *cache =
+      get_or_create_function_entropy_pair_cache(*function, *accessor);
+  llvm::Value *pair =
+      builder.CreateLoad(accessor->getReturnType(), cache, (name + ".pair").str());
+  llvm::cast<llvm::LoadInst>(pair)->setAlignment(cache->getAlign());
+  llvm::Value *direct = builder.CreateExtractValue(pair, {0}, (name + ".direct").str());
+  llvm::Value *indirect =
+      builder.CreateExtractValue(pair, {1}, (name + ".indirect").str());
   return {.direct = direct, .indirect = indirect};
 }
 

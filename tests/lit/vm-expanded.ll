@@ -153,7 +153,6 @@ entry:
 ; CHECK-DAG: @__obf_vm_retkey_switch_score = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @__obf_vm_retkey_mixed_width = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; CHECK-NOT: @__obf_vm_retkey_float_mix
 ; CHECK-NOT: @__obf_vm_retkey_vector_mix
 ; CHECK-LABEL: define i32 @branch_phi(i32 %x)
@@ -166,7 +165,9 @@ entry:
 ; CHECK: entry.obf.vm:
 ; CHECK: %obf.vm.state = alloca i64
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
-; CHECK: %obf.entropy.direct = load i64, ptr @__obf_entropy_anchor
+; CHECK: %obf.entropy.cache.init{{[0-9]*}} = call { i64, i64 } @__obf_load_entropy_pair()
+; CHECK: %obf.entropy.pair{{[0-9]*}} = load { i64, i64 }, ptr %obf.entropy.cache, align 8
+; CHECK: %obf.entropy.direct{{[0-9]*}} = extractvalue { i64, i64 } %obf.entropy.pair{{[0-9]*}}, 0
 ; CHECK: %obf.vm.integrity.ptr = getelementptr inbounds
 ; CHECK: %obf.vm.integrity.byte.ptr = getelementptr inbounds
 ; CHECK: %obf.vm.integrity.byte.window = load i32, ptr %obf.vm.integrity.byte.ptr, align 1

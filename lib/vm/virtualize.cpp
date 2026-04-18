@@ -2331,8 +2331,140 @@ void rewrite_function_body(llvm::Function &function,
     return decoded;
   };
 
+  struct decoded_metadata_span_result {
+    llvm::Value *assembled_word = nullptr;
+    bool consumed = false;
+
+    [[nodiscard]] bool valid() const { return consumed; }
+  };
+
+  const auto decode_metadata_span = [&](llvm::IRBuilder<> &builder,
+                                        std::uint32_t offset,
+                                        std::uint32_t length,
+                                        bool assemble_first_word,
+                                        std::uint64_t salt)
+      -> decoded_metadata_span_result {
+    decoded_metadata_span_result result;
+    auto *array_type = llvm::dyn_cast<llvm::ArrayType>(bytecode_global->getValueType());
+    const llvm::DataLayout *data_layout = get_builder_data_layout(builder);
+    if (array_type == nullptr || data_layout == nullptr ||
+        !data_layout->isLittleEndian() || length <= 1) {
+      return result;
+    }
+
+    const std::uint64_t byte_count = array_type->getNumElements();
+    if (static_cast<std::uint64_t>(offset) + length > byte_count) {
+      return result;
+    }
+
+    llvm::Value *bytecode_base = materialize_pointer_value(
+        builder, bytecode_global, opaque_seed, opaque_seed_base, mba_context,
+        salt ^ 0x5f0fULL);
+    if (bytecode_base == nullptr) {
+      bytecode_base = bytecode_global;
+    }
+
+    llvm::Value *state = builder.CreateLoad(builder.getInt64Ty(), state_slot,
+                                            "obf.vm.bc.state.span.load");
+    llvm::Value *assembled_word =
+        assemble_first_word ? builder.getInt32(0) : nullptr;
+    std::uint32_t processed = 0;
+    while (processed < length) {
+      const std::uint32_t remaining = length - processed;
+      std::uint32_t window_bytes = 1;
+      if (remaining >= 4) {
+        window_bytes = 4;
+      } else if (remaining >= 2) {
+        window_bytes = 2;
+      }
+
+      const std::uint32_t base_offset = offset + processed;
+      auto *base_index_constant =
+          llvm::ConstantInt::get(builder.getInt32Ty(), base_offset);
+      llvm::Value *base_index = materialize_integer_constant(
+          builder, *base_index_constant, opaque_seed, opaque_seed_base,
+          mba_context, salt ^ (0x6000ULL + processed));
+      llvm::Value *window_ptr = builder.CreateInBoundsGEP(
+          array_type, bytecode_base, {builder.getInt32(0), base_index},
+          "obf.vm.bc.span.ptr");
+      auto *window_type = builder.getIntNTy(window_bytes * 8);
+      llvm::Value *window_value =
+          builder.CreateLoad(window_type, window_ptr, "obf.vm.bc.span.window");
+      llvm::cast<llvm::LoadInst>(window_value)->setAlignment(llvm::Align(1));
+
+      for (std::uint32_t window_index = 0;
+           window_index < window_bytes && processed < length;
+           ++window_index, ++processed) {
+        llvm::Value *encoded = builder.CreateTrunc(
+            window_value, builder.getInt8Ty(), "obf.vm.bc.span.enc");
+        llvm::Value *rotated = builder.CreateOr(
+            builder.CreateLShr(state, builder.getInt64(13), "obf.vm.bc.shr"),
+            builder.CreateShl(state, builder.getInt64(51), "obf.vm.bc.shl"),
+            "obf.vm.bc.rot");
+        llvm::Value *key_mix = mba::create_xor(
+            builder, state, rotated, mba_context,
+            salt + static_cast<std::uint64_t>(processed) * 8 + 1,
+            "obf.vm.bc.key.mix");
+        llvm::Value *key_word = mba::create_xor(
+            builder, key_mix,
+            builder.getInt64(mix_seed(bytecode_seed,
+                                      static_cast<std::uint64_t>(offset + processed) +
+                                          1)),
+            mba_context, salt + static_cast<std::uint64_t>(processed) * 8 + 2,
+            "obf.vm.bc.key.word");
+        llvm::Value *key =
+            builder.CreateTrunc(key_word, builder.getInt8Ty(), "obf.vm.bc.key");
+        llvm::Value *decoded = mba::create_xor(
+            builder, encoded, key, mba_context,
+            salt + static_cast<std::uint64_t>(processed) * 8 + 3,
+            "obf.vm.bc.byte");
+
+        state = builder.CreateAdd(
+            builder.CreateShl(state, builder.getInt64(8), "obf.vm.bc.state.shift"),
+            builder.CreateZExt(decoded, builder.getInt64Ty(), "obf.vm.bc.state.byte"),
+            "obf.vm.bc.state.next");
+
+        if (assembled_word != nullptr && processed < 4) {
+          llvm::Value *piece = builder.CreateZExt(
+              decoded, builder.getInt32Ty(), "obf.vm.bc.word.byte");
+          if (processed != 0) {
+            piece = builder.CreateShl(
+                piece,
+                materialize_integer_constant(
+                    builder,
+                    *llvm::ConstantInt::get(builder.getInt32Ty(), processed * 8),
+                    opaque_seed, opaque_seed_base, mba_context,
+                    salt + static_cast<std::uint64_t>(processed) * 8 + 4),
+                "obf.vm.bc.word.shl");
+          }
+          assembled_word =
+              builder.CreateAdd(assembled_word, piece, "obf.vm.bc.word");
+        }
+
+        if (window_index + 1 < window_bytes && processed < length) {
+          window_value = builder.CreateLShr(
+              window_value, llvm::ConstantInt::get(window_type, 8),
+              "obf.vm.bc.span.window.next");
+        }
+      }
+    }
+
+    (void)builder.CreateStore(state, state_slot);
+    result.assembled_word = assembled_word;
+    result.consumed = true;
+    return result;
+  };
+
   const auto fetch_u32 = [&](llvm::IRBuilder<> &builder, std::uint32_t offset,
                              std::uint64_t salt) -> llvm::Value * {
+    if (decoded_metadata_span_result span =
+            decode_metadata_span(builder, offset, 4,
+                                 /*assemble_first_word=*/true,
+                                 salt ^ 0x6100ULL);
+        span.valid()) {
+      return span.assembled_word;
+    }
+
     llvm::Value *word = builder.CreateZExt(fetch_byte(builder, offset, salt),
                                            builder.getInt32Ty(),
                                            "obf.vm.bc.word.0");
@@ -2362,6 +2494,15 @@ void rewrite_function_body(llvm::Function &function,
         local_salt += 4;
         continue;
       }
+      if (chunk.size > 1) {
+        if (decode_metadata_span(builder, chunk.offset, chunk.size,
+                                 /*assemble_first_word=*/false,
+                                 local_salt ^ 0x6200ULL)
+                .valid()) {
+          local_salt += chunk.size;
+          continue;
+        }
+      }
       for (std::uint32_t byte_index = 0; byte_index < chunk.size; ++byte_index) {
         (void)fetch_byte(builder, chunk.offset + byte_index, local_salt++);
       }
@@ -2375,6 +2516,14 @@ void rewrite_function_body(llvm::Function &function,
   const auto decode_target_dispatch = [&](llvm::IRBuilder<> &builder,
                                           std::uint32_t offset,
                                           std::uint64_t salt) {
+    if (decoded_metadata_span_result span =
+            decode_metadata_span(builder, offset, 12,
+                                 /*assemble_first_word=*/true,
+                                 salt ^ 0x6300ULL);
+        span.valid()) {
+      return span.assembled_word;
+    }
+
     llvm::Value *target = fetch_u32(builder, offset, salt);
     for (unsigned byte_index = 0; byte_index < 8; ++byte_index) {
       (void)fetch_byte(builder, offset + 4 + byte_index, salt + 4 + byte_index);

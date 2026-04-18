@@ -21,12 +21,12 @@ entry:
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
 ; CHECK-DAG: @__obf_vm_bc_fold_value = private unnamed_addr constant [{{[0-9]+}} x i8] c"
 ; CHECK-DAG: @__obf_vm_retkey_fold_value = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; CHECK: @__obf_vm_target_fold_value = private global i{{[0-9]+}} {{-?[0-9]+}}
 ; CHECK-NOT: @llvm.global_ctors
 ; CHECK-LABEL: define i32 @fold_value(i32 %value)
-; CHECK: %obf.entropy.direct = load i64, ptr @__obf_entropy_anchor
-; CHECK: %obf.entropy.ref = load ptr, ptr @__obf_entropy_anchor_ref
+; CHECK: %obf.entropy.cache.init = call { i64, i64 } @__obf_load_entropy_pair()
+; CHECK: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
+; CHECK: %obf.entropy.direct = extractvalue { i64, i64 } %obf.entropy.pair, 0
 ; CHECK: %fold_value.obf.wrapper.token = xor i64
 ; CHECK: call i32 @__obf_vm_impl_fold_value(i32 %value, i64 %fold_value.obf.wrapper.token)
 ; CHECK-LABEL: define i32 @main()
@@ -56,8 +56,10 @@ entry:
 ; CHECK: %obf.vm.token.state.match = icmp eq i64 %obf.hidden_token,
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
 ; CHECK: {{^vm\.0:}}
-; CHECK: load i8, ptr @__obf_vm_bc_fold_value
-; CHECK: %obf.vm.integrity.byte = load i8, ptr getelementptr inbounds
+; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_
+; CHECK: %obf.vm.integrity.byte.ptr = getelementptr inbounds
+; CHECK: %obf.vm.integrity.byte.window = load i32, ptr %obf.vm.integrity.byte.ptr, align 1
+; CHECK: %obf.vm.integrity.byte = trunc i32 %obf.vm.integrity.byte.shr to i8
 ; CHECK: %obf.vm.integrity.state = load i64, ptr %obf.vm.state
 ; CHECK: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, {{-?[0-9]+}}
 ; CHECK: indirectbr ptr
@@ -67,7 +69,6 @@ entry:
 ; CHECK: ret i32 %obf.vm.ret.encoded
 
 ; INST-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; INST-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; INST-LABEL: define i32 @fold_value(i32 %value)
 ; INST: %fold_value.obf.wrapper.token = xor i64
 ; INST: call i32 @__obf_vm_impl_fold_value(i32 %value, i64 %fold_value.obf.wrapper.token)
