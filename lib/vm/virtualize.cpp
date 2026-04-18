@@ -1396,6 +1396,45 @@ void rewrite_function_body(llvm::Function &function,
                              "obf.vm.dispatch.index.site");
   };
 
+  struct switch_dispatch_bank {
+    llvm::BasicBlock *block = nullptr;
+    llvm::PHINode *dispatch_index_phi = nullptr;
+    std::uint64_t salt = 0;
+  };
+
+  constexpr std::size_t switch_dispatch_bank_count = 4;
+  llvm::SmallVector<switch_dispatch_bank, switch_dispatch_bank_count>
+      switch_dispatch_banks;
+  if (!instruction_blocks.empty() &&
+      dispatch_backend == dispatch_backend_variant::switch_index) {
+    switch_dispatch_banks.reserve(switch_dispatch_bank_count);
+    for (std::size_t bank_index = 0; bank_index < switch_dispatch_bank_count;
+         ++bank_index) {
+      const std::uint64_t bank_salt = 0x177000ULL + bank_index;
+      auto *dispatch_switch_block = llvm::BasicBlock::Create(
+          context,
+          "dispatch.index.bank.obf.vm." + std::to_string(bank_index), &function);
+      llvm::IRBuilder<> switch_builder(dispatch_switch_block);
+      auto *dispatch_index_phi = switch_builder.CreatePHI(
+          switch_builder.getInt32Ty(), 8, "obf.vm.dispatch.index.bank");
+      llvm::Value *remapped_dispatch_index = remap_switch_dispatch_value(
+          switch_builder, dispatch_index_phi, bank_salt);
+      auto *switch_inst = switch_builder.CreateSwitch(
+          remapped_dispatch_index, trap_block, instruction_blocks.size());
+      for (std::size_t instruction_index = 0;
+           instruction_index < instruction_blocks.size(); ++instruction_index) {
+        switch_inst->addCase(
+            switch_builder.getInt32(remap_switch_dispatch_constant(
+                dispatch_index_for_instruction[instruction_index], bank_salt)),
+            instruction_blocks[instruction_index]);
+      }
+      switch_dispatch_banks.push_back(
+          {.block = dispatch_switch_block,
+           .dispatch_index_phi = dispatch_index_phi,
+           .salt = bank_salt});
+    }
+  }
+
   if (!instruction_blocks.empty() && dispatch_table != nullptr) {
     for (std::size_t instruction_index = 0;
          instruction_index < instruction_blocks.size(); ++instruction_index) {
@@ -1505,25 +1544,18 @@ void rewrite_function_body(llvm::Function &function,
                                  llvm::Value *dispatch_index,
                                  std::uint64_t salt) {
     if (dispatch_backend == dispatch_backend_variant::switch_index) {
-      llvm::Value *remapped_dispatch_index =
-          remap_switch_dispatch_value(builder, dispatch_index, salt);
-      auto *dispatch_switch_block = llvm::BasicBlock::Create(
-          context, "dispatch.index.switch.obf.vm." +
-                       std::to_string(dispatch_site_counter++),
-          &function);
-      builder.CreateBr(dispatch_switch_block);
-
-      llvm::IRBuilder<> switch_builder(dispatch_switch_block);
-      auto *switch_inst = switch_builder.CreateSwitch(
-          remapped_dispatch_index, trap_block, instruction_blocks.size());
-      for (std::size_t instruction_index = 0;
-           instruction_index < instruction_blocks.size(); ++instruction_index) {
-        switch_inst->addCase(switch_builder.getInt32(
-                                 remap_switch_dispatch_constant(
-                                     dispatch_index_for_instruction[instruction_index],
-                                     salt)),
-                              instruction_blocks[instruction_index]);
+      if (switch_dispatch_banks.empty()) {
+        builder.CreateBr(trap_block);
+        return;
       }
+
+      llvm::BasicBlock *dispatch_source = builder.GetInsertBlock();
+      const std::size_t bank_index = static_cast<std::size_t>(
+          mix_seed(bytecode_seed, 0x5357495443483003ULL ^ salt) %
+          switch_dispatch_banks.size());
+      switch_dispatch_bank &bank = switch_dispatch_banks[bank_index];
+      builder.CreateBr(bank.block);
+      bank.dispatch_index_phi->addIncoming(dispatch_index, dispatch_source);
       return;
     }
 
