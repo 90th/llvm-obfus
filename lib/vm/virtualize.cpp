@@ -1280,6 +1280,77 @@ bool store_non_pointer_value_to_memory(
   return true;
 }
 
+llvm::Value *load_byte_through_window(
+    llvm::IRBuilder<> &builder, llvm::Value *array_base,
+    llvm::ArrayType *array_type, std::uint32_t byte_offset,
+    llvm::AllocaInst *opaque_seed_slot, std::uint64_t opaque_seed_base,
+    const mba::builder_context &mba_context, std::uint64_t salt,
+    llvm::StringRef name_prefix = "obf.vm.byte") {
+  if (array_base == nullptr || array_type == nullptr ||
+      !array_base->getType()->isPointerTy() ||
+      array_type->getElementType() != builder.getInt8Ty()) {
+    return nullptr;
+  }
+
+  const llvm::DataLayout *data_layout = get_builder_data_layout(builder);
+  if (data_layout == nullptr) {
+    return nullptr;
+  }
+
+  const std::uint64_t byte_count = array_type->getNumElements();
+  if (byte_offset >= byte_count) {
+    return nullptr;
+  }
+
+  std::uint32_t window_bytes = 0;
+  if (byte_count >= 4) {
+    window_bytes = 4;
+  } else if (byte_count >= 2) {
+    window_bytes = 2;
+  } else {
+    return nullptr;
+  }
+
+  const std::uint64_t max_base = byte_count - window_bytes;
+  std::uint64_t base_index =
+      byte_offset >= window_bytes - 1 ? byte_offset - (window_bytes - 1) : 0;
+  if (base_index > max_base) {
+    base_index = max_base;
+  }
+
+  const std::uint64_t byte_index = byte_offset - base_index;
+  const std::string base_name =
+      name_prefix.empty() ? "obf.vm.byte" : name_prefix.str();
+  auto *window_type = builder.getIntNTy(window_bytes * 8);
+
+  auto *base_index_constant =
+      llvm::ConstantInt::get(builder.getInt32Ty(), base_index);
+  llvm::Value *base_index_value = materialize_integer_constant(
+      builder, *base_index_constant, opaque_seed_slot, opaque_seed_base,
+      mba_context, salt ^ 0x5c0cULL);
+  llvm::Value *window_ptr = builder.CreateInBoundsGEP(
+      array_type, array_base, {builder.getInt32(0), base_index_value},
+      base_name + ".ptr");
+  auto *window_load =
+      builder.CreateLoad(window_type, window_ptr, base_name + ".window");
+  window_load->setAlignment(llvm::Align(1));
+
+  const std::uint64_t shift_bits = data_layout->isLittleEndian()
+                                       ? byte_index * 8
+                                       : (window_bytes - 1 - byte_index) * 8;
+  llvm::Value *window_value = window_load;
+  if (shift_bits != 0) {
+    auto *shift_constant = llvm::ConstantInt::get(window_type, shift_bits);
+    llvm::Value *shift_value = materialize_integer_constant(
+        builder, *shift_constant, opaque_seed_slot, opaque_seed_base,
+        mba_context, salt ^ 0x5d0dULL);
+    window_value =
+        builder.CreateLShr(window_value, shift_value, base_name + ".shr");
+  }
+
+  return builder.CreateTrunc(window_value, builder.getInt8Ty(), base_name);
+}
+
 llvm::Value *materialize_constant(llvm::IRBuilder<> &builder,
                                   const llvm::Constant &constant,
                                   llvm::AllocaInst *opaque_seed_slot,
@@ -2227,8 +2298,14 @@ void rewrite_function_body(llvm::Function &function,
     llvm::Value *slot = builder.CreateInBoundsGEP(
         bytecode_global->getValueType(), bytecode_base,
         {builder.getInt32(0), builder.getInt32(offset)}, "obf.vm.bc.slot");
-    llvm::Value *encoded =
-        builder.CreateLoad(builder.getInt8Ty(), slot, "obf.vm.bc.enc");
+    llvm::Value *encoded = load_byte_through_window(
+        builder, bytecode_base,
+        llvm::cast<llvm::ArrayType>(bytecode_global->getValueType()), offset,
+        opaque_seed, opaque_seed_base, mba_context, salt ^ 0x5e0eULL,
+        "obf.vm.bc.enc");
+    if (encoded == nullptr) {
+      encoded = builder.CreateLoad(builder.getInt8Ty(), slot, "obf.vm.bc.enc");
+    }
     auto *state_load = builder.CreateLoad(builder.getInt64Ty(), state_slot,
                                           "obf.vm.bc.state.load");
     llvm::Value *rotated = builder.CreateOr(
@@ -2470,8 +2547,16 @@ void rewrite_function_body(llvm::Function &function,
             bytecode_global->getValueType(), bytecode_base,
             {header_builder.getInt32(0), header_builder.getInt32(probe_offset)},
             "obf.vm.integrity.ptr");
-        llvm::Value *cipher_byte = header_builder.CreateLoad(
-            header_builder.getInt8Ty(), byte_ptr, "obf.vm.integrity.byte");
+        llvm::Value *cipher_byte = load_byte_through_window(
+            header_builder, bytecode_base,
+            llvm::cast<llvm::ArrayType>(bytecode_global->getValueType()),
+            probe_offset, opaque_seed, opaque_seed_base, mba_context,
+            0x5900 + static_cast<std::uint64_t>(instruction_index) * 4 + probe,
+            "obf.vm.integrity.byte");
+        if (cipher_byte == nullptr) {
+          cipher_byte = header_builder.CreateLoad(
+              header_builder.getInt8Ty(), byte_ptr, "obf.vm.integrity.byte");
+        }
         auto *integrity_state = header_builder.CreateLoad(
             header_builder.getInt64Ty(), state_slot, "obf.vm.integrity.state");
         llvm::Value *rotated = header_builder.CreateOr(

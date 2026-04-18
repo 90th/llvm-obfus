@@ -168,7 +168,9 @@ entry:
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
 ; CHECK: %obf.entropy.direct = load i64, ptr @__obf_entropy_anchor
 ; CHECK: %obf.vm.integrity.ptr = getelementptr inbounds
-; CHECK: %obf.vm.integrity.byte = load i8, ptr %obf.vm.integrity.ptr
+; CHECK: %obf.vm.integrity.byte.ptr = getelementptr inbounds
+; CHECK: %obf.vm.integrity.byte.window = load i32, ptr %obf.vm.integrity.byte.ptr, align 1
+; CHECK: %obf.vm.integrity.byte = trunc i32 %obf.vm.integrity.byte.shr to i8
 ; CHECK: %obf.vm.integrity.fold = xor i64
 ; CHECK: indirectbr ptr
 ; CHECK-LABEL: define i32 @__obf_vm_impl_call_memory(ptr %src, ptr %dst, i64 %obf.hidden_token)
