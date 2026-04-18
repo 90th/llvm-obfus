@@ -1,134 +1,104 @@
 # llvm-obfus
 
-make reverse engineers mass.
+out-of-tree LLVM 21+ pass plugin for policy-driven IR obfuscation.
 
-an out-of-tree LLVM pass plugin that selectively obfuscates your IR.
-you pick the protection level, it does the rest.
+## why?
 
-> LLVM 21 · C++23 · New Pass Manager · Linux-first
+the project applies obfuscation per function instead of as one blanket pipeline. you can inspect policy decisions with `obf-feature-report`, run individual passes directly, or use `obf-safe-pipeline` to drive the current pass sequence.
 
----
+## what it has
 
-## what it does
+- `obf_plugin` for LLVM's new pass manager
+- registered passes: `obf-feature-report`, `obf-entropy-init`, `obf-cfg-state-cleanup`, `obf-artifact-cleanup`, `obf-block-split`, `obf-split-scaffold`, `obf-string-encode`, `obf-vm`, `obf-constant-encode`, `obf-instruction-substitute`, `obf-opaque-gep`, `obf-function-outline`, `obf-control-flatten`, `obf-opaque-preds`, `obf-bogus-cf`, `obf-safe-pipeline`
+- YAML config with `seed`, `default_level`, `overrides`, `targets`, `block_split`, `string_encoding`, `constant_encoding`, and `mba.depth`
+- benchmark targets: `license_demo_bench`, `config_demo_bench`, `vm_workflow_demo_bench`, `wpo_demo_bench`
+- a runtime entropy object generated from `runtime/entropy_anchor.c`
 
-eight transforms, one policy engine, zero runtime dependencies (yet).
+## layout
 
-| pass | what happens |
-|------|-------------|
-| `obf-block-split` | chops basic blocks at seeded points |
-| `obf-constant-encode` | XOR-encodes integer constants |
-| `obf-string-encode` | encrypts string literals (lazy / ctor / inline-stack) |
-| `obf-instruction-substitute` | replaces arithmetic with MBA identities |
-| `obf-control-flatten` | switch-dispatch control flow flattening |
-| `obf-opaque-preds` | injects always-true predicates into branches |
-| `obf-bogus-cf` | adds fake paths guarded by opaque predicates |
-| `obf-vm` | lowers functions to a micro-IR interpreter |
+```text
+include/obf/       public headers
+lib/analysis/      function feature extraction
+lib/frontend/      yaml config loading and annotation collection
+lib/plugin/        pass registration and pipeline wiring
+lib/policy/        policy selection
+lib/report/        reporting
+lib/transforms/    IR transforms
+lib/vm/            VM lowering and dispatch pieces
+runtime/           entropy anchor and runtime support code
+tests/lit/         lit suite
+benchmarks/        corpus, configs, and benchmark targets
+tools/obf-driver/  driver scaffold
+```
 
-or just run `obf-safe-pipeline` and let the policy engine figure it out.
+## building
 
----
-
-## build
+- requires CMake `3.24+`, a C++23 compiler, LLVM `21+`, Python3, and `lit`
+- CMake also expects `opt`, `clang`, `clang++`, `llvm-link`, `llc`, and `llvm-strip` from that LLVM install
 
 ```sh
 cmake -S . -B build -DLLVM_DIR="$(llvm-config --cmakedir)"
 cmake --build build
 ```
 
-## use
+## usage
 
 ```sh
-# the full pipeline
 opt -load-pass-plugin build/obf_plugin.so \
-    --obf-config=config.yaml \
-    -passes=obf-safe-pipeline -S input.ll -o output.ll
+  --obf-config=config.yaml \
+  -passes=obf-feature-report \
+  -disable-output input.ll
 
-# just one pass
 opt -load-pass-plugin build/obf_plugin.so \
-    --obf-config=config.yaml \
-    -passes=obf-vm -S input.ll -o output.ll
+  --obf-config=config.yaml \
+  -passes=obf-safe-pipeline \
+  -S input.ll -o output.ll
 
-# analysis only — see what would happen
 opt -load-pass-plugin build/obf_plugin.so \
-    --obf-config=config.yaml \
-    -passes=obf-feature-report -disable-output input.ll
+  --obf-config=config.yaml \
+  --obf-seed=20240601 \
+  -passes=obf-vm \
+  -S input.ll -o output.ll
 ```
 
-## configure
+## config
 
-drop a YAML file. that's it.
+the loader accepts `seed`, `default_level`, `overrides`, `targets`, `block_split`, `string_encoding`, `constant_encoding`, and `mba`.
+
+protection levels are `none`, `light`, `strong`, `vm`, and `strong_vm`.
 
 ```yaml
-seed: 1337
-default_level: light
+seed: 20240601
+default_level: none
 
 overrides:
-  - name: hot_loop
-    level: none          # leave performance-critical code alone
+  - name: classify_byte
+    level: vm
+  - name: route_score
+    level: vm
 
-targets:
-  - match: verify_*
-    level: strong
-  - match: license_check
-    level: vm            # full virtualization
+block_split:
+  max_splits_per_function: 1
+  min_instructions_per_block: 2
 
 string_encoding:
+  min_string_length: 2
+  max_strings_per_module: 64
   prefer_lazy_decode: true
   allow_ctor_fallback: true
+
+constant_encoding:
+  max_constants_per_function: 4
+  min_bit_width: 8
+
+mba:
+  depth: 1
 ```
 
-five protection levels:
+## notes
 
-| level | you get |
-|-------|---------|
-| `none` | nothing. it's opt-out. |
-| `light` | strings + constants + block split |
-| `strong` | everything except VM |
-| `vm` | virtualized into a bytecode interpreter |
-| `strong_vm` | strong + VM |
-
-policy precedence: **override > annotation > target rule > auto-analysis > default**
-
-source annotations work too:
-
-```c
-__attribute__((annotate("obf:strong")))
-int check_license(const char *key) { ... }
-```
-
-`strong_vm` is the loud one: strong classical transforms first, then VM.
-
-## test
-
-```sh
-ctest                  # or: lit -sv build/tests
-```
-
-15 lit tests covering every pass with FileCheck + `lli` runtime verification.
-
-## benchmarks
-
-```sh
-cmake --build build --target obf-benchmarks
-```
-
-builds baseline vs. obfuscated stripped binaries under `build/benchmarks/`.
-open both in Ghidra. enjoy the difference.
-
----
-
-## project layout
-
-```
-include/obf/         headers — clean C++ interfaces, no LLVM pass goo
-lib/transforms/       the eight transforms
-lib/vm/               micro-IR lowering + switch-dispatch emitter
-lib/plugin/           pass registration and pipeline orchestration
-lib/policy/           per-function protection decisions
-lib/analysis/         feature extraction (complexity, loops, strings, …)
-lib/frontend/         YAML config loader + annotation parser
-lib/report/           JSON report generation
-tests/lit/            lit tests + YAML configs
-benchmarks/           corpus + configs for RE comparison
-runtime/              (empty — future home of VM dispatch + string helpers)
-```
+- `tools/obf-driver` currently loads a config and prints a summary; it is not a full compile driver
+- the build, tests, and benchmark flows use an extra object generated from `runtime/entropy_anchor.c`
+- tests are wired through `ctest`; direct `lit -sv build/tests` works too
+- `cmake --build build --target obf-benchmarks` writes benchmark artifacts under `build/benchmarks/`
+- `cmake --build build --target obf-benchmarks-mir` also emits MIR for the linked benchmark
