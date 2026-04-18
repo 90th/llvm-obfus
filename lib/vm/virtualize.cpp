@@ -6,6 +6,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CallingConv.h"
@@ -884,6 +885,139 @@ llvm::Value *build_opaque_vm_mask(llvm::IRBuilder<> &builder,
                          "obf.vm.const.mask");
 }
 
+llvm::Value *materialize_integer_constant(llvm::IRBuilder<> &builder,
+                                          const llvm::ConstantInt &integer,
+                                          llvm::AllocaInst *opaque_seed_slot,
+                                          std::uint64_t opaque_seed_base,
+                                          const mba::builder_context &mba_context,
+                                          std::uint64_t salt) {
+  if (!should_obfuscate_vm_constant(integer)) {
+    return const_cast<llvm::ConstantInt *>(&integer);
+  }
+
+  const llvm::APInt &value = integer.getValue();
+  const std::uint64_t constant_salt =
+      static_cast<std::uint64_t>(value.getBitWidth()) * 131ULL;
+  const std::uint64_t word = value.getLimitedValue();
+  const llvm::APInt key(value.getBitWidth(),
+                        (word ^ 0x9e3779b97f4a7c15ULL) + constant_salt,
+                        /*isSigned=*/false, /*implicitTrunc=*/true);
+  const llvm::APInt encoded = value ^ key;
+  llvm::Value *mask = build_opaque_vm_mask(
+      builder, opaque_seed_slot, opaque_seed_base,
+      llvm::cast<llvm::IntegerType>(integer.getType()), key, mba_context,
+      salt ^ constant_salt ^ 0x13579bdfULL);
+  return mba::create_xor(builder,
+                         llvm::ConstantInt::get(integer.getType(), encoded),
+                         mask, mba_context, salt ^ constant_salt ^ 0x2468ace0ULL,
+                         "obf.vm.const");
+}
+
+const llvm::DataLayout *get_builder_data_layout(const llvm::IRBuilder<> &builder) {
+  const llvm::BasicBlock *block = builder.GetInsertBlock();
+  const llvm::Function *function = block != nullptr ? block->getParent() : nullptr;
+  const llvm::Module *module = function != nullptr ? function->getParent() : nullptr;
+  return module != nullptr ? &module->getDataLayout() : nullptr;
+}
+
+bool can_materialize_pointer_through_integer(const llvm::DataLayout &data_layout,
+                                             const llvm::Type *type) {
+  const auto *pointer_type = llvm::dyn_cast<llvm::PointerType>(type);
+  return pointer_type != nullptr &&
+         !data_layout.isNonIntegralPointerType(
+             const_cast<llvm::PointerType *>(pointer_type));
+}
+
+llvm::IntegerType *get_pointer_carrier_type(llvm::IRBuilder<> &builder,
+                                            llvm::Type *type) {
+  const llvm::DataLayout *data_layout = get_builder_data_layout(builder);
+  if (data_layout == nullptr ||
+      !can_materialize_pointer_through_integer(*data_layout, type)) {
+    return nullptr;
+  }
+
+  const auto *pointer_type = llvm::cast<llvm::PointerType>(type);
+  return data_layout->getIntPtrType(builder.getContext(),
+                                    pointer_type->getAddressSpace());
+}
+
+llvm::GlobalVariable *get_or_create_pointer_constant_cell(
+    llvm::Module &module, const llvm::Constant &constant) {
+  const std::string global_name =
+      ("__obf_vm_ptrconst_" +
+       llvm::utohexstr(static_cast<std::uint64_t>(llvm::hash_value(&constant))));
+  if (llvm::GlobalVariable *existing = module.getNamedGlobal(global_name)) {
+    if (existing->getValueType() != constant.getType()) {
+      llvm_unreachable("vm pointer constant cell has unexpected type");
+    }
+    return existing;
+  }
+
+  auto *cell = new llvm::GlobalVariable(module, const_cast<llvm::Type *>(constant.getType()),
+                                        /*isConstant=*/true,
+                                        llvm::GlobalValue::PrivateLinkage,
+                                        const_cast<llvm::Constant *>(&constant),
+                                        global_name);
+  cell->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  return cell;
+}
+
+llvm::Value *materialize_pointer_carrier(
+    llvm::IRBuilder<> &builder, llvm::Value *pointer_value,
+    llvm::AllocaInst *opaque_seed_slot, std::uint64_t opaque_seed_base,
+    const mba::builder_context &mba_context, std::uint64_t salt) {
+  auto *carrier_type = get_pointer_carrier_type(builder, pointer_value->getType());
+  if (carrier_type == nullptr) {
+    return nullptr;
+  }
+
+  if (const auto *pointer_constant = llvm::dyn_cast<llvm::Constant>(pointer_value)) {
+    llvm::BasicBlock *block = builder.GetInsertBlock();
+    llvm::Function *function = block != nullptr ? block->getParent() : nullptr;
+    llvm::Module *module = function != nullptr ? function->getParent() : nullptr;
+    if (module != nullptr) {
+      llvm::GlobalVariable *pointer_cell =
+          get_or_create_pointer_constant_cell(*module, *pointer_constant);
+      pointer_value = builder.CreateLoad(
+          const_cast<llvm::Type *>(pointer_constant->getType()), pointer_cell,
+          "obf.vm.ptr.const");
+    }
+  }
+
+  llvm::Value *raw_carrier =
+      builder.CreatePtrToInt(pointer_value, carrier_type, "obf.vm.ptr.raw");
+  if (const auto *carrier_integer = llvm::dyn_cast<llvm::ConstantInt>(raw_carrier)) {
+    return materialize_integer_constant(builder, *carrier_integer, opaque_seed_slot,
+                                        opaque_seed_base, mba_context,
+                                        salt ^ 0x5101ULL);
+  }
+
+  return mba::entangle_value(builder, raw_carrier, mba_context,
+                             salt ^ 0x5202ULL, "obf.vm.ptr.carrier");
+}
+
+llvm::Value *materialize_pointer_value(llvm::IRBuilder<> &builder,
+                                       llvm::Value *pointer_value,
+                                       llvm::AllocaInst *opaque_seed_slot,
+                                       std::uint64_t opaque_seed_base,
+                                       const mba::builder_context &mba_context,
+                                       std::uint64_t salt) {
+  auto *pointer_type = llvm::dyn_cast<llvm::PointerType>(pointer_value->getType());
+  if (pointer_type == nullptr) {
+    return nullptr;
+  }
+
+  llvm::Value *carrier =
+      materialize_pointer_carrier(builder, pointer_value, opaque_seed_slot,
+                                  opaque_seed_base, mba_context,
+                                  salt ^ 0x5303ULL);
+  if (carrier == nullptr) {
+    return nullptr;
+  }
+
+  return builder.CreateIntToPtr(carrier, pointer_type, "obf.vm.ptr");
+}
+
 llvm::Value *materialize_constant(llvm::IRBuilder<> &builder,
                                   const llvm::Constant &constant,
                                   llvm::AllocaInst *opaque_seed_slot,
@@ -891,26 +1025,16 @@ llvm::Value *materialize_constant(llvm::IRBuilder<> &builder,
                                   const mba::builder_context &mba_context,
                                   std::uint64_t salt) {
   if (const auto *integer = llvm::dyn_cast<llvm::ConstantInt>(&constant)) {
-    if (!should_obfuscate_vm_constant(*integer)) {
-      return const_cast<llvm::ConstantInt *>(integer);
-    }
+    return materialize_integer_constant(builder, *integer, opaque_seed_slot,
+                                        opaque_seed_base, mba_context, salt);
+  }
 
-    const llvm::APInt &value = integer->getValue();
-    const std::uint64_t constant_salt =
-        static_cast<std::uint64_t>(value.getBitWidth()) * 131ULL;
-    const std::uint64_t word = value.getLimitedValue();
-    const llvm::APInt key(value.getBitWidth(),
-                          (word ^ 0x9e3779b97f4a7c15ULL) + constant_salt,
-                          /*isSigned=*/false, /*implicitTrunc=*/true);
-    const llvm::APInt encoded = value ^ key;
-    llvm::Value *mask = build_opaque_vm_mask(
-        builder, opaque_seed_slot, opaque_seed_base,
-        llvm::cast<llvm::IntegerType>(integer->getType()), key, mba_context,
-        salt ^ constant_salt ^ 0x13579bdfULL);
-    return mba::create_xor(builder,
-                           llvm::ConstantInt::get(integer->getType(), encoded),
-                           mask, mba_context, salt ^ constant_salt ^ 0x2468ace0ULL,
-                           "obf.vm.const");
+  if (constant.getType()->isPointerTy()) {
+    if (llvm::Value *pointer_value = materialize_pointer_value(
+            builder, const_cast<llvm::Constant *>(&constant), opaque_seed_slot,
+            opaque_seed_base, mba_context, salt ^ 0x5404ULL)) {
+      return pointer_value;
+    }
   }
 
   return const_cast<llvm::Constant *>(&constant);
@@ -926,7 +1050,17 @@ llvm::Value *materialize_value(llvm::IRBuilder<> &builder,
                                const mba::builder_context &mba_context,
                                std::uint64_t salt) {
   if (value.kind == value_ref_kind::slot) {
-    return load_slot(builder, slot_allocas, slot_mapping, program, value.slot);
+    llvm::Value *slot_value =
+        load_slot(builder, slot_allocas, slot_mapping, program, value.slot);
+    if (slot_value->getType()->isPointerTy()) {
+      if (llvm::Value *pointer_value = materialize_pointer_value(
+              builder, slot_value, opaque_seed_slot, opaque_seed_base,
+              mba_context, salt ^ 0x5505ULL)) {
+        return pointer_value;
+      }
+    }
+
+    return slot_value;
   }
 
   return materialize_constant(builder, *value.constant, opaque_seed_slot,
@@ -940,6 +1074,28 @@ const llvm::Type *value_ref_type(const bytecode_program &program,
   }
 
   return value.constant->getType();
+}
+
+llvm::Value *materialize_pointer_carrier_from_value_ref(
+    llvm::IRBuilder<> &builder, const slot_storage &slot_allocas,
+    llvm::ArrayRef<std::uint32_t> slot_mapping, const bytecode_program &program,
+    const value_ref &value, llvm::AllocaInst *opaque_seed_slot,
+    std::uint64_t opaque_seed_base, const mba::builder_context &mba_context,
+    std::uint64_t salt) {
+  if (!value_ref_type(program, value)->isPointerTy()) {
+    return nullptr;
+  }
+
+  llvm::Value *pointer_value = nullptr;
+  if (value.kind == value_ref_kind::slot) {
+    pointer_value =
+        load_slot(builder, slot_allocas, slot_mapping, program, value.slot);
+  } else {
+    pointer_value = const_cast<llvm::Constant *>(value.constant);
+  }
+
+  return materialize_pointer_carrier(builder, pointer_value, opaque_seed_slot,
+                                     opaque_seed_base, mba_context, salt);
 }
 
 llvm::Value *emit_integer_nonzero_test(
@@ -1170,6 +1326,32 @@ llvm::Value *emit_integer_cast(llvm::IRBuilder<> &builder, opcode cast_opcode,
   return nullptr;
 }
 
+llvm::Value *emit_unsigned_integer_width_cast(
+    llvm::IRBuilder<> &builder, llvm::Value *operand,
+    llvm::IntegerType *destination_type,
+    const mba::builder_context &mba_context, std::uint64_t salt) {
+  auto *source_type = llvm::dyn_cast<llvm::IntegerType>(operand->getType());
+  if (source_type == nullptr || destination_type == nullptr) {
+    return nullptr;
+  }
+
+  if (source_type == destination_type) {
+    return operand;
+  }
+
+  if (source_type->getBitWidth() < destination_type->getBitWidth()) {
+    return emit_integer_zext(builder, operand, destination_type, mba_context,
+                             salt + 1);
+  }
+
+  if (source_type->getBitWidth() > destination_type->getBitWidth()) {
+    return emit_integer_trunc(builder, operand, destination_type, mba_context,
+                              salt + 2);
+  }
+
+  return operand;
+}
+
 llvm::Value *emit_binary(llvm::IRBuilder<> &builder,
                          const slot_storage &slot_allocas,
                          llvm::ArrayRef<std::uint32_t> slot_mapping,
@@ -1327,47 +1509,112 @@ llvm::Value *emit_cast(llvm::IRBuilder<> &builder,
     llvm_unreachable("opcode is not a cast opcode");
   }
 
-  llvm::Value *const operand =
-      materialize_value(builder, slot_allocas, slot_mapping, program,
-                        instruction.operands[0],
-                        opaque_seed_slot, opaque_seed_base, mba_context,
-                        salt + 1);
   llvm::Type *const destination_type =
       const_cast<llvm::Type *>(program.slots[instruction.result_slot].type);
+  const llvm::Type *const source_type =
+      value_ref_type(program, instruction.operands[0]);
+
+  llvm::Value *operand = nullptr;
+  const auto materialize_operand = [&]() -> llvm::Value * {
+    if (operand == nullptr) {
+      operand = materialize_value(builder, slot_allocas, slot_mapping, program,
+                                  instruction.operands[0], opaque_seed_slot,
+                                  opaque_seed_base, mba_context, salt + 1);
+    }
+
+    return operand;
+  };
+
+  if (instruction.op == opcode::ptr_to_int && source_type->isPointerTy() &&
+      destination_type->isIntegerTy()) {
+    if (llvm::Value *carrier = materialize_pointer_carrier_from_value_ref(
+            builder, slot_allocas, slot_mapping, program,
+            instruction.operands[0], opaque_seed_slot, opaque_seed_base,
+            mba_context, salt + 2)) {
+      return emit_unsigned_integer_width_cast(
+          builder, carrier, llvm::cast<llvm::IntegerType>(destination_type),
+          mba_context, salt + 3);
+    }
+  }
+
+  if (instruction.op == opcode::int_to_ptr && destination_type->isPointerTy()) {
+    llvm::Value *source_integer = materialize_operand();
+    if (auto *carrier_type = get_pointer_carrier_type(builder, destination_type)) {
+      if (llvm::Value *carrier = emit_unsigned_integer_width_cast(
+              builder, source_integer, carrier_type, mba_context, salt + 4)) {
+        carrier = mba::entangle_value(builder, carrier, mba_context,
+                                      salt ^ 0x5606ULL,
+                                      "obf.vm.inttoptr.carrier");
+        return builder.CreateIntToPtr(carrier, destination_type,
+                                      "obf.vm.inttoptr");
+      }
+    }
+  }
+
+  if (instruction.op == opcode::bitcast && source_type->isPointerTy() &&
+      destination_type->isPointerTy()) {
+    if (llvm::Value *carrier = materialize_pointer_carrier_from_value_ref(
+            builder, slot_allocas, slot_mapping, program,
+            instruction.operands[0], opaque_seed_slot, opaque_seed_base,
+            mba_context, salt + 5)) {
+      if (auto *carrier_type = get_pointer_carrier_type(builder, destination_type)) {
+        if (llvm::Value *normalized = emit_unsigned_integer_width_cast(
+                builder, carrier, carrier_type, mba_context, salt + 6)) {
+          return builder.CreateIntToPtr(normalized, destination_type,
+                                        "obf.vm.bitcast");
+        }
+      }
+    }
+  }
+
+  llvm::Value *const materialized_operand = materialize_operand();
 
   if (llvm::Value *integer_cast = emit_integer_cast(
-          builder, instruction.op, operand, destination_type, mba_context,
+          builder, instruction.op, materialized_operand, destination_type,
+          mba_context,
           salt + 2)) {
     return integer_cast;
   }
 
   switch (instruction.op) {
   case opcode::trunc:
-    return builder.CreateTrunc(operand, destination_type, "obf.vm.trunc");
+    return builder.CreateTrunc(materialized_operand, destination_type,
+                               "obf.vm.trunc");
   case opcode::zext:
-    return builder.CreateZExt(operand, destination_type, "obf.vm.zext");
+    return builder.CreateZExt(materialized_operand, destination_type,
+                              "obf.vm.zext");
   case opcode::sext:
-    return builder.CreateSExt(operand, destination_type, "obf.vm.sext");
+    return builder.CreateSExt(materialized_operand, destination_type,
+                              "obf.vm.sext");
   case opcode::fp_trunc:
-    return builder.CreateFPTrunc(operand, destination_type, "obf.vm.fptrunc");
+    return builder.CreateFPTrunc(materialized_operand, destination_type,
+                                 "obf.vm.fptrunc");
   case opcode::fp_ext:
-    return builder.CreateFPExt(operand, destination_type, "obf.vm.fpext");
+    return builder.CreateFPExt(materialized_operand, destination_type,
+                               "obf.vm.fpext");
   case opcode::ui_to_fp:
-    return builder.CreateUIToFP(operand, destination_type, "obf.vm.uitofp");
+    return builder.CreateUIToFP(materialized_operand, destination_type,
+                                "obf.vm.uitofp");
   case opcode::si_to_fp:
-    return builder.CreateSIToFP(operand, destination_type, "obf.vm.sitofp");
+    return builder.CreateSIToFP(materialized_operand, destination_type,
+                                "obf.vm.sitofp");
   case opcode::fp_to_ui:
-    return builder.CreateFPToUI(operand, destination_type, "obf.vm.fptoui");
+    return builder.CreateFPToUI(materialized_operand, destination_type,
+                                "obf.vm.fptoui");
   case opcode::fp_to_si:
-    return builder.CreateFPToSI(operand, destination_type, "obf.vm.fptosi");
+    return builder.CreateFPToSI(materialized_operand, destination_type,
+                                "obf.vm.fptosi");
   case opcode::ptr_to_int:
-    return builder.CreatePtrToInt(operand, destination_type, "obf.vm.ptrtoint");
+    return builder.CreatePtrToInt(materialized_operand, destination_type,
+                                  "obf.vm.ptrtoint");
   case opcode::int_to_ptr:
-    return builder.CreateIntToPtr(operand, destination_type, "obf.vm.inttoptr");
+    return builder.CreateIntToPtr(materialized_operand, destination_type,
+                                  "obf.vm.inttoptr");
   case opcode::bitcast:
-    return builder.CreateBitCast(operand, destination_type, "obf.vm.bitcast");
+    return builder.CreateBitCast(materialized_operand, destination_type,
+                                 "obf.vm.bitcast");
   case opcode::addrspace_cast:
-    return builder.CreateAddrSpaceCast(operand, destination_type,
+    return builder.CreateAddrSpaceCast(materialized_operand, destination_type,
                                        "obf.vm.addrspacecast");
   default:
     llvm_unreachable("opcode is not a cast opcode");
@@ -1702,8 +1949,15 @@ void rewrite_function_body(llvm::Function &function,
 
   const auto fetch_byte = [&](llvm::IRBuilder<> &builder, std::uint32_t offset,
                               std::uint64_t salt) -> llvm::Value * {
+    llvm::Value *bytecode_base = materialize_pointer_value(
+        builder, bytecode_global, opaque_seed, opaque_seed_base, mba_context,
+        salt ^ 0x5707ULL);
+    if (bytecode_base == nullptr) {
+      bytecode_base = bytecode_global;
+    }
+
     llvm::Value *slot = builder.CreateInBoundsGEP(
-        bytecode_global->getValueType(), bytecode_global,
+        bytecode_global->getValueType(), bytecode_base,
         {builder.getInt32(0), builder.getInt32(offset)}, "obf.vm.bc.slot");
     llvm::Value *encoded =
         builder.CreateLoad(builder.getInt8Ty(), slot, "obf.vm.bc.enc");
@@ -1937,8 +2191,15 @@ void rewrite_function_body(llvm::Function &function,
                      static_cast<std::uint64_t>(instruction_index) * 0x1337ULL +
                           probe + 1) %
             layout.integrity_probe_range);
+        llvm::Value *bytecode_base = materialize_pointer_value(
+            header_builder, bytecode_global, opaque_seed, opaque_seed_base,
+            mba_context,
+            0x5800 + static_cast<std::uint64_t>(instruction_index) * 4 + probe);
+        if (bytecode_base == nullptr) {
+          bytecode_base = bytecode_global;
+        }
         llvm::Value *byte_ptr = header_builder.CreateInBoundsGEP(
-            bytecode_global->getValueType(), bytecode_global,
+            bytecode_global->getValueType(), bytecode_base,
             {header_builder.getInt32(0), header_builder.getInt32(probe_offset)},
             "obf.vm.integrity.ptr");
         llvm::Value *cipher_byte = header_builder.CreateLoad(

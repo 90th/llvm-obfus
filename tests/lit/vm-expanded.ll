@@ -167,14 +167,20 @@ entry:
 ; CHECK: %obf.vm.state = alloca i64
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
 ; CHECK: %obf.entropy.direct = load i64, ptr @__obf_entropy_anchor
-; CHECK: %obf.vm.integrity.byte = load i8, ptr getelementptr inbounds
+; CHECK: %obf.vm.integrity.ptr = getelementptr inbounds
+; CHECK: %obf.vm.integrity.byte = load i8, ptr %obf.vm.integrity.ptr
 ; CHECK: %obf.vm.integrity.fold = xor i64
 ; CHECK: indirectbr ptr
 ; CHECK-LABEL: define i32 @__obf_vm_impl_call_memory(ptr %src, ptr %dst, i64 %obf.hidden_token)
-; CHECK: call i32 @bump(i32
+; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_
+; CHECK: %obf.vm.ptr.carrier{{[0-9]*}} =
+; CHECK: %obf.vm.call = call i32 %obf.vm.ptr{{[0-9]*}}(i32
 ; CHECK: load i32, ptr
 ; CHECK: store i32
 ; CHECK-LABEL: define i32 @__obf_vm_impl_gep_load(ptr %base, i32 %index, i64 %obf.hidden_token)
+; CHECK: %obf.vm.ptr.raw{{[0-9]*}} = ptrtoint ptr %obf.vm.slot{{[0-9]*}} to i64
+; CHECK: %obf.vm.ptr.carrier{{[0-9]*}} =
+; CHECK: %obf.vm.ptr{{[0-9]*}} = inttoptr i64 %obf.vm.ptr.carrier{{[0-9]*}} to ptr
 ; CHECK: getelementptr inbounds i32, ptr
 ; CHECK-LABEL: define i32 @__obf_vm_impl_switch_score(i32 %tag, i32 %base, i64 %obf.hidden_token)
 ; CHECK: vm.switch.default.
