@@ -1,4 +1,4 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/transform-report.yaml -passes=obf-feature-report -disable-output %s | %FileCheck %s
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/transform-report.yaml -passes=obf-feature-report -disable-output %s | jq -r '.schema, (.transforms[] | [.target_name, .pass, .status, (.count|tostring), .detail, (.strategy.kind // ""), (.strategy.helper_shape // ""), (.strategy.fallback_reason // "")] | join("|"))' | %FileCheck %s
 
 @.secret = private unnamed_addr constant [7 x i8] c"secret\00"
 @.plain = private unnamed_addr constant [6 x i8] c"plain\00"
@@ -43,16 +43,19 @@ entry:
   ret i32 42
 }
 
-; CHECK-DAG: "count":3,"detail":"eligible: 3 virtual instruction(s) across 1 block(s)","pass":"vm","status":"applied","target_kind":"function","target_name":"vm_me"
-; CHECK-DAG: "count":0,"detail":"suppressed after vm","pass":"constant_encoding","status":"skipped","target_kind":"function","target_name":"vm_me"
-; CHECK-DAG: "count":0,"detail":"suppressed after vm","pass":"block_split","status":"skipped","target_kind":"function","target_name":"vm_me"
-; CHECK-DAG: "count":3,"detail":"eligible: 3 virtual instruction(s) across 1 block(s)","pass":"vm","status":"applied","target_kind":"function","target_name":"strong_vm_me"
-; CHECK-DAG: "count":0,"detail":"policy disallows split","pass":"block_split","status":"skipped","target_kind":"function","target_name":"strong_vm_me"
-; CHECK-DAG: "count":0,"detail":"policy disallows constant encoding","pass":"constant_encoding","status":"skipped","target_kind":"function","target_name":"strong_vm_me"
-; CHECK-DAG: "count":0,"detail":"deferred to vm hardening","pass":"instruction_substitution","status":"skipped","target_kind":"function","target_name":"strong_vm_me"
-; CHECK-DAG: "count":0,"detail":"deferred to vm hardening","pass":"control_flattening","status":"skipped","target_kind":"function","target_name":"strong_vm_me"
-; CHECK-DAG: "count":1,"detail":"1 split(s) available","pass":"block_split","status":"applied","target_kind":"function","target_name":"split_me"
-; CHECK-DAG: "count":0,"detail":"no viable blocks to split","pass":"block_split","status":"skipped","target_kind":"function","target_name":"keep_plain"
-; CHECK-DAG: "count":1,"detail":"1 constant(s) available","pass":"constant_encoding","status":"applied","target_kind":"function","target_name":"main"
-; CHECK: "detail":"lazy_decode: 1 lazy use(s)"{{.*}}"kind":"helper_lazy_decode"{{.*}}"target_name":".secret"
-; CHECK: "detail":"lazy_decode: 1 lazy use(s)"{{.*}}"kind":"helper_lazy_decode"{{.*}}"target_name":".plain"
+; CHECK: obf.feature_report.v3
+; CHECK-DAG: vm_me|vm|applied|3|eligible: 3 virtual instruction(s) across 1 block(s)|
+; CHECK-DAG: vm_me|constant_encoding|skipped|0|suppressed after vm|
+; CHECK-DAG: vm_me|block_split|skipped|0|suppressed after vm|
+; CHECK-DAG: strong_vm_me|vm|applied|3|eligible: 3 virtual instruction(s) across 1 block(s)|
+; CHECK-DAG: strong_vm_me|block_split|skipped|0|policy disallows split|
+; CHECK-DAG: strong_vm_me|constant_encoding|skipped|0|policy disallows constant encoding|
+; CHECK-DAG: strong_vm_me|instruction_substitution|skipped|0|deferred to vm hardening|
+; CHECK-DAG: strong_vm_me|control_flattening|skipped|0|deferred to vm hardening|
+; CHECK-DAG: split_me|block_split|applied|1|1 split(s) available|
+; CHECK-DAG: split_me|constant_encoding|applied|1|1 constant(s) available|
+; CHECK-DAG: keep_plain|block_split|skipped|0|no viable blocks to split|
+; CHECK-DAG: main|block_split|applied|1|1 split(s) available|
+; CHECK-DAG: main|constant_encoding|applied|1|1 constant(s) available|
+; CHECK-DAG: .secret|string_encoding|applied|1|lazy_decode: 1 isolated lazy use(s)|helper_lazy_decode|lazy_flag_unrolled_v0|
+; CHECK-DAG: .plain|string_encoding|applied|1|lazy_decode: 1 lazy use(s)|helper_lazy_decode|lazy_cached_pointer_v3|

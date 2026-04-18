@@ -59,11 +59,11 @@ entry:
 }
 
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; CHECK-NOT: getelementptr
 ; CHECK-LABEL: define i64 @read_field(ptr %p)
+; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
 ; CHECK: %obf.gep.base = ptrtoint ptr %p to i64
-; CHECK: %obf.entropy.direct = load i64, ptr @__obf_entropy_anchor
+; CHECK: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
 ; CHECK: %obf.gep.addr =
 ; CHECK: %field = inttoptr i64 %obf.gep.addr to ptr
 ; CHECK-LABEL: define i64 @read_global_field()

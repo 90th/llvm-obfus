@@ -45,7 +45,9 @@ entry:
 ; --- Global declarations ---
 ; Retkey globals for all three integer-returning functions.
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
+; CHECK-DAG: @[[PTR32:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @__obf_vm_bc_encode_i32
+; CHECK-DAG: @[[PTRI1:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @__obf_vm_bc_encode_i1
+; CHECK-DAG: @[[PTR64:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @__obf_vm_bc_encode_i64
 ; CHECK-DAG: @__obf_vm_retkey_encode_i32 = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @__obf_vm_retkey_encode_i1 = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @__obf_vm_retkey_encode_i64 = private global i64 {{-?[0-9]+}}
@@ -89,6 +91,7 @@ entry:
 
 ; --- VM body: no plaintext return ---
 ; CHECK-LABEL: define i32 @__obf_vm_impl_encode_i32(i32 %x, i64 %obf.hidden_token)
+; CHECK: %obf.vm.ptr.const = load ptr, ptr @[[PTR32]]
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_encode_i32
 ; CHECK: %obf.vm.ret.tokenkey = {{(or|sub) i64}}
@@ -96,6 +99,7 @@ entry:
 ; CHECK: ret i32 %obf.vm.ret.encoded
 
 ; CHECK-LABEL: define i1 @__obf_vm_impl_encode_i1(i32 %x, i64 %obf.hidden_token)
+; CHECK: %obf.vm.ptr.const = load ptr, ptr @[[PTRI1]]
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_encode_i1
 ; CHECK: %obf.vm.ret.tokenkey = {{(or|sub) i64}}
@@ -103,6 +107,7 @@ entry:
 ; CHECK: ret i1 %obf.vm.ret.encoded
 
 ; CHECK-LABEL: define i64 @__obf_vm_impl_encode_i64(i64 %x, i64 %obf.hidden_token)
+; CHECK: %obf.vm.ptr.const = load ptr, ptr @[[PTR64]]
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_encode_i64
 ; CHECK-NOT: %obf.vm.ret.key.trunc

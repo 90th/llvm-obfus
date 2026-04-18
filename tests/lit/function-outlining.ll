@@ -65,7 +65,6 @@ entry:
 }
 
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; CHECK-LABEL: define i32 @shardy(i32 %x)
 ; CHECK: obf.flat.dispatch:
 ; CHECK: %obf.shard.addr.base = ptrtoint ptr @__obf_shard_{{[0-9a-f]+}} to i64

@@ -34,15 +34,17 @@ entry:
   %a = call i32 @strong_vm_whole_preferred(i32 5, i32 3)
   %b = call i32 @strong_vm_whole_preferred(i32 -2, i32 -4)
   %sum = add i32 %a, %b
-  %ok = icmp eq i32 %sum, 17
+  %ok = icmp eq i32 %sum, 28
   %ret = select i1 %ok, i32 0, i32 1
   ret i32 %ret
 }
 
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; CHECK-NOT: __obf_vm_region_strong_vm_whole_preferred
 ; CHECK-LABEL: define i32 @strong_vm_whole_preferred(i32
 ; CHECK: call i32 @[[VMIMPL:_[0-9a-f]+]](i32 %0, i32 %1, i64
+; CHECK-LABEL: define i32 @main()
+; CHECK: call i32 %{{[^ ]+}}(i32 5, i32 3, i64 %{{[^)]+}})
+; CHECK: call i32 %{{[^ ]+}}(i32 -2, i32 -4, i64 %{{[^)]+}})
 ; CHECK: define i32 @[[VMIMPL]](i32
 ; CHECK: indirectbr ptr

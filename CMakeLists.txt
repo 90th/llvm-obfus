@@ -66,6 +66,12 @@ add_library(obf_core
   lib/transforms/opaque_predicates.cpp
   lib/transforms/string_encoding.cpp
   lib/vm/candidate_analysis.cpp
+  lib/vm/bytecode_decode.cpp
+  lib/vm/dispatch_emission.cpp
+  lib/vm/handler_lowering_control.cpp
+  lib/vm/handler_lowering_memory.cpp
+  lib/vm/handler_lowering_scalar.cpp
+  lib/vm/value_materialization.cpp
   lib/vm/virtualize.cpp
 )
 llvm_update_compile_flags(obf_core)
@@ -73,6 +79,10 @@ target_include_directories(obf_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(obf_core PRIVATE ${OBF_LLVM_LIBS})
 
 add_llvm_pass_plugin(obf_plugin
+  lib/plugin/plugin_vm.cpp
+  lib/plugin/plugin_pipeline.cpp
+  lib/plugin/plugin_reporting.cpp
+  lib/plugin/plugin_policy.cpp
   lib/plugin/obfuscator_plugin.cpp
 )
 llvm_update_compile_flags(obf_plugin)
@@ -93,7 +103,7 @@ add_custom_command(
   OUTPUT "${OBF_ENTROPY_ANCHOR_OBJ}"
   COMMAND "${OBF_CLANG}" -std=c17 -O0 -S -emit-llvm "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_LL}"
   COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" -passes=obf-entropy-init -S "${OBF_ENTROPY_ANCHOR_LL}" -o "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}"
-  COMMAND "${OBF_CLANG}" -c "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}" -o "${OBF_ENTROPY_ANCHOR_OBJ}"
+  COMMAND "${OBF_CLANG}" -c -fPIC "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}" -o "${OBF_ENTROPY_ANCHOR_OBJ}"
   DEPENDS obf_plugin "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c"
   VERBATIM)
 add_custom_target(obf-entropy-anchor-runtime ALL DEPENDS "${OBF_ENTROPY_ANCHOR_OBJ}")

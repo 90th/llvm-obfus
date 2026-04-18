@@ -37,11 +37,11 @@ entry:
 }
 
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; CHECK-DAG: @__obf_entropy_anchor_ref = external externally_initialized global ptr, align 8
 ; CHECK-DAG: @[[VMBC:_[0-9a-f]+]] = private unnamed_addr constant [{{[0-9]+}} x i8] c"
 ; CHECK-DAG: @[[VMRETKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @[[VMTARGET:_[0-9a-f]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
-; CHECK-DAG: @[[VMKEY:_[0-9a-f]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
+; CHECK-DAG: @[[VMPTRCONST:_[0-9a-f]+]] = private unnamed_addr constant ptr @[[VMBC]]
+; CHECK-DAG: @[[VMTARGET:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @[[VMKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-NOT: @__obf_vm_
 ; CHECK-NOT: @__obf_family_
 ; CHECK-NOT: @__obf_cached_
@@ -49,19 +49,19 @@ entry:
 ; CHECK-NOT: !dbg
 ; CHECK-NOT: %obf.
 ; CHECK-LABEL: define i32 @value()
-; CHECK: load i64, ptr @__obf_entropy_anchor
-; CHECK: load ptr, ptr @__obf_entropy_anchor_ref
+; CHECK: alloca { i64, i64 }, align 8
+; CHECK: call { i64, i64 } @__obf_load_entropy_pair()
 ; CHECK: ret i32
 ; CHECK-LABEL: define i32 @fold_value(i32
 ; CHECK: call i32 @[[VMIMPL:_[0-9a-f]+]](i32 %0, i64
 ; CHECK-LABEL: define i32 @main()
 ; CHECK: call ptr @[[STRHELPER:_[0-9a-f]+]](ptr
-; CHECK: load i{{[0-9]+}}, ptr @[[VMTARGET]]
-; CHECK: store i{{[0-9]+}} %{{[^,]+}}, ptr @[[VMTARGET]]
-; CHECK: load i{{[0-9]+}}, ptr @[[VMKEY]]
-; CHECK: call i32 %{{[0-9]+}}(i32 %{{[0-9]+}}, i64 %{{[0-9]+}})
+; CHECK: load i64, ptr @[[VMTARGET]]
+; CHECK: store i64 %{{[^,]+}}, ptr @[[VMTARGET]]
+; CHECK: load i64, ptr @[[VMKEY]]
+; CHECK: call i32 %{{[^ ]+}}(i32 %{{[^,]+}}, i64 %{{[^)]+}})
 ; CHECK: load i64, ptr @[[VMRETKEY]]
 ; CHECK: define i32 @[[VMIMPL]](i32
-; CHECK: load i8, ptr @[[VMBC]]
+; CHECK: load ptr, ptr @[[VMPTRCONST]]
 ; CHECK: indirectbr ptr
 ; CHECK: define internal ptr @[[STRHELPER]](ptr
