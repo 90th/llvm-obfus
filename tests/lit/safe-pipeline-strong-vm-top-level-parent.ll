@@ -38,6 +38,11 @@ join:
 }
 
 ; CHECK-LABEL: define i32 @main(i32
-; CHECK: call i32 @[[MAINVM:_[0-9a-f]+]](i32 %0, ptr %1, i64
-; CHECK: define i32 @[[MAINVM]](i32
+; CHECK: load i64, ptr @{{_[0-9a-f]+}}
+; CHECK: load i64, ptr @{{_[0-9a-f]+}}
+; CHECK: load i64, ptr @{{_[0-9a-f]+}}
+; CHECK: inttoptr i64
+; CHECK: call i32 %{{[^ ]+}}(i32 %{{[^,]+}}, ptr %{{[^,]+}}, i64 %{{[^)]+}})
+; CHECK: load i64, ptr @{{_[0-9a-f]+}}
+; CHECK: define i32 @[[MAINVM:_[0-9a-f]+]](i32
 ; CHECK: indirectbr ptr

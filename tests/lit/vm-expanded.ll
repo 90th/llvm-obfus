@@ -152,15 +152,32 @@ entry:
 ; CHECK-DAG: @__obf_vm_retkey_gep_load = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @__obf_vm_retkey_switch_score = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @__obf_vm_retkey_mixed_width = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @__obf_vm_targetseed_branch_phi = private global i{{[0-9]+}} 0
+; CHECK-DAG: @__obf_vm_targetseed_vector_mix = private global i{{[0-9]+}} 0
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
 ; CHECK-NOT: @__obf_vm_retkey_float_mix
 ; CHECK-NOT: @__obf_vm_retkey_vector_mix
 ; CHECK-LABEL: define i32 @branch_phi(i32 %x)
 ; CHECK: entry.obf.vm.wrapper:
-; CHECK: %branch_phi.obf.wrapper.call = call i32 @__obf_vm_impl_branch_phi(i32 %x, i64 %branch_phi.obf.wrapper.token)
+; CHECK: %branch_phi.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_target_branch_phi
+; CHECK: %branch_phi.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_key_branch_phi
+; CHECK: %branch_phi.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_targetseed_branch_phi
+; CHECK: %branch_phi.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %branch_phi.obf.wrapper.target.key, i{{[0-9]+}} %branch_phi.obf.wrapper.target.base)
+; CHECK: %branch_phi.obf.wrapper.real.int = sub i{{[0-9]+}} %branch_phi.obf.wrapper.target.value, %branch_phi.obf.wrapper.target.base
+; CHECK: %branch_phi.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_key_branch_phi
+; CHECK: %branch_phi.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %branch_phi.obf.wrapper.decoded to ptr
+; CHECK: %branch_phi.obf.wrapper.call{{[0-9]*}} = call i32 %branch_phi.obf.wrapper.indirect(i32 %x, i64 %branch_phi.obf.wrapper.token)
+; CHECK: %branch_phi.obf.retkey = load i64, ptr @__obf_vm_retkey_branch_phi
 ; CHECK-LABEL: define <2 x i32> @vector_mix(<2 x i32> %a, <2 x i32> %b)
 ; CHECK: entry.obf.vm.wrapper:
-; CHECK: %vector_mix.obf.wrapper.call = call <2 x i32> @__obf_vm_impl_vector_mix(<2 x i32> %a, <2 x i32> %b, i64 %vector_mix.obf.wrapper.token)
+; CHECK: %vector_mix.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_target_vector_mix
+; CHECK: %vector_mix.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_key_vector_mix
+; CHECK: %vector_mix.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_targetseed_vector_mix
+; CHECK: %vector_mix.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %vector_mix.obf.wrapper.target.key, i{{[0-9]+}} %vector_mix.obf.wrapper.target.base)
+; CHECK: %vector_mix.obf.wrapper.real.int = sub i{{[0-9]+}} %vector_mix.obf.wrapper.target.value, %vector_mix.obf.wrapper.target.base
+; CHECK: %vector_mix.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_key_vector_mix
+; CHECK: %vector_mix.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %vector_mix.obf.wrapper.decoded to ptr
+; CHECK: %vector_mix.obf.wrapper.call{{[0-9]*}} = call <2 x i32> %vector_mix.obf.wrapper.indirect(<2 x i32> %a, <2 x i32> %b, i64 %vector_mix.obf.wrapper.token)
 ; CHECK-LABEL: define i32 @__obf_vm_impl_branch_phi(i32 %x, i64 %obf.hidden_token)
 ; CHECK: entry.obf.vm:
 ; CHECK: %obf.vm.state = alloca i64

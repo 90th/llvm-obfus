@@ -48,6 +48,9 @@ entry:
 ; CHECK-DAG: @[[PTR32:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @__obf_vm_bc_encode_i32
 ; CHECK-DAG: @[[PTRI1:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @__obf_vm_bc_encode_i1
 ; CHECK-DAG: @[[PTR64:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @__obf_vm_bc_encode_i64
+; CHECK-DAG: @__obf_vm_targetseed_encode_i32 = private global i{{[0-9]+}} 0
+; CHECK-DAG: @__obf_vm_targetseed_encode_i1 = private global i{{[0-9]+}} 0
+; CHECK-DAG: @__obf_vm_targetseed_encode_i64 = private global i{{[0-9]+}} 0
 ; CHECK-DAG: @__obf_vm_retkey_encode_i32 = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @__obf_vm_retkey_encode_i1 = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @__obf_vm_retkey_encode_i64 = private global i64 {{-?[0-9]+}}
@@ -55,13 +58,39 @@ entry:
 ; --- Wrappers ---
 ; CHECK-LABEL: define i32 @encode_i32(i32 %x)
 ; CHECK: %encode_i32.obf.wrapper.token = xor i64
-; CHECK: call i32 @__obf_vm_impl_encode_i32(i32 %x, i64 %encode_i32.obf.wrapper.token)
+; CHECK: %encode_i32.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_target_encode_i32
+; CHECK: %encode_i32.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_key_encode_i32
+; CHECK: %encode_i32.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_targetseed_encode_i32
+; CHECK: %encode_i32.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i32.obf.wrapper.target.key, i{{[0-9]+}} %encode_i32.obf.wrapper.target.base)
+; CHECK: %encode_i32.obf.wrapper.real.int = sub i{{[0-9]+}} %encode_i32.obf.wrapper.target.value, %encode_i32.obf.wrapper.target.base
+; CHECK: %encode_i32.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_key_encode_i32
+; CHECK: call i32 %encode_i32.obf.wrapper.indirect(i32 %x, i64 %encode_i32.obf.wrapper.token)
+; CHECK: %encode_i32.obf.retkey = load i64, ptr @__obf_vm_retkey_encode_i32
+; CHECK: %encode_i32.obf.retkey.cast = trunc i64 %encode_i32.obf.retkey.bound to i32
+; CHECK: %encode_i32.obf.retdec = {{(or|sub) i32}}
 ; CHECK-LABEL: define i1 @encode_i1(i32 %x)
 ; CHECK: %encode_i1.obf.wrapper.token = xor i64
-; CHECK: call i1 @__obf_vm_impl_encode_i1(i32 %x, i64 %encode_i1.obf.wrapper.token)
+; CHECK: %encode_i1.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_target_encode_i1
+; CHECK: %encode_i1.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_key_encode_i1
+; CHECK: %encode_i1.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_targetseed_encode_i1
+; CHECK: %encode_i1.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i1.obf.wrapper.target.key, i{{[0-9]+}} %encode_i1.obf.wrapper.target.base)
+; CHECK: %encode_i1.obf.wrapper.real.int = sub i{{[0-9]+}} %encode_i1.obf.wrapper.target.value, %encode_i1.obf.wrapper.target.base
+; CHECK: %encode_i1.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_key_encode_i1
+; CHECK: call i1 %encode_i1.obf.wrapper.indirect(i32 %x, i64 %encode_i1.obf.wrapper.token)
+; CHECK: %encode_i1.obf.retkey = load i64, ptr @__obf_vm_retkey_encode_i1
+; CHECK: %encode_i1.obf.retkey.cast = trunc i64 %encode_i1.obf.retkey.bound to i1
+; CHECK: %encode_i1.obf.retdec = {{(or|sub) i1}}
 ; CHECK-LABEL: define i64 @encode_i64(i64 %x)
 ; CHECK: %encode_i64.obf.wrapper.token = xor i64
-; CHECK: call i64 @__obf_vm_impl_encode_i64(i64 %x, i64 %encode_i64.obf.wrapper.token)
+; CHECK: %encode_i64.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_target_encode_i64
+; CHECK: %encode_i64.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_key_encode_i64
+; CHECK: %encode_i64.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_targetseed_encode_i64
+; CHECK: %encode_i64.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i64.obf.wrapper.target.key, i{{[0-9]+}} %encode_i64.obf.wrapper.target.base)
+; CHECK: %encode_i64.obf.wrapper.real.int = sub i{{[0-9]+}} %encode_i64.obf.wrapper.target.value, %encode_i64.obf.wrapper.target.base
+; CHECK: %encode_i64.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_key_encode_i64
+; CHECK: call i64 %encode_i64.obf.wrapper.indirect(i64 %x, i64 %encode_i64.obf.wrapper.token)
+; CHECK: %encode_i64.obf.retkey = load i64, ptr @__obf_vm_retkey_encode_i64
+; CHECK: %encode_i64.obf.retdec = {{(or|sub) i64}}
 
 ; --- Caller-side decode ---
 ; CHECK-LABEL: define i32 @main()
