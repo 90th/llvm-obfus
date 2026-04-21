@@ -22,18 +22,24 @@ entry:
 ; CHECK-DAG: @[[VMRETKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @[[VMPTRCONST:_[0-9a-f]+]] = private unnamed_addr constant ptr @[[VMBC]]
 ; CHECK-DAG: @[[VMTARGET:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @[[VMTARGETSEED:_[0-9a-f]+]] = private global i64 0
 ; CHECK-DAG: @[[VMKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-NOT: @__obf_vm_
 ; CHECK-NOT: !dbg
 ; CHECK-NOT: %obf.
 ; CHECK-LABEL: define i32 @strong_vm_fold(i32
-; CHECK: call i32 @[[VMIMPL:_[0-9a-f]+]](i32 %0, i64
+; CHECK: load i64, ptr @[[VMTARGET]]
+; CHECK: load i64, ptr @[[VMKEY]]
+; CHECK: load i64, ptr @[[VMTARGETSEED]]
+; CHECK: inttoptr i64
+; CHECK: call i32 %{{[^ ]+}}(i32 %0, i64 %{{[^)]+}})
+; CHECK: load i64, ptr @[[VMRETKEY]]
 ; CHECK-LABEL: define i32 @main()
 ; CHECK: load i64, ptr @[[VMTARGET]]
 ; CHECK: store i64 %{{[^,]+}}, ptr @[[VMTARGET]]
 ; CHECK: load i64, ptr @[[VMKEY]]
 ; CHECK: call i32 %{{[^ ]+}}(i32 0, i64 %{{[^)]+}})
 ; CHECK: load i64, ptr @[[VMRETKEY]]
-; CHECK: define i32 @[[VMIMPL]](i32
+; CHECK: define i32 @[[VMIMPL:_[0-9a-f]+]](i32
 ; CHECK: load ptr, ptr @[[VMPTRCONST]]
 ; CHECK: indirectbr ptr

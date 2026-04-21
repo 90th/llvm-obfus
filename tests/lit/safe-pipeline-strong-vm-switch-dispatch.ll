@@ -43,9 +43,16 @@ entry:
 }
 
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @[[VMTARGET:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @[[VMTARGETSEED:_[0-9a-f]+]] = private global i64 0
+; CHECK-DAG: @[[VMKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-NOT: blockaddress(
 ; CHECK-NOT: indirectbr ptr
 ; CHECK-LABEL: define i32 @strong_vm_switch_dispatch(i32
-; CHECK: call i32 @[[VMIMPL:_[0-9a-f]+]](i32 %0, i32 %1, i32 %2, i64
-; CHECK: define i32 @[[VMIMPL]](i32
+; CHECK: load i64, ptr @{{_[0-9a-f]+}}
+; CHECK: load i64, ptr @{{_[0-9a-f]+}}
+; CHECK: load i64, ptr @{{_[0-9a-f]+}}
+; CHECK: inttoptr i64
+; CHECK: call i32 %{{[^ ]+}}(i32 %{{[^,]+}}, i32 %{{[^,]+}}, i32 %{{[^,]+}}, i64 %{{[^)]+}})
+; CHECK: define i32 @[[VMIMPL:_[0-9a-f]+]](i32
 ; CHECK: switch i32

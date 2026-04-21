@@ -41,6 +41,8 @@ entry:
 ; CHECK-DAG: @[[VMRETKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @[[VMPTRCONST:_[0-9a-f]+]] = private unnamed_addr constant ptr @[[VMBC]]
 ; CHECK-DAG: @[[VMTARGET:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @[[VMTARGETSEED:_[0-9a-f]+]] = private global i64 0
+; CHECK-DAG: @llvm.global_ctors = appending global [{{[0-9]+}} x { i32, ptr, ptr }]
 ; CHECK-DAG: @[[VMKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-NOT: @__obf_vm_
 ; CHECK-NOT: @__obf_family_
@@ -53,7 +55,12 @@ entry:
 ; CHECK: call { i64, i64 } @__obf_load_entropy_pair()
 ; CHECK: ret i32
 ; CHECK-LABEL: define i32 @fold_value(i32
-; CHECK: call i32 @[[VMIMPL:_[0-9a-f]+]](i32 %0, i64
+; CHECK: load i64, ptr @[[VMTARGET]]
+; CHECK: load i64, ptr @[[VMKEY]]
+; CHECK: load i64, ptr @[[VMTARGETSEED]]
+; CHECK: inttoptr i64
+; CHECK: call i32 %{{[^ ]+}}(i32 %0, i64 %{{[^)]+}})
+; CHECK: load i64, ptr @[[VMRETKEY]]
 ; CHECK-LABEL: define i32 @main()
 ; CHECK: call ptr @[[STRHELPER:_[0-9a-f]+]](ptr
 ; CHECK: load i64, ptr @[[VMTARGET]]
@@ -61,7 +68,7 @@ entry:
 ; CHECK: load i64, ptr @[[VMKEY]]
 ; CHECK: call i32 %{{[^ ]+}}(i32 %{{[^,]+}}, i64 %{{[^)]+}})
 ; CHECK: load i64, ptr @[[VMRETKEY]]
-; CHECK: define i32 @[[VMIMPL]](i32
+; CHECK: define i32 @[[VMIMPL:_[0-9a-f]+]](i32
 ; CHECK: load ptr, ptr @[[VMPTRCONST]]
 ; CHECK: indirectbr ptr
 ; CHECK: define internal ptr @[[STRHELPER]](ptr
