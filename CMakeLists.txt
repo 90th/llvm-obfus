@@ -24,6 +24,12 @@ find_program(OBF_LLVM_LINK llvm-link HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(OBF_LLC llc HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(OBF_STRIP llvm-strip HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 
+option(OBF_BENCHMARK_CLEAN_IR
+  "Generate cleaned benchmark IR for analysis builds"
+  OFF)
+set(OBF_BENCHMARK_CLEANUP_PASSES "dse" CACHE STRING
+  "Cleanup passes used when OBF_BENCHMARK_CLEAN_IR is enabled")
+
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 
 if(LLVM_PACKAGE_VERSION VERSION_LESS 21)
@@ -125,6 +131,7 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
   set(baseline_ll "${output_dir}/${target_name}.baseline.ll")
   set(obfuscated_ll "${output_dir}/${target_name}.obfuscated.ll")
   set(cleaned_ll "${output_dir}/${target_name}.obfuscated.cleaned.ll")
+  set(final_obfuscated_ll "${obfuscated_ll}")
   set(baseline_bin "${output_dir}/${target_name}.baseline")
   set(obfuscated_bin "${output_dir}/${target_name}.obfuscated")
 
@@ -143,11 +150,14 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
     DEPENDS obf_plugin "${baseline_ll}" "${config_file}"
     VERBATIM)
 
-  add_custom_command(
-    OUTPUT "${cleaned_ll}"
-    COMMAND "${OBF_OPT}" "-passes=instcombine<no-verify-fixpoint>,dse" -S "${obfuscated_ll}" -o "${cleaned_ll}"
-    DEPENDS "${obfuscated_ll}"
-    VERBATIM)
+  if(OBF_BENCHMARK_CLEAN_IR)
+    add_custom_command(
+      OUTPUT "${cleaned_ll}"
+      COMMAND "${OBF_OPT}" "-passes=${OBF_BENCHMARK_CLEANUP_PASSES}" -S "${obfuscated_ll}" -o "${cleaned_ll}"
+      DEPENDS "${obfuscated_ll}"
+      VERBATIM)
+    set(final_obfuscated_ll "${cleaned_ll}")
+  endif()
 
   add_custom_command(
     OUTPUT "${baseline_bin}"
@@ -158,9 +168,9 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
 
   add_custom_command(
     OUTPUT "${obfuscated_bin}"
-    COMMAND "${compiler}" "${cleaned_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
+    COMMAND "${compiler}" "${final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
     COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
-    DEPENDS "${cleaned_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
+    DEPENDS "${final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
     VERBATIM)
 
   add_custom_target("${target_name}_bench" DEPENDS "${baseline_bin}" "${obfuscated_bin}")
@@ -173,6 +183,7 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
   set(linked_baseline_ll "${output_dir}/${target_name}.baseline.ll")
   set(linked_obfuscated_ll "${output_dir}/${target_name}.obfuscated.ll")
   set(linked_cleaned_ll "${output_dir}/${target_name}.obfuscated.cleaned.ll")
+  set(linked_final_obfuscated_ll "${linked_obfuscated_ll}")
   set(baseline_bin "${output_dir}/${target_name}.baseline")
   set(obfuscated_bin "${output_dir}/${target_name}.obfuscated")
 
@@ -202,11 +213,14 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
     DEPENDS obf_plugin "${linked_baseline_ll}" "${config_file}"
     VERBATIM)
 
-  add_custom_command(
-    OUTPUT "${linked_cleaned_ll}"
-    COMMAND "${OBF_OPT}" "-passes=instcombine<no-verify-fixpoint>,dse" -S "${linked_obfuscated_ll}" -o "${linked_cleaned_ll}"
-    DEPENDS "${linked_obfuscated_ll}"
-    VERBATIM)
+  if(OBF_BENCHMARK_CLEAN_IR)
+    add_custom_command(
+      OUTPUT "${linked_cleaned_ll}"
+      COMMAND "${OBF_OPT}" "-passes=${OBF_BENCHMARK_CLEANUP_PASSES}" -S "${linked_obfuscated_ll}" -o "${linked_cleaned_ll}"
+      DEPENDS "${linked_obfuscated_ll}"
+      VERBATIM)
+    set(linked_final_obfuscated_ll "${linked_cleaned_ll}")
+  endif()
 
   add_custom_command(
     OUTPUT "${baseline_bin}"
@@ -217,9 +231,9 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
 
   add_custom_command(
     OUTPUT "${obfuscated_bin}"
-    COMMAND "${compiler}" "${linked_cleaned_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
+    COMMAND "${compiler}" "${linked_final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
     COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
-    DEPENDS "${linked_cleaned_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
+    DEPENDS "${linked_final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
     VERBATIM)
 
   add_custom_target("${target_name}_bench" DEPENDS "${baseline_bin}" "${obfuscated_bin}")
@@ -235,8 +249,8 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
     VERBATIM)
   add_custom_command(
     OUTPUT "${mir_obfuscated}"
-    COMMAND "${OBF_LLC}" -stop-after=finalize-isel "${linked_cleaned_ll}" -o "${mir_obfuscated}"
-    DEPENDS "${linked_cleaned_ll}"
+    COMMAND "${OBF_LLC}" -stop-after=finalize-isel "${linked_final_obfuscated_ll}" -o "${mir_obfuscated}"
+    DEPENDS "${linked_final_obfuscated_ll}"
     VERBATIM)
   add_custom_target("${target_name}_mir" DEPENDS "${mir_baseline}" "${mir_obfuscated}")
   list(APPEND OBF_MIR_TARGETS "${target_name}_mir")

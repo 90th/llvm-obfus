@@ -53,5 +53,5 @@ entry:
 ; CHECK-LABEL: define i32 @main()
 ; CHECK: call i32 %{{[^ ]+}}(i32 5, i32 3, i64 %{{[^)]+}})
 ; CHECK: call i32 %{{[^ ]+}}(i32 -2, i32 -4, i64 %{{[^)]+}})
-; CHECK: define i32 @[[VMIMPL:_[0-9a-f]+]](i32
+; CHECK: define internal i32 @[[VMIMPL:_[0-9a-f]+]](i32
 ; CHECK: indirectbr ptr

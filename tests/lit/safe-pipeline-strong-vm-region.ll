@@ -111,7 +111,7 @@ entry:
 ; VM: load i64, ptr @__obf_vm_targetseed___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
 ; VM: load i64, ptr @__obf_vm_key___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
 ; VM: call void %{{[^ ]+}}(i32 %x, ptr %v.ce.ce.out, i64
-; VM-LABEL: define dso_local void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.ce.out, i64 %obf.hidden_token) #{{[0-9]+}} {
+; VM-LABEL: define internal void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.ce.out, i64 %obf.hidden_token) #{{[0-9]+}} {
 ; VM: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_{{[0-9A-F]+}}
 ; VM: indirectbr ptr
 ; SAFE-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
@@ -122,9 +122,9 @@ entry:
 ; SAFE: call void @{{_[0-9a-f]+}}(i32 %{{[^,]+}}, i32 %{{[^,]+}}, ptr %{{[^)]+}})
 ; SAFE: define internal void @{{_[0-9a-f]+}}(i32 %0, ptr %1) {
 ; SAFE: call void %{{[^ ]+}}(i32 %0, ptr %{{[^,]+}}, i64 %{{[^)]+}})
-; SAFE: define dso_local void @{{_[0-9a-f]+}}(i32 %0, ptr %1, i64 %2)
+; SAFE: define internal void @{{_[0-9a-f]+}}(i32 %0, ptr %1, i64 %2)
 ; SAFE: indirectbr ptr
 ; SAFE: define internal void @{{_[0-9a-f]+}}(i32 %0, i32 %1, ptr %2) {
 ; SAFE: call void %{{[^ ]+}}(i32 %1, i32 %0, ptr %{{[^,]+}}, i64 %{{[^)]+}})
-; SAFE: define dso_local void @{{_[0-9a-f]+}}(i32 %0, i32 %1, ptr %2, i64 %3)
+; SAFE: define internal void @{{_[0-9a-f]+}}(i32 %0, i32 %1, ptr %2, i64 %3)
 ; SAFE: indirectbr ptr

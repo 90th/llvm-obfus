@@ -62,7 +62,7 @@ entry:
 ; CHECK: %fold_value.obf.retkey.cast = trunc i64 %fold_value.obf.retkey.bound to i32
 ; CHECK: %fold_value.obf.retdec = {{(or|sub) i32}}
 ; CHECK: icmp eq i32 %fold_value.obf.retdec,
-; CHECK-LABEL: define i32 @__obf_vm_impl_fold_value(i32 %value, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_impl_fold_value(i32 %value, i64 %obf.hidden_token)
 ; CHECK: entry.obf.vm:
 ; CHECK-NOT: %obf.vm.pc = alloca i32
 ; CHECK-NOT: dispatch.obf.vm:
@@ -105,7 +105,7 @@ entry:
 ; INST: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_fold_value
 ; INST: %fold_value.obf.retkey.bound = {{(or|sub) i64}}
 ; INST: %fold_value.obf.retdec = {{(or|sub) i32}}
-; INST-LABEL: define i32 @__obf_vm_impl_fold_value(i32 %value, i64 %obf.hidden_token)
+; INST-LABEL: define internal i32 @__obf_vm_impl_fold_value(i32 %value, i64 %obf.hidden_token)
 ; INST: %obf.vm.state = alloca i64
 ; INST: {{^vm\.0:}}
 ; INST: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, {{-?[0-9]+}}

@@ -9,6 +9,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
@@ -340,6 +341,90 @@ llvm::Value *build_hidden_token_value(llvm::IRBuilder<> &builder,
                                     (prefix + ".token").str());
 }
 
+bool is_vm_abi_safe_return_attribute(llvm::Attribute attribute) {
+  if (attribute.isStringAttribute() || !attribute.hasKindAsEnum()) {
+    return false;
+  }
+
+  switch (attribute.getKindAsEnum()) {
+  case llvm::Attribute::InReg:
+  case llvm::Attribute::SExt:
+  case llvm::Attribute::ZExt:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool is_vm_abi_safe_parameter_attribute(llvm::Attribute attribute) {
+  if (attribute.isStringAttribute() || !attribute.hasKindAsEnum()) {
+    return false;
+  }
+
+  switch (attribute.getKindAsEnum()) {
+  case llvm::Attribute::Alignment:
+  case llvm::Attribute::ByRef:
+  case llvm::Attribute::ByVal:
+  case llvm::Attribute::ElementType:
+  case llvm::Attribute::InAlloca:
+  case llvm::Attribute::InReg:
+  case llvm::Attribute::Nest:
+  case llvm::Attribute::Preallocated:
+  case llvm::Attribute::SExt:
+  case llvm::Attribute::StructRet:
+  case llvm::Attribute::SwiftAsync:
+  case llvm::Attribute::SwiftError:
+  case llvm::Attribute::SwiftSelf:
+  case llvm::Attribute::ZExt:
+    return true;
+  default:
+    return false;
+  }
+}
+
+llvm::AttributeList build_vm_abi_attribute_list(const llvm::Function &function) {
+  llvm::LLVMContext &context = function.getContext();
+  const llvm::AttributeList original = function.getAttributes();
+  llvm::AttributeList sanitized;
+
+  for (llvm::Attribute attribute : original.getRetAttrs()) {
+    if (is_vm_abi_safe_return_attribute(attribute)) {
+      sanitized = sanitized.addRetAttribute(context, attribute);
+    }
+  }
+
+  for (const llvm::Argument &argument : function.args()) {
+    const unsigned argument_index = argument.getArgNo();
+    for (llvm::Attribute attribute : original.getParamAttrs(argument_index)) {
+      if (is_vm_abi_safe_parameter_attribute(attribute)) {
+        sanitized = sanitized.addAttributeAtIndex(
+            context, llvm::AttributeList::FirstArgIndex + argument_index,
+            attribute);
+      }
+    }
+  }
+
+  return sanitized;
+}
+
+llvm::AttributeList build_vm_safe_callsite_attributes(
+    const llvm::Function &callee_function) {
+  return build_vm_abi_attribute_list(callee_function);
+}
+
+void sanitize_vm_implementation_attributes(
+    llvm::Function &implementation_function,
+    const llvm::Function &interface_function) {
+  implementation_function.setAttributes(
+      build_vm_abi_attribute_list(interface_function));
+  implementation_function.setDSOLocal(true);
+  implementation_function.addFnAttr(llvm::Attribute::NoInline);
+}
+
+void sanitize_vm_wrapper_attributes(llvm::Function &interface_function) {
+  interface_function.setAttributes(build_vm_abi_attribute_list(interface_function));
+}
+
 llvm::Function *clone_vm_implementation(llvm::Function &interface_function) {
   llvm::Module *module = interface_function.getParent();
   if (module == nullptr) {
@@ -356,10 +441,9 @@ llvm::Function *clone_vm_implementation(llvm::Function &interface_function) {
   auto *implementation_type = llvm::FunctionType::get(
       interface_function.getReturnType(), parameter_types, /*isVarArg=*/false);
   auto *implementation_function = llvm::Function::Create(
-      implementation_type, llvm::GlobalValue::ExternalLinkage,
+      implementation_type, llvm::GlobalValue::InternalLinkage,
       ("__obf_vm_impl_" + interface_function.getName()).str(), module);
   implementation_function->setCallingConv(interface_function.getCallingConv());
-  implementation_function->setAttributes(interface_function.getAttributes());
   implementation_function->setDSOLocal(true);
 
   llvm::ValueToValueMapTy value_map;
@@ -374,6 +458,8 @@ llvm::Function *clone_vm_implementation(llvm::Function &interface_function) {
   llvm::CloneFunctionInto(implementation_function, &interface_function, value_map,
                           llvm::CloneFunctionChangeType::LocalChangesOnly,
                           returns);
+  sanitize_vm_implementation_attributes(*implementation_function,
+                                        interface_function);
   return implementation_function;
 }
 
@@ -458,6 +544,7 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
                          /*isSigned=*/false, /*implicitTrunc=*/true);
 
   interface_function.deleteBody();
+  sanitize_vm_wrapper_attributes(interface_function);
 
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(
       interface_function.getContext(), "entry.obf.vm.wrapper",
@@ -549,7 +636,7 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
           ? ""
           : wrapper_prefix + ".call");
   call->setCallingConv(interface_function.getCallingConv());
-  call->setAttributes(implementation_function.getAttributes());
+  call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
   if (interface_function.getReturnType()->isVoidTy()) {
     call_builder.CreateRetVoid();
   } else {
@@ -1087,7 +1174,8 @@ bool rewrite_calls_to_virtualized_function(
         implementation_function.getFunctionType(), indirect_target, arguments,
         call->getType()->isVoidTy() ? "" : function.getName() + ".obf.callsite");
     rewritten_call->setCallingConv(call->getCallingConv());
-    rewritten_call->setAttributes(implementation_function.getAttributes());
+    rewritten_call->setAttributes(
+        build_vm_safe_callsite_attributes(implementation_function));
 
     llvm::Type *call_ret_type = rewritten_call->getType();
     if (call_ret_type->isIntegerTy()) {
@@ -1178,6 +1266,7 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
       const vm::virtualization_result result =
           vm::run_virtualization(*binding.implementation_function, vm_options);
       if (result.virtualized) {
+        binding.implementation_function->setDSOLocal(true);
         rewrite_vm_interface_wrapper(*binding.interface_function,
                                      *binding.implementation_function,
                                      binding.wrapper_token, config.mba.depth);

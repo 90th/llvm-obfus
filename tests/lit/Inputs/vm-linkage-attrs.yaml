@@ -1,0 +1,7 @@
+seed: 1337
+default_level: none
+targets:
+  - match: attr_readnone
+    level: vm
+  - match: attr_readonly
+    level: vm

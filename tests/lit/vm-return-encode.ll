@@ -119,7 +119,7 @@ entry:
 ; CHECK: icmp eq i64 %encode_i64.obf.retdec, 1234567890123456789
 
 ; --- VM body: no plaintext return ---
-; CHECK-LABEL: define i32 @__obf_vm_impl_encode_i32(i32 %x, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_impl_encode_i32(i32 %x, i64 %obf.hidden_token)
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @[[PTR32]]
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_encode_i32
@@ -127,7 +127,7 @@ entry:
 ; CHECK: %obf.vm.ret.key.cast = trunc i64 %obf.vm.ret.fullkey to i32
 ; CHECK: ret i32 %obf.vm.ret.encoded
 
-; CHECK-LABEL: define i1 @__obf_vm_impl_encode_i1(i32 %x, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i1 @__obf_vm_impl_encode_i1(i32 %x, i64 %obf.hidden_token)
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @[[PTRI1]]
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_encode_i1
@@ -135,7 +135,7 @@ entry:
 ; CHECK: %obf.vm.ret.key.cast = trunc i64 %obf.vm.ret.fullkey to i1
 ; CHECK: ret i1 %obf.vm.ret.encoded
 
-; CHECK-LABEL: define i64 @__obf_vm_impl_encode_i64(i64 %x, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i64 @__obf_vm_impl_encode_i64(i64 %x, i64 %obf.hidden_token)
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @[[PTR64]]
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_encode_i64

@@ -139,6 +139,54 @@ llvm::Value *load_byte_through_window(
   return builder.CreateTrunc(window_value, builder.getInt8Ty(), base_name);
 }
 
+llvm::Value *materialize_decode_round_constant(
+    llvm::IRBuilder<> &builder, const rewrite_function_context &context,
+    llvm::IntegerType *type, std::uint64_t value, std::uint64_t salt) {
+  auto *constant = llvm::ConstantInt::get(type, value);
+  llvm::Value *materialized = materialize_integer_constant(
+      builder, *constant, context.opaque_seed_slot, context.opaque_seed_base,
+      context.mba_context, salt);
+  return materialized != nullptr ? materialized : constant;
+}
+
+llvm::Value *decode_byte_and_advance_state(
+    llvm::IRBuilder<> &builder, const rewrite_function_context &context,
+    llvm::Value *encoded, llvm::Value *&state, std::uint32_t offset,
+    llvm::Value *rotate_right, llvm::Value *rotate_left,
+    llvm::Value *state_shift, std::uint64_t salt,
+    llvm::StringRef name_prefix = "obf.vm.bc") {
+  const std::string base_name =
+      name_prefix.empty() ? "obf.vm.bc" : name_prefix.str();
+  auto *state_type = builder.getInt64Ty();
+  llvm::Value *rotated = builder.CreateOr(
+      builder.CreateLShr(state, rotate_right, base_name + ".shr"),
+      builder.CreateShl(state, rotate_left, base_name + ".shl"),
+      base_name + ".rot");
+  llvm::Value *key_mix = mba::create_xor(
+      builder, state, rotated, context.mba_context, salt + 1,
+      base_name + ".key.mix");
+  llvm::Value *key_seed = materialize_decode_round_constant(
+      builder, context, state_type,
+      mix_seed(context.bytecode_seed, static_cast<std::uint64_t>(offset) + 1),
+      salt ^ 0x6b6bULL);
+  llvm::Value *key_word = mba::create_xor(
+      builder, key_mix, key_seed, context.mba_context, salt + 2,
+      base_name + ".key.word");
+  llvm::Value *key =
+      builder.CreateTrunc(key_word, builder.getInt8Ty(), base_name + ".key");
+  llvm::Value *decoded = mba::create_xor(builder, encoded, key,
+                                         context.mba_context, salt + 3,
+                                         base_name + ".byte");
+  llvm::Value *shifted_state =
+      builder.CreateShl(state, state_shift, base_name + ".state.shift");
+  llvm::Value *decoded_byte = builder.CreateZExt(
+      decoded, state_type, base_name + ".state.byte");
+  state = mba::create_add(builder, shifted_state, decoded_byte,
+                          context.mba_context, salt + 4,
+                          base_name + ".state.next");
+  return decoded;
+}
+
 llvm::Value *fetch_byte(llvm::IRBuilder<> &builder,
                         const rewrite_function_context &context,
                         std::uint32_t offset, std::uint64_t salt) {
@@ -160,29 +208,19 @@ llvm::Value *fetch_byte(llvm::IRBuilder<> &builder,
   if (encoded == nullptr) {
     encoded = builder.CreateLoad(builder.getInt8Ty(), slot, "obf.vm.bc.enc");
   }
-  auto *state_load = builder.CreateLoad(builder.getInt64Ty(), context.state_slot,
-                                        "obf.vm.bc.state.load");
-  llvm::Value *rotated = builder.CreateOr(
-      builder.CreateLShr(state_load, builder.getInt64(13), "obf.vm.bc.shr"),
-      builder.CreateShl(state_load, builder.getInt64(51), "obf.vm.bc.shl"),
-      "obf.vm.bc.rot");
-  llvm::Value *key_mix = mba::create_xor(builder, state_load, rotated,
-                                         context.mba_context, salt + 1,
-                                         "obf.vm.bc.key.mix");
-  llvm::Value *key_word = mba::create_xor(
-      builder, key_mix,
-      builder.getInt64(mix_seed(context.bytecode_seed,
-                                static_cast<std::uint64_t>(offset) + 1)),
-      context.mba_context, salt + 2, "obf.vm.bc.key.word");
-  llvm::Value *key =
-      builder.CreateTrunc(key_word, builder.getInt8Ty(), "obf.vm.bc.key");
-  llvm::Value *decoded = mba::create_xor(builder, encoded, key, context.mba_context,
-                                         salt + 3, "obf.vm.bc.byte");
-  llvm::Value *next_state = builder.CreateOr(
-      builder.CreateShl(state_load, builder.getInt64(8), "obf.vm.bc.state.shift"),
-      builder.CreateZExt(decoded, builder.getInt64Ty(), "obf.vm.bc.state.byte"),
-      "obf.vm.bc.state.next");
-  (void)builder.CreateStore(next_state, context.state_slot);
+  auto *state_type = builder.getInt64Ty();
+  llvm::Value *rotate_right = materialize_decode_round_constant(
+      builder, context, state_type, 13, salt ^ 0x6113ULL);
+  llvm::Value *rotate_left = materialize_decode_round_constant(
+      builder, context, state_type, 51, salt ^ 0x6151ULL);
+  llvm::Value *state_shift = materialize_decode_round_constant(
+      builder, context, state_type, 8, salt ^ 0x6108ULL);
+  llvm::Value *state_value = builder.CreateLoad(
+      builder.getInt64Ty(), context.state_slot, "obf.vm.bc.state.load");
+  llvm::Value *decoded = decode_byte_and_advance_state(
+      builder, context, encoded, state_value, offset, rotate_right, rotate_left,
+      state_shift, salt ^ 0x6200ULL, "obf.vm.bc");
+  (void)builder.CreateStore(state_value, context.state_slot);
   return decoded;
 }
 
@@ -215,6 +253,13 @@ decoded_metadata_span_result decode_metadata_span(
                                           "obf.vm.bc.state.span.load");
   llvm::Value *assembled_word =
       assemble_first_word ? builder.getInt32(0) : nullptr;
+  auto *state_type = builder.getInt64Ty();
+  llvm::Value *rotate_right = materialize_decode_round_constant(
+      builder, context, state_type, 13, salt ^ 0x6213ULL);
+  llvm::Value *rotate_left = materialize_decode_round_constant(
+      builder, context, state_type, 51, salt ^ 0x6251ULL);
+  llvm::Value *state_shift = materialize_decode_round_constant(
+      builder, context, state_type, 8, salt ^ 0x6208ULL);
   for (std::uint32_t processed = 0; processed < length; ++processed) {
     const std::uint64_t byte_salt =
         salt + static_cast<std::uint64_t>(processed) * 8;
@@ -232,29 +277,9 @@ decoded_metadata_span_result decode_metadata_span(
       encoded = builder.CreateLoad(builder.getInt8Ty(), slot,
                                    "obf.vm.bc.span.enc");
     }
-
-    llvm::Value *rotated = builder.CreateOr(
-        builder.CreateLShr(state, builder.getInt64(13), "obf.vm.bc.shr"),
-        builder.CreateShl(state, builder.getInt64(51), "obf.vm.bc.shl"),
-        "obf.vm.bc.rot");
-    llvm::Value *key_mix = mba::create_xor(builder, state, rotated,
-                                           context.mba_context, byte_salt + 1,
-                                           "obf.vm.bc.key.mix");
-    llvm::Value *key_word = mba::create_xor(
-        builder, key_mix,
-        builder.getInt64(mix_seed(context.bytecode_seed,
-                                  static_cast<std::uint64_t>(byte_offset) + 1)),
-        context.mba_context, byte_salt + 2, "obf.vm.bc.key.word");
-    llvm::Value *key =
-        builder.CreateTrunc(key_word, builder.getInt8Ty(), "obf.vm.bc.key");
-    llvm::Value *decoded = mba::create_xor(builder, encoded, key,
-                                           context.mba_context, byte_salt + 3,
-                                           "obf.vm.bc.byte");
-
-    state = builder.CreateAdd(
-        builder.CreateShl(state, builder.getInt64(8), "obf.vm.bc.state.shift"),
-        builder.CreateZExt(decoded, builder.getInt64Ty(), "obf.vm.bc.state.byte"),
-        "obf.vm.bc.state.next");
+    llvm::Value *decoded = decode_byte_and_advance_state(
+        builder, context, encoded, state, byte_offset, rotate_right,
+        rotate_left, state_shift, byte_salt ^ 0x6300ULL, "obf.vm.bc.span");
 
     if (assembled_word != nullptr && processed < 4) {
       llvm::Value *piece =
