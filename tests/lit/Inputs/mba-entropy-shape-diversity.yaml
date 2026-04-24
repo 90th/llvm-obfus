@@ -1,0 +1,10 @@
+seed: 4444
+default_level: none
+targets:
+  - match: shape_mix
+    level: strong
+constant_encoding:
+  max_constants_per_function: 4
+  min_bit_width: 8
+mba:
+  depth: 2

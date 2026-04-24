@@ -63,6 +63,7 @@ struct classified_string_candidate {
   llvm::GlobalVariable *global = nullptr;
   std::uint64_t seed = 0;
   bool has_high_security_use = false;
+  bool has_strong_vm_use = false;
   string_use_summary summary;
   string_encoding_result result;
 };
@@ -624,6 +625,9 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
     if (level.has_value() && is_high_security_level(*level)) {
       candidate.has_high_security_use = true;
     }
+    if (level.has_value() && *level == protection_level::strong_vm) {
+      candidate.has_strong_vm_use = true;
+    }
   }
 
   candidate.seed =
@@ -657,6 +661,26 @@ string_strategy_plan select_strategy(const classified_string_candidate &candidat
   plan.seed = candidate.seed;
   plan.result = candidate.result;
 
+  const auto select_inline_stack_decode = [&]() {
+    plan.result.applied = true;
+    plan.result.mode = string_encoding_mode::inline_stack_decode;
+    plan.result.strategy_kind = string_strategy_kind::inline_stack_decode;
+    plan.result.helper_shape = string_helper_shape::none;
+    plan.result.key_schedule = string_key_schedule_kind::cfg_path_byte_xor_v2;
+    plan.result.merge_group = -1;
+    plan.result.rewritten_use_count = candidate.summary.protected_uses.size();
+    plan.result.detail = std::to_string(plan.result.rewritten_use_count) +
+                         " inline stack decode use(s)";
+    plan.result.inline_detail =
+        "short compare-like string selected for stack decode";
+    plan.inline_uses = candidate.summary.protected_uses;
+  };
+
+  const auto skip_strong_vm_global_plaintext = [&](llvm::StringRef detail) {
+    plan.result.detail = detail.str();
+    plan.result.fallback_reason = "strong_vm_no_global_plaintext";
+  };
+
   if (candidate.global == nullptr) {
     return plan;
   }
@@ -671,7 +695,23 @@ string_strategy_plan select_strategy(const classified_string_candidate &candidat
     return plan;
   }
 
+  const bool is_strong_vm_candidate = candidate.has_strong_vm_use;
+  if (is_strong_vm_candidate &&
+      should_inline_stack_decode(*candidate.global, candidate.summary)) {
+    select_inline_stack_decode();
+    return plan;
+  }
+
   if (!candidate.summary.unprotected_functions.empty()) {
+    if (is_strong_vm_candidate &&
+        (!options.allow_ctor_fallback ||
+         !options.strong_vm_allow_global_plaintext ||
+         !options.strong_vm_allow_ctor_fallback)) {
+      skip_strong_vm_global_plaintext(
+          "strong_vm_no_global_plaintext: shared with unprotected function");
+      return plan;
+    }
+
     if (!options.allow_ctor_fallback) {
       plan.result.detail = "shared with unprotected function";
       return plan;
@@ -688,6 +728,15 @@ string_strategy_plan select_strategy(const classified_string_candidate &candidat
   }
 
   if (candidate.summary.has_forwarded_pointer_load) {
+    if (is_strong_vm_candidate &&
+        (!options.allow_ctor_fallback ||
+         !options.strong_vm_allow_global_plaintext ||
+         !options.strong_vm_allow_ctor_fallback)) {
+      skip_strong_vm_global_plaintext(
+          "strong_vm_no_global_plaintext: forwarded pointer table use");
+      return plan;
+    }
+
     plan.result.applied = true;
     plan.result.mode = string_encoding_mode::global_ctor;
     plan.result.strategy_kind = string_strategy_kind::helper_global_ctor;
@@ -699,22 +748,16 @@ string_strategy_plan select_strategy(const classified_string_candidate &candidat
   }
 
   if (should_inline_stack_decode(*candidate.global, candidate.summary)) {
-    plan.result.applied = true;
-    plan.result.mode = string_encoding_mode::inline_stack_decode;
-    plan.result.strategy_kind = string_strategy_kind::inline_stack_decode;
-    plan.result.helper_shape = string_helper_shape::none;
-    plan.result.key_schedule = string_key_schedule_kind::cfg_path_byte_xor_v2;
-    plan.result.merge_group = -1;
-    plan.result.rewritten_use_count = candidate.summary.protected_uses.size();
-    plan.result.detail = std::to_string(plan.result.rewritten_use_count) +
-                         " inline stack decode use(s)";
-    plan.result.inline_detail =
-        "short compare-like string selected for stack decode";
-    plan.inline_uses = candidate.summary.protected_uses;
+    select_inline_stack_decode();
     return plan;
   }
 
-  if (options.prefer_lazy_decode && !candidate.summary.has_lazy_blockers &&
+  const bool lazy_decode_allowed =
+      !is_strong_vm_candidate ||
+      (options.strong_vm_allow_global_plaintext &&
+       options.strong_vm_allow_lazy_decode);
+  if (options.prefer_lazy_decode && lazy_decode_allowed &&
+      !candidate.summary.has_lazy_blockers &&
       !candidate.summary.protected_uses.empty()) {
     plan.result.applied = true;
     plan.result.mode = string_encoding_mode::lazy_decode;
@@ -733,7 +776,20 @@ string_strategy_plan select_strategy(const classified_string_candidate &candidat
     return plan;
   }
 
-  if (!options.allow_ctor_fallback) {
+  const bool ctor_fallback_allowed =
+      options.allow_ctor_fallback &&
+      (!is_strong_vm_candidate ||
+       (options.strong_vm_allow_global_plaintext &&
+        options.strong_vm_allow_ctor_fallback));
+  if (!ctor_fallback_allowed) {
+    if (is_strong_vm_candidate) {
+      skip_strong_vm_global_plaintext(
+          candidate.summary.has_lazy_blockers
+              ? "strong_vm_no_global_plaintext: unsupported lazy use pattern"
+              : "strong_vm_no_global_plaintext: no local string strategy");
+      return plan;
+    }
+
     plan.result.detail = candidate.summary.has_lazy_blockers
                              ? "unsupported lazy use pattern"
                              : "no supported lazy uses";

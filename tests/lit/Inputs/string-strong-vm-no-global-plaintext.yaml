@@ -1,0 +1,10 @@
+seed: 6060
+default_level: none
+targets:
+  - match: strong_inline_string
+    level: strong_vm
+  - match: strong_skip_string
+    level: strong_vm
+string_encoding:
+  prefer_lazy_decode: true
+  allow_ctor_fallback: true

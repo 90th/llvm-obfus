@@ -31,6 +31,9 @@ struct string_encoding_config {
   std::uint32_t max_strings_per_module = 64;
   bool prefer_lazy_decode = true;
   bool allow_ctor_fallback = true;
+  bool strong_vm_allow_global_plaintext = false;
+  bool strong_vm_allow_lazy_decode = false;
+  bool strong_vm_allow_ctor_fallback = false;
 };
 
 struct constant_encoding_config {

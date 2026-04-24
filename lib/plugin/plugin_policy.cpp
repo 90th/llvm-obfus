@@ -360,7 +360,13 @@ build_string_encoding_options(const obfuscation_config &config) {
           .max_strings_per_module = config.string_encoding.max_strings_per_module,
           .ctor_priority = 0,
           .prefer_lazy_decode = config.string_encoding.prefer_lazy_decode,
-          .allow_ctor_fallback = config.string_encoding.allow_ctor_fallback};
+          .allow_ctor_fallback = config.string_encoding.allow_ctor_fallback,
+          .strong_vm_allow_global_plaintext =
+              config.string_encoding.strong_vm_allow_global_plaintext,
+          .strong_vm_allow_lazy_decode =
+              config.string_encoding.strong_vm_allow_lazy_decode,
+          .strong_vm_allow_ctor_fallback =
+              config.string_encoding.strong_vm_allow_ctor_fallback};
 }
 
 constant_encoding_options

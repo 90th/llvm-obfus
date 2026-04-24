@@ -52,6 +52,9 @@ struct string_encoding_options {
   unsigned ctor_priority = 0;
   bool prefer_lazy_decode = true;
   bool allow_ctor_fallback = true;
+  bool strong_vm_allow_global_plaintext = false;
+  bool strong_vm_allow_lazy_decode = false;
+  bool strong_vm_allow_ctor_fallback = false;
 };
 
 struct string_encoding_result {

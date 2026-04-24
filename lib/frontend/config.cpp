@@ -54,6 +54,12 @@ template <> struct MappingTraits<obf::string_encoding_config> {
                    std::uint32_t{64});
     io.mapOptional("prefer_lazy_decode", config.prefer_lazy_decode, true);
     io.mapOptional("allow_ctor_fallback", config.allow_ctor_fallback, true);
+    io.mapOptional("strong_vm_allow_global_plaintext",
+                   config.strong_vm_allow_global_plaintext, false);
+    io.mapOptional("strong_vm_allow_lazy_decode",
+                   config.strong_vm_allow_lazy_decode, false);
+    io.mapOptional("strong_vm_allow_ctor_fallback",
+                   config.strong_vm_allow_ctor_fallback, false);
   }
 };
 
@@ -141,6 +147,18 @@ std::string summarize_config(const obfuscation_config &config) {
          << '\n';
   stream << "string_encoding.allow_ctor_fallback: "
          << (config.string_encoding.allow_ctor_fallback ? "true" : "false")
+         << '\n';
+  stream << "string_encoding.strong_vm_allow_global_plaintext: "
+         << (config.string_encoding.strong_vm_allow_global_plaintext ? "true"
+                                                                    : "false")
+         << '\n';
+  stream << "string_encoding.strong_vm_allow_lazy_decode: "
+         << (config.string_encoding.strong_vm_allow_lazy_decode ? "true"
+                                                               : "false")
+         << '\n';
+  stream << "string_encoding.strong_vm_allow_ctor_fallback: "
+         << (config.string_encoding.strong_vm_allow_ctor_fallback ? "true"
+                                                                 : "false")
          << '\n';
   stream << "constant_encoding.max_constants_per_function: "
          << config.constant_encoding.max_constants_per_function << '\n';

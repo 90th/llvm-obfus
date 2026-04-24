@@ -14,9 +14,57 @@ namespace obf::mba {
 
 namespace {
 
+enum class opaque_zero_shape {
+  xor_pair,
+  add_sub_pair,
+  sub_pair,
+  rotate_xor_pair,
+  cmp_select_pair,
+};
+
+enum class entangle_shape {
+  xor_zero,
+  add_zero,
+  sub_zero,
+  xor_masked_pair,
+  add_sub_masked_pair,
+};
+
 std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
   seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
   return seed;
+}
+
+opaque_zero_shape select_opaque_zero_shape(const builder_context &context,
+                                           std::uint64_t salt) {
+  switch (mix_seed(context.seed_base, salt ^ 0x4f7c2d1b9a031ULL) % 5U) {
+  case 0:
+    return opaque_zero_shape::xor_pair;
+  case 1:
+    return opaque_zero_shape::add_sub_pair;
+  case 2:
+    return opaque_zero_shape::sub_pair;
+  case 3:
+    return opaque_zero_shape::rotate_xor_pair;
+  default:
+    return opaque_zero_shape::cmp_select_pair;
+  }
+}
+
+entangle_shape select_entangle_shape(const builder_context &context,
+                                     std::uint64_t salt) {
+  switch (mix_seed(context.seed_base, salt ^ 0x25b7e151628aed2bULL) % 5U) {
+  case 0:
+    return entangle_shape::xor_zero;
+  case 1:
+    return entangle_shape::add_zero;
+  case 2:
+    return entangle_shape::sub_zero;
+  case 3:
+    return entangle_shape::xor_masked_pair;
+  default:
+    return entangle_shape::add_sub_masked_pair;
+  }
 }
 
 std::uint64_t derive_function_seed(const llvm::Function &function,
@@ -83,6 +131,28 @@ llvm::Constant *constant_i64_to_type(llvm::Type *target_type, std::uint64_t word
       element_type,
       llvm::APInt(element_type->getBitWidth(), word, false, true));
   return llvm::ConstantVector::getSplat(vector_type->getElementCount(), element);
+}
+
+llvm::Value *rotate_left_scalar(llvm::IRBuilder<> &builder, llvm::Value *value,
+                                unsigned amount, llvm::StringRef name_prefix) {
+  auto *integer_type = llvm::dyn_cast<llvm::IntegerType>(value->getType());
+  if (integer_type == nullptr || integer_type->getBitWidth() <= 1) {
+    return nullptr;
+  }
+
+  const unsigned bit_width = integer_type->getBitWidth();
+  amount %= bit_width;
+  if (amount == 0) {
+    amount = 1;
+  }
+
+  auto *left_amount = llvm::ConstantInt::get(integer_type, amount);
+  auto *right_amount = llvm::ConstantInt::get(integer_type, bit_width - amount);
+  llvm::Value *left = builder.CreateShl(value, left_amount,
+                                        (name_prefix + ".shl").str());
+  llvm::Value *right = builder.CreateLShr(value, right_amount,
+                                          (name_prefix + ".lshr").str());
+  return builder.CreateOr(left, right, (name_prefix + ".rot").str());
 }
 
 struct entropy_pair {
@@ -171,6 +241,78 @@ llvm::Value *entangle_value_impl(llvm::IRBuilder<> &builder, llvm::Value *value,
                                  const builder_context &context,
                                  std::uint64_t salt, llvm::StringRef name);
 
+llvm::Value *build_opaque_zero_xor_pair(llvm::IRBuilder<> &builder,
+                                        llvm::Value *entropy_a,
+                                        llvm::Value *entropy_b,
+                                        llvm::Constant *mask) {
+  llvm::Value *lhs = builder.CreateXor(entropy_a, mask,
+                                       "obf.mba.zero.xor_pair.lhs");
+  llvm::Value *rhs = builder.CreateXor(entropy_b, mask,
+                                       "obf.mba.zero.xor_pair.rhs");
+  return builder.CreateXor(lhs, rhs, "obf.mba.zero.xor_pair");
+}
+
+llvm::Value *build_opaque_zero_for_shape(llvm::IRBuilder<> &builder,
+                                         opaque_zero_shape shape,
+                                         llvm::Value *entropy_a,
+                                         llvm::Value *entropy_b,
+                                         llvm::Type *target_type,
+                                         llvm::Constant *mask,
+                                         std::uint64_t salt) {
+  switch (shape) {
+  case opaque_zero_shape::xor_pair:
+    return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
+  case opaque_zero_shape::add_sub_pair: {
+    llvm::Value *lhs = builder.CreateAdd(entropy_a, mask,
+                                         "obf.mba.zero.add_sub_pair.lhs");
+    llvm::Value *rhs = builder.CreateAdd(entropy_b, mask,
+                                         "obf.mba.zero.add_sub_pair.rhs");
+    return builder.CreateSub(lhs, rhs, "obf.mba.zero.add_sub_pair");
+  }
+  case opaque_zero_shape::sub_pair: {
+    llvm::Value *lhs = builder.CreateXor(entropy_a, mask,
+                                         "obf.mba.zero.sub_pair.lhs");
+    llvm::Value *rhs = builder.CreateXor(entropy_b, mask,
+                                         "obf.mba.zero.sub_pair.rhs");
+    return builder.CreateSub(lhs, rhs, "obf.mba.zero.sub_pair");
+  }
+  case opaque_zero_shape::rotate_xor_pair: {
+    if (!target_type->isIntegerTy()) {
+      return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
+    }
+
+    llvm::Value *lhs_seed = builder.CreateXor(entropy_a, mask,
+                                              "obf.mba.zero.rotate_xor_pair.lhs.seed");
+    llvm::Value *rhs_seed = builder.CreateXor(entropy_b, mask,
+                                              "obf.mba.zero.rotate_xor_pair.rhs.seed");
+    const unsigned bit_width = target_type->getIntegerBitWidth();
+    if (bit_width <= 1) {
+      return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
+    }
+
+    const unsigned amount = static_cast<unsigned>((salt % (bit_width - 1)) + 1);
+    llvm::Value *lhs = rotate_left_scalar(builder, lhs_seed, amount,
+                                          "obf.mba.zero.rotate_xor_pair.lhs");
+    llvm::Value *rhs = rotate_left_scalar(builder, rhs_seed, amount,
+                                          "obf.mba.zero.rotate_xor_pair.rhs");
+    if (lhs == nullptr || rhs == nullptr) {
+      return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
+    }
+    return builder.CreateXor(lhs, rhs, "obf.mba.zero.rotate_xor_pair");
+  }
+  case opaque_zero_shape::cmp_select_pair: {
+    llvm::Value *equal = builder.CreateICmpEQ(entropy_a, entropy_b,
+                                             "obf.mba.zero.cmp_select_pair.eq");
+    llvm::Value *delta = builder.CreateXor(entropy_a, entropy_b,
+                                           "obf.mba.zero.cmp_select_pair.delta");
+    return builder.CreateSelect(equal, llvm::Constant::getNullValue(target_type),
+                                delta, "obf.mba.zero.cmp_select_pair");
+  }
+  }
+
+  return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
+}
+
 llvm::Value *build_opaque_zero(llvm::IRBuilder<> &builder,
                                const builder_context &context,
                                llvm::Type *target_type, std::uint64_t salt) {
@@ -180,15 +322,19 @@ llvm::Value *build_opaque_zero(llvm::IRBuilder<> &builder,
 
   const entropy_pair entropy =
       load_entropy_anchor_pair(builder, context.entropy_anchor, "obf.entropy");
+  if (entropy.direct == nullptr || entropy.indirect == nullptr) {
+    return llvm::Constant::getNullValue(target_type);
+  }
+
   llvm::Value *entropy_a =
       cast_i64_to_type(builder, entropy.direct, target_type, "obf.entropy.a.cast");
   llvm::Value *entropy_b =
       cast_i64_to_type(builder, entropy.indirect, target_type, "obf.entropy.b.cast");
   llvm::Constant *mask = constant_i64_to_type(
       target_type, mix_seed(context.seed_base, salt ^ 0x13579bdfULL));
-  llvm::Value *lhs = builder.CreateXor(entropy_a, mask, "obf.entropy.mix.a");
-  llvm::Value *rhs = builder.CreateXor(entropy_b, mask, "obf.entropy.mix.b");
-  return builder.CreateXor(lhs, rhs, "obf.mba.zero");
+  return build_opaque_zero_for_shape(builder, select_opaque_zero_shape(context, salt),
+                                     entropy_a, entropy_b, target_type, mask,
+                                     salt);
 }
 
 llvm::Value *entangle_value_impl(llvm::IRBuilder<> &builder, llvm::Value *value,
@@ -198,21 +344,47 @@ llvm::Value *entangle_value_impl(llvm::IRBuilder<> &builder, llvm::Value *value,
     return value;
   }
 
-  const entropy_pair entropy =
-      load_entropy_anchor_pair(builder, context.entropy_anchor, "obf.entropy");
-  llvm::Value *entropy_a =
-      cast_i64_to_type(builder, entropy.direct, value->getType(), "obf.entropy.a.cast");
-  llvm::Value *entropy_b =
-      cast_i64_to_type(builder, entropy.indirect, value->getType(), "obf.entropy.b.cast");
+  llvm::Type *type = value->getType();
+  llvm::Value *zero = build_opaque_zero(builder, context, type, salt);
+  const llvm::Twine result_name = name.empty() ? "obf.entropy.value" : name;
 
-  llvm::Constant *mask = constant_i64_to_type(
-      value->getType(), mix_seed(context.seed_base, salt ^ 0x13579bdfULL));
-  llvm::Value *left = builder.CreateXor(
-      value, builder.CreateXor(entropy_a, mask, "obf.entropy.mix.a"),
-      "obf.entropy.left");
-  return builder.CreateXor(
-      left, builder.CreateXor(entropy_b, mask, "obf.entropy.mix.b"),
-      name.empty() ? "obf.entropy.value" : name);
+  switch (select_entangle_shape(context, salt)) {
+  case entangle_shape::xor_zero: {
+    llvm::Value *shape_zero = builder.CreateXor(
+        zero, llvm::Constant::getNullValue(type), "obf.entangle.xor_zero.zero");
+    return builder.CreateXor(value, shape_zero, result_name);
+  }
+  case entangle_shape::add_zero: {
+    llvm::Value *shape_zero = builder.CreateAdd(
+        zero, llvm::Constant::getNullValue(type), "obf.entangle.add_zero.zero");
+    return builder.CreateAdd(value, shape_zero, result_name);
+  }
+  case entangle_shape::sub_zero: {
+    llvm::Value *shape_zero = builder.CreateAdd(
+        zero, llvm::Constant::getNullValue(type), "obf.entangle.sub_zero.zero");
+    return builder.CreateSub(value, shape_zero, result_name);
+  }
+  case entangle_shape::xor_masked_pair: {
+    llvm::Constant *mask = constant_i64_to_type(
+        type, mix_seed(context.seed_base, salt ^ 0x78dde6a3ULL));
+    llvm::Value *masked = builder.CreateXor(value, mask,
+                                            "obf.entangle.xor_masked_pair.masked");
+    llvm::Value *unmasked = builder.CreateXor(
+        masked, mask, "obf.entangle.xor_masked_pair.unmasked");
+    return builder.CreateXor(unmasked, zero, result_name);
+  }
+  case entangle_shape::add_sub_masked_pair: {
+    llvm::Constant *mask = constant_i64_to_type(
+        type, mix_seed(context.seed_base, salt ^ 0x412ad0f5ULL));
+    llvm::Value *masked = builder.CreateAdd(value, mask,
+                                            "obf.entangle.add_sub_masked_pair.add");
+    llvm::Value *unmasked = builder.CreateSub(
+        masked, mask, "obf.entangle.add_sub_masked_pair.sub");
+    return builder.CreateAdd(unmasked, zero, result_name);
+  }
+  }
+
+  return builder.CreateXor(value, zero, result_name);
 }
 
 llvm::Value *mask_with_zero_add(llvm::IRBuilder<> &builder, llvm::Value *value,
