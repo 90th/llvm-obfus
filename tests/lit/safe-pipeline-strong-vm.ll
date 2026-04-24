@@ -40,6 +40,6 @@ entry:
 ; CHECK: load i64, ptr @[[VMKEY]]
 ; CHECK: call i32 %{{[^ ]+}}(i32 0, i64 %{{[^)]+}})
 ; CHECK: load i64, ptr @[[VMRETKEY]]
-; CHECK: define i32 @[[VMIMPL:_[0-9a-f]+]](i32
+; CHECK: define internal i32 @[[VMIMPL:_[0-9a-f]+]](i32
 ; CHECK: load ptr, ptr @[[VMPTRCONST]]
 ; CHECK: indirectbr ptr

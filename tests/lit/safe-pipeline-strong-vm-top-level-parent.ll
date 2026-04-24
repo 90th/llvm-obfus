@@ -44,5 +44,5 @@ join:
 ; CHECK: inttoptr i64
 ; CHECK: call i32 %{{[^ ]+}}(i32 %{{[^,]+}}, ptr %{{[^,]+}}, i64 %{{[^)]+}})
 ; CHECK: load i64, ptr @{{_[0-9a-f]+}}
-; CHECK: define i32 @[[MAINVM:_[0-9a-f]+]](i32
+; CHECK: define internal i32 @[[MAINVM:_[0-9a-f]+]](i32
 ; CHECK: indirectbr ptr

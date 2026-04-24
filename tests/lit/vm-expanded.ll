@@ -178,7 +178,7 @@ entry:
 ; CHECK: %vector_mix.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_key_vector_mix
 ; CHECK: %vector_mix.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %vector_mix.obf.wrapper.decoded to ptr
 ; CHECK: %vector_mix.obf.wrapper.call{{[0-9]*}} = call <2 x i32> %vector_mix.obf.wrapper.indirect(<2 x i32> %a, <2 x i32> %b, i64 %vector_mix.obf.wrapper.token)
-; CHECK-LABEL: define i32 @__obf_vm_impl_branch_phi(i32 %x, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_impl_branch_phi(i32 %x, i64 %obf.hidden_token)
 ; CHECK: entry.obf.vm:
 ; CHECK: %obf.vm.state = alloca i64
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
@@ -191,21 +191,21 @@ entry:
 ; CHECK: %obf.vm.integrity.byte = trunc i32 %obf.vm.integrity.byte.shr to i8
 ; CHECK: %obf.vm.integrity.fold = xor i64
 ; CHECK: indirectbr ptr
-; CHECK-LABEL: define i32 @__obf_vm_impl_call_memory(ptr %src, ptr %dst, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_impl_call_memory(ptr %src, ptr %dst, i64 %obf.hidden_token)
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_
 ; CHECK: %obf.vm.ptr.carrier{{[0-9]*}} =
 ; CHECK: %obf.vm.call = call i32 %obf.vm.ptr{{[0-9]*}}(i32
 ; CHECK: load i32, ptr
 ; CHECK: store i32
-; CHECK-LABEL: define i32 @__obf_vm_impl_gep_load(ptr %base, i32 %index, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_impl_gep_load(ptr %base, i32 %index, i64 %obf.hidden_token)
 ; CHECK: store i64 %obf.vm.ptr.carrier{{[0-9]*}}, ptr %obf.vm.slot{{[0-9]*}}
 ; CHECK: %obf.vm.slot.ptr.raw{{[0-9]*}} = load i64, ptr %obf.vm.slot{{[0-9]*}}
 ; CHECK: %obf.vm.slot.ptr.value{{[0-9]*}} = inttoptr i64 %obf.vm.slot.ptr.raw{{[0-9]*}} to ptr
 ; CHECK: getelementptr inbounds i32, ptr %obf.vm.slot.ptr.value{{[0-9]*}}, i32
 ; CHECK: %obf.vm.ptr.carrier{{[0-9]*}} =
-; CHECK-LABEL: define i32 @__obf_vm_impl_switch_score(i32 %tag, i32 %base, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_impl_switch_score(i32 %tag, i32 %base, i64 %obf.hidden_token)
 ; CHECK: vm.switch.default.
-; CHECK-LABEL: define i16 @__obf_vm_impl_mixed_width(i8 %x, i32 %y, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i16 @__obf_vm_impl_mixed_width(i8 %x, i32 %y, i64 %obf.hidden_token)
 ; CHECK: vm.cast.exec.
 ; CHECK: %obf.vm.zext.bias =
 ; CHECK: %obf.vm.zext.wide = zext i8 %obf.vm.zext.bias to i32
@@ -214,7 +214,7 @@ entry:
 ; CHECK: %obf.vm.zext = add i32
 ; CHECK: %obf.vm.trunc.mask = and i32 %{{[^,]+}}, 65535
 ; CHECK: %obf.vm.trunc = trunc i32 %obf.vm.trunc.mask to i16
-; CHECK-LABEL: define float @__obf_vm_impl_float_mix(float %x, float %y, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal float @__obf_vm_impl_float_mix(float %x, float %y, i64 %obf.hidden_token)
 ; CHECK: fcmp ogt float
-; CHECK-LABEL: define <2 x i32> @__obf_vm_impl_vector_mix(<2 x i32> %a, <2 x i32> %b, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal <2 x i32> @__obf_vm_impl_vector_mix(<2 x i32> %a, <2 x i32> %b, i64 %obf.hidden_token)
 ; CHECK: add <2 x i32>

@@ -54,7 +54,7 @@ entry:
 ; CHECK: %extended_semantics.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %extended_semantics.obf.wrapper.decoded to ptr
 ; CHECK: call i32 %extended_semantics.obf.wrapper.indirect(i32 %x, float %f, ptr %dst, i64 %extended_semantics.obf.wrapper.token)
 ; CHECK: %extended_semantics.obf.retkey = load i64, ptr @__obf_vm_retkey_extended_semantics
-; CHECK-LABEL: define i32 @__obf_vm_impl_extended_semantics(i32 %x, float %f, ptr %dst, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_impl_extended_semantics(i32 %x, float %f, ptr %dst, i64 %obf.hidden_token)
 ; CHECK-DAG: %obf.vm.slot.6.0 = alloca <2 x i32>, align 8
 ; CHECK-DAG: %obf.vm.slot.9.0 = alloca <2 x i32>, align 8
 ; CHECK-DAG: %obf.vm.slot.11.0 = alloca { i32, i32 }, align 8

@@ -37,11 +37,11 @@ done:
 
 ; ENTROPY: @__obf_entropy_anchor = global i64 {{-?[1-9][0-9]*}}, align 8
 
-; VM-LABEL: define i32 @__obf_vm_impl_alpha_add(i32 %x, i64 %obf.hidden_token)
+; VM-LABEL: define internal i32 @__obf_vm_impl_alpha_add(i32 %x, i64 %obf.hidden_token)
 ; VM: {{^vm\.0:}}
 ; VM: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[ALPHA_OP:-?[0-9]+]]
 ; VM: {{^vm\.exec\.0:}}
-; VM-LABEL: define i32 @__obf_vm_impl_beta_add(i32 %x, i64 %obf.hidden_token)
+; VM-LABEL: define internal i32 @__obf_vm_impl_beta_add(i32 %x, i64 %obf.hidden_token)
 ; VM: {{^vm\.0:}}
 ; VM-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[ALPHA_OP]]
 ; VM: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[BETA_OP:-?[0-9]+]]
