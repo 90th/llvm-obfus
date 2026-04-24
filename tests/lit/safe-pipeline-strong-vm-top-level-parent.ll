@@ -40,7 +40,6 @@ join:
 ; CHECK-LABEL: define i32 @main(i32
 ; CHECK: load i64, ptr @{{_[0-9a-f]+}}
 ; CHECK: load i64, ptr @{{_[0-9a-f]+}}
-; CHECK: load i64, ptr @{{_[0-9a-f]+}}
 ; CHECK: inttoptr i64
 ; CHECK: call i32 %{{[^ ]+}}(i32 %{{[^,]+}}, ptr %{{[^,]+}}, i64 %{{[^)]+}})
 ; CHECK: load i64, ptr @{{_[0-9a-f]+}}

@@ -1,0 +1,7 @@
+seed: 2027
+default_level: none
+targets:
+  - match: normal_vm_value
+    level: vm
+  - match: strong_vm_value
+    level: strong_vm

@@ -102,14 +102,12 @@ entry:
 ; VM: call void @__obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.loc)
 ; VM: call void @__obf_vm_region_strong_vm_two_regions_0x{{[0-9a-f]+}}(i32 %{{[^,]+}}, i32 %{{[^,]+}}, ptr %w.ce.loc)
 ; VM-LABEL: define internal void @__obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.out) {
-; VM: load i64, ptr @__obf_vm_target___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
-; VM: load i64, ptr @__obf_vm_targetseed___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
 ; VM: load i64, ptr @__obf_vm_key___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
+; VM: load i64, ptr @__obf_vm_targetseed___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
 ; VM: call void %{{[^ ]+}}(i32 %x, ptr %v.ce.ce.loc, i64
 ; VM-LABEL: define dso_local void @__obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.ce.out) {
-; VM: load i64, ptr @__obf_vm_target___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
-; VM: load i64, ptr @__obf_vm_targetseed___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
 ; VM: load i64, ptr @__obf_vm_key___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
+; VM: load i64, ptr @__obf_vm_targetseed___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}
 ; VM: call void %{{[^ ]+}}(i32 %x, ptr %v.ce.ce.out, i64
 ; VM-LABEL: define internal void @__obf_vm_impl___obf_vm_region___obf_vm_region_strong_vm_region_0x{{[0-9a-f]+}}_0x{{[0-9a-f]+}}(i32 %x, ptr %v.ce.ce.out, i64 %obf.hidden_token) #{{[0-9]+}} {
 ; VM: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_{{[0-9A-F]+}}

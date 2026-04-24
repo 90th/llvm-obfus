@@ -64,6 +64,19 @@ struct vm_region_candidate {
   std::size_t score = 0;
 };
 
+enum class vm_resolver_shape {
+  cached_sentinel_global,
+  local_always_decode,
+};
+
+vm_resolver_shape select_vm_resolver_shape(protection_level level) {
+  if (level == protection_level::strong_vm) {
+    return vm_resolver_shape::local_always_decode;
+  }
+
+  return vm_resolver_shape::cached_sentinel_global;
+}
+
 llvm::SmallVector<vm_region_candidate, 8>
 find_regional_vm_candidates(llvm::Function &function,
                             const llvm::StringSet<> &skip_functions) {
@@ -341,6 +354,16 @@ llvm::Value *build_hidden_token_value(llvm::IRBuilder<> &builder,
                                     (prefix + ".token").str());
 }
 
+llvm::IntegerType *get_vm_pointer_int_type(llvm::Function &function) {
+  llvm::Module *module = function.getParent();
+  if (module == nullptr) {
+    return nullptr;
+  }
+
+  const llvm::DataLayout &data_layout = module->getDataLayout();
+  return data_layout.getIntPtrType(module->getContext(), function.getAddressSpace());
+}
+
 bool is_vm_abi_safe_return_attribute(llvm::Attribute attribute) {
   if (attribute.isStringAttribute() || !attribute.hasKindAsEnum()) {
     return false;
@@ -509,22 +532,85 @@ llvm::Value *decode_virtualized_integer_return(
     llvm::Value *hidden_token, std::uint64_t token_seed,
     std::uint32_t mba_depth);
 
+llvm::Value *build_encoded_vm_target_value(
+    llvm::IRBuilder<> &builder, llvm::Function &owner,
+    llvm::Function &interface_function, llvm::GlobalVariable &target_seed_global,
+    llvm::GlobalVariable &decode_key_global, llvm::Value *hidden_token,
+    const llvm::APInt &key, const llvm::APInt &salt, llvm::StringRef prefix,
+    std::uint64_t token_seed, std::uint64_t token_salt_base,
+    std::uint32_t mba_depth) {
+  auto *ptr_int_type = llvm::cast<llvm::IntegerType>(target_seed_global.getValueType());
+  auto *resolve_key = builder.CreateLoad(ptr_int_type, &decode_key_global,
+                                         prefix.str() + ".target.key");
+  llvm::Value *target_int = decode_virtualized_target_seed(
+      builder, owner, prefix, target_seed_global, resolve_key,
+      derive_vm_target_seed_mask(interface_function, ptr_int_type), token_seed,
+      mba_depth);
+
+  llvm::Value *token_int = hidden_token;
+  if (token_int->getType() != ptr_int_type) {
+    token_int = builder.CreateZExtOrTrunc(token_int, ptr_int_type,
+                                          prefix.str() + ".token.cast");
+  }
+
+  token_int = mba::entangle_value(
+      builder, token_int,
+      mba::builder_context{.entropy_anchor =
+                               mba::get_or_create_entropy_anchor(*owner.getParent()),
+                           .seed_base = token_seed,
+                           .depth = mba_depth},
+      token_salt_base + token_seed, prefix.str() + ".token");
+  auto *salt_const = llvm::ConstantInt::get(ptr_int_type, salt);
+  auto *runtime_key = builder.CreateXor(token_int, salt_const,
+                                        prefix.str() + ".rkey");
+  auto *mixed = builder.CreateXor(target_int, runtime_key,
+                                  prefix.str() + ".mixed");
+  auto *unmixed = builder.CreateXor(mixed, runtime_key,
+                                    prefix.str() + ".unmixed");
+  auto *key_const = llvm::ConstantInt::get(ptr_int_type, key);
+  return builder.CreateXor(unmixed, key_const, prefix.str() + ".resolved");
+}
+
+llvm::Value *decode_encoded_vm_target_value(
+    llvm::IRBuilder<> &builder, llvm::Function &owner,
+    llvm::GlobalVariable &decode_key_global, llvm::Value *encoded_target,
+    const llvm::APInt &key, llvm::StringRef prefix, std::uint64_t token_seed,
+    std::uint64_t decode_salt_base, std::uint32_t mba_depth) {
+  auto *ptr_int_type = llvm::cast<llvm::IntegerType>(decode_key_global.getValueType());
+  auto *opaque_key = builder.CreateLoad(ptr_int_type, &decode_key_global,
+                                        prefix.str() + ".key");
+  return mba::create_xor(
+      builder, encoded_target, opaque_key,
+      mba::builder_context{.entropy_anchor =
+                               mba::get_or_create_entropy_anchor(*owner.getParent()),
+                           .seed_base = token_seed ^ key.getLimitedValue(),
+                           .depth = mba_depth},
+      decode_salt_base + token_seed, prefix.str() + ".decoded");
+}
+
 void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
                                   llvm::Function &implementation_function,
                                   std::uint64_t wrapper_token,
+                                  vm_resolver_shape resolver_shape,
                                   std::uint32_t mba_depth) {
   llvm::Module *module = interface_function.getParent();
   if (module == nullptr) {
     llvm_unreachable("vm wrapper missing parent module");
   }
 
-  llvm::GlobalVariable *target_global =
-      get_or_create_vm_target_global(interface_function);
-  if (target_global == nullptr) {
-    llvm_unreachable("vm target cache global creation failed");
+  auto *ptr_int_type = get_vm_pointer_int_type(interface_function);
+  if (ptr_int_type == nullptr) {
+    llvm_unreachable("vm wrapper missing pointer integer type");
   }
 
-  auto *ptr_int_type = llvm::cast<llvm::IntegerType>(target_global->getValueType());
+  llvm::GlobalVariable *target_global = nullptr;
+  if (resolver_shape == vm_resolver_shape::cached_sentinel_global) {
+    target_global = get_or_create_vm_target_global(interface_function);
+    if (target_global == nullptr) {
+      llvm_unreachable("vm target cache global creation failed");
+    }
+  }
+
   const llvm::APInt key = derive_vm_target_key(interface_function, ptr_int_type);
   const llvm::APInt sentinel = derive_vm_target_sentinel(key);
   llvm::GlobalVariable *target_seed_global = get_or_create_vm_target_seed_global(
@@ -549,6 +635,53 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(
       interface_function.getContext(), "entry.obf.vm.wrapper",
       &interface_function);
+  llvm::IRBuilder<> builder(entry);
+  const std::string wrapper_prefix =
+      (interface_function.getName() + ".obf.wrapper").str();
+  llvm::Value *hidden_token = build_hidden_token_value(
+      builder, interface_function, wrapper_prefix, wrapper_token,
+      mba_depth, 0x6000ULL);
+
+  if (resolver_shape == vm_resolver_shape::local_always_decode) {
+    llvm::Value *encoded_target = build_encoded_vm_target_value(
+        builder, interface_function, interface_function, *target_seed_global,
+        *decode_key_global, hidden_token, key, salt, wrapper_prefix,
+        wrapper_token, 0x610000ULL, mba_depth);
+    llvm::Value *decoded_target = decode_encoded_vm_target_value(
+        builder, interface_function, *decode_key_global, encoded_target, key,
+        wrapper_prefix, wrapper_token, 0x620000ULL, mba_depth);
+    llvm::Value *indirect_target = builder.CreateIntToPtr(
+        decoded_target, implementation_function.getType(),
+        wrapper_prefix + ".indirect");
+
+    llvm::SmallVector<llvm::Value *, 8> arguments;
+    arguments.reserve(interface_function.arg_size() + 1);
+    for (llvm::Argument &argument : interface_function.args()) {
+      arguments.push_back(&argument);
+    }
+    arguments.push_back(hidden_token);
+
+    auto *call = builder.CreateCall(
+        implementation_function.getFunctionType(), indirect_target, arguments,
+        interface_function.getReturnType()->isVoidTy()
+            ? ""
+            : wrapper_prefix + ".call");
+    call->setCallingConv(interface_function.getCallingConv());
+    call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
+    if (interface_function.getReturnType()->isVoidTy()) {
+      builder.CreateRetVoid();
+    } else {
+      llvm::Value *wrapper_ret = call;
+      if (interface_function.getReturnType()->isIntegerTy()) {
+        wrapper_ret = decode_virtualized_integer_return(
+            builder, interface_function, interface_function.getName(), call,
+            hidden_token, wrapper_token, mba_depth);
+      }
+      builder.CreateRet(wrapper_ret);
+    }
+    return;
+  }
+
   llvm::BasicBlock *resolve_bb = llvm::BasicBlock::Create(
       interface_function.getContext(),
       (interface_function.getName() + ".obf.wrapper.resolve").str(),
@@ -557,12 +690,6 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
       interface_function.getContext(),
       (interface_function.getName() + ".obf.wrapper.call").str(),
       &interface_function);
-  llvm::IRBuilder<> builder(entry);
-  const std::string wrapper_prefix =
-      (interface_function.getName() + ".obf.wrapper").str();
-  llvm::Value *hidden_token = build_hidden_token_value(
-      builder, interface_function, wrapper_prefix, wrapper_token,
-      mba_depth, 0x6000ULL);
 
   auto *encoded_check = builder.CreateLoad(ptr_int_type, target_global,
                                            wrapper_prefix + ".check");
@@ -572,35 +699,10 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
   builder.CreateCondBr(is_unresolved, resolve_bb, call_bb);
 
   llvm::IRBuilder<> resolve_builder(resolve_bb);
-  auto *resolve_key = resolve_builder.CreateLoad(ptr_int_type, decode_key_global,
-                                                 wrapper_prefix + ".target.key");
-  llvm::Value *target_int = decode_virtualized_target_seed(
-      resolve_builder, interface_function, wrapper_prefix, *target_seed_global,
-      resolve_key, derive_vm_target_seed_mask(interface_function, ptr_int_type),
-      wrapper_token, mba_depth);
-  llvm::Value *token_int = hidden_token;
-  if (token_int->getType() != ptr_int_type) {
-    token_int = resolve_builder.CreateZExtOrTrunc(token_int, ptr_int_type,
-                                                  wrapper_prefix + ".token.cast");
-  }
-
-  token_int = mba::entangle_value(
-      resolve_builder, token_int,
-      mba::builder_context{.entropy_anchor =
-                               mba::get_or_create_entropy_anchor(*module),
-                           .seed_base = wrapper_token,
-                           .depth = mba_depth},
-      0x610000ULL + wrapper_token, wrapper_prefix + ".token");
-  auto *salt_const = llvm::ConstantInt::get(ptr_int_type, salt);
-  auto *runtime_key = resolve_builder.CreateXor(token_int, salt_const,
-                                                wrapper_prefix + ".rkey");
-  auto *mixed = resolve_builder.CreateXor(target_int, runtime_key,
-                                          wrapper_prefix + ".mixed");
-  auto *unmixed = resolve_builder.CreateXor(mixed, runtime_key,
-                                            wrapper_prefix + ".unmixed");
-  auto *key_const = llvm::ConstantInt::get(ptr_int_type, key);
-  auto *new_encoded = resolve_builder.CreateXor(unmixed, key_const,
-                                                wrapper_prefix + ".resolved");
+  llvm::Value *new_encoded = build_encoded_vm_target_value(
+      resolve_builder, interface_function, interface_function, *target_seed_global,
+      *decode_key_global, hidden_token, key, salt, wrapper_prefix, wrapper_token,
+      0x610000ULL, mba_depth);
   resolve_builder.CreateStore(new_encoded, target_global);
   resolve_builder.CreateBr(call_bb);
 
@@ -610,15 +712,9 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
   encoded_phi->addIncoming(encoded_check, entry);
   encoded_phi->addIncoming(new_encoded, resolve_bb);
 
-  auto *opaque_key = call_builder.CreateLoad(ptr_int_type, decode_key_global,
-                                             wrapper_prefix + ".key");
-  llvm::Value *decoded_target = mba::create_xor(
-      call_builder, encoded_phi, opaque_key,
-      mba::builder_context{.entropy_anchor =
-                               mba::get_or_create_entropy_anchor(*module),
-                           .seed_base = wrapper_token ^ key.getLimitedValue(),
-                           .depth = mba_depth},
-      0x620000ULL + wrapper_token, wrapper_prefix + ".decoded");
+  llvm::Value *decoded_target = decode_encoded_vm_target_value(
+      call_builder, interface_function, *decode_key_global, encoded_phi, key,
+      wrapper_prefix, wrapper_token, 0x620000ULL, mba_depth);
   llvm::Value *indirect_target = call_builder.CreateIntToPtr(
       decoded_target, implementation_function.getType(),
       wrapper_prefix + ".indirect");
@@ -1043,17 +1139,28 @@ bool rewrite_calls_to_virtualized_function(
 
   llvm::Function &function = *binding.interface_function;
   llvm::Function &implementation_function = *binding.implementation_function;
-  llvm::GlobalVariable *target_global = get_or_create_vm_target_global(function);
-  if (target_global == nullptr) {
-    return false;
-  }
-
   llvm::Module *module = function.getParent();
   if (module == nullptr) {
     return false;
   }
 
-  auto *ptr_int_type = llvm::cast<llvm::IntegerType>(target_global->getValueType());
+  const vm_resolver_shape resolver_shape =
+      binding.state == nullptr
+          ? vm_resolver_shape::cached_sentinel_global
+          : select_vm_resolver_shape(binding.state->report.decision.policy.level);
+  auto *ptr_int_type = get_vm_pointer_int_type(function);
+  if (ptr_int_type == nullptr) {
+    return false;
+  }
+
+  llvm::GlobalVariable *target_global = nullptr;
+  if (resolver_shape == vm_resolver_shape::cached_sentinel_global) {
+    target_global = get_or_create_vm_target_global(function);
+    if (target_global == nullptr) {
+      return false;
+    }
+  }
+
   const llvm::APInt key = derive_vm_target_key(function, ptr_int_type);
   const llvm::APInt sentinel = derive_vm_target_sentinel(key);
   llvm::GlobalVariable *target_seed_global = get_or_create_vm_target_seed_global(
@@ -1061,6 +1168,8 @@ bool rewrite_calls_to_virtualized_function(
   if (target_seed_global == nullptr) {
     return false;
   }
+  llvm::GlobalVariable *decode_key_global = get_or_create_vm_decode_key_global(
+      *module, ptr_int_type, function.getName(), key);
 
   const std::uint64_t raw_salt =
       static_cast<std::uint64_t>(llvm::hash_value(function.getName())) *
@@ -1081,8 +1190,63 @@ bool rewrite_calls_to_virtualized_function(
       continue;
     }
 
-    llvm::GlobalVariable *decode_key_global = get_or_create_vm_decode_key_global(
-        *module, ptr_int_type, function.getName(), key);
+    if (resolver_shape == vm_resolver_shape::local_always_decode) {
+      llvm::IRBuilder<> builder(call);
+      llvm::Value *hidden_token = build_hidden_token_value(
+          builder, *caller, (function.getName() + ".obf.call").str(),
+          site.hidden_token, mba_depth,
+          0x700000ULL + static_cast<std::uint64_t>(callsite_index++));
+      llvm::Value *encoded_target = build_encoded_vm_target_value(
+          builder, *caller, function, *target_seed_global, *decode_key_global,
+          hidden_token, key, salt, (function.getName() + ".obf").str(),
+          site.hidden_token, 0x710000ULL, mba_depth);
+      llvm::Value *decoded_target = decode_encoded_vm_target_value(
+          builder, *caller, *decode_key_global, encoded_target, key,
+          (function.getName() + ".obf").str(), site.hidden_token, 0x720000ULL,
+          mba_depth);
+      llvm::Value *indirect_target = builder.CreateIntToPtr(
+          decoded_target, call->getCalledOperand()->getType(),
+          function.getName() + ".obf.indirect");
+
+      llvm::SmallVector<llvm::Use *, 16> original_uses;
+      for (llvm::Use &use : call->uses()) {
+        original_uses.push_back(&use);
+      }
+
+      llvm::SmallVector<llvm::Value *, 8> arguments;
+      arguments.reserve(call->arg_size() + 1);
+      for (llvm::Use &argument : call->args()) {
+        arguments.push_back(argument.get());
+      }
+      arguments.push_back(hidden_token);
+
+      auto *rewritten_call = builder.CreateCall(
+          implementation_function.getFunctionType(), indirect_target, arguments,
+          call->getType()->isVoidTy() ? "" : function.getName() + ".obf.callsite");
+      rewritten_call->setCallingConv(call->getCallingConv());
+      rewritten_call->setAttributes(
+          build_vm_safe_callsite_attributes(implementation_function));
+
+      llvm::Type *call_ret_type = rewritten_call->getType();
+      if (call_ret_type->isIntegerTy()) {
+        llvm::Value *decoded_ret = decode_virtualized_integer_return(
+            builder, *caller, function.getName(), rewritten_call, hidden_token,
+            site.hidden_token, mba_depth);
+
+        for (llvm::Use *use : original_uses) {
+          use->set(decoded_ret);
+        }
+      } else {
+        for (llvm::Use *use : original_uses) {
+          use->set(rewritten_call);
+        }
+      }
+
+      call->eraseFromParent();
+
+      changed = true;
+      continue;
+    }
 
     llvm::BasicBlock *orig_bb = call->getParent();
     llvm::BasicBlock *call_bb = orig_bb->splitBasicBlock(
@@ -1106,35 +1270,10 @@ bool rewrite_calls_to_virtualized_function(
     entry_builder.CreateCondBr(is_unresolved, resolve_bb, call_bb);
 
     llvm::IRBuilder<> resolve_builder(resolve_bb);
-    auto *resolve_key = resolve_builder.CreateLoad(
-        ptr_int_type, decode_key_global, function.getName() + ".obf.target.key");
-    llvm::Value *target_int = decode_virtualized_target_seed(
-        resolve_builder, *caller, function.getName(), *target_seed_global,
-        resolve_key, derive_vm_target_seed_mask(function, ptr_int_type),
-        site.hidden_token, mba_depth);
-    llvm::Value *token_int = hidden_token;
-    if (token_int->getType() != ptr_int_type) {
-      token_int = resolve_builder.CreateZExtOrTrunc(
-          token_int, ptr_int_type, function.getName() + ".obf.token.cast");
-    }
-    const std::string token_name = (function.getName() + ".obf.token").str();
-    token_int = mba::entangle_value(
-        resolve_builder, token_int,
-        mba::builder_context{.entropy_anchor =
-                                 mba::get_or_create_entropy_anchor(*module),
-                             .seed_base = site.hidden_token,
-                             .depth = mba_depth},
-        0x710000ULL + site.hidden_token, token_name);
-    auto *salt_const = llvm::ConstantInt::get(ptr_int_type, salt);
-    auto *runtime_key = resolve_builder.CreateXor(
-        token_int, salt_const, function.getName() + ".obf.rkey");
-    auto *mixed = resolve_builder.CreateXor(target_int, runtime_key,
-                                            function.getName() + ".obf.mixed");
-    auto *unmixed = resolve_builder.CreateXor(mixed, runtime_key,
-                                              function.getName() + ".obf.unmixed");
-    auto *key_const = llvm::ConstantInt::get(ptr_int_type, key);
-    auto *new_encoded = resolve_builder.CreateXor(
-        unmixed, key_const, function.getName() + ".obf.resolved");
+    llvm::Value *new_encoded = build_encoded_vm_target_value(
+        resolve_builder, *caller, function, *target_seed_global, *decode_key_global,
+        hidden_token, key, salt, (function.getName() + ".obf").str(),
+        site.hidden_token, 0x710000ULL, mba_depth);
     resolve_builder.CreateStore(new_encoded, target_global);
     resolve_builder.CreateBr(call_bb);
 
@@ -1144,16 +1283,10 @@ bool rewrite_calls_to_virtualized_function(
     encoded_phi->addIncoming(encoded_check, orig_bb);
     encoded_phi->addIncoming(new_encoded, resolve_bb);
 
-    auto *opaque_key = call_builder.CreateLoad(
-        ptr_int_type, decode_key_global, function.getName() + ".obf.key");
-    llvm::Value *decoded_target = mba::create_xor(
-        call_builder, encoded_phi, opaque_key,
-        mba::builder_context{.entropy_anchor =
-                                 mba::get_or_create_entropy_anchor(*module),
-                             .seed_base = site.hidden_token ^ key.getLimitedValue(),
-                             .depth = mba_depth},
-        0x720000ULL + site.hidden_token,
-        (function.getName() + ".obf.decoded").str());
+    llvm::Value *decoded_target = decode_encoded_vm_target_value(
+        call_builder, *caller, *decode_key_global, encoded_phi, key,
+        (function.getName() + ".obf").str(), site.hidden_token, 0x720000ULL,
+        mba_depth);
     llvm::Value *indirect_target = call_builder.CreateIntToPtr(
         decoded_target, call->getCalledOperand()->getType(),
         function.getName() + ".obf.indirect");
@@ -1267,9 +1400,12 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
           vm::run_virtualization(*binding.implementation_function, vm_options);
       if (result.virtualized) {
         binding.implementation_function->setDSOLocal(true);
+        const vm_resolver_shape resolver_shape = select_vm_resolver_shape(
+            binding.state->report.decision.policy.level);
         rewrite_vm_interface_wrapper(*binding.interface_function,
                                      *binding.implementation_function,
-                                     binding.wrapper_token, config.mba.depth);
+                                     binding.wrapper_token, resolver_shape,
+                                     config.mba.depth);
         virtualized_functions[target_function->getName()] = std::move(binding);
         skip_functions.insert(target_function->getName());
       }

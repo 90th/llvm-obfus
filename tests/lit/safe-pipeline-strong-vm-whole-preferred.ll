@@ -40,12 +40,10 @@ entry:
 }
 
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; CHECK-DAG: @[[VMTARGET:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @[[VMTARGETSEED:_[0-9a-f]+]] = private global i64 0
 ; CHECK-DAG: @[[VMKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-NOT: __obf_vm_region_strong_vm_whole_preferred
 ; CHECK-LABEL: define i32 @strong_vm_whole_preferred(i32
-; CHECK: load i64, ptr @{{_[0-9a-f]+}}
 ; CHECK: load i64, ptr @{{_[0-9a-f]+}}
 ; CHECK: load i64, ptr @{{_[0-9a-f]+}}
 ; CHECK: inttoptr i64
