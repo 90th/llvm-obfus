@@ -1,0 +1,11 @@
+seed: 9090
+default_level: none
+overrides:
+  - name: strong_target_a
+    level: strong_vm
+  - name: strong_target_b
+    level: strong_vm
+  - name: strong_target_c
+    level: strong_vm
+mba:
+  depth: 2

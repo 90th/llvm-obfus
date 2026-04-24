@@ -74,6 +74,12 @@ enum class vm_seed_resolver_shape {
   local_inline_resolver,
 };
 
+enum class vm_pointer_materialization_shape {
+  direct_ptrtoint,
+  split_xor_chunks,
+  add_sub_bias,
+};
+
 vm_resolver_shape select_vm_resolver_shape(protection_level level) {
   if (level == protection_level::strong_vm) {
     return vm_resolver_shape::local_always_decode;
@@ -88,6 +94,26 @@ vm_seed_resolver_shape select_vm_seed_resolver_shape(protection_level level) {
   }
 
   return vm_seed_resolver_shape::shared_switch_resolver;
+}
+
+vm_pointer_materialization_shape select_vm_pointer_materialization_shape(
+    llvm::Function &interface_function, std::uint64_t seed_base,
+    llvm::StringRef prefix) {
+  std::uint64_t selector =
+      static_cast<std::uint64_t>(llvm::hash_value(interface_function.getName()));
+  selector = mix_vm_handshake_seed(selector, seed_base);
+  selector = mix_vm_handshake_seed(
+      selector, static_cast<std::uint64_t>(llvm::hash_value(prefix)));
+
+  switch (selector % 3) {
+  case 1:
+    return vm_pointer_materialization_shape::split_xor_chunks;
+  case 2:
+    return vm_pointer_materialization_shape::add_sub_bias;
+  case 0:
+  default:
+    return vm_pointer_materialization_shape::direct_ptrtoint;
+  }
 }
 
 llvm::SmallVector<vm_region_candidate, 8>
@@ -1075,6 +1101,97 @@ get_or_create_vm_decode_key_global(llvm::Module &module,
                                   global_name);
 }
 
+llvm::APInt derive_vm_pointer_materialization_mask(
+    llvm::Function &interface_function, llvm::IntegerType *ptr_int_type,
+    std::uint64_t seed_base, llvm::StringRef prefix, std::uint64_t salt) {
+  std::uint64_t mask =
+      static_cast<std::uint64_t>(llvm::hash_value(interface_function.getName()));
+  mask = mix_vm_handshake_seed(mask, seed_base ^ salt);
+  mask = mix_vm_handshake_seed(
+      mask, static_cast<std::uint64_t>(llvm::hash_value(prefix)));
+  if (mask == 0) {
+    mask = 0x6a09e667f3bcc909ULL ^ salt;
+  }
+
+  return llvm::APInt(ptr_int_type->getBitWidth(), mask, /*isSigned=*/false,
+                     /*implicitTrunc=*/true);
+}
+
+llvm::Value *materialize_vm_impl_pointer_int(
+    llvm::IRBuilder<> &builder, llvm::Function &owner,
+    llvm::Function &interface_function, llvm::Function &implementation_function,
+    llvm::IntegerType *ptr_int_type, llvm::Value *opaque_key,
+    const mba::builder_context &context, std::uint64_t seed_base,
+    llvm::StringRef prefix, vm_pointer_materialization_shape shape) {
+  (void)owner;
+  const unsigned bit_width = ptr_int_type->getBitWidth();
+  if (shape == vm_pointer_materialization_shape::split_xor_chunks &&
+      bit_width < 32) {
+    shape = vm_pointer_materialization_shape::direct_ptrtoint;
+  }
+
+  const llvm::APInt key = derive_vm_target_key(interface_function, ptr_int_type);
+  const std::string shape_prefix =
+      (prefix + (shape == vm_pointer_materialization_shape::split_xor_chunks
+                     ? ".ptrmat.split"
+                     : shape == vm_pointer_materialization_shape::add_sub_bias
+                           ? ".ptrmat.addsub"
+                           : ".ptrmat.direct"))
+          .str();
+  llvm::Value *target_int = builder.CreatePtrToInt(
+      &implementation_function, ptr_int_type, shape_prefix + ".target");
+
+  llvm::Value *materialized_target = target_int;
+  if (shape == vm_pointer_materialization_shape::split_xor_chunks) {
+    const unsigned half_width = bit_width / 2;
+    const llvm::APInt low_mask = llvm::APInt::getLowBitsSet(bit_width, half_width);
+    const llvm::APInt mask_a = derive_vm_pointer_materialization_mask(
+        interface_function, ptr_int_type, seed_base, prefix, 0x781100ULL);
+    const llvm::APInt mask_b = derive_vm_pointer_materialization_mask(
+        interface_function, ptr_int_type, seed_base, prefix, 0x781200ULL);
+
+    llvm::Value *mask_a_const = llvm::ConstantInt::get(ptr_int_type, mask_a);
+    llvm::Value *mask_b_const = llvm::ConstantInt::get(ptr_int_type, mask_b);
+    llvm::Value *low_mask_const = llvm::ConstantInt::get(ptr_int_type, low_mask);
+    llvm::Value *half_width_const = llvm::ConstantInt::get(ptr_int_type, half_width);
+
+    llvm::Value *low_masked = builder.CreateAnd(
+        builder.CreateXor(target_int, mask_a_const, shape_prefix + ".low.xor"),
+        low_mask_const, shape_prefix + ".low");
+    llvm::Value *high_masked = builder.CreateXor(
+        builder.CreateLShr(target_int, half_width_const, shape_prefix + ".high.shift"),
+        mask_b_const, shape_prefix + ".high");
+    llvm::Value *low_real = builder.CreateXor(
+        low_masked, llvm::ConstantInt::get(ptr_int_type, mask_a & low_mask),
+        shape_prefix + ".low.real");
+    llvm::Value *high_real =
+        builder.CreateXor(high_masked, mask_b_const, shape_prefix + ".high.real");
+    materialized_target = builder.CreateOr(
+        builder.CreateShl(high_real, half_width_const, shape_prefix + ".join.high"),
+        low_real, shape_prefix + ".real");
+  } else if (shape == vm_pointer_materialization_shape::add_sub_bias) {
+    llvm::APInt bias = derive_vm_pointer_materialization_mask(
+        interface_function, ptr_int_type, seed_base, prefix, 0x782100ULL);
+    if (bias.isZero()) {
+      bias = llvm::APInt(ptr_int_type->getBitWidth(), 0x4f1bbcddULL,
+                         /*isSigned=*/false, /*implicitTrunc=*/true);
+    }
+
+    llvm::Value *bias_const = llvm::ConstantInt::get(ptr_int_type, bias);
+    llvm::Value *biased = builder.CreateAdd(target_int, bias_const,
+                                            shape_prefix + ".biased");
+    materialized_target = builder.CreateSub(biased, bias_const,
+                                            shape_prefix + ".real");
+  }
+
+  llvm::Value *masked_target = mba::create_xor(
+      builder, materialized_target, opaque_key, context,
+      0x63f100ULL + key.getLimitedValue(), shape_prefix + ".masked");
+  return mba::create_xor(builder, masked_target, opaque_key, context,
+                         0x63f200ULL + key.getLimitedValue(),
+                         shape_prefix + ".real.unmasked");
+}
+
 llvm::Value *decode_virtualized_target_seed_shared(
     llvm::IRBuilder<> &builder, llvm::Function &owner, llvm::StringRef prefix,
     llvm::GlobalVariable &target_seed_global, llvm::Value *opaque_key,
@@ -1138,16 +1255,13 @@ llvm::Value *decode_virtualized_target_seed_local(
       owner, (prefix + ".target.local.seed").str(),
       key.getLimitedValue() ^ seed_base ^ 0x63f000ULL);
   resolve_context.depth = mba_depth;
-  llvm::Value *target_int = builder.CreatePtrToInt(
-      &implementation_function, ptr_int_type, prefix.str() + ".target.seed.target");
-  llvm::Value *masked_target = mba::create_xor(
-      builder, target_int, opaque_key, resolve_context,
-      0x63f100ULL + key.getLimitedValue(),
-      prefix.str() + ".target.seed.target.masked");
-  llvm::Value *resolved_target = mba::create_xor(
-      builder, masked_target, opaque_key, resolve_context,
-      0x63f200ULL + key.getLimitedValue(),
-      prefix.str() + ".target.seed.target.real");
+  const vm_pointer_materialization_shape pointer_shape =
+      select_vm_pointer_materialization_shape(interface_function, seed_base,
+                                              prefix);
+  llvm::Value *resolved_target = materialize_vm_impl_pointer_int(
+      builder, owner, interface_function, implementation_function, ptr_int_type,
+      opaque_key, resolve_context, seed_base, prefix.str() + ".target.seed",
+      pointer_shape);
   llvm::Value *share_value = mba::create_add(
       builder, resolved_target, real_base, resolve_context,
       0x63f300ULL + key.getLimitedValue(),
