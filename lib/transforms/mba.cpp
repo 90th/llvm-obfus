@@ -7,6 +7,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/Support/FormatVariadic.h"
 
 #include <cstdint>
 
@@ -28,6 +29,14 @@ enum class entangle_shape {
   sub_zero,
   xor_masked_pair,
   add_sub_masked_pair,
+};
+
+enum class entropy_thunk_shape {
+  direct,
+  swap_twice,
+  xor_neutral,
+  add_sub_neutral,
+  select_neutral,
 };
 
 std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
@@ -64,6 +73,27 @@ entangle_shape select_entangle_shape(const builder_context &context,
     return entangle_shape::xor_masked_pair;
   default:
     return entangle_shape::add_sub_masked_pair;
+  }
+}
+
+entropy_thunk_shape select_entropy_thunk_shape(llvm::Function &owner,
+                                               const builder_context &context,
+                                               std::uint64_t salt) {
+  std::uint64_t selector = context.seed_base;
+  selector = mix_seed(selector,
+                      static_cast<std::uint64_t>(llvm::hash_value(owner.getName())));
+  selector = mix_seed(selector, salt ^ 0x64ef22d5c31a91b7ULL);
+  switch (selector % 5U) {
+  case 0:
+    return entropy_thunk_shape::direct;
+  case 1:
+    return entropy_thunk_shape::swap_twice;
+  case 2:
+    return entropy_thunk_shape::xor_neutral;
+  case 3:
+    return entropy_thunk_shape::add_sub_neutral;
+  default:
+    return entropy_thunk_shape::select_neutral;
   }
 }
 
@@ -160,6 +190,179 @@ struct entropy_pair {
   llvm::Value *indirect = nullptr;
 };
 
+std::uint64_t derive_entropy_thunk_id(llvm::Function &owner,
+                                      const builder_context &context,
+                                      std::uint64_t salt,
+                                      entropy_thunk_shape shape) {
+  std::uint64_t id = context.seed_base;
+  id = mix_seed(id, static_cast<std::uint64_t>(llvm::hash_value(owner.getName())));
+  id = mix_seed(id, salt);
+  id = mix_seed(id, static_cast<std::uint64_t>(shape));
+  return id == 0 ? 0xa55aa55aa55aa55aULL : id;
+}
+
+std::uint64_t derive_entropy_thunk_constant(llvm::Function &owner,
+                                            const builder_context &context,
+                                            std::uint64_t salt,
+                                            std::uint64_t family_salt) {
+  std::uint64_t value = context.seed_base;
+  value = mix_seed(value,
+                   static_cast<std::uint64_t>(llvm::hash_value(owner.getName())));
+  value = mix_seed(value, salt ^ family_salt);
+  return value == 0 ? 0x9e3779b97f4a7c15ULL : value;
+}
+
+llvm::Value *build_entropy_thunk_xor_neutral(llvm::IRBuilder<> &builder,
+                                             llvm::Function &owner,
+                                             const builder_context &context,
+                                             std::uint64_t salt,
+                                             llvm::Value *pair,
+                                             llvm::StringRef prefix) {
+  llvm::Type *i64_type = llvm::Type::getInt64Ty(builder.getContext());
+  llvm::Value *direct =
+      builder.CreateExtractValue(pair, {0}, (prefix + ".direct").str());
+  llvm::Value *indirect =
+      builder.CreateExtractValue(pair, {1}, (prefix + ".indirect").str());
+  llvm::Value *key = llvm::ConstantInt::get(
+      i64_type, derive_entropy_thunk_constant(owner, context, salt, 0x135700ULL));
+  llvm::Value *direct_masked =
+      builder.CreateXor(direct, key, (prefix + ".direct.masked").str());
+  llvm::Value *direct_real =
+      builder.CreateXor(direct_masked, key, (prefix + ".direct.real").str());
+  llvm::Value *indirect_masked =
+      builder.CreateXor(indirect, key, (prefix + ".indirect.masked").str());
+  llvm::Value *indirect_real =
+      builder.CreateXor(indirect_masked, key, (prefix + ".indirect.real").str());
+  llvm::Value *result = llvm::UndefValue::get(pair->getType());
+  result = builder.CreateInsertValue(result, direct_real, {0},
+                                     (prefix + ".insert.direct").str());
+  return builder.CreateInsertValue(result, indirect_real, {1},
+                                   (prefix + ".insert.indirect").str());
+}
+
+llvm::Function *get_or_create_entropy_thunk(llvm::Module &module,
+                                            llvm::Function &owner,
+                                            llvm::Function &entropy_anchor,
+                                            const builder_context &context,
+                                            std::uint64_t salt) {
+  entropy_thunk_shape shape = select_entropy_thunk_shape(owner, context, salt);
+  const std::uint64_t thunk_id =
+      derive_entropy_thunk_id(owner, context, salt, shape);
+  const std::string thunk_name =
+      llvm::formatv("__obf_entropy_thunk_{0:x}", thunk_id).str();
+  if (llvm::Function *existing = module.getFunction(thunk_name)) {
+    return existing;
+  }
+
+  auto *thunk = llvm::Function::Create(
+      entropy_anchor.getFunctionType(), llvm::GlobalValue::InternalLinkage,
+      thunk_name, module);
+  thunk->setDSOLocal(true);
+  thunk->addFnAttr(llvm::Attribute::NoInline);
+
+  llvm::BasicBlock *entry =
+      llvm::BasicBlock::Create(module.getContext(), "entry", thunk);
+  llvm::IRBuilder<> builder(entry);
+  const char *prefix = "entropy.thunk.direct";
+  if (shape == entropy_thunk_shape::swap_twice) {
+    prefix = "entropy.thunk.swap";
+  } else if (shape == entropy_thunk_shape::xor_neutral) {
+    prefix = "entropy.thunk.xor";
+  } else if (shape == entropy_thunk_shape::add_sub_neutral) {
+    prefix = "entropy.thunk.addsub";
+  } else if (shape == entropy_thunk_shape::select_neutral) {
+    prefix = "entropy.thunk.select";
+  }
+
+  llvm::Value *pair = builder.CreateCall(entropy_anchor.getFunctionType(),
+                                         &entropy_anchor, {},
+                                         std::string(prefix) + ".call");
+  switch (shape) {
+  case entropy_thunk_shape::direct:
+    builder.CreateRet(pair);
+    break;
+  case entropy_thunk_shape::swap_twice: {
+    llvm::Value *direct =
+        builder.CreateExtractValue(pair, {0}, "entropy.thunk.swap.direct");
+    llvm::Value *indirect =
+        builder.CreateExtractValue(pair, {1}, "entropy.thunk.swap.indirect");
+    llvm::Value *swapped = llvm::UndefValue::get(pair->getType());
+    swapped = builder.CreateInsertValue(swapped, indirect, {0},
+                                        "entropy.thunk.swap.first");
+    swapped = builder.CreateInsertValue(swapped, direct, {1},
+                                        "entropy.thunk.swap.second");
+    llvm::Value *restored_direct = builder.CreateExtractValue(
+        swapped, {1}, "entropy.thunk.swap.restore.direct");
+    llvm::Value *restored_indirect = builder.CreateExtractValue(
+        swapped, {0}, "entropy.thunk.swap.restore.indirect");
+    llvm::Value *restored = llvm::UndefValue::get(pair->getType());
+    restored = builder.CreateInsertValue(restored, restored_direct, {0},
+                                         "entropy.thunk.swap.restored.direct");
+    restored = builder.CreateInsertValue(restored, restored_indirect, {1},
+                                         "entropy.thunk.swap.restored.indirect");
+    builder.CreateRet(restored);
+    break;
+  }
+  case entropy_thunk_shape::xor_neutral:
+    builder.CreateRet(build_entropy_thunk_xor_neutral(
+        builder, owner, context, salt, pair, "entropy.thunk.xor"));
+    break;
+  case entropy_thunk_shape::add_sub_neutral: {
+    llvm::Type *i64_type = llvm::Type::getInt64Ty(module.getContext());
+    llvm::Value *direct = builder.CreateExtractValue(
+        pair, {0}, "entropy.thunk.addsub.direct");
+    llvm::Value *indirect = builder.CreateExtractValue(
+        pair, {1}, "entropy.thunk.addsub.indirect");
+    llvm::Value *key = llvm::ConstantInt::get(
+        i64_type, derive_entropy_thunk_constant(owner, context, salt, 0x246800ULL));
+    llvm::Value *direct_biased =
+        builder.CreateAdd(direct, key, "entropy.thunk.addsub.direct.biased");
+    llvm::Value *direct_real = builder.CreateSub(
+        direct_biased, key, "entropy.thunk.addsub.direct.real");
+    llvm::Value *indirect_biased = builder.CreateAdd(
+        indirect, key, "entropy.thunk.addsub.indirect.biased");
+    llvm::Value *indirect_real = builder.CreateSub(
+        indirect_biased, key, "entropy.thunk.addsub.indirect.real");
+    llvm::Value *result = llvm::UndefValue::get(pair->getType());
+    result = builder.CreateInsertValue(result, direct_real, {0},
+                                       "entropy.thunk.addsub.insert.direct");
+    result = builder.CreateInsertValue(result, indirect_real, {1},
+                                       "entropy.thunk.addsub.insert.indirect");
+    builder.CreateRet(result);
+    break;
+  }
+  case entropy_thunk_shape::select_neutral: {
+    llvm::Value *direct = builder.CreateExtractValue(
+        pair, {0}, "entropy.thunk.select.direct");
+    llvm::Value *indirect = builder.CreateExtractValue(
+        pair, {1}, "entropy.thunk.select.indirect");
+    llvm::Value *frozen_direct =
+        builder.CreateFreeze(direct, "entropy.thunk.select.freeze");
+    llvm::Value *condition = builder.CreateICmpEQ(
+        frozen_direct, frozen_direct, "entropy.thunk.select.cond");
+    llvm::Value *neutral = build_entropy_thunk_xor_neutral(
+        builder, owner, context, salt, pair, "entropy.thunk.select.neutral");
+    llvm::Value *neutral_direct = builder.CreateExtractValue(
+        neutral, {0}, "entropy.thunk.select.neutral.direct");
+    llvm::Value *neutral_indirect = builder.CreateExtractValue(
+        neutral, {1}, "entropy.thunk.select.neutral.indirect");
+    llvm::Value *selected_direct = builder.CreateSelect(
+        condition, direct, neutral_direct, "entropy.thunk.select.direct.real");
+    llvm::Value *selected_indirect = builder.CreateSelect(
+        condition, indirect, neutral_indirect, "entropy.thunk.select.indirect.real");
+    llvm::Value *result = llvm::UndefValue::get(pair->getType());
+    result = builder.CreateInsertValue(result, selected_direct, {0},
+                                       "entropy.thunk.select.insert.direct");
+    result = builder.CreateInsertValue(result, selected_indirect, {1},
+                                       "entropy.thunk.select.insert.indirect");
+    builder.CreateRet(result);
+    break;
+  }
+  }
+
+  return thunk;
+}
+
 llvm::Function *get_or_create_entropy_pair_accessor(llvm::Module &module) {
   auto *pair_type = llvm::StructType::get(module.getContext(),
                                           {llvm::Type::getInt64Ty(module.getContext()),
@@ -180,7 +383,8 @@ llvm::Function *get_or_create_entropy_pair_accessor(llvm::Module &module) {
 }
 
 llvm::AllocaInst *get_or_create_function_entropy_pair_cache(
-    llvm::Function &function, llvm::Function &accessor) {
+    llvm::Function &function, llvm::Function &accessor,
+    const builder_context &context, std::uint64_t salt) {
   auto *pair_type = llvm::dyn_cast<llvm::StructType>(accessor.getReturnType());
   if (pair_type == nullptr) {
     llvm::report_fatal_error("__obf_load_entropy_pair return type is not a struct");
@@ -208,8 +412,11 @@ llvm::AllocaInst *get_or_create_function_entropy_pair_cache(
   auto *cache = entry_builder.CreateAlloca(pair_type, nullptr, "obf.entropy.cache");
   const llvm::DataLayout &data_layout = function.getParent()->getDataLayout();
   cache->setAlignment(data_layout.getPrefTypeAlign(pair_type));
-  llvm::Value *pair =
-      entry_builder.CreateCall(&accessor, {}, "obf.entropy.cache.init");
+  llvm::Function *thunk = get_or_create_entropy_thunk(
+      *function.getParent(), function, accessor, context, salt);
+  llvm::Function *initializer = thunk != nullptr ? thunk : &accessor;
+  llvm::Value *pair = entry_builder.CreateCall(
+      initializer->getFunctionType(), initializer, {}, "obf.entropy.cache.init");
   auto *store = entry_builder.CreateStore(pair, cache);
   store->setAlignment(cache->getAlign());
   return cache;
@@ -217,6 +424,8 @@ llvm::AllocaInst *get_or_create_function_entropy_pair_cache(
 
 entropy_pair load_entropy_anchor_pair(llvm::IRBuilder<> &builder,
                                       llvm::GlobalVariable *entropy_anchor,
+                                      const builder_context &context,
+                                      std::uint64_t salt,
                                       llvm::StringRef name) {
   llvm::BasicBlock *block = builder.GetInsertBlock();
   llvm::Function *function = block != nullptr ? block->getParent() : nullptr;
@@ -227,7 +436,8 @@ entropy_pair load_entropy_anchor_pair(llvm::IRBuilder<> &builder,
 
   llvm::Function *accessor = get_or_create_entropy_pair_accessor(*module);
   llvm::AllocaInst *cache =
-      get_or_create_function_entropy_pair_cache(*function, *accessor);
+      get_or_create_function_entropy_pair_cache(*function, *accessor, context,
+                                                salt);
   llvm::Value *pair =
       builder.CreateLoad(accessor->getReturnType(), cache, (name + ".pair").str());
   llvm::cast<llvm::LoadInst>(pair)->setAlignment(cache->getAlign());
@@ -321,7 +531,8 @@ llvm::Value *build_opaque_zero(llvm::IRBuilder<> &builder,
   }
 
   const entropy_pair entropy =
-      load_entropy_anchor_pair(builder, context.entropy_anchor, "obf.entropy");
+      load_entropy_anchor_pair(builder, context.entropy_anchor, context, salt,
+                               "obf.entropy");
   if (entropy.direct == nullptr || entropy.indirect == nullptr) {
     return llvm::Constant::getNullValue(target_type);
   }

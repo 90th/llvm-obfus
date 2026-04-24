@@ -25,7 +25,7 @@ entry:
 ; CHECK: @__obf_vm_targetseed_fold_value = private global i{{[0-9]+}} 0
 ; CHECK: @llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]
 ; CHECK-LABEL: define i32 @fold_value(i32 %value)
-; CHECK: %obf.entropy.cache.init = call { i64, i64 } @__obf_load_entropy_pair()
+; CHECK: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
 ; CHECK: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
 ; CHECK: %obf.entropy.direct = extractvalue { i64, i64 } %obf.entropy.pair, 0
 ; CHECK: %fold_value.obf.wrapper.token = {{(add|sub|xor) i64}}

@@ -52,7 +52,7 @@ entry:
 ; CHECK-NOT: %obf.
 ; CHECK-LABEL: define i32 @value()
 ; CHECK: alloca { i64, i64 }, align 8
-; CHECK: call { i64, i64 } @__obf_load_entropy_pair()
+; CHECK: call { i64, i64 } @{{[^ ]+}}()
 ; CHECK: ret i32
 ; CHECK-LABEL: define i32 @fold_value(i32
 ; CHECK: load i64, ptr @[[VMTARGET]]

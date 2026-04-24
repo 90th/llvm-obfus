@@ -182,7 +182,7 @@ entry:
 ; CHECK: entry.obf.vm:
 ; CHECK: %obf.vm.state = alloca i64
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
-; CHECK: %obf.entropy.cache.init{{[0-9]*}} = call { i64, i64 } @__obf_load_entropy_pair()
+; CHECK: %obf.entropy.cache.init{{[0-9]*}} = call { i64, i64 } @__obf_entropy_thunk_
 ; CHECK: %obf.entropy.pair{{[0-9]*}} = load { i64, i64 }, ptr %obf.entropy.cache, align 8
 ; CHECK: %obf.entropy.direct{{[0-9]*}} = extractvalue { i64, i64 } %obf.entropy.pair{{[0-9]*}}, 0
 ; CHECK: %obf.vm.integrity.ptr = getelementptr inbounds

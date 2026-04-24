@@ -1,0 +1,19 @@
+seed: 8181
+default_level: none
+overrides:
+  - name: main
+    level: none
+targets:
+  - match: entropy_thunk_a
+    level: strong
+  - match: entropy_thunk_b
+    level: strong
+  - match: entropy_thunk_c
+    level: strong
+  - match: entropy_thunk_d
+    level: strong
+constant_encoding:
+  max_constants_per_function: 6
+  min_bit_width: 8
+mba:
+  depth: 2
