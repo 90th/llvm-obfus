@@ -1,7 +1,7 @@
-seed: 6060
+seed: 6061
 default_level: none
 targets:
-  - match: strong_inline_string
+  - match: strong_skip_string
     level: strong_vm
 string_encoding:
   prefer_lazy_decode: true

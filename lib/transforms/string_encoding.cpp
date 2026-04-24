@@ -10,6 +10,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
@@ -65,6 +66,7 @@ struct classified_string_candidate {
   bool has_high_security_use = false;
   bool has_strong_vm_use = false;
   string_use_summary summary;
+  llvm::SmallVector<const llvm::Function *, 4> strong_vm_functions;
   string_encoding_result result;
 };
 
@@ -194,6 +196,29 @@ bool is_local_constant_forwarding_global(const llvm::GlobalVariable &global) {
 
 bool is_local_forwarding_alias(const llvm::GlobalAlias &alias) {
   return alias.hasLocalLinkage();
+}
+
+bool operand_references_value(const llvm::Value *operand, const llvm::Value &value);
+
+bool is_direct_string_pointer_forward(const llvm::Value &value,
+                                      const llvm::GlobalVariable &global) {
+  const auto *forwarding_global = llvm::dyn_cast<llvm::GlobalVariable>(&value);
+  if (forwarding_global == nullptr || !forwarding_global->hasInitializer() ||
+      !forwarding_global->getValueType()->isPointerTy()) {
+    return false;
+  }
+
+  return operand_references_global(
+      const_cast<llvm::Constant *>(forwarding_global->getInitializer()), global);
+}
+
+bool is_forwarded_string_pointer_load(const llvm::Value &value,
+                                      const llvm::GlobalVariable &global,
+                                      const llvm::Instruction &instruction) {
+  const auto *load = llvm::dyn_cast<llvm::LoadInst>(&instruction);
+  return load != nullptr && load->getType()->isPointerTy() &&
+         is_direct_string_pointer_forward(value, global) &&
+         operand_references_value(load->getPointerOperand(), value);
 }
 
 bool operand_references_value(const llvm::Value *operand, const llvm::Value &value) {
@@ -396,6 +421,21 @@ void collect_string_users(const llvm::Value &value, const llvm::GlobalVariable &
         add_unique_function(summary.protected_functions, function);
       } else {
         add_unique_function(summary.unprotected_functions, function);
+      }
+
+      if (is_forwarded_string_pointer_load(value, global, *instruction)) {
+        add_use_kind(summary.observed_kinds,
+                     string_use_kind::forwarded_pointer_load);
+        if (is_protected) {
+          classified_string_use classified;
+          classified.instruction = const_cast<llvm::Instruction *>(instruction);
+          classified.kind = string_use_kind::forwarded_pointer_load;
+          classified.rewriteable = true;
+          classified.inline_candidate = true;
+          summary.protected_uses.push_back(std::move(classified));
+          summary.has_forwarded_pointer_load = true;
+        }
+        continue;
       }
 
       bool matched_operand = false;
@@ -627,6 +667,7 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
     }
     if (level.has_value() && *level == protection_level::strong_vm) {
       candidate.has_strong_vm_use = true;
+      candidate.strong_vm_functions.push_back(function);
     }
   }
 
@@ -842,6 +883,64 @@ select_plans(const std::vector<classified_string_candidate> &candidates,
   }
 
   return plans;
+}
+
+bool is_strong_vm_plaintext_violation(const string_strategy_plan &plan,
+                                      const classified_string_candidate &candidate) {
+  const bool has_direct_protected_use = llvm::any_of(
+      candidate.summary.protected_uses, [](const classified_string_use &use) {
+        return use.kind != string_use_kind::forwarded_pointer_load;
+      });
+  return candidate.has_strong_vm_use && !plan.result.applied &&
+         plan.result.fallback_reason == "strong_vm_no_global_plaintext" &&
+         has_direct_protected_use &&
+         plan.result.detail.find("forwarded pointer table use") ==
+             std::string::npos;
+}
+
+std::string describe_strong_vm_owners(
+    const classified_string_candidate &candidate) {
+  if (candidate.strong_vm_functions.empty()) {
+    return "unknown";
+  }
+
+  std::string owners;
+  for (const llvm::Function *function : candidate.strong_vm_functions) {
+    if (function == nullptr) {
+      continue;
+    }
+
+    if (!owners.empty()) {
+      owners += ",";
+    }
+    owners += function->getName().str();
+  }
+
+  return owners.empty() ? "unknown" : owners;
+}
+
+void report_strong_vm_plaintext_violation(
+    const string_strategy_plan &plan,
+    const classified_string_candidate &candidate) {
+  std::string message = "strong_vm plaintext string violation: global ";
+  message += plan.result.global_name.empty() ? "<unknown>" : plan.result.global_name;
+  message += "; reason: ";
+  message += plan.result.detail.empty() ? "no local string strategy"
+                                       : plan.result.detail;
+  message += "; owning strong_vm function: ";
+  message += describe_strong_vm_owners(candidate);
+  llvm::report_fatal_error(llvm::StringRef(message));
+}
+
+void enforce_strong_vm_plaintext_policy(
+    const std::vector<string_strategy_plan> &plans,
+    const std::vector<classified_string_candidate> &candidates) {
+  const std::size_t count = std::min(plans.size(), candidates.size());
+  for (std::size_t index = 0; index < count; ++index) {
+    if (is_strong_vm_plaintext_violation(plans[index], candidates[index])) {
+      report_strong_vm_plaintext_violation(plans[index], candidates[index]);
+    }
+  }
 }
 
 void diversify_lazy_helper_shapes(std::vector<string_strategy_plan> &plans,
@@ -1534,6 +1633,14 @@ void rewrite_inline_stack_uses(llvm::GlobalVariable &global, std::uint64_t seed,
     llvm::Value *decoded_ptr = before_builder.CreateInBoundsGEP(
         buffer_type, buffer,
         {llvm::ConstantInt::get(i64_type, 0), llvm::ConstantInt::get(i64_type, 0)});
+    if (use.kind == string_use_kind::forwarded_pointer_load &&
+        llvm::isa<llvm::LoadInst>(use.instruction) &&
+        use.instruction->getType()->isPointerTy()) {
+      use.instruction->replaceAllUsesWith(decoded_ptr);
+      use.instruction->eraseFromParent();
+      continue;
+    }
+
     use.instruction->setOperand(use.operand_index, decoded_ptr);
 
     if (llvm::Instruction *next = use.instruction->getNextNode()) {
@@ -1577,6 +1684,9 @@ std::vector<string_encoding_result> build_string_results(
   diversify_lazy_helper_shapes(plans, module_seed);
   apply_string_encoding_limit(plans, options);
   assign_lazy_descriptor_indices(plans, module_seed);
+  if (apply_changes) {
+    enforce_strong_vm_plaintext_policy(plans, candidates);
+  }
 
   std::vector<string_encoding_result> results;
   results.reserve(plans.size());

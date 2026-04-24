@@ -23,6 +23,9 @@ find_program(OBF_CLANGXX clang++ HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(OBF_LLVM_LINK llvm-link HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(OBF_LLC llc HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(OBF_STRIP llvm-strip HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
+find_program(OBF_NM llvm-nm HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
+find_program(OBF_OBJDUMP llvm-objdump HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
+find_program(OBF_STRINGS strings)
 
 option(OBF_BENCHMARK_CLEAN_IR
   "Generate cleaned benchmark IR for analysis builds"
@@ -288,3 +291,13 @@ add_obf_linked_benchmark(
 
 add_custom_target(obf-benchmarks DEPENDS ${OBF_BENCHMARK_TARGETS})
 add_custom_target(obf-benchmarks-mir DEPENDS ${OBF_MIR_TARGETS})
+add_custom_target(obf-audit-benchmarks
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/obf-audit/audit_binary.py"
+          "--benchmarks-dir" "${CMAKE_CURRENT_BINARY_DIR}/benchmarks"
+          "--llvm-nm" "${OBF_NM}"
+          "--llvm-objdump" "${OBF_OBJDUMP}"
+          "--strings" "${OBF_STRINGS}"
+          "--strict"
+  DEPENDS obf-benchmarks
+  VERBATIM)

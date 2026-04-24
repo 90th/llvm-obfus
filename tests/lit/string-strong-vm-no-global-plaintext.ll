@@ -4,7 +4,6 @@
 ; RUN: %lli %t
 
 @.inline = private unnamed_addr constant [3 x i8] c"ok\00"
-@.skip = private unnamed_addr constant [22 x i8] c"strong-vm-skip-string\00"
 
 declare i32 @bcmp(ptr, ptr, i64)
 
@@ -16,20 +15,11 @@ entry:
   ret i32 %ret
 }
 
-define ptr @strong_skip_string() {
-entry:
-  ret ptr @.skip
-}
-
 define i32 @main() {
 entry:
   %inline = call i32 @strong_inline_string()
-  %ptr = call ptr @strong_skip_string()
-  %first = load i8, ptr %ptr, align 1
-  %skip.ok = icmp eq i8 %first, 115
   %inline.ok = icmp eq i32 %inline, 0
-  %ok = and i1 %inline.ok, %skip.ok
-  %ret = select i1 %ok, i32 0, i32 1
+  %ret = select i1 %inline.ok, i32 0, i32 1
   ret i32 %ret
 }
 
@@ -38,7 +28,6 @@ entry:
 ; IR-NOT: @__obf_lazy_
 ; IR-NOT: @__obf_desc
 ; IR-NOT: c"ok\00"
-; IR: @.skip = private unnamed_addr constant [22 x i8] c"strong-vm-skip-string\00"
 ; IR: %obf.inline.str = alloca [3 x i8]
 ; IR: call i32 @bcmp(ptr %{{[^,]+}}, ptr %{{[^,]+}}, i64 2)
 
@@ -47,4 +36,3 @@ entry:
 ; REPORT-NOT: global_ctor
 ; REPORT-NOT: helper_global_ctor
 ; REPORT-DAG: .inline|applied|2|inline_stack_decode: 2 inline stack decode use(s)|inline_stack_decode|none|
-; REPORT-DAG: .skip|skipped|0|strong_vm_no_global_plaintext: no local string strategy|none|none|strong_vm_no_global_plaintext
