@@ -74,7 +74,9 @@ struct string_encoding_result {
   std::size_t unprotected_use_count = 0;
   bool inline_eligible = false;
   bool applied = false;
+  bool has_strong_vm_use = false;
   std::vector<std::string> use_kinds;
+  std::vector<std::string> strong_vm_owner_names;
 };
 
 using protected_function_seed_lookup =

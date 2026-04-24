@@ -346,6 +346,7 @@ public:
         apply_instruction_substitution_to_functions(strong_vm_virtualized, config);
     changed |= apply_bogus_control_flow_to_functions(strong_vm_virtualized,
                                                      config);
+    changed |= enforce_security_gates(module, states, post_vm_virtualized, config);
     changed |= apply_artifact_cleanup_stage(module, config);
 
     if (!changed) {

@@ -1,0 +1,4 @@
+seed: 9191
+default_level: none
+security:
+  fail_on_public_obf_symbol: true

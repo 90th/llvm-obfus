@@ -1,0 +1,14 @@
+seed: 9191
+default_level: none
+overrides:
+  - name: main
+    level: none
+targets:
+  - match: unsupported_alloca
+    level: strong_vm
+security:
+  fail_on_unvirtualized_strong_vm: false
+  fail_on_unprotected_strong_vm_string: false
+  fail_on_shared_seed_resolver_in_strong_vm: false
+  fail_on_target_cache_in_strong_vm: false
+  fail_on_public_obf_symbol: false

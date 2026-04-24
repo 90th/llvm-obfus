@@ -197,6 +197,12 @@ void include_vm_parent_functions(
     llvm::StringSet<> &virtualized_names,
     const virtualized_function_map &virtualized_functions);
 
+bool enforce_security_gates(
+    llvm::Module &module,
+    const llvm::SmallVectorImpl<function_pipeline_state> &states,
+    const virtualized_function_map &virtualized_functions,
+    const obfuscation_config &config);
+
 template <typename Predicate>
 llvm::StringMap<std::uint64_t> build_function_seed_map(
     const llvm::SmallVectorImpl<function_pipeline_state> &states,

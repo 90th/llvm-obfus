@@ -668,6 +668,8 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
     if (level.has_value() && *level == protection_level::strong_vm) {
       candidate.has_strong_vm_use = true;
       candidate.strong_vm_functions.push_back(function);
+      candidate.result.has_strong_vm_use = true;
+      candidate.result.strong_vm_owner_names.push_back(function->getName().str());
     }
   }
 

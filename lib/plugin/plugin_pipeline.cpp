@@ -1,10 +1,14 @@
 #include "obf/plugin/obfuscator_plugin_internal.h"
 
 #include "obf/transforms/entropy_initialization.h"
+#include "obf/vm/candidate_analysis.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -25,6 +29,292 @@ bool should_skip_function(const function_pipeline_state &state,
 
   return skip_functions != nullptr &&
          skip_functions->contains(state.function->getName());
+}
+
+bool security_gates_enabled(const security_gate_config &config) {
+  return config.fail_on_unvirtualized_strong_vm ||
+         config.fail_on_unprotected_strong_vm_string ||
+         config.fail_on_shared_seed_resolver_in_strong_vm ||
+         config.fail_on_target_cache_in_strong_vm ||
+         config.fail_on_public_obf_symbol;
+}
+
+[[noreturn]] void report_security_gate_failure(llvm::StringRef detail) {
+  std::string message = "security gate failure: ";
+  message += detail.str();
+  llvm::report_fatal_error(llvm::StringRef(message));
+}
+
+bool is_strong_vm_state(const function_pipeline_state &state) {
+  return state.function != nullptr && !state.function->isDeclaration() &&
+         state.report.decision.policy.level == protection_level::strong_vm;
+}
+
+bool binding_belongs_to_state(const virtualized_function_binding &binding,
+                              const function_pipeline_state &state) {
+  if (binding.state == &state) {
+    return true;
+  }
+
+  return binding.state != nullptr && binding.state->function != nullptr &&
+         state.function != nullptr &&
+         binding.state->function->getName() == state.function->getName();
+}
+
+bool has_virtualized_binding_for_state(
+    const virtualized_function_map &virtualized_functions,
+    const function_pipeline_state &state) {
+  for (const auto &entry : virtualized_functions) {
+    if (binding_belongs_to_state(entry.second, state)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void enforce_strong_vm_virtualization_gate(
+    const llvm::SmallVectorImpl<function_pipeline_state> &states,
+    const virtualized_function_map &virtualized_functions) {
+  for (const function_pipeline_state &state : states) {
+    if (!is_strong_vm_state(state) || !state.report.decision.policy.allow_vm ||
+        has_virtualized_binding_for_state(virtualized_functions, state)) {
+      continue;
+    }
+
+    const vm::candidate_result result = vm::analyze_candidate(*state.function);
+    std::string detail = "unvirtualized strong_vm function ";
+    detail += state.function->getName().str();
+    detail += "; policy_source=";
+    detail += std::string(to_string(state.report.decision.source));
+    detail += "; policy_detail=";
+    detail += state.report.decision.detail;
+    detail += "; reason=";
+    detail += result.detail.empty() ? "no whole-function or regional VM target"
+                                    : result.detail;
+    report_security_gate_failure(detail);
+  }
+}
+
+std::string join_owner_names(const std::vector<std::string> &owners) {
+  if (owners.empty()) {
+    return "unknown";
+  }
+
+  std::string joined;
+  for (const std::string &owner : owners) {
+    if (!joined.empty()) {
+      joined += ",";
+    }
+    joined += owner;
+  }
+  return joined;
+}
+
+void enforce_strong_vm_string_gate(
+    llvm::Module &module,
+    const llvm::SmallVectorImpl<function_pipeline_state> &states,
+    const virtualized_function_map &virtualized_functions,
+    const obfuscation_config &config) {
+  llvm::StringMap<std::uint64_t> protected_functions =
+      build_function_seed_map(states, [](const function_policy &policy) {
+        return policy.allow_string_encoding;
+      });
+  llvm::StringMap<protection_level> protected_levels =
+      build_function_level_map(states, [](const function_policy &policy) {
+        return policy.allow_string_encoding;
+      });
+  append_virtualized_function_seeds(
+      protected_functions, &virtualized_functions,
+      [](const function_policy &policy) { return policy.allow_string_encoding; });
+  append_virtualized_function_levels(
+      protected_levels, &virtualized_functions,
+      [](const function_policy &policy) { return policy.allow_string_encoding; });
+
+  const string_encoding_options options = build_string_encoding_options(config);
+  const std::vector<string_encoding_result> results = analyze_string_encoding(
+      module,
+      [&](llvm::StringRef function_name) -> std::optional<std::uint64_t> {
+        const auto iterator = protected_functions.find(function_name);
+        if (iterator == protected_functions.end()) {
+          return std::nullopt;
+        }
+        return iterator->second;
+      },
+      [&](llvm::StringRef function_name) -> std::optional<protection_level> {
+        const auto iterator = protected_levels.find(function_name);
+        if (iterator == protected_levels.end()) {
+          return std::nullopt;
+        }
+        return iterator->second;
+      },
+      options, config.seed);
+
+  for (const string_encoding_result &result : results) {
+    if (!result.has_strong_vm_use || result.applied ||
+        result.fallback_reason != "strong_vm_no_global_plaintext") {
+      continue;
+    }
+
+    std::string detail = "unprotected strong_vm string ";
+    detail += result.global_name.empty() ? "<unknown>" : result.global_name;
+    detail += "; owner=";
+    detail += join_owner_names(result.strong_vm_owner_names);
+    detail += "; fallback_reason=";
+    detail += result.fallback_reason;
+    detail += "; detail=";
+    detail += result.detail.empty() ? "unknown" : result.detail;
+    report_security_gate_failure(detail);
+  }
+}
+
+bool function_calls_named(llvm::Function *function, llvm::StringRef callee_name) {
+  if (function == nullptr || function->isDeclaration()) {
+    return false;
+  }
+
+  for (llvm::BasicBlock &block : *function) {
+    for (llvm::Instruction &instruction : block) {
+      auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+      if (call == nullptr) {
+        continue;
+      }
+      const llvm::Function *callee = call->getCalledFunction();
+      if (callee != nullptr && callee->getName() == callee_name) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+void enforce_strong_vm_shared_seed_gate(
+    llvm::Module &module,
+    const llvm::SmallVectorImpl<function_pipeline_state> &states,
+    const virtualized_function_map &virtualized_functions) {
+  for (const function_pipeline_state &state : states) {
+    if (!is_strong_vm_state(state)) {
+      continue;
+    }
+
+    const std::string original_case_name =
+        ("__obf_vm_seedcase_" + state.function->getName()).str();
+    if (module.getFunction(original_case_name) != nullptr) {
+      report_security_gate_failure(
+          "shared seed resolver case for strong_vm function " +
+          state.function->getName().str());
+    }
+  }
+
+  for (const auto &entry : virtualized_functions) {
+    const virtualized_function_binding &binding = entry.second;
+    if (binding.state == nullptr ||
+        binding.state->report.decision.policy.level != protection_level::strong_vm) {
+      continue;
+    }
+
+    const llvm::Function *interface_function = binding.interface_function;
+    if (interface_function != nullptr) {
+      const std::string case_name =
+          ("__obf_vm_seedcase_" + interface_function->getName()).str();
+      if (module.getFunction(case_name) != nullptr) {
+        report_security_gate_failure(
+            "shared seed resolver case for strong_vm binding " +
+            interface_function->getName().str());
+      }
+    }
+
+    if (function_calls_named(binding.interface_function, "__obf_vm_seed_resolve") ||
+        function_calls_named(binding.implementation_function,
+                             "__obf_vm_seed_resolve")) {
+      const llvm::StringRef name = interface_function != nullptr
+                                       ? interface_function->getName()
+                                       : llvm::StringRef(entry.getKey());
+      report_security_gate_failure(
+          "shared seed resolver call in strong_vm binding " + name.str());
+    }
+  }
+}
+
+void enforce_strong_vm_target_cache_gate(
+    llvm::Module &module,
+    const llvm::SmallVectorImpl<function_pipeline_state> &states,
+    const virtualized_function_map &virtualized_functions) {
+  for (const function_pipeline_state &state : states) {
+    if (!is_strong_vm_state(state)) {
+      continue;
+    }
+
+    const std::string target_name =
+        ("__obf_vm_target_" + state.function->getName()).str();
+    if (module.getNamedGlobal(target_name) != nullptr) {
+      report_security_gate_failure(
+          "target cache global for strong_vm function " +
+          state.function->getName().str());
+    }
+  }
+
+  for (const auto &entry : virtualized_functions) {
+    const virtualized_function_binding &binding = entry.second;
+    if (binding.state == nullptr ||
+        binding.state->report.decision.policy.level != protection_level::strong_vm ||
+        binding.interface_function == nullptr) {
+      continue;
+    }
+
+    const std::string target_name =
+        ("__obf_vm_target_" + binding.interface_function->getName()).str();
+    if (module.getNamedGlobal(target_name) != nullptr) {
+      report_security_gate_failure(
+          "target cache global for strong_vm binding " +
+          binding.interface_function->getName().str());
+    }
+  }
+}
+
+bool is_obfuscator_internal_symbol_name(llvm::StringRef name) {
+  constexpr llvm::StringLiteral prefixes[] = {
+      "__obf_vm_impl_",       "__obf_vm_region_",
+      "__obf_vm_seedcase_",   "__obf_vm_seed_resolve",
+      "__obf_vm_target_",     "__obf_vm_targetseed_",
+      "__obf_vm_key_",        "__obf_vm_retkey_",
+      "__obf_entropy_thunk_"};
+  for (llvm::StringRef prefix : prefixes) {
+    if (name.starts_with(prefix)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool has_public_obfuscator_linkage(const llvm::GlobalValue &value) {
+  return is_obfuscator_internal_symbol_name(value.getName()) &&
+         !value.hasLocalLinkage();
+}
+
+void enforce_public_obf_symbol_gate(llvm::Module &module) {
+  for (llvm::Function &function : module) {
+    if (has_public_obfuscator_linkage(function)) {
+      report_security_gate_failure("public obfuscator symbol " +
+                                   function.getName().str());
+    }
+  }
+
+  for (llvm::GlobalVariable &global : module.globals()) {
+    if (has_public_obfuscator_linkage(global)) {
+      report_security_gate_failure("public obfuscator symbol " +
+                                   global.getName().str());
+    }
+  }
+
+  for (llvm::GlobalAlias &alias : module.aliases()) {
+    if (has_public_obfuscator_linkage(alias)) {
+      report_security_gate_failure("public obfuscator symbol " +
+                                   alias.getName().str());
+    }
+  }
 }
 
 } // namespace
@@ -396,6 +686,34 @@ bool apply_bogus_control_flow_to_functions(
   }
 
   return changed;
+}
+
+bool enforce_security_gates(
+    llvm::Module &module,
+    const llvm::SmallVectorImpl<function_pipeline_state> &states,
+    const virtualized_function_map &virtualized_functions,
+    const obfuscation_config &config) {
+  if (!security_gates_enabled(config.security)) {
+    return false;
+  }
+
+  if (config.security.fail_on_unvirtualized_strong_vm) {
+    enforce_strong_vm_virtualization_gate(states, virtualized_functions);
+  }
+  if (config.security.fail_on_unprotected_strong_vm_string) {
+    enforce_strong_vm_string_gate(module, states, virtualized_functions, config);
+  }
+  if (config.security.fail_on_shared_seed_resolver_in_strong_vm) {
+    enforce_strong_vm_shared_seed_gate(module, states, virtualized_functions);
+  }
+  if (config.security.fail_on_target_cache_in_strong_vm) {
+    enforce_strong_vm_target_cache_gate(module, states, virtualized_functions);
+  }
+  if (config.security.fail_on_public_obf_symbol) {
+    enforce_public_obf_symbol_gate(module);
+  }
+
+  return false;
 }
 
 } // namespace obf

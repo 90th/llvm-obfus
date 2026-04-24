@@ -1,0 +1,7 @@
+seed: 9191
+default_level: none
+targets:
+  - match: seed_case
+    level: strong_vm
+security:
+  fail_on_shared_seed_resolver_in_strong_vm: true

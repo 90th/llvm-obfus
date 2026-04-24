@@ -1,0 +1,17 @@
+seed: 9191
+default_level: none
+overrides:
+  - name: main
+    level: none
+targets:
+  - match: string_table_user
+    level: strong_vm
+string_encoding:
+  min_string_length: 2
+  max_strings_per_module: 32
+  prefer_lazy_decode: true
+  allow_ctor_fallback: true
+security:
+  fail_on_unprotected_strong_vm_string: true
+mba:
+  depth: 1

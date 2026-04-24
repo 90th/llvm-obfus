@@ -45,6 +45,14 @@ struct mba_config {
   std::uint32_t depth = 1;
 };
 
+struct security_gate_config {
+  bool fail_on_unvirtualized_strong_vm = false;
+  bool fail_on_unprotected_strong_vm_string = false;
+  bool fail_on_shared_seed_resolver_in_strong_vm = false;
+  bool fail_on_target_cache_in_strong_vm = false;
+  bool fail_on_public_obf_symbol = false;
+};
+
 struct obfuscation_config {
   std::uint64_t seed = 0;
   protection_level default_level = protection_level::none;
@@ -54,6 +62,7 @@ struct obfuscation_config {
   string_encoding_config string_encoding;
   constant_encoding_config constant_encoding;
   mba_config mba;
+  security_gate_config security;
 };
 
 llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path);

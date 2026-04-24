@@ -77,6 +77,21 @@ template <> struct MappingTraits<obf::mba_config> {
   }
 };
 
+template <> struct MappingTraits<obf::security_gate_config> {
+  static void mapping(IO &io, obf::security_gate_config &config) {
+    io.mapOptional("fail_on_unvirtualized_strong_vm",
+                   config.fail_on_unvirtualized_strong_vm, false);
+    io.mapOptional("fail_on_unprotected_strong_vm_string",
+                   config.fail_on_unprotected_strong_vm_string, false);
+    io.mapOptional("fail_on_shared_seed_resolver_in_strong_vm",
+                   config.fail_on_shared_seed_resolver_in_strong_vm, false);
+    io.mapOptional("fail_on_target_cache_in_strong_vm",
+                   config.fail_on_target_cache_in_strong_vm, false);
+    io.mapOptional("fail_on_public_obf_symbol",
+                   config.fail_on_public_obf_symbol, false);
+  }
+};
+
 template <> struct MappingTraits<obf::obfuscation_config> {
   static void mapping(IO &io, obf::obfuscation_config &config) {
     io.mapOptional("seed", config.seed, std::uint64_t{0});
@@ -88,6 +103,7 @@ template <> struct MappingTraits<obf::obfuscation_config> {
     io.mapOptional("string_encoding", config.string_encoding);
     io.mapOptional("constant_encoding", config.constant_encoding);
     io.mapOptional("mba", config.mba);
+    io.mapOptional("security", config.security);
   }
 };
 
@@ -165,6 +181,23 @@ std::string summarize_config(const obfuscation_config &config) {
   stream << "constant_encoding.min_bit_width: "
          << config.constant_encoding.min_bit_width << '\n';
   stream << "mba.depth: " << config.mba.depth << '\n';
+  stream << "security.fail_on_unvirtualized_strong_vm: "
+         << (config.security.fail_on_unvirtualized_strong_vm ? "true" : "false")
+         << '\n';
+  stream << "security.fail_on_unprotected_strong_vm_string: "
+         << (config.security.fail_on_unprotected_strong_vm_string ? "true"
+                                                                 : "false")
+         << '\n';
+  stream << "security.fail_on_shared_seed_resolver_in_strong_vm: "
+         << (config.security.fail_on_shared_seed_resolver_in_strong_vm ? "true"
+                                                                       : "false")
+         << '\n';
+  stream << "security.fail_on_target_cache_in_strong_vm: "
+         << (config.security.fail_on_target_cache_in_strong_vm ? "true" : "false")
+         << '\n';
+  stream << "security.fail_on_public_obf_symbol: "
+         << (config.security.fail_on_public_obf_symbol ? "true" : "false")
+         << '\n';
 
   return output;
 }
