@@ -1,0 +1,7 @@
+seed: 8080
+default_level: none
+targets:
+  - match: strong_target
+    level: strong_vm
+  - match: normal_target
+    level: vm

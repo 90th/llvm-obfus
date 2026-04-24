@@ -43,7 +43,7 @@ entry:
 ; CHECK-NOT: strong_vm_value.obf.wrapper.unresolved
 ; CHECK-NOT: strong_vm_value.obf.wrapper.encoded
 ; CHECK: %strong_vm_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_key_strong_vm_value
-; CHECK: %strong_vm_value.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve
+; CHECK: ptrtoint (ptr @__obf_vm_impl_strong_vm_value to i{{[0-9]+}})
 ; CHECK: call i32 %strong_vm_value.obf.wrapper.indirect(i32 %x, i64 %strong_vm_value.obf.wrapper.token)
 
 ; CHECK-LABEL: define i32 @main()
@@ -54,7 +54,7 @@ entry:
 ; CHECK-NOT: strong_vm_value.obf.unresolved
 ; CHECK-NOT: strong_vm_value.obf.encoded
 ; CHECK: %strong_vm_value.obf.target.key = load i{{[0-9]+}}, ptr @__obf_vm_key_strong_vm_value
-; CHECK: %strong_vm_value.obf.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve
+; CHECK: ptrtoint (ptr @__obf_vm_impl_strong_vm_value to i{{[0-9]+}})
 ; CHECK: call i32 %strong_vm_value.obf.indirect(i32 12, i64 %strong_vm_value.obf.call.token)
 
 ; CHECK-LABEL: define internal i32 @__obf_vm_impl_normal_vm_value(i32 %x, i64 %obf.hidden_token)
