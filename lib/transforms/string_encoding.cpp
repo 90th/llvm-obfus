@@ -1,5 +1,7 @@
 #include "obf/transforms/string_encoding.h"
 
+#include "obf/support/generated_names.h"
+
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -575,6 +577,21 @@ std::string make_decoder_name(llvm::StringRef global_name, llvm::StringRef prefi
   return (prefix + sanitize_name(global_name)).str();
 }
 
+std::string make_string_generated_name(llvm::Module &module,
+                                       const string_strategy_plan &plan,
+                                       llvm::StringRef role,
+                                       llvm::StringRef debug_prefix,
+                                       llvm::StringRef debug_suffix,
+                                       std::uint64_t seed,
+                                       const string_encoding_options &options) {
+  if (options.debug_preserve_generated_names) {
+    return make_decoder_name(plan.global->getName(), debug_prefix) +
+           debug_suffix.str();
+  }
+
+  return make_unique_obf_symbol_name(module, role, plan.global->getName(), seed);
+}
+
 std::size_t get_string_length(const llvm::GlobalVariable &global) {
   const auto *data =
       llvm::cast<llvm::ConstantDataSequential>(global.getInitializer());
@@ -889,15 +906,15 @@ select_plans(const std::vector<classified_string_candidate> &candidates,
 
 bool is_strong_vm_plaintext_violation(const string_strategy_plan &plan,
                                       const classified_string_candidate &candidate) {
-  const bool has_direct_protected_use = llvm::any_of(
-      candidate.summary.protected_uses, [](const classified_string_use &use) {
-        return use.kind != string_use_kind::forwarded_pointer_load;
-      });
-  return candidate.has_strong_vm_use && !plan.result.applied &&
-         plan.result.fallback_reason == "strong_vm_no_global_plaintext" &&
-         has_direct_protected_use &&
-         plan.result.detail.find("forwarded pointer table use") ==
-             std::string::npos;
+  if (!candidate.has_strong_vm_use) {
+    return false;
+  }
+
+  if (plan.result.applied) {
+    return plan.result.mode != string_encoding_mode::inline_stack_decode;
+  }
+
+  return plan.result.fallback_reason == "strong_vm_no_global_plaintext";
 }
 
 std::string describe_strong_vm_owners(
@@ -924,12 +941,12 @@ std::string describe_strong_vm_owners(
 void report_strong_vm_plaintext_violation(
     const string_strategy_plan &plan,
     const classified_string_candidate &candidate) {
-  std::string message = "strong_vm plaintext string violation: global ";
+  std::string message = "strong_vm invariant violation: string ";
   message += plan.result.global_name.empty() ? "<unknown>" : plan.result.global_name;
-  message += "; reason: ";
+  message += " would remain plaintext; reason=";
   message += plan.result.detail.empty() ? "no local string strategy"
-                                       : plan.result.detail;
-  message += "; owning strong_vm function: ";
+                                        : plan.result.detail;
+  message += "; owner=";
   message += describe_strong_vm_owners(candidate);
   llvm::report_fatal_error(llvm::StringRef(message));
 }
@@ -1111,18 +1128,20 @@ void emit_unrolled_decode(llvm::IRBuilder<> &builder, llvm::GlobalVariable &glob
   }
 }
 
-llvm::Function *create_ctor_decoder(llvm::Module &module, llvm::GlobalVariable &global,
-                                    std::uint64_t seed) {
+llvm::Function *create_ctor_decoder(llvm::Module &module,
+                                    const string_strategy_plan &plan,
+                                    const string_encoding_options &options) {
   llvm::LLVMContext &context = module.getContext();
   llvm::FunctionType *type =
       llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
+  const std::string decoder_name = make_string_generated_name(
+      module, plan, "__obf_str_d", "__obf_decode_", "", plan.seed, options);
   llvm::Function *decoder = llvm::Function::Create(
-      type, llvm::GlobalValue::InternalLinkage,
-      make_decoder_name(global.getName(), "__obf_decode_"), module);
+      type, llvm::GlobalValue::InternalLinkage, decoder_name, module);
 
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", decoder);
   llvm::IRBuilder<> builder(entry);
-  emit_unrolled_decode(builder, global, seed, false);
+  emit_unrolled_decode(builder, *plan.global, plan.seed, false);
   builder.CreateRetVoid();
   return decoder;
 }
@@ -1460,21 +1479,28 @@ llvm::Function *get_or_create_cached_family_helper(llvm::Module &module) {
   return create_cached_family_helper(module, name);
 }
 
-llvm::GlobalVariable *create_lazy_state_global(llvm::Module &module,
-                                               const string_strategy_plan &plan) {
+llvm::GlobalVariable *create_lazy_state_global(
+    llvm::Module &module, const string_strategy_plan &plan,
+    const string_encoding_options &options) {
   llvm::LLVMContext &context = module.getContext();
   if (plan.result.helper_shape == string_helper_shape::lazy_cached_pointer_v3) {
     llvm::Type *ptr_type = llvm::PointerType::getUnqual(context);
+    const std::string state_name = make_string_generated_name(
+        module, plan, "__obf_str_c", "__obf_cached_", "",
+        plan.seed ^ 0xcac4edULL, options);
     return new llvm::GlobalVariable(
         module, ptr_type, false, llvm::GlobalValue::InternalLinkage,
         llvm::ConstantPointerNull::get(cast<llvm::PointerType>(ptr_type)),
-        make_decoder_name(plan.global->getName(), "__obf_cached_"));
+        state_name);
   }
 
+  const std::string state_name = make_string_generated_name(
+      module, plan, "__obf_str_f", "__obf_decoded_", "",
+      plan.seed ^ 0xdec0deULL, options);
   return new llvm::GlobalVariable(
       module, llvm::Type::getInt1Ty(context), false,
       llvm::GlobalValue::InternalLinkage, llvm::ConstantInt::getFalse(context),
-      make_decoder_name(plan.global->getName(), "__obf_decoded_"));
+      state_name);
 }
 
 llvm::Function *get_or_create_lazy_family_helper(llvm::Module &module,
@@ -1490,11 +1516,13 @@ llvm::Function *get_or_create_lazy_family_helper(llvm::Module &module,
   }
 }
 
-llvm::Function *create_isolated_lazy_helper(llvm::Module &module,
-                                            const string_strategy_plan &plan) {
-  const std::string helper_name =
-      make_decoder_name(plan.global->getName(), "__obf_lazy_") +
-      "_" + to_string(plan.result.helper_shape);
+llvm::Function *create_isolated_lazy_helper(
+    llvm::Module &module, const string_strategy_plan &plan,
+    const string_encoding_options &options) {
+  const std::string shape_suffix = "_" + to_string(plan.result.helper_shape);
+  const std::string helper_name = make_string_generated_name(
+      module, plan, "__obf_str_l", "__obf_lazy_", shape_suffix,
+      plan.seed ^ static_cast<std::uint64_t>(plan.result.helper_shape), options);
   switch (plan.result.helper_shape) {
   case string_helper_shape::lazy_flag_reverse_v1:
     return create_flag_family_helper(module, helper_name, true);
@@ -1666,13 +1694,16 @@ discover_string_candidates(llvm::Module &module) {
 
 llvm::GlobalVariable *create_standalone_descriptor_global(
     llvm::Module &module, const string_strategy_plan &plan,
-    llvm::GlobalVariable &state_global) {
+    llvm::GlobalVariable &state_global, const string_encoding_options &options) {
   llvm::StructType *descriptor_type =
       get_string_descriptor_type(module.getContext(), plan.result.helper_shape);
+  const std::string descriptor_name = make_string_generated_name(
+      module, plan, "__obf_str_x", "__obf_desc_", "", plan.seed ^ 0xde5cULL,
+      options);
   return new llvm::GlobalVariable(
       module, descriptor_type, true, llvm::GlobalValue::InternalLinkage,
       create_descriptor_initializer(module.getContext(), plan, state_global),
-      make_decoder_name(plan.global->getName(), "__obf_desc_"));
+      descriptor_name);
 }
 
 std::vector<string_encoding_result> build_string_results(
@@ -1705,7 +1736,7 @@ std::vector<string_encoding_result> build_string_results(
         continue;
       }
 
-      state_globals[index] = create_lazy_state_global(module, plan);
+      state_globals[index] = create_lazy_state_global(module, plan, options);
       if (plan.result.merge_group < 0) {
         continue;
       }
@@ -1753,7 +1784,8 @@ std::vector<string_encoding_result> build_string_results(
       }
 
       llvm::GlobalVariable *descriptor =
-          create_standalone_descriptor_global(module, plan, *state_globals[index]);
+          create_standalone_descriptor_global(module, plan, *state_globals[index],
+                                             options);
       descriptor_ptrs[index] = descriptor;
     }
   }
@@ -1770,13 +1802,13 @@ std::vector<string_encoding_result> build_string_results(
         rewrite_inline_stack_uses(*plan.global, plan.seed, plan.inline_uses);
       } else if (plan.result.mode == string_encoding_mode::lazy_decode) {
         llvm::Function *family_helper = plan.isolate_lazy_helper
-                                            ? create_isolated_lazy_helper(module, plan)
+                                            ? create_isolated_lazy_helper(module, plan,
+                                                                         options)
                                             : get_or_create_lazy_family_helper(
                                                   module, plan.result.helper_shape);
         rewrite_lazy_uses(*family_helper, descriptor_ptrs[plan_index], plan.lazy_uses);
       } else if (plan.result.mode == string_encoding_mode::global_ctor) {
-        llvm::Function *decoder =
-            create_ctor_decoder(module, *plan.global, plan.seed);
+        llvm::Function *decoder = create_ctor_decoder(module, plan, options);
         llvm::appendToGlobalCtors(module, decoder, options.ctor_priority);
       }
     }

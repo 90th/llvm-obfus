@@ -1,0 +1,11 @@
+default_level: none
+debug_preserve_generated_names: true
+overrides:
+  - name: verify_license
+    level: strong_vm
+  - name: parse_secret_token
+    level: vm
+mba:
+  depth: 2
+security:
+  fail_on_public_obf_symbol: true

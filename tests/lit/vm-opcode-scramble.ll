@@ -25,11 +25,11 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-LABEL: define internal i32 @__obf_vm_impl_alpha_add(i32 %x, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK: {{^vm\.0:}}
 ; CHECK: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[ALPHA_OP:-?[0-9]+]]
 ; CHECK: {{^vm\.exec\.0:}}
-; CHECK-LABEL: define internal i32 @__obf_vm_impl_beta_add(i32 %x, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK: {{^vm\.0:}}
 ; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[ALPHA_OP]]
 ; CHECK: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[BETA_OP:-?[0-9]+]]

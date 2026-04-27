@@ -31,9 +31,6 @@ struct string_encoding_config {
   std::uint32_t max_strings_per_module = 64;
   bool prefer_lazy_decode = true;
   bool allow_ctor_fallback = true;
-  bool strong_vm_allow_global_plaintext = false;
-  bool strong_vm_allow_lazy_decode = false;
-  bool strong_vm_allow_ctor_fallback = false;
 };
 
 struct constant_encoding_config {
@@ -46,10 +43,6 @@ struct mba_config {
 };
 
 struct security_gate_config {
-  bool fail_on_unvirtualized_strong_vm = false;
-  bool fail_on_unprotected_strong_vm_string = false;
-  bool fail_on_shared_seed_resolver_in_strong_vm = false;
-  bool fail_on_target_cache_in_strong_vm = false;
   bool fail_on_public_obf_symbol = false;
 };
 
@@ -63,6 +56,7 @@ struct obfuscation_config {
   constant_encoding_config constant_encoding;
   mba_config mba;
   security_gate_config security;
+  bool debug_preserve_generated_names = false;
 };
 
 llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path);

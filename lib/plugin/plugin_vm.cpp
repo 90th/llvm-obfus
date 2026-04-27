@@ -1,5 +1,6 @@
 #include "obf/plugin/obfuscator_plugin_internal.h"
 
+#include "obf/support/generated_names.h"
 #include "obf/transforms/mba.h"
 #include "obf/vm/candidate_analysis.h"
 #include "obf/vm/virtualize.h"
@@ -51,11 +52,67 @@ std::uint64_t derive_vm_wrapper_token(llvm::StringRef function_name) {
   return derive_vm_hidden_token(function_name, function_name, 0x51f15eedULL);
 }
 
+std::string make_debug_vm_name(llvm::StringRef prefix,
+                               llvm::StringRef source_name) {
+  return (prefix + source_name).str();
+}
+
+std::string make_vm_generated_symbol_name(llvm::Module &module,
+                                          bool preserve_generated_names,
+                                          llvm::StringRef role,
+                                          llvm::StringRef source_name,
+                                          std::uint64_t seed,
+                                          llvm::StringRef debug_prefix) {
+  if (preserve_generated_names) {
+    return make_debug_vm_name(debug_prefix, source_name);
+  }
+
+  return make_unique_obf_symbol_name(module, role, source_name, seed);
+}
+
 std::string build_vm_region_helper_name(llvm::Function &function,
-                                        std::uint64_t ordinal) {
-  return llvm::formatv("__obf_vm_region_{0}_{1:x}", function.getName(),
-                       ordinal + 1)
-      .str();
+                                        std::uint64_t ordinal,
+                                        std::uint64_t seed,
+                                        bool preserve_generated_names) {
+  if (preserve_generated_names) {
+    return llvm::formatv("__obf_vm_region_{0}_{1:x}", function.getName(),
+                         ordinal + 1)
+        .str();
+  }
+
+  llvm::Module *module = function.getParent();
+  if (module == nullptr) {
+    return make_obf_symbol_name("__obf_vm_g", function.getName(),
+                                mix_generated_name_seed(seed, ordinal + 1));
+  }
+
+  return make_unique_obf_symbol_name(
+      *module, "__obf_vm_g", function.getName(),
+      mix_generated_name_seed(seed, ordinal + 1));
+}
+
+std::string make_vm_symbol_tag(llvm::Module &module,
+                               bool preserve_generated_names,
+                               llvm::StringRef source_name,
+                               std::uint64_t seed) {
+  if (preserve_generated_names) {
+    return source_name.str();
+  }
+
+  const std::string base = make_obf_symbol_name("i", source_name, seed);
+  for (std::uint64_t suffix = 0;; ++suffix) {
+    const std::string candidate =
+        suffix == 0 ? base : base + "_" + std::to_string(suffix);
+    if (module.getNamedValue(std::string("__obf_vm_bc_") + candidate) == nullptr &&
+        module.getNamedValue(std::string("__obf_vm_retkey_") + candidate) ==
+            nullptr) {
+      return candidate;
+    }
+  }
+}
+
+std::string make_vm_retkey_global_name(llvm::StringRef symbol_tag) {
+  return ("__obf_vm_retkey_" + symbol_tag).str();
 }
 
 struct vm_region_candidate {
@@ -210,15 +267,19 @@ find_regional_vm_candidates(llvm::Function &function,
 }
 
 bool can_virtualize_extracted_region(llvm::Function &function,
-                                     const vm_region_candidate &candidate,
-                                     std::uint64_t helper_ordinal) {
+                                      const vm_region_candidate &candidate,
+                                      std::uint64_t helper_ordinal,
+                                      std::uint64_t seed,
+                                      bool preserve_generated_names) {
   llvm::ValueToValueMapTy value_map;
   llvm::Function *clone = llvm::CloneFunction(&function, value_map);
   if (clone == nullptr) {
     return false;
   }
 
-  clone->setName(build_vm_region_helper_name(function, helper_ordinal) + ".probe");
+  clone->setName(build_vm_region_helper_name(function, helper_ordinal, seed,
+                                            preserve_generated_names) +
+                 ".probe");
   llvm::BasicBlock *clone_header =
       llvm::cast<llvm::BasicBlock>(value_map.lookup(candidate.header));
   llvm::SmallVector<llvm::BasicBlock *, 8> region_blocks;
@@ -259,8 +320,10 @@ bool can_virtualize_extracted_region(llvm::Function &function,
 }
 
 llvm::Function *extract_regional_vm_helper(llvm::Function &function,
-                                           const vm_region_candidate &candidate,
-                                           std::uint64_t helper_ordinal) {
+                                            const vm_region_candidate &candidate,
+                                            std::uint64_t helper_ordinal,
+                                            std::uint64_t seed,
+                                            bool preserve_generated_names) {
   llvm::SmallVector<llvm::BasicBlock *, 8> region_blocks(
       candidate.region_blocks.begin(), candidate.region_blocks.end());
   llvm::CodeExtractorAnalysisCache cache(function);
@@ -273,7 +336,9 @@ llvm::Function *extract_regional_vm_helper(llvm::Function &function,
                                 /*AllowVarArgs=*/false,
                                 /*AllowAlloca=*/false,
                                 /*AllocationBlock=*/nullptr,
-                                build_vm_region_helper_name(function, helper_ordinal));
+                                build_vm_region_helper_name(
+                                    function, helper_ordinal, seed,
+                                    preserve_generated_names));
   if (!extractor.isEligible()) {
     return nullptr;
   }
@@ -283,7 +348,8 @@ llvm::Function *extract_regional_vm_helper(llvm::Function &function,
     return nullptr;
   }
 
-  helper->setName(build_vm_region_helper_name(function, helper_ordinal));
+  helper->setName(build_vm_region_helper_name(function, helper_ordinal, seed,
+                                             preserve_generated_names));
   helper->setLinkage(llvm::GlobalValue::InternalLinkage);
   helper->setDSOLocal(true);
   return helper;
@@ -294,6 +360,7 @@ bool collect_regional_vm_targets(
     llvm::StringSet<> &skip_functions, std::uint64_t &helper_ordinal,
     std::size_t nesting_depth, std::size_t max_nesting_depth,
     std::size_t max_regions,
+    bool preserve_generated_names,
     llvm::SmallVectorImpl<vm_target_candidate> &targets) {
   bool extracted_any = false;
   std::size_t extracted_count = 0;
@@ -302,12 +369,15 @@ bool collect_regional_vm_targets(
         find_regional_vm_candidates(function, skip_functions);
     bool extracted_this_round = false;
     for (const vm_region_candidate &candidate : candidates) {
-      if (!can_virtualize_extracted_region(function, candidate, helper_ordinal)) {
+      if (!can_virtualize_extracted_region(
+              function, candidate, helper_ordinal, state.report.decision.seed,
+              preserve_generated_names)) {
         continue;
       }
 
-      llvm::Function *helper =
-          extract_regional_vm_helper(function, candidate, helper_ordinal++);
+      llvm::Function *helper = extract_regional_vm_helper(
+          function, candidate, helper_ordinal++, state.report.decision.seed,
+          preserve_generated_names);
       if (helper == nullptr) {
         continue;
       }
@@ -315,9 +385,11 @@ bool collect_regional_vm_targets(
       llvm::SmallVector<vm_target_candidate, 4> nested_targets;
       if (nesting_depth < max_nesting_depth) {
         (void)collect_regional_vm_targets(*helper, state, skip_functions,
-                                          helper_ordinal, nesting_depth + 1,
-                                          max_nesting_depth,
-                                          /*max_regions=*/1, nested_targets);
+                                           helper_ordinal, nesting_depth + 1,
+                                           max_nesting_depth,
+                                           /*max_regions=*/1,
+                                           preserve_generated_names,
+                                           nested_targets);
       }
 
       if (vm::analyze_candidate(*helper).eligible) {
@@ -345,7 +417,8 @@ bool collect_regional_vm_targets(
 llvm::SmallVector<vm_target_candidate, 8>
 discover_vm_targets_for_state(const function_pipeline_state &state,
                               llvm::StringSet<> &skip_functions,
-                              std::uint64_t &helper_ordinal) {
+                              std::uint64_t &helper_ordinal,
+                              bool preserve_generated_names) {
   llvm::SmallVector<vm_target_candidate, 8> targets;
   if (state.function == nullptr || state.function->isDeclaration() ||
       skip_functions.contains(state.function->getName())) {
@@ -366,7 +439,7 @@ discover_vm_targets_for_state(const function_pipeline_state &state,
         *state.function, state, skip_functions, helper_ordinal,
         /*nesting_depth=*/0,
         /*max_nesting_depth=*/1,
-        /*max_regions=*/2, targets);
+        /*max_regions=*/2, preserve_generated_names, targets);
     if (extracted_regions) {
       return targets;
     }
@@ -487,7 +560,8 @@ void sanitize_vm_wrapper_attributes(llvm::Function &interface_function) {
   interface_function.setAttributes(build_vm_abi_attribute_list(interface_function));
 }
 
-llvm::Function *clone_vm_implementation(llvm::Function &interface_function) {
+llvm::Function *clone_vm_implementation(llvm::Function &interface_function,
+                                        llvm::StringRef implementation_name) {
   llvm::Module *module = interface_function.getParent();
   if (module == nullptr) {
     return nullptr;
@@ -504,7 +578,7 @@ llvm::Function *clone_vm_implementation(llvm::Function &interface_function) {
       interface_function.getReturnType(), parameter_types, /*isVarArg=*/false);
   auto *implementation_function = llvm::Function::Create(
       implementation_type, llvm::GlobalValue::InternalLinkage,
-      ("__obf_vm_impl_" + interface_function.getName()).str(), module);
+      implementation_name, module);
   implementation_function->setCallingConv(interface_function.getCallingConv());
   implementation_function->setDSOLocal(true);
 
@@ -530,13 +604,15 @@ llvm::APInt derive_vm_target_key(const llvm::Function &function,
 
 llvm::APInt derive_vm_target_sentinel(const llvm::APInt &key);
 
-llvm::GlobalVariable *get_or_create_vm_target_global(llvm::Function &function);
+llvm::GlobalVariable *get_or_create_vm_target_global(
+    llvm::Function &function, llvm::StringRef global_name);
 
 llvm::APInt derive_vm_target_seed_mask(const llvm::Function &function,
                                        llvm::IntegerType *ptr_int_type);
 
 llvm::GlobalVariable *get_or_create_vm_target_seed_global(
     llvm::Function &interface_function, llvm::Function &implementation_function,
+    llvm::StringRef global_name, llvm::StringRef seed_case_function_name,
     llvm::IntegerType *ptr_int_type, vm_seed_resolver_shape seed_resolver_shape,
     std::uint32_t mba_depth);
 
@@ -547,18 +623,20 @@ llvm::Function *get_or_create_vm_target_seed_resolver(llvm::Module &module,
 
 llvm::Function *get_or_create_vm_target_seed_case_resolver(
     llvm::Function &interface_function, llvm::Function &implementation_function,
+    llvm::StringRef resolver_name,
     llvm::IntegerType *ptr_int_type, std::uint32_t mba_depth);
 
 void ensure_vm_target_seed_resolver_case(llvm::Function &interface_function,
-                                         llvm::Function &implementation_function,
-                                         llvm::IntegerType *ptr_int_type,
-                                         std::uint32_t mba_depth);
+                                          llvm::Function &implementation_function,
+                                          llvm::StringRef resolver_name,
+                                          llvm::IntegerType *ptr_int_type,
+                                          std::uint32_t mba_depth);
 
 llvm::GlobalVariable *
 get_or_create_vm_decode_key_global(llvm::Module &module,
-                                   llvm::IntegerType *ptr_int_type,
-                                   llvm::StringRef callee_name,
-                                   const llvm::APInt &key);
+                                    llvm::IntegerType *ptr_int_type,
+                                    llvm::StringRef global_name,
+                                    const llvm::APInt &key);
 
 llvm::Value *decode_virtualized_target_seed(
     llvm::IRBuilder<> &builder, llvm::Function &owner, llvm::StringRef prefix,
@@ -570,9 +648,9 @@ llvm::Value *decode_virtualized_target_seed(
 
 llvm::Value *decode_virtualized_integer_return(
     llvm::IRBuilder<> &builder, llvm::Function &owner,
-    llvm::StringRef callee_name, llvm::Value *encoded_ret,
-    llvm::Value *hidden_token, std::uint64_t token_seed,
-    std::uint32_t mba_depth);
+    llvm::StringRef callee_name, llvm::StringRef retkey_global_name,
+    llvm::Value *encoded_ret, llvm::Value *hidden_token,
+    std::uint64_t token_seed, std::uint32_t mba_depth);
 
 llvm::Value *build_encoded_vm_target_value(
     llvm::IRBuilder<> &builder, llvm::Function &owner,
@@ -633,10 +711,11 @@ llvm::Value *decode_encoded_vm_target_value(
 }
 
 void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
-                                  llvm::Function &implementation_function,
-                                  std::uint64_t wrapper_token,
-                                  vm_resolver_shape resolver_shape,
-                                  vm_seed_resolver_shape seed_resolver_shape,
+                                   llvm::Function &implementation_function,
+                                   const virtualized_function_binding &binding,
+                                   std::uint64_t wrapper_token,
+                                   vm_resolver_shape resolver_shape,
+                                   vm_seed_resolver_shape seed_resolver_shape,
                                   std::uint32_t mba_depth) {
   llvm::Module *module = interface_function.getParent();
   if (module == nullptr) {
@@ -650,7 +729,8 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
 
   llvm::GlobalVariable *target_global = nullptr;
   if (resolver_shape == vm_resolver_shape::cached_sentinel_global) {
-    target_global = get_or_create_vm_target_global(interface_function);
+    target_global = get_or_create_vm_target_global(
+        interface_function, binding.target_cache_global_name);
     if (target_global == nullptr) {
       llvm_unreachable("vm target cache global creation failed");
     }
@@ -659,14 +739,14 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
   const llvm::APInt key = derive_vm_target_key(interface_function, ptr_int_type);
   const llvm::APInt sentinel = derive_vm_target_sentinel(key);
   llvm::GlobalVariable *target_seed_global = get_or_create_vm_target_seed_global(
-      interface_function, implementation_function, ptr_int_type, seed_resolver_shape,
-      mba_depth);
+      interface_function, implementation_function, binding.target_seed_global_name,
+      binding.seed_case_function_name, ptr_int_type, seed_resolver_shape, mba_depth);
   if (target_seed_global == nullptr) {
     llvm_unreachable("vm target seed global creation failed");
   }
 
   llvm::GlobalVariable *decode_key_global = get_or_create_vm_decode_key_global(
-      *module, ptr_int_type, interface_function.getName(), key);
+      *module, ptr_int_type, binding.decode_key_global_name, key);
 
   const std::uint64_t raw_salt =
       static_cast<std::uint64_t>(llvm::hash_value(interface_function.getName())) *
@@ -721,8 +801,9 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
       llvm::Value *wrapper_ret = call;
       if (interface_function.getReturnType()->isIntegerTy()) {
         wrapper_ret = decode_virtualized_integer_return(
-            builder, interface_function, interface_function.getName(), call,
-            hidden_token, wrapper_token, mba_depth);
+            builder, interface_function, interface_function.getName(),
+            make_vm_retkey_global_name(binding.vm_symbol_tag), call, hidden_token,
+            wrapper_token, mba_depth);
       }
       builder.CreateRet(wrapper_ret);
     }
@@ -787,8 +868,9 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
     llvm::Value *wrapper_ret = call;
     if (interface_function.getReturnType()->isIntegerTy()) {
       wrapper_ret = decode_virtualized_integer_return(
-          call_builder, interface_function, interface_function.getName(), call,
-          hidden_token, wrapper_token, mba_depth);
+          call_builder, interface_function, interface_function.getName(),
+          make_vm_retkey_global_name(binding.vm_symbol_tag), call, hidden_token,
+          wrapper_token, mba_depth);
     }
     call_builder.CreateRet(wrapper_ret);
   }
@@ -796,10 +878,14 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
 
 virtualized_function_binding
 prepare_virtualized_function_binding(const function_pipeline_state &state,
-                                     std::uint32_t mba_depth) {
+                                     const obfuscation_config &config) {
   virtualized_function_binding binding;
   llvm::Function *interface_function = state.function;
   if (interface_function == nullptr || interface_function->isDeclaration()) {
+    return binding;
+  }
+  llvm::Module *module = interface_function->getParent();
+  if (module == nullptr) {
     return binding;
   }
 
@@ -813,8 +899,29 @@ prepare_virtualized_function_binding(const function_pipeline_state &state,
     direct_call_sites.push_back(call);
   }
 
+  const std::uint64_t seed = state.report.decision.seed;
+  const bool preserve_generated_names = config.debug_preserve_generated_names;
+  const llvm::StringRef source_name = interface_function->getName();
+  const std::string implementation_name = make_vm_generated_symbol_name(
+      *module, preserve_generated_names, "__obf_vm_i", source_name, seed,
+      "__obf_vm_impl_");
+  binding.vm_symbol_tag =
+      make_vm_symbol_tag(*module, preserve_generated_names, source_name, seed);
+  binding.target_cache_global_name = make_vm_generated_symbol_name(
+      *module, preserve_generated_names, "__obf_vm_t", source_name,
+      seed ^ 0x7a9ceULL, "__obf_vm_target_");
+  binding.target_seed_global_name = make_vm_generated_symbol_name(
+      *module, preserve_generated_names, "__obf_vm_s", source_name,
+      seed ^ 0x5eedULL, "__obf_vm_targetseed_");
+  binding.decode_key_global_name = make_vm_generated_symbol_name(
+      *module, preserve_generated_names, "__obf_vm_k", source_name,
+      seed ^ 0xdec0deULL, "__obf_vm_key_");
+  binding.seed_case_function_name = make_vm_generated_symbol_name(
+      *module, preserve_generated_names, "__obf_vm_c", source_name,
+      seed ^ 0xca5eULL, "__obf_vm_seedcase_");
+
   llvm::Function *implementation_function =
-      clone_vm_implementation(*interface_function);
+      clone_vm_implementation(*interface_function, implementation_name);
   if (implementation_function == nullptr) {
     return binding;
   }
@@ -867,13 +974,13 @@ llvm::APInt derive_vm_target_seed_mask(const llvm::Function &function,
                      /*isSigned=*/false, /*implicitTrunc=*/true);
 }
 
-llvm::GlobalVariable *get_or_create_vm_target_global(llvm::Function &function) {
+llvm::GlobalVariable *get_or_create_vm_target_global(
+    llvm::Function &function, llvm::StringRef global_name) {
   llvm::Module *module = function.getParent();
   if (module == nullptr) {
     return nullptr;
   }
 
-  const std::string global_name = ("__obf_vm_target_" + function.getName()).str();
   const llvm::DataLayout &data_layout = module->getDataLayout();
   auto *ptr_int_type =
       data_layout.getIntPtrType(module->getContext(), function.getAddressSpace());
@@ -892,6 +999,7 @@ llvm::GlobalVariable *get_or_create_vm_target_global(llvm::Function &function) {
 
 llvm::GlobalVariable *get_or_create_vm_target_seed_global(
     llvm::Function &interface_function, llvm::Function &implementation_function,
+    llvm::StringRef global_name, llvm::StringRef seed_case_function_name,
     llvm::IntegerType *ptr_int_type, vm_seed_resolver_shape seed_resolver_shape,
     std::uint32_t mba_depth) {
   llvm::Module *module = interface_function.getParent();
@@ -899,12 +1007,11 @@ llvm::GlobalVariable *get_or_create_vm_target_seed_global(
     return nullptr;
   }
 
-  const std::string global_name =
-      ("__obf_vm_targetseed_" + interface_function.getName()).str();
   if (llvm::GlobalVariable *existing = module->getNamedGlobal(global_name)) {
     if (seed_resolver_shape == vm_seed_resolver_shape::shared_switch_resolver) {
       ensure_vm_target_seed_resolver_case(interface_function, implementation_function,
-                                          ptr_int_type, mba_depth);
+                                          seed_case_function_name, ptr_int_type,
+                                          mba_depth);
     }
     return existing;
   }
@@ -915,7 +1022,8 @@ llvm::GlobalVariable *get_or_create_vm_target_seed_global(
   target_seed_global->setDSOLocal(true);
   if (seed_resolver_shape == vm_seed_resolver_shape::shared_switch_resolver) {
     ensure_vm_target_seed_resolver_case(interface_function, implementation_function,
-                                        ptr_int_type, mba_depth);
+                                        seed_case_function_name, ptr_int_type,
+                                        mba_depth);
   }
 
   llvm::Function *seed_init = get_or_create_vm_target_seed_init_function(*module);
@@ -923,13 +1031,13 @@ llvm::GlobalVariable *get_or_create_vm_target_seed_global(
   llvm::IRBuilder<> builder(entry_block.getTerminator());
 
   llvm::Value *interface_int = builder.CreatePtrToInt(
-      &interface_function, ptr_int_type, global_name + ".iface");
+      &interface_function, ptr_int_type, global_name.str() + ".iface");
   llvm::Value *share_base = builder.CreateXor(
       interface_int,
       llvm::ConstantInt::get(ptr_int_type,
                              derive_vm_target_seed_mask(interface_function,
                                                          ptr_int_type)),
-      global_name + ".base");
+      global_name.str() + ".base");
   builder.CreateStore(share_base, target_seed_global);
   return target_seed_global;
 }
@@ -988,14 +1096,13 @@ llvm::Function *get_or_create_vm_target_seed_resolver(llvm::Module &module,
 
 llvm::Function *get_or_create_vm_target_seed_case_resolver(
     llvm::Function &interface_function, llvm::Function &implementation_function,
+    llvm::StringRef resolver_name,
     llvm::IntegerType *ptr_int_type, std::uint32_t mba_depth) {
   llvm::Module *module = interface_function.getParent();
   if (module == nullptr) {
     return nullptr;
   }
 
-  const std::string resolver_name =
-      ("__obf_vm_seedcase_" + interface_function.getName()).str();
   if (llvm::Function *existing = module->getFunction(resolver_name)) {
     return existing;
   }
@@ -1042,9 +1149,10 @@ llvm::Function *get_or_create_vm_target_seed_case_resolver(
 }
 
 void ensure_vm_target_seed_resolver_case(llvm::Function &interface_function,
-                                         llvm::Function &implementation_function,
-                                         llvm::IntegerType *ptr_int_type,
-                                         std::uint32_t mba_depth) {
+                                          llvm::Function &implementation_function,
+                                          llvm::StringRef resolver_name,
+                                          llvm::IntegerType *ptr_int_type,
+                                          std::uint32_t mba_depth) {
   llvm::Module *module = interface_function.getParent();
   if (module == nullptr) {
     return;
@@ -1061,7 +1169,8 @@ void ensure_vm_target_seed_resolver_case(llvm::Function &interface_function,
   const llvm::APInt key = derive_vm_target_key(interface_function, ptr_int_type);
   auto *key_const = llvm::ConstantInt::get(ptr_int_type, key);
   llvm::Function *case_resolver = get_or_create_vm_target_seed_case_resolver(
-      interface_function, implementation_function, ptr_int_type, mba_depth);
+      interface_function, implementation_function, resolver_name, ptr_int_type,
+      mba_depth);
   if (case_resolver == nullptr) {
     return;
   }
@@ -1087,10 +1196,9 @@ void ensure_vm_target_seed_resolver_case(llvm::Function &interface_function,
 
 llvm::GlobalVariable *
 get_or_create_vm_decode_key_global(llvm::Module &module,
-                                   llvm::IntegerType *ptr_int_type,
-                                   llvm::StringRef callee_name,
-                                   const llvm::APInt &key) {
-  const std::string global_name = ("__obf_vm_key_" + callee_name).str();
+                                    llvm::IntegerType *ptr_int_type,
+                                    llvm::StringRef global_name,
+                                    const llvm::APInt &key) {
   if (auto *existing = module.getNamedGlobal(global_name)) {
     return existing;
   }
@@ -1294,16 +1402,15 @@ llvm::Value *decode_virtualized_target_seed(
 
 llvm::Value *decode_virtualized_integer_return(
     llvm::IRBuilder<> &builder, llvm::Function &owner,
-    llvm::StringRef callee_name, llvm::Value *encoded_ret,
-    llvm::Value *hidden_token, std::uint64_t token_seed,
-    std::uint32_t mba_depth) {
+    llvm::StringRef callee_name, llvm::StringRef retkey_global_name,
+    llvm::Value *encoded_ret, llvm::Value *hidden_token,
+    std::uint64_t token_seed, std::uint32_t mba_depth) {
   llvm::Module *module = owner.getParent();
   if (module == nullptr || !encoded_ret->getType()->isIntegerTy()) {
     return encoded_ret;
   }
 
-  llvm::GlobalVariable *retkey_global =
-      module->getNamedGlobal(("__obf_vm_retkey_" + callee_name).str());
+  llvm::GlobalVariable *retkey_global = module->getNamedGlobal(retkey_global_name);
   if (retkey_global == nullptr) {
     return encoded_ret;
   }
@@ -1369,7 +1476,8 @@ bool rewrite_calls_to_virtualized_function(
 
   llvm::GlobalVariable *target_global = nullptr;
   if (resolver_shape == vm_resolver_shape::cached_sentinel_global) {
-    target_global = get_or_create_vm_target_global(function);
+    target_global = get_or_create_vm_target_global(
+        function, binding.target_cache_global_name);
     if (target_global == nullptr) {
       return false;
     }
@@ -1378,13 +1486,13 @@ bool rewrite_calls_to_virtualized_function(
   const llvm::APInt key = derive_vm_target_key(function, ptr_int_type);
   const llvm::APInt sentinel = derive_vm_target_sentinel(key);
   llvm::GlobalVariable *target_seed_global = get_or_create_vm_target_seed_global(
-      function, implementation_function, ptr_int_type, seed_resolver_shape,
-      mba_depth);
+      function, implementation_function, binding.target_seed_global_name,
+      binding.seed_case_function_name, ptr_int_type, seed_resolver_shape, mba_depth);
   if (target_seed_global == nullptr) {
     return false;
   }
   llvm::GlobalVariable *decode_key_global = get_or_create_vm_decode_key_global(
-      *module, ptr_int_type, function.getName(), key);
+      *module, ptr_int_type, binding.decode_key_global_name, key);
 
   const std::uint64_t raw_salt =
       static_cast<std::uint64_t>(llvm::hash_value(function.getName())) *
@@ -1446,8 +1554,9 @@ bool rewrite_calls_to_virtualized_function(
       llvm::Type *call_ret_type = rewritten_call->getType();
       if (call_ret_type->isIntegerTy()) {
         llvm::Value *decoded_ret = decode_virtualized_integer_return(
-            builder, *caller, function.getName(), rewritten_call, hidden_token,
-            site.hidden_token, mba_depth);
+            builder, *caller, function.getName(),
+            make_vm_retkey_global_name(binding.vm_symbol_tag), rewritten_call,
+            hidden_token, site.hidden_token, mba_depth);
 
         for (llvm::Use *use : original_uses) {
           use->set(decoded_ret);
@@ -1531,7 +1640,8 @@ bool rewrite_calls_to_virtualized_function(
     if (call_ret_type->isIntegerTy()) {
       llvm::IRBuilder<> decode_builder(call);
       llvm::Value *decoded_ret = decode_virtualized_integer_return(
-          decode_builder, *caller, function.getName(), rewritten_call,
+          decode_builder, *caller, function.getName(),
+          make_vm_retkey_global_name(binding.vm_symbol_tag), rewritten_call,
           hidden_token, site.hidden_token, mba_depth);
 
       for (llvm::Use *use : original_uses) {
@@ -1587,7 +1697,8 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
     }
 
     const llvm::SmallVector<vm_target_candidate, 8> target_candidates =
-        discover_vm_targets_for_state(state, skip_functions, regional_helper_ordinal);
+        discover_vm_targets_for_state(state, skip_functions, regional_helper_ordinal,
+                                      config.debug_preserve_generated_names);
 
     for (const vm_target_candidate &target_candidate : target_candidates) {
       llvm::Function *target_function = target_candidate.function;
@@ -1599,7 +1710,7 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
                                                  .report =
                                                      target_candidate.state->report};
       virtualized_function_binding binding =
-          prepare_virtualized_function_binding(target_state, config.mba.depth);
+          prepare_virtualized_function_binding(target_state, config);
       if (binding.implementation_function == nullptr) {
         continue;
       }
@@ -1607,7 +1718,7 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
 
       vm::virtualization_options vm_options{.mba_depth = config.mba.depth,
                                             .hidden_token_handshake = true,
-                                            .symbol_tag = target_function->getName().str()};
+                                            .symbol_tag = binding.vm_symbol_tag};
       vm_options.valid_hidden_tokens.push_back(binding.wrapper_token);
       for (const virtualized_call_site &site : binding.call_sites) {
         vm_options.valid_hidden_tokens.push_back(site.hidden_token);
@@ -1622,10 +1733,15 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
         const vm_seed_resolver_shape seed_resolver_shape =
             select_vm_seed_resolver_shape(
                 binding.state->report.decision.policy.level);
+        binding.uses_target_cache =
+            resolver_shape == vm_resolver_shape::cached_sentinel_global;
+        binding.uses_shared_seed_resolver =
+            seed_resolver_shape == vm_seed_resolver_shape::shared_switch_resolver;
         rewrite_vm_interface_wrapper(*binding.interface_function,
-                                     *binding.implementation_function,
-                                     binding.wrapper_token, resolver_shape,
-                                     seed_resolver_shape, config.mba.depth);
+                                      *binding.implementation_function,
+                                      binding,
+                                      binding.wrapper_token, resolver_shape,
+                                      seed_resolver_shape, config.mba.depth);
         virtualized_functions[target_function->getName()] = std::move(binding);
         skip_functions.insert(target_function->getName());
       }

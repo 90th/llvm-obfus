@@ -54,12 +54,6 @@ template <> struct MappingTraits<obf::string_encoding_config> {
                    std::uint32_t{64});
     io.mapOptional("prefer_lazy_decode", config.prefer_lazy_decode, true);
     io.mapOptional("allow_ctor_fallback", config.allow_ctor_fallback, true);
-    io.mapOptional("strong_vm_allow_global_plaintext",
-                   config.strong_vm_allow_global_plaintext, false);
-    io.mapOptional("strong_vm_allow_lazy_decode",
-                   config.strong_vm_allow_lazy_decode, false);
-    io.mapOptional("strong_vm_allow_ctor_fallback",
-                   config.strong_vm_allow_ctor_fallback, false);
   }
 };
 
@@ -79,14 +73,6 @@ template <> struct MappingTraits<obf::mba_config> {
 
 template <> struct MappingTraits<obf::security_gate_config> {
   static void mapping(IO &io, obf::security_gate_config &config) {
-    io.mapOptional("fail_on_unvirtualized_strong_vm",
-                   config.fail_on_unvirtualized_strong_vm, false);
-    io.mapOptional("fail_on_unprotected_strong_vm_string",
-                   config.fail_on_unprotected_strong_vm_string, false);
-    io.mapOptional("fail_on_shared_seed_resolver_in_strong_vm",
-                   config.fail_on_shared_seed_resolver_in_strong_vm, false);
-    io.mapOptional("fail_on_target_cache_in_strong_vm",
-                   config.fail_on_target_cache_in_strong_vm, false);
     io.mapOptional("fail_on_public_obf_symbol",
                    config.fail_on_public_obf_symbol, false);
   }
@@ -104,6 +90,8 @@ template <> struct MappingTraits<obf::obfuscation_config> {
     io.mapOptional("constant_encoding", config.constant_encoding);
     io.mapOptional("mba", config.mba);
     io.mapOptional("security", config.security);
+    io.mapOptional("debug_preserve_generated_names",
+                   config.debug_preserve_generated_names, false);
   }
 };
 
@@ -164,40 +152,17 @@ std::string summarize_config(const obfuscation_config &config) {
   stream << "string_encoding.allow_ctor_fallback: "
          << (config.string_encoding.allow_ctor_fallback ? "true" : "false")
          << '\n';
-  stream << "string_encoding.strong_vm_allow_global_plaintext: "
-         << (config.string_encoding.strong_vm_allow_global_plaintext ? "true"
-                                                                    : "false")
-         << '\n';
-  stream << "string_encoding.strong_vm_allow_lazy_decode: "
-         << (config.string_encoding.strong_vm_allow_lazy_decode ? "true"
-                                                               : "false")
-         << '\n';
-  stream << "string_encoding.strong_vm_allow_ctor_fallback: "
-         << (config.string_encoding.strong_vm_allow_ctor_fallback ? "true"
-                                                                 : "false")
-         << '\n';
   stream << "constant_encoding.max_constants_per_function: "
          << config.constant_encoding.max_constants_per_function << '\n';
   stream << "constant_encoding.min_bit_width: "
          << config.constant_encoding.min_bit_width << '\n';
   stream << "mba.depth: " << config.mba.depth << '\n';
-  stream << "security.fail_on_unvirtualized_strong_vm: "
-         << (config.security.fail_on_unvirtualized_strong_vm ? "true" : "false")
-         << '\n';
-  stream << "security.fail_on_unprotected_strong_vm_string: "
-         << (config.security.fail_on_unprotected_strong_vm_string ? "true"
-                                                                 : "false")
-         << '\n';
-  stream << "security.fail_on_shared_seed_resolver_in_strong_vm: "
-         << (config.security.fail_on_shared_seed_resolver_in_strong_vm ? "true"
-                                                                       : "false")
-         << '\n';
-  stream << "security.fail_on_target_cache_in_strong_vm: "
-         << (config.security.fail_on_target_cache_in_strong_vm ? "true" : "false")
-         << '\n';
+  stream << "security.strong_vm_invariants: always_enforced\n";
   stream << "security.fail_on_public_obf_symbol: "
          << (config.security.fail_on_public_obf_symbol ? "true" : "false")
          << '\n';
+  stream << "debug_preserve_generated_names: "
+         << (config.debug_preserve_generated_names ? "true" : "false") << '\n';
 
   return output;
 }

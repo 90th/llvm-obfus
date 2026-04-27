@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace llvm {
 
@@ -48,6 +49,13 @@ struct virtualized_function_binding {
   const function_pipeline_state *state = nullptr;
   llvm::SmallVector<virtualized_call_site, 8> call_sites;
   std::uint64_t wrapper_token = 0;
+  std::string vm_symbol_tag;
+  std::string target_cache_global_name;
+  std::string target_seed_global_name;
+  std::string decode_key_global_name;
+  std::string seed_case_function_name;
+  bool uses_target_cache = false;
+  bool uses_shared_seed_resolver = false;
 };
 
 using virtualized_function_map =

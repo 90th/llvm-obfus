@@ -55,6 +55,7 @@ struct string_encoding_options {
   bool strong_vm_allow_global_plaintext = false;
   bool strong_vm_allow_lazy_decode = false;
   bool strong_vm_allow_ctor_fallback = false;
+  bool debug_preserve_generated_names = false;
 };
 
 struct string_encoding_result {

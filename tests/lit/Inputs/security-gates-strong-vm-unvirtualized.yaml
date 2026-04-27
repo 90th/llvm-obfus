@@ -6,5 +6,3 @@ overrides:
 targets:
   - match: unsupported_alloca
     level: strong_vm
-security:
-  fail_on_unvirtualized_strong_vm: true

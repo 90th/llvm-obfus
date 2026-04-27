@@ -41,20 +41,20 @@ entry:
   ret i32 %code
 }
 
-; CHECK-DAG: @__obf_vm_bc_extended_semantics = private unnamed_addr constant [{{[0-9]+}} x i8] c"
-; CHECK-DAG: @__obf_vm_targetseed_extended_semantics = private global i{{[0-9]+}} 0
-; CHECK-DAG: @__obf_vm_retkey_extended_semantics = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @__obf_vm_bc_i_{{[A-Za-z0-9_]+}} = private unnamed_addr constant [{{[0-9]+}} x i8] c"
+; CHECK-DAG: @__obf_vm_s_{{[A-Za-z0-9_]+}} = private global i{{[0-9]+}} 0
+; CHECK-DAG: @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}} = private global i64 {{-?[0-9]+}}
 ; CHECK-LABEL: define i32 @extended_semantics(i32 %x, float %f, ptr %dst)
-; CHECK: %extended_semantics.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_target_extended_semantics
-; CHECK: %extended_semantics.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_key_extended_semantics
-; CHECK: %extended_semantics.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_targetseed_extended_semantics
+; CHECK: %extended_semantics.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
+; CHECK: %extended_semantics.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
+; CHECK: %extended_semantics.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; CHECK: %extended_semantics.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %extended_semantics.obf.wrapper.target.key, i{{[0-9]+}} %extended_semantics.obf.wrapper.target.base)
 ; CHECK: %extended_semantics.obf.wrapper.real.int = sub i{{[0-9]+}} %extended_semantics.obf.wrapper.target.value, %extended_semantics.obf.wrapper.target.base
-; CHECK: %extended_semantics.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_key_extended_semantics
+; CHECK: %extended_semantics.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %extended_semantics.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %extended_semantics.obf.wrapper.decoded to ptr
 ; CHECK: call i32 %extended_semantics.obf.wrapper.indirect(i32 %x, float %f, ptr %dst, i64 %extended_semantics.obf.wrapper.token)
-; CHECK: %extended_semantics.obf.retkey = load i64, ptr @__obf_vm_retkey_extended_semantics
-; CHECK-LABEL: define internal i32 @__obf_vm_impl_extended_semantics(i32 %x, float %f, ptr %dst, i64 %obf.hidden_token)
+; CHECK: %extended_semantics.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
+; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, float %f, ptr %dst, i64 %obf.hidden_token)
 ; CHECK-DAG: %obf.vm.slot.6.0 = alloca <2 x i32>, align 8
 ; CHECK-DAG: %obf.vm.slot.9.0 = alloca <2 x i32>, align 8
 ; CHECK-DAG: %obf.vm.slot.11.0 = alloca { i32, i32 }, align 8

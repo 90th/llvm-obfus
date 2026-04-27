@@ -19,50 +19,51 @@ entry:
 }
 
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
-; CHECK-DAG: @__obf_vm_bc_fold_value = private unnamed_addr constant [{{[0-9]+}} x i8] c"
-; CHECK-DAG: @__obf_vm_retkey_fold_value = private global i64 {{-?[0-9]+}}
-; CHECK: @__obf_vm_target_fold_value = private global i{{[0-9]+}} {{-?[0-9]+}}
-; CHECK: @__obf_vm_targetseed_fold_value = private global i{{[0-9]+}} 0
-; CHECK: @llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]
+; CHECK-DAG: @[[VMBC:__obf_vm_bc_i_[A-Za-z0-9_]+]] = private unnamed_addr constant [{{[0-9]+}} x i8] c"
+; CHECK-DAG: @[[RETKEY:__obf_vm_retkey_i_[A-Za-z0-9_]+]] = private global i64 {{-?[0-9]+}}
+; CHECK-DAG: @[[TARGET:__obf_vm_t_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
+; CHECK-DAG: @[[TARGETSEED:__obf_vm_s_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} 0
+; CHECK-DAG: @[[KEY:__obf_vm_k_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
+; CHECK-DAG: @llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]
 ; CHECK-LABEL: define i32 @fold_value(i32 %value)
 ; CHECK: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
 ; CHECK: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
 ; CHECK: %obf.entropy.direct = extractvalue { i64, i64 } %obf.entropy.pair, 0
 ; CHECK: %fold_value.obf.wrapper.token = {{(add|sub|xor) i64}}
-; CHECK: %fold_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_target_fold_value
+; CHECK: %fold_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @[[TARGET]]
 ; CHECK: br i1 %fold_value.obf.wrapper.unresolved, label %fold_value.obf.wrapper.resolve, label %fold_value.obf.wrapper.call
 ; CHECK: fold_value.obf.wrapper.resolve:
-; CHECK: %fold_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_key_fold_value
-; CHECK: %fold_value.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_targetseed_fold_value
+; CHECK: %fold_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @[[KEY]]
+; CHECK: %fold_value.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @[[TARGETSEED]]
 ; CHECK: %fold_value.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %fold_value.obf.wrapper.target.key, i{{[0-9]+}} %fold_value.obf.wrapper.target.base)
 ; CHECK: %fold_value.obf.wrapper.real.int = sub i{{[0-9]+}} %fold_value.obf.wrapper.target.value, %fold_value.obf.wrapper.target.base
-; CHECK: store i{{[0-9]+}} %fold_value.obf.wrapper.resolved, ptr @__obf_vm_target_fold_value
+; CHECK: store i{{[0-9]+}} %fold_value.obf.wrapper.resolved, ptr @[[TARGET]]
 ; CHECK: fold_value.obf.wrapper.call:
-; CHECK: %fold_value.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_key_fold_value
+; CHECK: %fold_value.obf.wrapper.key = load i{{[0-9]+}}, ptr @[[KEY]]
 ; CHECK: %fold_value.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.wrapper.decoded to ptr
 ; CHECK: %fold_value.obf.wrapper.call{{[0-9]*}} = call i32 %fold_value.obf.wrapper.indirect(i32 %value, i64 %fold_value.obf.wrapper.token)
-; CHECK: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_fold_value
+; CHECK: %fold_value.obf.retkey = load i64, ptr @[[RETKEY]]
 ; CHECK: %fold_value.obf.retkey.cast = trunc i64 %fold_value.obf.retkey.bound to i32
 ; CHECK: %fold_value.obf.retdec = {{(or|sub) i32}}
 ; CHECK-LABEL: define i32 @main()
 ; CHECK: %fold_value.obf.call.token = {{(add|sub|xor) i64}}
-; CHECK: %fold_value.obf.check = load i{{[0-9]+}}, ptr @__obf_vm_target_fold_value
+; CHECK: %fold_value.obf.check = load i{{[0-9]+}}, ptr @[[TARGET]]
 ; CHECK: %fold_value.obf.unresolved = icmp eq i{{[0-9]+}} %fold_value.obf.check,
 ; CHECK: br i1 %fold_value.obf.unresolved, label %fold_value.obf.resolve, label %fold_value.obf.call
 ; CHECK: fold_value.obf.resolve:
 ; CHECK-NOT: llvm.returnaddress
-; CHECK: store i{{[0-9]+}} %fold_value.obf.resolved, ptr @__obf_vm_target_fold_value
+; CHECK: store i{{[0-9]+}} %fold_value.obf.resolved, ptr @[[TARGET]]
 ; CHECK: fold_value.obf.call:
 ; CHECK: %fold_value.obf.encoded = phi i{{[0-9]+}}
-; CHECK: %fold_value.obf.key = load i{{[0-9]+}}, ptr @__obf_vm_key_fold_value
+; CHECK: %fold_value.obf.key = load i{{[0-9]+}}, ptr @[[KEY]]
 ; CHECK: %fold_value.obf.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.decoded to ptr
 ; CHECK: call i32 %fold_value.obf.indirect(i32 0, i64 %fold_value.obf.call.token)
-; CHECK: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_fold_value
+; CHECK: %fold_value.obf.retkey = load i64, ptr @[[RETKEY]]
 ; CHECK: %fold_value.obf.retkey.bound = {{(or|sub) i64}}
 ; CHECK: %fold_value.obf.retkey.cast = trunc i64 %fold_value.obf.retkey.bound to i32
 ; CHECK: %fold_value.obf.retdec = {{(or|sub) i32}}
 ; CHECK: icmp eq i32 %fold_value.obf.retdec,
-; CHECK-LABEL: define internal i32 @__obf_vm_impl_fold_value(i32 %value, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)
 ; CHECK: entry.obf.vm:
 ; CHECK-NOT: %obf.vm.pc = alloca i32
 ; CHECK-NOT: dispatch.obf.vm:
@@ -79,36 +80,36 @@ entry:
 ; CHECK: indirectbr ptr
 ; CHECK: {{^vm\.exec\.0:}}
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
-; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_fold_value
+; CHECK: %obf.vm.ret.retkey = load i64, ptr @[[RETKEY]]
 ; CHECK: ret i32 %obf.vm.ret.encoded
 ; CHECK-LABEL: define private i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %obf.target.key, i{{[0-9]+}} %obf.share.base)
 ; CHECK-LABEL: define private void @__obf_vm_seed_ctor()
 
 ; INST-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
 ; INST-LABEL: define i32 @fold_value(i32 %value)
-; INST: %fold_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_target_fold_value
-; INST: %fold_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_key_fold_value
-; INST: %fold_value.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_targetseed_fold_value
+; INST: %fold_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
+; INST: %fold_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
+; INST: %fold_value.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %fold_value.obf.wrapper.target.key, i{{[0-9]+}} %fold_value.obf.wrapper.target.base)
 ; INST: %fold_value.obf.wrapper.real.int = {{(add|sub) i[0-9]+}}
 ; INST: %fold_value.obf.wrapper.token = {{(add|sub|xor) i64}}
 ; INST: %fold_value.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.wrapper.decoded to ptr
 ; INST: call i32 %fold_value.obf.wrapper.indirect(i32 %value, i64 %fold_value.obf.wrapper.token)
-; INST: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_fold_value
+; INST: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.retdec = {{(or|sub) i32}}
 ; INST-LABEL: define i32 @main()
-; INST: %fold_value.obf.check = load i{{[0-9]+}}, ptr @__obf_vm_target_fold_value
+; INST: %fold_value.obf.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; INST: br i1
-; INST: %fold_value.obf.key = load i{{[0-9]+}}, ptr @__obf_vm_key_fold_value
+; INST: %fold_value.obf.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.decoded to ptr
 ; INST: call i32 %fold_value.obf.indirect(i32 0, i64 %fold_value.obf.call.token)
-; INST: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_fold_value
+; INST: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.retkey.bound = {{(or|sub) i64}}
 ; INST: %fold_value.obf.retdec = {{(or|sub) i32}}
-; INST-LABEL: define internal i32 @__obf_vm_impl_fold_value(i32 %value, i64 %obf.hidden_token)
+; INST-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)
 ; INST: %obf.vm.state = alloca i64
 ; INST: {{^vm\.0:}}
 ; INST: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, {{-?[0-9]+}}
 ; INST: indirectbr ptr
 ; INST: {{^vm\.exec\.0:}}
-; INST: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_fold_value
+; INST: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}

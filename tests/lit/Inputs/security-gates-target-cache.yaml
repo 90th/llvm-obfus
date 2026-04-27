@@ -3,5 +3,3 @@ default_level: none
 targets:
   - match: target_cache_case
     level: strong_vm
-security:
-  fail_on_target_cache_in_strong_vm: true

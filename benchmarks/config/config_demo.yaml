@@ -1,7 +1,7 @@
 default_level: none
 overrides:
   - name: parse_mode
-    level: strong_vm
+    level: vm
   - name: fold_value
     level: strong_vm
 block_split:

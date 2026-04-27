@@ -44,9 +44,9 @@ entry:
 ; STRUCTURE: call i32 %{{[^ ]+}}(i32 %x, i64 %{{[^)]+}})
 ; STRUCTURE-LABEL: define i32 @strong_target_c(i32 %x)
 ; STRUCTURE: call i32 %{{[^ ]+}}(i32 %x, i64 %{{[^)]+}})
-; STRUCTURE-DAG: define internal i32 @__obf_vm_impl_strong_target_a(i32 %x, i64 %obf.hidden_token)
-; STRUCTURE-DAG: define internal i32 @__obf_vm_impl_strong_target_b(i32 %x, i64 %obf.hidden_token)
-; STRUCTURE-DAG: define internal i32 @__obf_vm_impl_strong_target_c(i32 %x, i64 %obf.hidden_token)
+; STRUCTURE-DAG: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
+; STRUCTURE-DAG: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
+; STRUCTURE-DAG: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 
 ; SHAPES-DAG: ptrmat.direct
 ; SHAPES-DAG: ptrmat.split

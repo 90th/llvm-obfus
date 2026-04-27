@@ -7,4 +7,4 @@ entry:
   ret ptr @.skip
 }
 
-; CHECK: LLVM ERROR: strong_vm plaintext string violation: global .skip; reason: strong_vm_no_global_plaintext: no local string strategy; owning strong_vm function: strong_skip_string
+; CHECK: LLVM ERROR: strong_vm invariant violation: string .skip would remain plaintext; reason=strong_vm_no_global_plaintext: no local string strategy; owner=strong_skip_string

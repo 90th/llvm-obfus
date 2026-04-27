@@ -1,5 +1,7 @@
 seed: 9191
 default_level: none
 targets:
+  - match: target_cache_case
+    level: vm
   - match: seed_case
-    level: strong_vm
+    level: vm

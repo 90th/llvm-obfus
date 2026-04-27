@@ -47,8 +47,8 @@ attributes #1 = { mustprogress nofree norecurse nosync willreturn memory(read) }
 ; CHECK-LABEL: define i32 @attr_readonly(ptr %base, i32 %index) {
 ; CHECK: %attr_readonly.obf.wrapper.call{{[0-9]*}} = call i32 %attr_readonly.obf.wrapper.indirect(ptr %base, i32 %index, i64 %attr_readonly.obf.wrapper.token)
 
-; CHECK-LABEL: define internal i32 @__obf_vm_impl_attr_readnone(i32 %x, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK-SAME: #[[IMPL:[0-9]+]] {
-; CHECK-LABEL: define internal i32 @__obf_vm_impl_attr_readonly(ptr %base, i32 %index, i64 %obf.hidden_token)
+; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(ptr %base, i32 %index, i64 %obf.hidden_token)
 ; CHECK-SAME: #[[IMPL]] {
 ; CHECK: attributes #[[IMPL]] = { {{.*}}noinline{{.*}}"instcombine-no-verify-fixpoint"{{.*}} }
