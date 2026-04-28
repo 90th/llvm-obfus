@@ -1,0 +1,6 @@
+profile: fortress
+targets:
+  - match: string_user
+    level: strong
+string_encoding:
+  min_string_length: 99

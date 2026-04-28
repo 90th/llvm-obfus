@@ -6,6 +6,7 @@
 #include "llvm/Support/Error.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,14 @@ struct function_override {
 struct target_rule {
   std::string match;
   protection_level level = protection_level::none;
+};
+
+enum class config_profile {
+  fast,
+  standard,
+  guarded,
+  fortress,
+  lab,
 };
 
 struct block_split_config {
@@ -47,6 +56,7 @@ struct security_gate_config {
 };
 
 struct obfuscation_config {
+  std::optional<config_profile> profile;
   std::uint64_t seed = 0;
   protection_level default_level = protection_level::none;
   std::vector<function_override> overrides;
@@ -61,5 +71,6 @@ struct obfuscation_config {
 
 llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path);
 std::string summarize_config(const obfuscation_config &config);
+llvm::StringRef to_string(config_profile profile);
 
 } // namespace obf

@@ -1,0 +1,4 @@
+profile: standard
+targets:
+  - match: profile_accept
+    level: strong

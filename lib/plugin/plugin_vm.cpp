@@ -1717,8 +1717,9 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
       binding.state = target_candidate.state;
 
       vm::virtualization_options vm_options{.mba_depth = config.mba.depth,
-                                            .hidden_token_handshake = true,
-                                            .symbol_tag = binding.vm_symbol_tag};
+                                             .hidden_token_handshake = true,
+                                             .prefer_island_helpers = true,
+                                             .symbol_tag = binding.vm_symbol_tag};
       vm_options.valid_hidden_tokens.push_back(binding.wrapper_token);
       for (const virtualized_call_site &site : binding.call_sites) {
         vm_options.valid_hidden_tokens.push_back(site.hidden_token);

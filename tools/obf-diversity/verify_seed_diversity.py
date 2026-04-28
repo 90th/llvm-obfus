@@ -27,6 +27,18 @@ MARKER_GROUPS = {
         "temp": r"vm\.handler\.shape\.temp",
         "neutral": r"vm\.handler\.shape\.neutral",
     },
+    "dispatcher_shapes": {
+        "direct": r"vm\.dispatch\.shape\.direct",
+        "switch": r"vm\.dispatch\.shape\.switch",
+        "banked": r"vm\.dispatch\.shape\.banked",
+        "bank": r"vm\.dispatch\.bank",
+    },
+    "vm_islands": {
+        "topology": r"vm\.island\.topology\.helper_shards",
+        "count": r"vm\.island\.count\.\d+",
+        "entry": r"vm\.island\.entry",
+        "helper": r"vm\.island\.helper",
+    },
     "pointer_materialization": {
         "direct": r"ptrmat\.direct",
         "split": r"ptrmat\.split",
@@ -57,6 +69,7 @@ SYMBOL_PATTERNS = {
     "vm_seed": r"__obf_vm_s_[A-Za-z0-9_]+",
     "vm_key": r"__obf_vm_k_[A-Za-z0-9_]+",
     "vm_case": r"__obf_vm_c_[A-Za-z0-9_]+",
+    "vm_helper": r"__obf_vm_h_[A-Za-z0-9_]+",
     "string": r"__obf_str_[A-Za-z0-9_]+",
     "entropy": r"__obf_entropy_thunk_[A-Za-z0-9_]+",
 }
@@ -185,6 +198,15 @@ def is_vm_implementation(function_body: str) -> bool:
     return "indirectbr" in function_body and bool(extract_header_opcodes(function_body))
 
 
+def is_vm_like_function(function_name: str, function_body: str) -> bool:
+    return (
+        function_name.startswith("__obf_vm_i_")
+        or function_name.startswith("__obf_vm_h_")
+        or "obf.vm." in function_body
+        or "vm.island." in function_body
+    )
+
+
 def count_markers(ir_text: str, patterns: dict[str, str]) -> dict[str, int]:
     return {name: len(re.findall(pattern, ir_text)) for name, pattern in patterns.items()}
 
@@ -206,6 +228,25 @@ def vm_structure(function_body: str) -> dict[str, int]:
     }
 
 
+def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str, int]:
+    vm_like_bodies = {
+        name: body for name, body in functions.items() if is_vm_like_function(name, body)
+    }
+    helper_bodies = {
+        name: body for name, body in functions.items() if name.startswith("__obf_vm_h_")
+    }
+    marker_counts = count_markers(marker_text, MARKER_GROUPS["vm_islands"])
+    return {
+        "island_marker_count": sum(marker_counts.values()),
+        "helper_count": len(helper_bodies),
+        "vm_like_function_count": len(vm_like_bodies),
+        "largest_vm_like_function_lines": max(
+            (len([line for line in body.splitlines() if line.strip()]) for body in vm_like_bodies.values()),
+            default=0,
+        ),
+    }
+
+
 def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
     functions = parse_functions(ir_text)
     vm_bodies = {name: body for name, body in functions.items() if is_vm_implementation(body)}
@@ -220,6 +261,7 @@ def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
         name: sorted(set(re.findall(pattern, ir_text)))
         for name, pattern in SYMBOL_PATTERNS.items()
     }
+    island_structure = vm_island_structure(functions, marker_text)
 
     fingerprint: dict[str, Any] = {
         "vm_function_count": len(vm_bodies),
@@ -230,6 +272,10 @@ def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
         "vm_structure_hash": hash_json(structures) if structures else "",
         "symbol_sets": symbol_sets,
         "symbol_name_hash": hash_json(symbol_sets),
+        "vm_island_structure": island_structure,
+        "vm_island_hash": hash_json(island_structure)
+        if island_structure["island_marker_count"] or island_structure["helper_count"]
+        else "",
     }
     for group_name, patterns in MARKER_GROUPS.items():
         counts = count_markers(marker_text, patterns)
@@ -243,6 +289,10 @@ def dimension_value(fingerprint: dict[str, Any], dimension: str) -> Any:
         return fingerprint["opcode_map_hash"]
     if dimension == "handler_shapes":
         return fingerprint["handler_shapes"]
+    if dimension == "dispatcher_shapes":
+        return fingerprint["dispatcher_shapes"]
+    if dimension == "vm_islands":
+        return fingerprint["vm_island_hash"]
     if dimension == "pointer_materialization":
         return fingerprint["pointer_materialization"]
     if dimension == "entropy_thunks":
@@ -335,6 +385,8 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
     dimensions = [
         "opcode_mapping",
         "handler_shapes",
+        "dispatcher_shapes",
+        "vm_islands",
         "pointer_materialization",
         "entropy_thunks",
         "mba_shapes",
@@ -353,9 +405,20 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
             statuses[dimension] = "same"
 
     if any(fingerprints[seed]["vm_function_count"] for seed in seeds):
-        primary = [statuses[dimension] for dimension in ("opcode_mapping", "handler_shapes", "vm_structure")]
+        primary = [
+            statuses[dimension]
+            for dimension in (
+                "opcode_mapping",
+                "handler_shapes",
+                "dispatcher_shapes",
+                "vm_islands",
+                "vm_structure",
+            )
+        ]
         if "different" not in primary:
-            failures.append("vm output had no opcode, handler-shape, or structure diversity")
+            failures.append(
+                "vm output had no opcode, handler-shape, dispatcher-shape, island, or structure diversity"
+            )
     return statuses, failures
 
 
@@ -433,6 +496,8 @@ def main() -> int:
     dimension_names = [
         "opcode_mapping",
         "handler_shapes",
+        "dispatcher_shapes",
+        "vm_islands",
         "pointer_materialization",
         "entropy_thunks",
         "mba_shapes",

@@ -10,7 +10,7 @@ the project applies obfuscation per function instead of as one blanket pipeline.
 
 - `obf_plugin` for LLVM's new pass manager
 - registered passes: `obf-feature-report`, `obf-entropy-init`, `obf-cfg-state-cleanup`, `obf-artifact-cleanup`, `obf-block-split`, `obf-split-scaffold`, `obf-string-encode`, `obf-vm`, `obf-constant-encode`, `obf-instruction-substitute`, `obf-opaque-gep`, `obf-function-outline`, `obf-control-flatten`, `obf-opaque-preds`, `obf-bogus-cf`, `obf-safe-pipeline`
-- YAML config with `seed`, `default_level`, `overrides`, `targets`, `block_split`, `string_encoding`, `constant_encoding`, and `mba.depth`
+- YAML config with `profile`, `seed`, `default_level`, `overrides`, `targets`, `block_split`, `string_encoding`, `constant_encoding`, `mba`, `security`, and `debug_preserve_generated_names`
 - benchmark targets: `license_demo_bench`, `config_demo_bench`, `vm_workflow_demo_bench`, `wpo_demo_bench`
 - a runtime entropy object generated from `runtime/entropy_anchor.c`
 
@@ -63,11 +63,32 @@ opt -load-pass-plugin build/obf_plugin.so \
 
 ## config
 
-the loader accepts `seed`, `default_level`, `overrides`, `targets`, `block_split`, `string_encoding`, `constant_encoding`, and `mba`.
+the loader accepts `profile`, `seed`, `default_level`, `overrides`, `targets`, `block_split`, `string_encoding`, `constant_encoding`, `mba`, `security`, and `debug_preserve_generated_names`.
 
 protection levels are `none`, `light`, `strong`, `vm`, and `strong_vm`.
 
+profiles are optional. if `profile` is omitted, legacy defaults are used. new configs should usually start with `profile: standard` and then add `targets` or `overrides` for the functions that need protection.
+
+profile defaults are applied before explicit YAML sections, and `--obf-seed` still overrides the top-level `seed` after config loading:
+
+```text
+base defaults -> profile defaults -> explicit YAML sections -> --obf-seed
+```
+
+section-level overrides win as a unit. for example, if `profile: fortress` and an `mba:` section are both present, the explicit `mba:` section is used while other absent sections still come from the fortress profile.
+
+available profiles:
+
+- `fast`: quick iteration, low overhead
+- `standard`: recommended default for normal use
+- `guarded`: stronger protection for sensitive paths while staying practical
+- `fortress`: strict high-value protection defaults
+- `lab`: experimental/high-diversity stress defaults
+
+profiles do not automatically promote every function to `strong_vm`. use `targets`, `overrides`, or annotations to choose which functions are protected. `strong_vm` invariants are always fail-closed regardless of profile and cannot be disabled by config.
+
 ```yaml
+profile: standard
 seed: 20240601
 default_level: none
 
@@ -93,6 +114,26 @@ constant_encoding:
 
 mba:
   depth: 1
+```
+
+example high-value config:
+
+```yaml
+profile: fortress
+targets:
+  - match: "verify_*"
+    level: strong_vm
+  - match: "license_*"
+    level: strong_vm
+```
+
+example lab config for one function:
+
+```yaml
+profile: lab
+overrides:
+  - name: verify_license
+    level: strong_vm
 ```
 
 ## notes

@@ -35,12 +35,25 @@ inline constexpr std::uint32_t vm_slot_rotation_cell_count = 3;
 inline constexpr std::size_t vm_opcode_count =
     static_cast<std::size_t>(opcode::ret) + 1;
 inline constexpr std::size_t vm_switch_dispatch_min_instruction_count = 16;
-inline constexpr std::size_t switch_dispatch_bank_count = 4;
+inline constexpr std::size_t vm_island_min_instruction_count = 16;
+inline constexpr std::size_t vm_island_max_count = 4;
+inline constexpr std::size_t switch_dispatch_max_bank_count = 4;
 
 enum class dispatch_backend_variant : std::uint32_t {
   switch_index = 0,
   direct_threaded_match = 1,
   direct_threaded_switch = 2,
+};
+
+enum class vm_dispatcher_shape : std::uint32_t {
+  direct_threaded = 0,
+  switch_biased = 1,
+  banked = 2,
+};
+
+enum class vm_island_topology : std::uint32_t {
+  none = 0,
+  helper_shards = 1,
 };
 
 enum class scalar_handler_shape : std::uint32_t {
@@ -83,6 +96,7 @@ struct serialized_bytecode_program {
 struct switch_dispatch_bank {
   llvm::BasicBlock *block = nullptr;
   llvm::PHINode *dispatch_index_phi = nullptr;
+  llvm::SwitchInst *switch_inst = nullptr;
   std::uint64_t salt = 0;
 };
 
@@ -99,6 +113,10 @@ struct rewrite_function_context {
   const opcode_permutation &opcode_map;
   dispatch_backend_variant dispatch_backend =
       dispatch_backend_variant::switch_index;
+  vm_dispatcher_shape dispatch_shape = vm_dispatcher_shape::switch_biased;
+  vm_island_topology island_topology = vm_island_topology::none;
+  std::uint32_t island_count = 0;
+  std::uint32_t switch_dispatch_bank_count = 1;
   llvm::ArrayRef<std::uint32_t> dispatch_index_for_instruction;
   llvm::GlobalVariable *bytecode_global = nullptr;
   llvm::GlobalVariable *retkey_global = nullptr;
@@ -146,6 +164,21 @@ scalar_handler_shape select_scalar_handler_shape(std::uint64_t seed_base,
 std::uint32_t select_dispatch_variant(std::uint64_t seed_base, std::uint64_t salt,
                                       std::size_t instruction_count,
                                       std::uint32_t variant_count = 3);
+vm_dispatcher_shape select_dispatcher_shape(std::uint64_t seed_base,
+                                            std::uint64_t salt,
+                                            std::size_t instruction_count);
+std::uint32_t select_switch_dispatch_bank_count(std::uint64_t seed_base,
+                                                std::uint64_t salt,
+                                                std::size_t instruction_count,
+                                                vm_dispatcher_shape shape);
+vm_island_topology select_vm_island_topology(bool prefer_islands,
+                                             std::size_t instruction_count,
+                                             std::uint64_t seed_base,
+                                             std::uint64_t salt);
+std::uint32_t select_vm_island_count(std::uint64_t seed_base,
+                                     std::uint64_t salt,
+                                     std::size_t instruction_count,
+                                     vm_island_topology topology);
 opcode_permutation build_opcode_permutation(const llvm::Function &function,
                                             const bytecode_program &program);
 std::uint8_t get_physical_opcode(const opcode_permutation &permutation,
@@ -163,6 +196,7 @@ void initialize_dispatch_runtime(llvm::IRBuilder<> &entry_builder,
 void emit_dispatch(llvm::IRBuilder<> &builder,
                    rewrite_function_context &context,
                    llvm::Value *dispatch_index, std::uint64_t salt);
+std::uint32_t outline_vm_islands(rewrite_function_context &context);
 
 serialized_bytecode_program serialize_bytecode_program(
     const bytecode_program &program,

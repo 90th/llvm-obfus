@@ -1,0 +1,4 @@
+profile: fast
+targets:
+  - match: unsupported_alloca
+    level: strong_vm

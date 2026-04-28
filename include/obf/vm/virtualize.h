@@ -14,6 +14,7 @@ namespace obf::vm {
 struct virtualization_options {
   std::uint32_t mba_depth = 1;
   bool hidden_token_handshake = false;
+  bool prefer_island_helpers = false;
   std::vector<std::uint64_t> valid_hidden_tokens;
   std::string symbol_tag;
 };

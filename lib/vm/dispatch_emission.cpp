@@ -129,6 +129,77 @@ std::uint32_t select_dispatch_variant(std::uint64_t seed_base, std::uint64_t sal
                  fallback_variant_count);
 }
 
+vm_dispatcher_shape select_dispatcher_shape(std::uint64_t seed_base,
+                                            std::uint64_t salt,
+                                            std::size_t instruction_count) {
+  if (instruction_count < vm_switch_dispatch_min_instruction_count) {
+    return vm_dispatcher_shape::direct_threaded;
+  }
+
+  const std::uint64_t choice = mix_seed(
+      seed_base, salt ^ (static_cast<std::uint64_t>(instruction_count) *
+                         0x9e3779b97f4a7c15ULL));
+  return (choice & 1ULL) == 0 ? vm_dispatcher_shape::switch_biased
+                              : vm_dispatcher_shape::banked;
+}
+
+std::uint32_t select_switch_dispatch_bank_count(std::uint64_t seed_base,
+                                                std::uint64_t salt,
+                                                std::size_t instruction_count,
+                                                vm_dispatcher_shape shape) {
+  if (shape == vm_dispatcher_shape::switch_biased || instruction_count < 8) {
+    return 1;
+  }
+  if (shape != vm_dispatcher_shape::banked) {
+    return 0;
+  }
+
+  const std::uint32_t max_bank_count = static_cast<std::uint32_t>(
+      std::min<std::size_t>(switch_dispatch_max_bank_count,
+                            std::max<std::size_t>(2, instruction_count / 4)));
+  return 2U + static_cast<std::uint32_t>(
+                 mix_seed(seed_base, salt ^ 0xba11d15fULL) %
+                 (max_bank_count - 1U));
+}
+
+vm_island_topology select_vm_island_topology(bool prefer_islands,
+                                              std::size_t instruction_count,
+                                              std::uint64_t seed_base,
+                                              std::uint64_t salt) {
+  if (!prefer_islands || instruction_count < vm_island_min_instruction_count) {
+    return vm_island_topology::none;
+  }
+  if (instruction_count < vm_island_min_instruction_count + 8) {
+    const std::uint64_t choice = mix_seed(
+        seed_base, salt ^ (static_cast<std::uint64_t>(instruction_count) *
+                           0x151a151a151a151aULL));
+    if ((choice & 1ULL) != 0) {
+      return vm_island_topology::none;
+    }
+  }
+  return vm_island_topology::helper_shards;
+}
+
+std::uint32_t select_vm_island_count(std::uint64_t seed_base,
+                                     std::uint64_t salt,
+                                     std::size_t instruction_count,
+                                     vm_island_topology topology) {
+  if (topology != vm_island_topology::helper_shards) {
+    return 0;
+  }
+  const std::uint32_t base_count = instruction_count >= 96 ? 3U : 2U;
+  const std::uint32_t max_count = static_cast<std::uint32_t>(
+      std::min<std::size_t>(vm_island_max_count,
+                            std::max<std::size_t>(base_count,
+                                                  instruction_count / 32)));
+  if (max_count <= base_count) {
+    return base_count;
+  }
+  return base_count + static_cast<std::uint32_t>(
+                          mix_seed(seed_base, salt ^ 0x151a9dULL) %
+                          (max_count - base_count + 1U));
+}
+
 opcode_permutation build_opcode_permutation(const llvm::Function &function,
                                             const bytecode_program &program) {
   opcode_permutation permutation;
@@ -243,13 +314,35 @@ void initialize_dispatch_runtime(llvm::IRBuilder<> &entry_builder,
                                  rewrite_function_context &context) {
   if (!context.instruction_blocks.empty() &&
       context.dispatch_backend == dispatch_backend_variant::switch_index) {
-    context.switch_dispatch_banks.reserve(switch_dispatch_bank_count);
-    for (std::size_t bank_index = 0; bank_index < switch_dispatch_bank_count;
-         ++bank_index) {
+    const std::uint32_t bank_count =
+        std::max<std::uint32_t>(1, context.switch_dispatch_bank_count);
+    context.switch_dispatch_banks.reserve(bank_count);
+    llvm::SmallVector<std::uint32_t, switch_dispatch_max_bank_count> bank_order;
+    bank_order.reserve(bank_count);
+    for (std::uint32_t bank_index = 0; bank_index < bank_count; ++bank_index) {
+      bank_order.push_back(bank_index);
+    }
+    std::stable_sort(bank_order.begin(), bank_order.end(), [&](std::uint32_t lhs,
+                                                               std::uint32_t rhs) {
+      const std::uint64_t lhs_key = mix_seed(context.bytecode_seed,
+                                            0xba110000ULL + lhs);
+      const std::uint64_t rhs_key = mix_seed(context.bytecode_seed,
+                                            0xba110000ULL + rhs);
+      return lhs_key == rhs_key ? lhs < rhs : lhs_key < rhs_key;
+    });
+
+    for (std::size_t bank_position = 0; bank_position < bank_order.size();
+         ++bank_position) {
+      const std::uint32_t bank_index = bank_order[bank_position];
       const std::uint64_t bank_salt = 0x177000ULL + bank_index;
+      const bool is_banked_shape =
+          context.dispatch_shape == vm_dispatcher_shape::banked;
+      const std::string shape_name =
+          is_banked_shape ? "vm.dispatch.shape.banked.vm.dispatch.bank"
+                          : "vm.dispatch.shape.switch.vm.dispatch.switch";
       auto *dispatch_switch_block = llvm::BasicBlock::Create(
           context.function.getContext(),
-          "dispatch.index.bank.obf.vm." + std::to_string(bank_index),
+          shape_name + "." + std::to_string(bank_index),
           &context.function);
       llvm::IRBuilder<> switch_builder(dispatch_switch_block);
       auto *dispatch_index_phi = switch_builder.CreatePHI(
@@ -262,15 +355,17 @@ void initialize_dispatch_runtime(llvm::IRBuilder<> &entry_builder,
       for (std::size_t instruction_index = 0;
            instruction_index < context.instruction_blocks.size();
            ++instruction_index) {
+        const std::uint32_t dispatch_index =
+            context.dispatch_index_for_instruction[instruction_index];
         switch_inst->addCase(
             switch_builder.getInt32(remap_switch_dispatch_constant(
-                context.bytecode_seed,
-                context.dispatch_index_for_instruction[instruction_index], bank_salt)),
+                context.bytecode_seed, dispatch_index, bank_salt)),
             context.instruction_blocks[instruction_index]);
       }
       context.switch_dispatch_banks.push_back(
           {.block = dispatch_switch_block,
            .dispatch_index_phi = dispatch_index_phi,
+           .switch_inst = switch_inst,
            .salt = bank_salt});
     }
   }
@@ -311,9 +406,24 @@ void emit_dispatch(llvm::IRBuilder<> &builder,
     }
 
     llvm::BasicBlock *dispatch_source = builder.GetInsertBlock();
-    const std::size_t bank_index = static_cast<std::size_t>(
-        mix_seed(context.bytecode_seed, 0x5357495443483003ULL ^ salt) %
-        context.switch_dispatch_banks.size());
+    std::size_t bank_index = 0;
+    if (context.dispatch_shape == vm_dispatcher_shape::banked) {
+      if (auto *constant_index = llvm::dyn_cast<llvm::ConstantInt>(dispatch_index)) {
+        const std::uint32_t bank_id = static_cast<std::uint32_t>(
+            constant_index->getZExtValue() % context.switch_dispatch_banks.size());
+        for (std::size_t index = 0; index < context.switch_dispatch_banks.size();
+             ++index) {
+          if ((context.switch_dispatch_banks[index].salt - 0x177000ULL) == bank_id) {
+            bank_index = index;
+            break;
+          }
+        }
+      } else {
+        bank_index = static_cast<std::size_t>(
+            mix_seed(context.bytecode_seed, 0x5357495443483003ULL ^ salt) %
+            context.switch_dispatch_banks.size());
+      }
+    }
     switch_dispatch_bank &bank = context.switch_dispatch_banks[bank_index];
     builder.CreateBr(bank.block);
     bank.dispatch_index_phi->addIncoming(dispatch_index, dispatch_source);
@@ -327,7 +437,8 @@ void emit_dispatch(llvm::IRBuilder<> &builder,
 
   auto *jump_block = llvm::BasicBlock::Create(
       context.function.getContext(),
-      "dispatch.jump.obf.vm." + std::to_string(context.dispatch_site_counter++),
+      "vm.dispatch.shape.direct.dispatch.jump.obf.vm." +
+          std::to_string(context.dispatch_site_counter++),
       &context.function);
   builder.CreateCondBr(in_range, jump_block, context.trap_block);
 

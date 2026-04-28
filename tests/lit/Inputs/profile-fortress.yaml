@@ -1,0 +1,4 @@
+profile: fortress
+targets:
+  - match: profile_accept
+    level: strong
