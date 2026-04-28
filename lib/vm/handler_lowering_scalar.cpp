@@ -32,6 +32,144 @@ bool is_binary_opcode(opcode op) {
   }
 }
 
+bool is_polymorphic_integer_binary_opcode(opcode op) {
+  switch (op) {
+  case opcode::add:
+  case opcode::sub:
+  case opcode::and_op:
+  case opcode::or_op:
+  case opcode::xor_op:
+    return true;
+  default:
+    return false;
+  }
+}
+
+llvm::StringRef scalar_shape_marker(scalar_handler_shape shape) {
+  switch (shape) {
+  case scalar_handler_shape::direct:
+    return "vm.handler.shape.direct";
+  case scalar_handler_shape::temp_slot_roundtrip:
+    return "vm.handler.shape.temp";
+  case scalar_handler_shape::mba_neutralized:
+    return "vm.handler.shape.neutral";
+  }
+  llvm_unreachable("unknown scalar handler shape");
+}
+
+llvm::AllocaInst *create_handler_temp_slot(llvm::IRBuilder<> &builder,
+                                           llvm::Type *type,
+                                           llvm::StringRef name) {
+  llvm::BasicBlock *block = builder.GetInsertBlock();
+  llvm::Function *function = block != nullptr ? block->getParent() : nullptr;
+  if (function == nullptr || type == nullptr) {
+    return nullptr;
+  }
+
+  llvm::BasicBlock &entry_block = function->getEntryBlock();
+  llvm::IRBuilder<> entry_builder(&entry_block, entry_block.begin());
+  return entry_builder.CreateAlloca(type, nullptr, name);
+}
+
+llvm::BinaryOperator *emit_plain_integer_binary(llvm::IRBuilder<> &builder,
+                                                opcode op, llvm::Value *lhs,
+                                                llvm::Value *rhs,
+                                                llvm::StringRef name) {
+  switch (op) {
+  case opcode::add:
+    return llvm::cast<llvm::BinaryOperator>(builder.CreateAdd(lhs, rhs, name));
+  case opcode::sub:
+    return llvm::cast<llvm::BinaryOperator>(builder.CreateSub(lhs, rhs, name));
+  case opcode::and_op:
+    return llvm::cast<llvm::BinaryOperator>(builder.CreateAnd(lhs, rhs, name));
+  case opcode::or_op:
+    return llvm::cast<llvm::BinaryOperator>(builder.CreateOr(lhs, rhs, name));
+  case opcode::xor_op:
+    return llvm::cast<llvm::BinaryOperator>(builder.CreateXor(lhs, rhs, name));
+  default:
+    llvm_unreachable("opcode is not a polymorphic integer binary opcode");
+  }
+}
+
+llvm::Value *emit_current_integer_binary(llvm::IRBuilder<> &builder, opcode op,
+                                         llvm::Value *lhs, llvm::Value *rhs,
+                                         std::uint32_t flags,
+                                         const mba::builder_context &mba_context,
+                                         std::uint64_t salt,
+                                         llvm::Instruction *&flag_target,
+                                         llvm::StringRef name) {
+  flag_target = nullptr;
+  switch (op) {
+  case opcode::add:
+    if (!has_instruction_flag(flags, instruction_flag_nsw) &&
+        !has_instruction_flag(flags, instruction_flag_nuw)) {
+      return mba::create_add(builder, lhs, rhs, mba_context, salt + 3, name);
+    }
+    flag_target = emit_plain_integer_binary(builder, op, lhs, rhs, name);
+    return flag_target;
+  case opcode::sub:
+    if (!has_instruction_flag(flags, instruction_flag_nsw) &&
+        !has_instruction_flag(flags, instruction_flag_nuw)) {
+      return mba::create_sub(builder, lhs, rhs, mba_context, salt + 4, name);
+    }
+    flag_target = emit_plain_integer_binary(builder, op, lhs, rhs, name);
+    return flag_target;
+  case opcode::xor_op:
+    return mba::create_xor(builder, lhs, rhs, mba_context, salt + 5, name);
+  case opcode::and_op:
+  case opcode::or_op:
+    flag_target = emit_plain_integer_binary(builder, op, lhs, rhs, name);
+    return flag_target;
+  default:
+    llvm_unreachable("opcode is not a polymorphic integer binary opcode");
+  }
+}
+
+void apply_integer_binary_flags(llvm::Instruction *instruction,
+                                std::uint32_t flags) {
+  if (instruction == nullptr) {
+    return;
+  }
+  auto *binary = llvm::dyn_cast<llvm::BinaryOperator>(instruction);
+  if (binary == nullptr) {
+    return;
+  }
+  if (has_instruction_flag(flags, instruction_flag_nsw)) {
+    binary->setHasNoSignedWrap();
+  }
+  if (has_instruction_flag(flags, instruction_flag_nuw)) {
+    binary->setHasNoUnsignedWrap();
+  }
+}
+
+llvm::Value *apply_scalar_handler_shape(llvm::IRBuilder<> &builder,
+                                        scalar_handler_shape shape,
+                                        llvm::Value *result) {
+  if (result == nullptr || !result->getType()->isIntegerTy()) {
+    return result;
+  }
+
+  const llvm::StringRef marker = scalar_shape_marker(shape);
+  if (shape == scalar_handler_shape::direct) {
+    if (result->hasName()) {
+      result->setName(marker);
+    }
+    return result;
+  }
+
+  if (shape == scalar_handler_shape::temp_slot_roundtrip) {
+    llvm::AllocaInst *temp = create_handler_temp_slot(builder, result->getType(), marker);
+    if (temp == nullptr) {
+      return result;
+    }
+    builder.CreateStore(result, temp);
+    return builder.CreateLoad(result->getType(), temp, marker);
+  }
+
+  auto *integer_type = llvm::cast<llvm::IntegerType>(result->getType());
+  return builder.CreateXor(result, llvm::ConstantInt::get(integer_type, 0), marker);
+}
+
 bool is_cast_opcode(opcode op) {
   switch (op) {
   case opcode::trunc:
@@ -401,7 +539,9 @@ llvm::Value *emit_binary(llvm::IRBuilder<> &builder,
                          const bytecode_program &program,
                          const micro_instruction &instruction,
                          llvm::AllocaInst *opaque_seed_slot,
-                         std::uint64_t opaque_seed_base,
+                          std::uint64_t opaque_seed_base,
+                         std::uint64_t bytecode_seed,
+                         const opcode_permutation &opcode_map,
                          const mba::builder_context &mba_context,
                          std::uint64_t salt) {
   if (!is_binary_opcode(instruction.op)) {
@@ -418,15 +558,26 @@ llvm::Value *emit_binary(llvm::IRBuilder<> &builder,
                         opaque_seed_base, mba_context, salt + 2);
 
   llvm::Value *result = nullptr;
-  const std::uint32_t variant =
-      select_handler_variant(instruction.op, opaque_seed_base, salt);
+  llvm::Instruction *flag_target = nullptr;
+  if (is_polymorphic_integer_binary_opcode(instruction.op) &&
+      lhs->getType()->isIntegerTy() && lhs->getType() == rhs->getType()) {
+    const scalar_handler_shape shape = select_scalar_handler_shape(
+        bytecode_seed, instruction.op, get_physical_opcode(opcode_map, instruction.op),
+        salt);
+    result = emit_current_integer_binary(builder, instruction.op, lhs, rhs,
+                                         instruction.flags, mba_context, salt,
+                                         flag_target, "obf.vm.scalar");
+    apply_integer_binary_flags(flag_target, instruction.flags);
+    return apply_scalar_handler_shape(builder, shape, result);
+  }
+
   switch (instruction.op) {
   case opcode::add:
     if (!has_instruction_flag(instruction.flags, instruction_flag_nsw) &&
         !has_instruction_flag(instruction.flags, instruction_flag_nuw)) {
       result = mba::create_add(builder, lhs, rhs, mba_context, salt + 3,
                                "obf.vm.add");
-    } else if (variant == 0) {
+    } else if (select_handler_variant(instruction.op, opaque_seed_base, salt) == 0) {
       result = builder.CreateAdd(lhs, rhs, "obf.vm.add");
     } else if (lhs->getType()->isIntegerTy()) {
       llvm::Value *sum = builder.CreateAdd(lhs, rhs, "obf.vm.add.variant");
@@ -447,7 +598,7 @@ llvm::Value *emit_binary(llvm::IRBuilder<> &builder,
         !has_instruction_flag(instruction.flags, instruction_flag_nuw)) {
       result = mba::create_sub(builder, lhs, rhs, mba_context, salt + 4,
                                "obf.vm.sub");
-    } else if (variant == 0) {
+    } else if (select_handler_variant(instruction.op, opaque_seed_base, salt) == 0) {
       result = builder.CreateSub(lhs, rhs, "obf.vm.sub");
     } else if (lhs->getType()->isIntegerTy()) {
       llvm::Value *diff = builder.CreateSub(lhs, rhs, "obf.vm.sub.variant");
@@ -706,6 +857,20 @@ std::uint32_t select_handler_variant(opcode op, std::uint64_t seed_base,
       variant_count);
 }
 
+scalar_handler_shape select_scalar_handler_shape(std::uint64_t seed_base,
+                                                 opcode op,
+                                                 std::uint8_t physical_opcode,
+                                                 std::uint64_t salt) {
+  std::uint64_t mixed = mix_seed(seed_base, salt ^ 0x51a9d15ca1a3ULL);
+  mixed = mix_seed(mixed,
+                   (static_cast<std::uint64_t>(opcode_to_index(op)) + 1) *
+                       0x9e3779b97f4a7c15ULL);
+  mixed = mix_seed(mixed,
+                   (static_cast<std::uint64_t>(physical_opcode) + 1) *
+                       0xbf58476d1ce4e5b9ULL);
+  return static_cast<scalar_handler_shape>(mixed % 3);
+}
+
 llvm::Value *emit_unsigned_integer_width_cast(
     llvm::IRBuilder<> &builder, llvm::Value *operand,
     llvm::IntegerType *destination_type,
@@ -758,12 +923,14 @@ bool lower_scalar_instruction(llvm::IRBuilder<> &builder,
   case opcode::fdiv:
   case opcode::frem:
     finish_value(builder, context,
-                 emit_binary(builder, function_context.slot_allocas,
-                             context.current_slot_mapping, function_context.program,
-                             instruction, function_context.opaque_seed_slot,
-                             function_context.opaque_seed_base,
-                             function_context.mba_context,
-                             0xb000 + instruction_index));
+                  emit_binary(builder, function_context.slot_allocas,
+                              context.current_slot_mapping, function_context.program,
+                              instruction, function_context.opaque_seed_slot,
+                              function_context.opaque_seed_base,
+                              function_context.bytecode_seed,
+                              function_context.opcode_map,
+                              function_context.mba_context,
+                              0xb000 + instruction_index));
     return true;
 
   case opcode::trunc:

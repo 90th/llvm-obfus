@@ -43,6 +43,12 @@ enum class dispatch_backend_variant : std::uint32_t {
   direct_threaded_switch = 2,
 };
 
+enum class scalar_handler_shape : std::uint32_t {
+  direct = 0,
+  temp_slot_roundtrip = 1,
+  mba_neutralized = 2,
+};
+
 struct opcode_permutation {
   std::array<std::uint8_t, vm_opcode_count> physical_for_logical = {};
 };
@@ -132,6 +138,10 @@ void apply_fast_math_flags(llvm::Instruction *instruction, std::uint32_t flags);
 std::uint32_t select_handler_variant(opcode op, std::uint64_t seed_base,
                                      std::uint64_t salt,
                                      std::uint32_t variant_count = 2);
+scalar_handler_shape select_scalar_handler_shape(std::uint64_t seed_base,
+                                                 opcode op,
+                                                 std::uint8_t physical_opcode,
+                                                 std::uint64_t salt);
 
 std::uint32_t select_dispatch_variant(std::uint64_t seed_base, std::uint64_t salt,
                                       std::size_t instruction_count,

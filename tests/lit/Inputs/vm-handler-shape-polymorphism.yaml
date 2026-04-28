@@ -1,0 +1,15 @@
+seed: 20260424
+default_level: none
+targets:
+  - match: arith_mix_a
+    level: strong_vm
+  - match: arith_mix_b
+    level: strong_vm
+  - match: compare_route
+    level: strong_vm
+  - match: branch_route
+    level: strong_vm
+mba:
+  depth: 2
+security:
+  fail_on_public_obf_symbol: true
