@@ -27,7 +27,7 @@
 
 namespace obf::vm {
 
-using slot_cells = llvm::SmallVector<llvm::AllocaInst *, 4>;
+using slot_cells = llvm::SmallVector<llvm::Value *, 4>;
 using slot_storage = llvm::SmallVector<slot_cells, 16>;
 using slot_cell_mapping = std::vector<std::uint32_t>;
 
@@ -36,8 +36,10 @@ inline constexpr std::size_t vm_opcode_count =
     static_cast<std::size_t>(opcode::ret) + 1;
 inline constexpr std::size_t vm_switch_dispatch_min_instruction_count = 16;
 inline constexpr std::size_t vm_island_min_instruction_count = 16;
-inline constexpr std::size_t vm_island_max_count = 4;
+inline constexpr std::size_t vm_island_max_count = 6;
 inline constexpr std::size_t switch_dispatch_max_bank_count = 4;
+inline constexpr std::uint32_t vm_island_done_status = 0xfffffffeU;
+inline constexpr std::uint32_t vm_island_trap_status = 0xffffffffU;
 
 enum class dispatch_backend_variant : std::uint32_t {
   switch_index = 0,
@@ -100,6 +102,15 @@ struct switch_dispatch_bank {
   std::uint64_t salt = 0;
 };
 
+struct vm_state_layout {
+  llvm::StructType *type = nullptr;
+  std::uint32_t bytecode_state_field = 0;
+  std::uint32_t dispatch_index_field = 1;
+  std::uint32_t hidden_token_field = 2;
+  std::uint32_t return_value_field = invalid_slot;
+  std::vector<std::array<std::uint32_t, vm_slot_rotation_cell_count>> slot_fields;
+};
+
 struct rewrite_function_context {
   llvm::Function &function;
   const bytecode_program &program;
@@ -120,9 +131,18 @@ struct rewrite_function_context {
   llvm::ArrayRef<std::uint32_t> dispatch_index_for_instruction;
   llvm::GlobalVariable *bytecode_global = nullptr;
   llvm::GlobalVariable *retkey_global = nullptr;
-  llvm::AllocaInst *state_slot = nullptr;
+  const vm_state_layout *state_layout = nullptr;
+  llvm::Value *state_storage = nullptr;
+  llvm::Value *state_slot = nullptr;
+  llvm::Value *dispatch_index_slot = nullptr;
+  llvm::Value *hidden_token_slot = nullptr;
+  llvm::Value *return_value_slot = nullptr;
   llvm::BasicBlock *trap_block = nullptr;
   llvm::ArrayRef<llvm::BasicBlock *> instruction_blocks;
+  llvm::ArrayRef<std::uint32_t> island_for_instruction;
+  bool state_island_body = false;
+  llvm::BasicBlock *island_route_block = nullptr;
+  llvm::PHINode *island_route_phi = nullptr;
   llvm::AllocaInst *dispatch_table = nullptr;
   llvm::ArrayType *dispatch_table_type = nullptr;
   llvm::IntegerType *ptr_int_type = nullptr;

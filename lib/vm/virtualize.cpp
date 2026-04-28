@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -356,6 +357,556 @@ std::string make_vm_island_helper_name(llvm::Module &module,
                                           0x151a0000ULL + island_index));
 }
 
+std::string make_vm_island_helper_name(llvm::Module &module,
+                                        std::uint64_t bytecode_seed,
+                                        std::uint64_t island_index) {
+  return obf::make_unique_obf_symbol_name(
+      module, "__obf_vm_h", "",
+      mix_seed(bytecode_seed, 0x151c0000ULL + island_index));
+}
+
+bool should_use_state_islands(const bytecode_program &program,
+                              vm_island_topology topology,
+                              std::uint32_t island_count) {
+  return topology == vm_island_topology::helper_shards && island_count >= 3 &&
+         program.instructions.size() >= vm_island_min_instruction_count + 8;
+}
+
+std::vector<std::uint32_t>
+assign_vm_instruction_islands(const bytecode_program &program,
+                              std::uint64_t bytecode_seed,
+                              std::uint32_t island_count) {
+  std::vector<std::uint32_t> island_for_instruction(program.instructions.size(), 0);
+  if (island_count == 0 || program.instructions.empty()) {
+    return island_for_instruction;
+  }
+
+  std::vector<std::size_t> order(program.instructions.size());
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs,
+                                                   std::size_t rhs) {
+    const std::uint64_t lhs_key = mix_seed(bytecode_seed, 0x151c1000ULL + lhs);
+    const std::uint64_t rhs_key = mix_seed(bytecode_seed, 0x151c1000ULL + rhs);
+    return lhs_key == rhs_key ? lhs < rhs : lhs_key < rhs_key;
+  });
+
+  for (std::size_t position = 0; position < order.size(); ++position) {
+    island_for_instruction[order[position]] =
+        static_cast<std::uint32_t>(position % island_count);
+  }
+  return island_for_instruction;
+}
+
+vm_state_layout build_vm_state_layout(llvm::LLVMContext &context,
+                                      llvm::Type *return_type,
+                                      const bytecode_program &program) {
+  vm_state_layout layout;
+  llvm::SmallVector<llvm::Type *, 64> fields;
+  fields.push_back(llvm::Type::getInt64Ty(context));
+  fields.push_back(llvm::Type::getInt32Ty(context));
+  fields.push_back(llvm::Type::getInt64Ty(context));
+  if (!return_type->isVoidTy()) {
+    layout.return_value_field = static_cast<std::uint32_t>(fields.size());
+    fields.push_back(return_type);
+  }
+
+  layout.slot_fields.resize(program.slots.size());
+  for (std::size_t slot_index = 0; slot_index < program.slots.size(); ++slot_index) {
+    for (std::uint32_t cell_index = 0; cell_index < vm_slot_rotation_cell_count;
+         ++cell_index) {
+      layout.slot_fields[slot_index][cell_index] =
+          static_cast<std::uint32_t>(fields.size());
+      fields.push_back(const_cast<llvm::Type *>(program.slots[slot_index].type));
+    }
+  }
+
+  layout.type = llvm::StructType::get(context, fields);
+  return layout;
+}
+
+llvm::Value *create_state_field_ptr(llvm::IRBuilder<> &builder,
+                                    const vm_state_layout &layout,
+                                    llvm::Value *state_storage,
+                                    std::uint32_t field_index,
+                                    llvm::StringRef name) {
+  return builder.CreateStructGEP(layout.type, state_storage, field_index, name);
+}
+
+slot_storage build_state_slot_storage(llvm::IRBuilder<> &builder,
+                                      const vm_state_layout &layout,
+                                      llvm::Value *state_storage,
+                                      const bytecode_program &program,
+                                      llvm::StringRef name_prefix) {
+  slot_storage slots;
+  slots.reserve(program.slots.size());
+  for (std::size_t slot_index = 0; slot_index < program.slots.size(); ++slot_index) {
+    slot_cells cells;
+    cells.reserve(vm_slot_rotation_cell_count);
+    for (std::uint32_t cell_index = 0; cell_index < vm_slot_rotation_cell_count;
+         ++cell_index) {
+      cells.push_back(create_state_field_ptr(
+          builder, layout, state_storage,
+          layout.slot_fields[slot_index][cell_index],
+          (name_prefix + ".slot." + llvm::Twine(slot_index) + "." +
+           llvm::Twine(cell_index))
+              .str()));
+    }
+    slots.push_back(std::move(cells));
+  }
+  return slots;
+}
+
+llvm::Value *build_hidden_token_storage_value(
+    llvm::IRBuilder<> &builder, llvm::Argument *hidden_token_arg,
+    std::uint64_t fallback_seed) {
+  if (hidden_token_arg == nullptr) {
+    return builder.getInt64(fallback_seed);
+  }
+  llvm::Value *token = hidden_token_arg;
+  if (token->getType() != builder.getInt64Ty()) {
+    token = builder.CreateZExtOrTrunc(token, builder.getInt64Ty(),
+                                      "obf.vm.island.token.cast");
+  }
+  return token;
+}
+
+void emit_island_route_return(llvm::IRBuilder<> &builder,
+                              rewrite_function_context &context) {
+  if (context.dispatch_index_slot != nullptr) {
+    builder.CreateStore(context.island_route_phi, context.dispatch_index_slot);
+  }
+  auto *route_switch = builder.CreateSwitch(
+      context.island_route_phi, context.trap_block,
+      context.program.instructions.size());
+
+  llvm::SmallVector<llvm::BasicBlock *, 8> return_blocks;
+  return_blocks.reserve(context.island_count);
+  for (std::uint32_t island_index = 0; island_index < context.island_count;
+       ++island_index) {
+    auto *return_block = llvm::BasicBlock::Create(
+        context.function.getContext(),
+        "vm.island.route.return." + std::to_string(island_index),
+        &context.function);
+    llvm::IRBuilder<> return_builder(return_block);
+    return_builder.CreateRet(return_builder.getInt32(island_index));
+    return_blocks.push_back(return_block);
+  }
+
+  for (std::size_t instruction_index = 0;
+       instruction_index < context.program.instructions.size(); ++instruction_index) {
+    const std::uint32_t island_index = context.island_for_instruction[instruction_index];
+    if (island_index >= return_blocks.size()) {
+      continue;
+    }
+    route_switch->addCase(
+        builder.getInt32(context.dispatch_index_for_instruction[instruction_index]),
+        return_blocks[island_index]);
+  }
+}
+
+void emit_state_island_helper(
+    llvm::Function &helper, const bytecode_program &program,
+    const virtualization_options &options, const vm_state_layout &state_layout,
+    llvm::GlobalVariable *bytecode_global, llvm::GlobalVariable *retkey_global,
+    const std::vector<slot_cell_mapping> &slot_mappings,
+    llvm::ArrayRef<std::uint32_t> dispatch_index_for_instruction,
+    llvm::ArrayRef<std::uint64_t> entry_states,
+    const serialized_bytecode_program &serialized, const opcode_permutation &opcode_map,
+    std::uint64_t opaque_seed_base, std::uint64_t bytecode_seed,
+    llvm::Argument *hidden_token_arg,
+    llvm::ArrayRef<std::uint32_t> island_for_instruction,
+    std::uint32_t island_index) {
+  llvm::LLVMContext &context = helper.getContext();
+  llvm::Module *module = helper.getParent();
+  llvm::BasicBlock *entry_block = llvm::BasicBlock::Create(
+      context, "vm.island.entry." + std::to_string(island_index), &helper);
+  llvm::BasicBlock *route_block = llvm::BasicBlock::Create(
+      context, "vm.island.route." + std::to_string(island_index), &helper);
+  llvm::BasicBlock *trap_block = llvm::BasicBlock::Create(
+      context, "vm.island.trap." + std::to_string(island_index), &helper);
+
+  llvm::IRBuilder<> entry_builder(entry_block);
+  llvm::Argument *state_arg = &*helper.arg_begin();
+  state_arg->setName("vm.island.state");
+  slot_storage helper_slots = build_state_slot_storage(
+      entry_builder, state_layout, state_arg, program, "vm.island.state");
+  llvm::Value *state_slot = create_state_field_ptr(
+      entry_builder, state_layout, state_arg, state_layout.bytecode_state_field,
+      "vm.island.state.bc");
+  llvm::Value *dispatch_index_slot = create_state_field_ptr(
+      entry_builder, state_layout, state_arg, state_layout.dispatch_index_field,
+      "vm.island.state.dispatch");
+  llvm::Value *hidden_token_slot = create_state_field_ptr(
+      entry_builder, state_layout, state_arg, state_layout.hidden_token_field,
+      "vm.island.state.token");
+  llvm::Value *return_value_slot = nullptr;
+  if (state_layout.return_value_field != invalid_slot) {
+    return_value_slot = create_state_field_ptr(
+        entry_builder, state_layout, state_arg, state_layout.return_value_field,
+        "vm.island.state.ret");
+  }
+
+  llvm::SmallVector<llvm::BasicBlock *, 64> instruction_blocks(
+      program.instructions.size(), nullptr);
+  for (std::size_t instruction_index = 0;
+       instruction_index < program.instructions.size(); ++instruction_index) {
+    if (island_for_instruction[instruction_index] != island_index) {
+      continue;
+    }
+    instruction_blocks[instruction_index] = llvm::BasicBlock::Create(
+        context, "vm.island." + std::to_string(island_index) + "." +
+                     std::to_string(instruction_index),
+        &helper);
+  }
+
+  llvm::Value *initial_dispatch = entry_builder.CreateLoad(
+      entry_builder.getInt32Ty(), dispatch_index_slot, "vm.island.dispatch.load");
+  auto *entry_switch = entry_builder.CreateSwitch(initial_dispatch, trap_block,
+                                                  program.instructions.size());
+  for (std::size_t instruction_index = 0;
+       instruction_index < instruction_blocks.size(); ++instruction_index) {
+    if (instruction_blocks[instruction_index] == nullptr) {
+      continue;
+    }
+    entry_switch->addCase(
+        entry_builder.getInt32(dispatch_index_for_instruction[instruction_index]),
+        instruction_blocks[instruction_index]);
+  }
+
+  llvm::IRBuilder<> route_phi_builder(route_block);
+  auto *route_phi = route_phi_builder.CreatePHI(route_phi_builder.getInt32Ty(), 8,
+                                                "vm.island.route.dispatch");
+
+  const mba::builder_context mba_context{
+      .entropy_anchor = mba::get_or_create_entropy_anchor(*module),
+      .seed_base = opaque_seed_base,
+      .depth = options.mba_depth};
+  std::size_t dispatch_site_counter = 0;
+  std::vector<switch_dispatch_bank> switch_dispatch_banks;
+  rewrite_function_context rewrite_context{
+      .function = helper,
+      .program = program,
+      .slot_allocas = helper_slots,
+      .slot_mappings = slot_mappings,
+      .opaque_seed_slot = nullptr,
+      .opaque_seed_base = opaque_seed_base,
+      .mba_context = mba_context,
+      .hidden_token_arg = nullptr,
+      .bytecode_seed = bytecode_seed,
+      .opcode_map = opcode_map,
+      .dispatch_backend = dispatch_backend_variant::switch_index,
+      .dispatch_shape = vm_dispatcher_shape::switch_biased,
+      .island_topology = vm_island_topology::helper_shards,
+      .island_count = static_cast<std::uint32_t>(
+          *std::max_element(island_for_instruction.begin(),
+                            island_for_instruction.end()) +
+          1),
+      .switch_dispatch_bank_count = 1,
+      .dispatch_index_for_instruction = dispatch_index_for_instruction,
+      .bytecode_global = bytecode_global,
+      .retkey_global = retkey_global,
+      .state_layout = &state_layout,
+      .state_storage = state_arg,
+      .state_slot = state_slot,
+      .dispatch_index_slot = dispatch_index_slot,
+      .hidden_token_slot = hidden_token_slot,
+      .return_value_slot = return_value_slot,
+      .trap_block = trap_block,
+      .instruction_blocks = instruction_blocks,
+      .island_for_instruction = island_for_instruction,
+      .state_island_body = true,
+      .island_route_block = route_block,
+      .island_route_phi = route_phi,
+      .dispatch_table = nullptr,
+      .dispatch_table_type = nullptr,
+      .ptr_int_type = module->getDataLayout().getIntPtrType(context),
+      .switch_dispatch_banks = switch_dispatch_banks,
+      .dispatch_site_counter = dispatch_site_counter,
+  };
+  (void)hidden_token_arg;
+  (void)entry_states;
+
+  for (std::size_t instruction_index = 0;
+       instruction_index < program.instructions.size(); ++instruction_index) {
+    if (instruction_blocks[instruction_index] == nullptr) {
+      continue;
+    }
+    const micro_instruction &instruction = program.instructions[instruction_index];
+    llvm::IRBuilder<> header_builder(instruction_blocks[instruction_index]);
+    const bytecode_layout &layout = serialized.layouts[instruction_index];
+    instruction_rewrite_context instruction_context{
+        .function_context = rewrite_context,
+        .instruction_index = instruction_index,
+        .instruction = instruction,
+        .layout = layout,
+        .current_slot_mapping = llvm::ArrayRef<std::uint32_t>(
+            slot_mappings[instruction_index]),
+    };
+
+    llvm::Value *decoded_opcode = consume_metadata(
+        header_builder, rewrite_context, layout,
+        0x8000 + static_cast<std::uint64_t>(instruction_index) * 32);
+
+    emit_instruction_integrity_probes(header_builder, instruction_context);
+
+    auto *opcode_block = llvm::BasicBlock::Create(
+        context, "vm.island.exec." + std::to_string(island_index) + "." +
+                     std::to_string(instruction_index),
+        &helper);
+    llvm::Value *opcode_match = header_builder.CreateICmpEQ(
+        decoded_opcode,
+        header_builder.getInt8(get_physical_opcode(opcode_map, instruction.op)),
+        "obf.vm.opcode.match");
+    if (select_handler_variant(instruction.op, opaque_seed_base,
+                               0x7d000 + instruction_index) == 0) {
+      header_builder.CreateCondBr(opcode_match, opcode_block, trap_block);
+    } else {
+      llvm::Value *match_word = header_builder.CreateZExt(
+          opcode_match, header_builder.getInt64Ty(), "obf.vm.opcode.match.word");
+      llvm::Value *gated_match = mba::create_xor(
+          header_builder, match_word,
+          mba::create_opaque_integer(
+              header_builder, header_builder.getInt64Ty(), mba_context,
+              llvm::APInt(64, 0), 0x7e000 + instruction_index,
+              "obf.vm.opcode.zero"),
+          mba_context, 0x7f000 + instruction_index, "obf.vm.opcode.gate");
+      llvm::Value *accept = header_builder.CreateICmpNE(
+          gated_match, header_builder.getInt64(0), "obf.vm.opcode.accept");
+      header_builder.CreateCondBr(accept, opcode_block, trap_block);
+    }
+
+    llvm::IRBuilder<> builder(opcode_block);
+    if (lower_scalar_instruction(builder, instruction_context)) {
+      continue;
+    }
+    if (lower_memory_instruction(builder, instruction_context)) {
+      continue;
+    }
+    if (lower_control_instruction(builder, instruction_context)) {
+      continue;
+    }
+
+    llvm_unreachable("unsupported vm opcode during island rewrite");
+  }
+
+  if (llvm::pred_empty(route_block)) {
+    route_phi->eraseFromParent();
+    llvm::IRBuilder<> route_builder(route_block);
+    route_builder.CreateRet(route_builder.getInt32(vm_island_trap_status));
+  } else {
+    llvm::IRBuilder<> route_builder(route_block);
+    route_builder.SetInsertPoint(route_block);
+    emit_island_route_return(route_builder, rewrite_context);
+  }
+
+  llvm::IRBuilder<> trap_builder(trap_block);
+  trap_builder.CreateRet(trap_builder.getInt32(vm_island_trap_status));
+}
+
+void rewrite_function_body_state_islands(
+    llvm::Function &function, const bytecode_program &program,
+    const virtualization_options &options, llvm::StringRef symbol_tag,
+    llvm::ArrayRef<llvm::BasicBlock *> old_blocks,
+    std::uint64_t opaque_seed_base, std::uint64_t bytecode_seed,
+    const opcode_permutation &opcode_map, std::uint32_t island_count) {
+  for (llvm::BasicBlock *block : old_blocks) {
+    block->dropAllReferences();
+  }
+  for (llvm::BasicBlock *block : old_blocks) {
+    block->eraseFromParent();
+  }
+
+  llvm::LLVMContext &context = function.getContext();
+  llvm::Module *module = function.getParent();
+  auto *entry_block = llvm::BasicBlock::Create(context, "entry.obf.vm", &function);
+  auto *route_block = llvm::BasicBlock::Create(context, "vm.island.route.entry",
+                                               &function);
+  auto *finish_block = llvm::BasicBlock::Create(context, "vm.island.done",
+                                                &function);
+  auto *trap_block = llvm::BasicBlock::Create(context, "trap.obf.vm", &function);
+  llvm::IRBuilder<> entry_builder(entry_block);
+
+  vm_state_layout state_layout = build_vm_state_layout(
+      context, function.getReturnType(), program);
+  auto *state_storage = entry_builder.CreateAlloca(state_layout.type, nullptr,
+                                                   "vm.island.state");
+  llvm::Value *state_slot = create_state_field_ptr(
+      entry_builder, state_layout, state_storage, state_layout.bytecode_state_field,
+      "vm.island.state.bc");
+  llvm::Value *dispatch_index_slot = create_state_field_ptr(
+      entry_builder, state_layout, state_storage, state_layout.dispatch_index_field,
+      "vm.island.state.dispatch");
+  llvm::Value *hidden_token_slot = create_state_field_ptr(
+      entry_builder, state_layout, state_storage, state_layout.hidden_token_field,
+      "vm.island.state.token");
+  llvm::Value *return_value_slot = nullptr;
+  if (state_layout.return_value_field != invalid_slot) {
+    return_value_slot = create_state_field_ptr(
+        entry_builder, state_layout, state_storage, state_layout.return_value_field,
+        "vm.island.state.ret");
+    entry_builder.CreateStore(
+        llvm::Constant::getNullValue(function.getReturnType()), return_value_slot);
+  }
+
+  slot_storage state_slots = build_state_slot_storage(
+      entry_builder, state_layout, state_storage, program, "vm.island.state");
+  const std::vector<slot_cell_mapping> slot_mappings =
+      build_slot_cell_mappings(program, opaque_seed_base);
+  const std::vector<std::uint64_t> entry_states =
+      build_instruction_entry_states(program, bytecode_seed);
+  const std::vector<std::uint32_t> dispatch_index_for_instruction =
+      build_dispatch_index_map(program, bytecode_seed,
+                               dispatch_backend_variant::switch_index);
+  const serialized_bytecode_program serialized = serialize_bytecode_program(
+      program, dispatch_index_for_instruction, entry_states, bytecode_seed,
+      opcode_map);
+  const std::vector<std::uint32_t> island_for_instruction =
+      assign_vm_instruction_islands(program, bytecode_seed, island_count);
+
+  llvm::GlobalVariable *bytecode_global = nullptr;
+  if (!serialized.bytes.empty()) {
+    auto *bytecode_type =
+        llvm::ArrayType::get(entry_builder.getInt8Ty(), serialized.bytes.size());
+    bytecode_global = new llvm::GlobalVariable(
+        *module, bytecode_type, true, llvm::GlobalValue::PrivateLinkage,
+        llvm::ConstantDataArray::get(context, serialized.bytes),
+        "__obf_vm_bc_" + symbol_tag.str());
+    bytecode_global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  }
+
+  llvm::GlobalVariable *retkey_global = nullptr;
+  if (function.getReturnType()->isIntegerTy()) {
+    const std::uint64_t retkey_value = derive_vm_return_key(function, program);
+    const std::string retkey_name = "__obf_vm_retkey_" + symbol_tag.str();
+    retkey_global = module->getNamedGlobal(retkey_name);
+    if (retkey_global == nullptr) {
+      retkey_global = new llvm::GlobalVariable(
+          *module, entry_builder.getInt64Ty(), false,
+          llvm::GlobalValue::PrivateLinkage, entry_builder.getInt64(retkey_value),
+          retkey_name);
+    } else {
+      retkey_global->setInitializer(entry_builder.getInt64(retkey_value));
+      retkey_global->setConstant(false);
+      retkey_global->setLinkage(llvm::GlobalValue::PrivateLinkage);
+    }
+  }
+
+  llvm::Argument *hidden_token_arg = nullptr;
+  if (options.hidden_token_handshake && function.arg_size() > 0) {
+    hidden_token_arg = &*std::prev(function.arg_end());
+  }
+  entry_builder.CreateStore(
+      build_hidden_token_storage_value(entry_builder, hidden_token_arg,
+                                       opaque_seed_base),
+      hidden_token_slot);
+
+  const std::uint32_t entry_instruction =
+      program.blocks.empty() ? 0 : program.blocks.front().first_instruction;
+  const slot_cell_mapping entry_identity_mapping(program.slots.size(), 0);
+  llvm::ArrayRef<std::uint32_t> entry_slot_mapping = entry_identity_mapping;
+  if (!slot_mappings.empty()) {
+    entry_slot_mapping = slot_mappings[entry_instruction];
+  }
+
+  const mba::builder_context mba_context{
+      .entropy_anchor = mba::get_or_create_entropy_anchor(*module),
+      .seed_base = opaque_seed_base,
+      .depth = options.mba_depth};
+  entry_builder.CreateStore(
+      build_hidden_token_seed(
+          entry_builder, hidden_token_arg,
+          program.instructions.empty() ? bytecode_seed : entry_states[entry_instruction],
+          options.valid_hidden_tokens, mba_context, 0x3100,
+          "obf.vm.token.state"),
+      state_slot);
+  entry_builder.CreateStore(
+      entry_builder.getInt32(dispatch_index_for_instruction[entry_instruction]),
+      dispatch_index_slot);
+
+  std::size_t argument_index = 0;
+  for (llvm::Argument &argument : function.args()) {
+    store_slot(entry_builder, state_slots, entry_slot_mapping, program,
+               program.argument_slots[argument_index], &argument, nullptr,
+               opaque_seed_base, mba_context, 0x8110 + argument_index);
+    ++argument_index;
+  }
+
+  llvm::SmallVector<llvm::Function *, 8> helpers;
+  helpers.reserve(island_count);
+  auto *state_pointer_type = llvm::PointerType::get(context, 0);
+  auto *helper_type = llvm::FunctionType::get(entry_builder.getInt32Ty(),
+                                              {state_pointer_type}, false);
+  for (std::uint32_t island_index = 0; island_index < island_count;
+       ++island_index) {
+    llvm::Function *helper = llvm::Function::Create(
+        helper_type, llvm::GlobalValue::InternalLinkage,
+        make_vm_island_helper_name(*module, bytecode_seed, island_index), module);
+    helper->setDSOLocal(true);
+    helper->addFnAttr(llvm::Attribute::NoInline);
+    helper->addFnAttr("instcombine-no-verify-fixpoint");
+    helper->addFnAttr("vm.island.helper");
+    helper->addFnAttr("vm.island.state");
+    helpers.push_back(helper);
+  }
+
+  entry_builder.CreateBr(route_block);
+  llvm::IRBuilder<> route_builder(route_block);
+  auto *status_phi = route_builder.CreatePHI(route_builder.getInt32Ty(),
+                                             helpers.size() + 1,
+                                             "vm.island.route.status");
+  status_phi->addIncoming(
+      route_builder.getInt32(island_for_instruction[entry_instruction]),
+      entry_block);
+  auto *route_switch = route_builder.CreateSwitch(status_phi, trap_block,
+                                                  helpers.size() + 2);
+  route_switch->addCase(route_builder.getInt32(vm_island_done_status),
+                        finish_block);
+  route_switch->addCase(route_builder.getInt32(vm_island_trap_status),
+                        trap_block);
+
+  for (std::uint32_t island_index = 0; island_index < helpers.size();
+       ++island_index) {
+    auto *call_block = llvm::BasicBlock::Create(
+        context, "vm.island.call." + std::to_string(island_index), &function);
+    route_switch->addCase(route_builder.getInt32(island_index), call_block);
+    llvm::IRBuilder<> call_builder(call_block);
+    auto *status = call_builder.CreateCall(helpers[island_index]->getFunctionType(),
+                                           helpers[island_index], {state_storage},
+                                           "vm.island.status");
+    call_builder.CreateBr(route_block);
+    status_phi->addIncoming(status, call_block);
+  }
+
+  llvm::IRBuilder<> finish_builder(finish_block);
+  if (function.getReturnType()->isVoidTy()) {
+    finish_builder.CreateRetVoid();
+  } else {
+    finish_builder.CreateRet(finish_builder.CreateLoad(
+        function.getReturnType(), return_value_slot, "vm.island.ret"));
+  }
+
+  llvm::IRBuilder<> trap_builder(trap_block);
+  llvm::FunctionCallee trap = llvm::Intrinsic::getOrInsertDeclaration(
+      module, llvm::Intrinsic::trap);
+  trap_builder.CreateCall(trap);
+  trap_builder.CreateUnreachable();
+
+  for (std::uint32_t island_index = 0; island_index < helpers.size();
+       ++island_index) {
+    emit_state_island_helper(
+        *helpers[island_index], program, options, state_layout, bytecode_global,
+        retkey_global, slot_mappings, dispatch_index_for_instruction, entry_states,
+        serialized, opcode_map, opaque_seed_base, bytecode_seed, hidden_token_arg,
+        island_for_instruction, island_index);
+  }
+
+  function.addFnAttr("vm.island.entry");
+  function.addFnAttr("vm.island.topology.helper_shards");
+  function.addFnAttr("vm.island.count." + std::to_string(helpers.size()));
+  function.addFnAttr("vm.island.route");
+  function.addFnAttr("vm.island.state");
+}
+
 void rewrite_function_body(llvm::Function &function,
                            const bytecode_program &program,
                            const virtualization_options &options) {
@@ -372,6 +923,25 @@ void rewrite_function_body(llvm::Function &function,
   old_blocks.reserve(function.size());
   for (llvm::BasicBlock &block : function) {
     old_blocks.push_back(&block);
+  }
+
+  const std::uint64_t opaque_seed_base = derive_vm_opaque_seed(function, program);
+  const std::uint64_t bytecode_seed = derive_vm_bytecode_seed(function, program);
+  const opcode_permutation opcode_map = build_opcode_permutation(function, program);
+  const vm_dispatcher_shape dispatch_shape = select_dispatcher_shape(
+      bytecode_seed, opaque_seed_base ^ 0x26000ULL, program.instructions.size());
+  const vm_island_topology island_topology = select_vm_island_topology(
+      options.prefer_island_helpers, program.instructions.size(), bytecode_seed,
+      opaque_seed_base ^ 0x26003ULL);
+  const std::uint32_t island_count = select_vm_island_count(
+      bytecode_seed, opaque_seed_base ^ 0x26002ULL, program.instructions.size(),
+      island_topology);
+
+  if (should_use_state_islands(program, island_topology, island_count)) {
+    rewrite_function_body_state_islands(function, program, options, symbol_tag,
+                                        old_blocks, opaque_seed_base, bytecode_seed,
+                                        opcode_map, island_count);
+    return;
   }
 
   for (llvm::BasicBlock *block : old_blocks) {
@@ -408,7 +978,6 @@ void rewrite_function_body(llvm::Function &function,
     slot_allocas.push_back(std::move(cells));
   }
 
-  const std::uint64_t opaque_seed_base = derive_vm_opaque_seed(function, program);
   const std::vector<slot_cell_mapping> slot_mappings =
       build_slot_cell_mappings(program, opaque_seed_base);
   llvm::AllocaInst *opaque_seed = nullptr;
@@ -423,16 +992,6 @@ void rewrite_function_body(llvm::Function &function,
     hidden_token_arg = &*std::prev(function.arg_end());
   }
 
-  const std::uint64_t bytecode_seed = derive_vm_bytecode_seed(function, program);
-  const opcode_permutation opcode_map = build_opcode_permutation(function, program);
-  const vm_dispatcher_shape dispatch_shape = select_dispatcher_shape(
-      bytecode_seed, opaque_seed_base ^ 0x26000ULL, program.instructions.size());
-  const vm_island_topology island_topology = select_vm_island_topology(
-      options.prefer_island_helpers, program.instructions.size(), bytecode_seed,
-      opaque_seed_base ^ 0x26003ULL);
-  const std::uint32_t island_count = select_vm_island_count(
-      bytecode_seed, opaque_seed_base ^ 0x26002ULL, program.instructions.size(),
-      island_topology);
   dispatch_backend_variant dispatch_backend = dispatch_backend_variant::switch_index;
   vm_dispatcher_shape effective_dispatch_shape = dispatch_shape;
   if (island_topology == vm_island_topology::helper_shards) {

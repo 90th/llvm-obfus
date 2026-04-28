@@ -74,7 +74,10 @@ entry:
 ; VM-DAG: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i32 %y, ptr %p, i64 %obf.hidden_token)
 ; VM-DAG: define internal {{.*}} @__obf_vm_h_{{[A-Za-z0-9_]+}}
 ; VM-DAG: define internal {{.*}} @__obf_vm_h_{{[A-Za-z0-9_]+}}
+; VM-DAG: define internal {{.*}} @__obf_vm_h_{{[A-Za-z0-9_]+}}
 ; VM-DAG: vm.island.topology.helper_shards
-; VM-DAG: vm.island.count.2
+; VM-DAG: vm.island.count.3
 ; VM-DAG: "vm.island.entry"
 ; VM-DAG: "vm.island.helper"
+; VM-DAG: "vm.island.route"
+; VM-DAG: "vm.island.state"

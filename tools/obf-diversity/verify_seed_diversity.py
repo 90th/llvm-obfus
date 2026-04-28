@@ -20,6 +20,9 @@ COND_BRANCH_PATTERN = re.compile(
 )
 FUNCTION_NAME_PATTERN = re.compile(r"@(?P<name>[^\(]+)\(")
 LABEL_PATTERN = re.compile(r"^(?P<label>[0-9A-Za-z_.]+):\s*(?:;.*)?$")
+VM_DATA_GLOBAL_PATTERN = re.compile(
+    r"@(?P<name>__obf_vm_(?:bc|g|k|ptrconst|retkey)_[A-Za-z0-9_]+)"
+)
 
 MARKER_GROUPS = {
     "handler_shapes": {
@@ -38,6 +41,8 @@ MARKER_GROUPS = {
         "count": r"vm\.island\.count\.\d+",
         "entry": r"vm\.island\.entry",
         "helper": r"vm\.island\.helper",
+        "route": r"vm\.island\.route",
+        "state": r"vm\.island\.state",
     },
     "pointer_materialization": {
         "direct": r"ptrmat\.direct",
@@ -235,15 +240,36 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
     helper_bodies = {
         name: body for name, body in functions.items() if name.startswith("__obf_vm_h_")
     }
+    primary_bodies = {
+        name: body for name, body in functions.items() if name.startswith("__obf_vm_i_")
+    }
+    helper_line_counts = [
+        len([line for line in body.splitlines() if line.strip()]) for body in helper_bodies.values()
+    ]
+    primary_line_counts = [
+        len([line for line in body.splitlines() if line.strip()]) for body in primary_bodies.values()
+    ]
+    vm_like_line_counts = [
+        len([line for line in body.splitlines() if line.strip()]) for body in vm_like_bodies.values()
+    ]
+    data_symbol_refs: Counter[str] = Counter()
+    data_ref_function_counts: list[int] = []
+    for body in vm_like_bodies.values():
+        refs = [match.group("name") for match in VM_DATA_GLOBAL_PATTERN.finditer(body)]
+        data_symbol_refs.update(refs)
+        data_ref_function_counts.append(len(refs))
     marker_counts = count_markers(marker_text, MARKER_GROUPS["vm_islands"])
     return {
         "island_marker_count": sum(marker_counts.values()),
+        "route_marker_count": marker_counts.get("route", 0),
+        "state_marker_count": marker_counts.get("state", 0),
         "helper_count": len(helper_bodies),
         "vm_like_function_count": len(vm_like_bodies),
-        "largest_vm_like_function_lines": max(
-            (len([line for line in body.splitlines() if line.strip()]) for body in vm_like_bodies.values()),
-            default=0,
-        ),
+        "largest_vm_like_function_lines": max(vm_like_line_counts, default=0),
+        "largest_helper_function_lines": max(helper_line_counts, default=0),
+        "primary_vm_entry_lines": max(primary_line_counts, default=0),
+        "top_vm_data_ref_function_refs": max(data_ref_function_counts, default=0),
+        "top_vm_data_ref_symbol_refs": max(data_symbol_refs.values(), default=0),
     }
 
 

@@ -187,11 +187,11 @@ std::uint32_t select_vm_island_count(std::uint64_t seed_base,
   if (topology != vm_island_topology::helper_shards) {
     return 0;
   }
-  const std::uint32_t base_count = instruction_count >= 96 ? 3U : 2U;
+  const std::uint32_t base_count = 3U;
   const std::uint32_t max_count = static_cast<std::uint32_t>(
       std::min<std::size_t>(vm_island_max_count,
                             std::max<std::size_t>(base_count,
-                                                  instruction_count / 32)));
+                                                  instruction_count / 16)));
   if (max_count <= base_count) {
     return base_count;
   }
@@ -399,6 +399,22 @@ void initialize_dispatch_runtime(llvm::IRBuilder<> &entry_builder,
 void emit_dispatch(llvm::IRBuilder<> &builder,
                    rewrite_function_context &context,
                    llvm::Value *dispatch_index, std::uint64_t salt) {
+  if (context.state_island_body) {
+    if (context.island_route_block == nullptr || context.island_route_phi == nullptr) {
+      builder.CreateBr(context.trap_block);
+      return;
+    }
+    llvm::BasicBlock *dispatch_source = builder.GetInsertBlock();
+    llvm::Value *typed_dispatch_index = dispatch_index;
+    if (typed_dispatch_index->getType() != builder.getInt32Ty()) {
+      typed_dispatch_index = builder.CreateZExtOrTrunc(
+          typed_dispatch_index, builder.getInt32Ty(), "obf.vm.island.dispatch.cast");
+    }
+    builder.CreateBr(context.island_route_block);
+    context.island_route_phi->addIncoming(typed_dispatch_index, dispatch_source);
+    return;
+  }
+
   if (context.dispatch_backend == dispatch_backend_variant::switch_index) {
     if (context.switch_dispatch_banks.empty()) {
       builder.CreateBr(context.trap_block);

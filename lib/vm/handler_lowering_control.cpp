@@ -259,7 +259,11 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
 
   case opcode::ret:
     if (instruction.operands.empty()) {
-      builder.CreateRetVoid();
+      if (function_context.state_island_body) {
+        builder.CreateRet(builder.getInt32(vm_island_done_status));
+      } else {
+        builder.CreateRetVoid();
+      }
     } else {
       llvm::Value *ret_val = materialize_value(
           builder, function_context.slot_allocas, context.current_slot_mapping,
@@ -279,11 +283,16 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
         auto *retkey_load = builder.CreateLoad(builder.getInt64Ty(),
                                                function_context.retkey_global,
                                                "obf.vm.ret.retkey");
-        llvm::Value *token_component = function_context.hidden_token_arg != nullptr
-                                           ? static_cast<llvm::Value *>(
-                                                 function_context.hidden_token_arg)
-                                           : builder.getInt64(
-                                                 function_context.opaque_seed_base);
+        llvm::Value *token_component = nullptr;
+        if (function_context.hidden_token_arg != nullptr) {
+          token_component = function_context.hidden_token_arg;
+        } else if (function_context.hidden_token_slot != nullptr) {
+          token_component = builder.CreateLoad(builder.getInt64Ty(),
+                                               function_context.hidden_token_slot,
+                                               "obf.vm.ret.token.state");
+        } else {
+          token_component = builder.getInt64(function_context.opaque_seed_base);
+        }
         if (token_component->getType() != builder.getInt64Ty()) {
           token_component = builder.CreateZExtOrTrunc(
               token_component, builder.getInt64Ty(), "obf.vm.ret.token.cast");
@@ -303,7 +312,14 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
             builder, ret_val, key_trunc, function_context.mba_context,
             ret_salt + 4, "obf.vm.ret.encoded");
       }
-      builder.CreateRet(ret_val);
+      if (function_context.state_island_body) {
+        if (function_context.return_value_slot != nullptr) {
+          builder.CreateStore(ret_val, function_context.return_value_slot);
+        }
+        builder.CreateRet(builder.getInt32(vm_island_done_status));
+      } else {
+        builder.CreateRet(ret_val);
+      }
     }
     return true;
 
