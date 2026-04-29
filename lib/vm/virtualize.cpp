@@ -369,7 +369,7 @@ bool should_use_state_islands(const bytecode_program &program,
                               vm_island_topology topology,
                               std::uint32_t island_count) {
   return topology == vm_island_topology::helper_shards && island_count >= 3 &&
-         program.instructions.size() >= vm_island_min_instruction_count + 8;
+         program.instructions.size() >= vm_island_min_instruction_count;
 }
 
 std::vector<std::uint32_t>
@@ -403,6 +403,7 @@ vm_state_layout build_vm_state_layout(llvm::LLVMContext &context,
   vm_state_layout layout;
   llvm::SmallVector<llvm::Type *, 64> fields;
   fields.push_back(llvm::Type::getInt64Ty(context));
+  fields.push_back(llvm::Type::getInt32Ty(context));
   fields.push_back(llvm::Type::getInt32Ty(context));
   fields.push_back(llvm::Type::getInt64Ty(context));
   if (!return_type->isVoidTy()) {
@@ -470,40 +471,6 @@ llvm::Value *build_hidden_token_storage_value(
   return token;
 }
 
-void emit_island_route_return(llvm::IRBuilder<> &builder,
-                              rewrite_function_context &context) {
-  if (context.dispatch_index_slot != nullptr) {
-    builder.CreateStore(context.island_route_phi, context.dispatch_index_slot);
-  }
-  auto *route_switch = builder.CreateSwitch(
-      context.island_route_phi, context.trap_block,
-      context.program.instructions.size());
-
-  llvm::SmallVector<llvm::BasicBlock *, 8> return_blocks;
-  return_blocks.reserve(context.island_count);
-  for (std::uint32_t island_index = 0; island_index < context.island_count;
-       ++island_index) {
-    auto *return_block = llvm::BasicBlock::Create(
-        context.function.getContext(),
-        "vm.island.route.return." + std::to_string(island_index),
-        &context.function);
-    llvm::IRBuilder<> return_builder(return_block);
-    return_builder.CreateRet(return_builder.getInt32(island_index));
-    return_blocks.push_back(return_block);
-  }
-
-  for (std::size_t instruction_index = 0;
-       instruction_index < context.program.instructions.size(); ++instruction_index) {
-    const std::uint32_t island_index = context.island_for_instruction[instruction_index];
-    if (island_index >= return_blocks.size()) {
-      continue;
-    }
-    route_switch->addCase(
-        builder.getInt32(context.dispatch_index_for_instruction[instruction_index]),
-        return_blocks[island_index]);
-  }
-}
-
 void emit_state_island_helper(
     llvm::Function &helper, const bytecode_program &program,
     const virtualization_options &options, const vm_state_layout &state_layout,
@@ -520,8 +487,6 @@ void emit_state_island_helper(
   llvm::Module *module = helper.getParent();
   llvm::BasicBlock *entry_block = llvm::BasicBlock::Create(
       context, "vm.island.entry." + std::to_string(island_index), &helper);
-  llvm::BasicBlock *route_block = llvm::BasicBlock::Create(
-      context, "vm.island.route." + std::to_string(island_index), &helper);
   llvm::BasicBlock *trap_block = llvm::BasicBlock::Create(
       context, "vm.island.trap." + std::to_string(island_index), &helper);
 
@@ -536,6 +501,9 @@ void emit_state_island_helper(
   llvm::Value *dispatch_index_slot = create_state_field_ptr(
       entry_builder, state_layout, state_arg, state_layout.dispatch_index_field,
       "vm.island.state.dispatch");
+  llvm::Value *island_id_slot = create_state_field_ptr(
+      entry_builder, state_layout, state_arg, state_layout.island_id_field,
+      "vm.island.state.island");
   llvm::Value *hidden_token_slot = create_state_field_ptr(
       entry_builder, state_layout, state_arg, state_layout.hidden_token_field,
       "vm.island.state.token");
@@ -560,9 +528,10 @@ void emit_state_island_helper(
   }
 
   llvm::Value *initial_dispatch = entry_builder.CreateLoad(
-      entry_builder.getInt32Ty(), dispatch_index_slot, "vm.island.dispatch.load");
+      entry_builder.getInt32Ty(), dispatch_index_slot,
+      "vm.island.helper.dispatch");
   auto *entry_switch = entry_builder.CreateSwitch(initial_dispatch, trap_block,
-                                                  program.instructions.size());
+                                                   program.instructions.size());
   for (std::size_t instruction_index = 0;
        instruction_index < instruction_blocks.size(); ++instruction_index) {
     if (instruction_blocks[instruction_index] == nullptr) {
@@ -572,10 +541,6 @@ void emit_state_island_helper(
         entry_builder.getInt32(dispatch_index_for_instruction[instruction_index]),
         instruction_blocks[instruction_index]);
   }
-
-  llvm::IRBuilder<> route_phi_builder(route_block);
-  auto *route_phi = route_phi_builder.CreatePHI(route_phi_builder.getInt32Ty(), 8,
-                                                "vm.island.route.dispatch");
 
   const mba::builder_context mba_context{
       .entropy_anchor = mba::get_or_create_entropy_anchor(*module),
@@ -609,14 +574,13 @@ void emit_state_island_helper(
       .state_storage = state_arg,
       .state_slot = state_slot,
       .dispatch_index_slot = dispatch_index_slot,
+      .island_id_slot = island_id_slot,
       .hidden_token_slot = hidden_token_slot,
       .return_value_slot = return_value_slot,
       .trap_block = trap_block,
       .instruction_blocks = instruction_blocks,
       .island_for_instruction = island_for_instruction,
       .state_island_body = true,
-      .island_route_block = route_block,
-      .island_route_phi = route_phi,
       .dispatch_table = nullptr,
       .dispatch_table_type = nullptr,
       .ptr_int_type = module->getDataLayout().getIntPtrType(context),
@@ -646,6 +610,7 @@ void emit_state_island_helper(
     llvm::Value *decoded_opcode = consume_metadata(
         header_builder, rewrite_context, layout,
         0x8000 + static_cast<std::uint64_t>(instruction_index) * 32);
+    decoded_opcode->setName("vm.island.helper.decode");
 
     emit_instruction_integrity_probes(header_builder, instruction_context);
 
@@ -689,16 +654,6 @@ void emit_state_island_helper(
     llvm_unreachable("unsupported vm opcode during island rewrite");
   }
 
-  if (llvm::pred_empty(route_block)) {
-    route_phi->eraseFromParent();
-    llvm::IRBuilder<> route_builder(route_block);
-    route_builder.CreateRet(route_builder.getInt32(vm_island_trap_status));
-  } else {
-    llvm::IRBuilder<> route_builder(route_block);
-    route_builder.SetInsertPoint(route_block);
-    emit_island_route_return(route_builder, rewrite_context);
-  }
-
   llvm::IRBuilder<> trap_builder(trap_block);
   trap_builder.CreateRet(trap_builder.getInt32(vm_island_trap_status));
 }
@@ -736,6 +691,9 @@ void rewrite_function_body_state_islands(
   llvm::Value *dispatch_index_slot = create_state_field_ptr(
       entry_builder, state_layout, state_storage, state_layout.dispatch_index_field,
       "vm.island.state.dispatch");
+  llvm::Value *island_id_slot = create_state_field_ptr(
+      entry_builder, state_layout, state_storage, state_layout.island_id_field,
+      "vm.island.state.island");
   llvm::Value *hidden_token_slot = create_state_field_ptr(
       entry_builder, state_layout, state_storage, state_layout.hidden_token_field,
       "vm.island.state.token");
@@ -763,15 +721,23 @@ void rewrite_function_body_state_islands(
   const std::vector<std::uint32_t> island_for_instruction =
       assign_vm_instruction_islands(program, bytecode_seed, island_count);
 
-  llvm::GlobalVariable *bytecode_global = nullptr;
+  llvm::SmallVector<llvm::GlobalVariable *, 8> bytecode_globals;
+  bytecode_globals.resize(island_count, nullptr);
   if (!serialized.bytes.empty()) {
     auto *bytecode_type =
         llvm::ArrayType::get(entry_builder.getInt8Ty(), serialized.bytes.size());
-    bytecode_global = new llvm::GlobalVariable(
-        *module, bytecode_type, true, llvm::GlobalValue::PrivateLinkage,
-        llvm::ConstantDataArray::get(context, serialized.bytes),
-        "__obf_vm_bc_" + symbol_tag.str());
-    bytecode_global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    llvm::Constant *bytecode_initializer =
+        llvm::ConstantDataArray::get(context, serialized.bytes);
+    for (std::uint32_t island_index = 0; island_index < island_count;
+         ++island_index) {
+      llvm::GlobalVariable *bytecode_global = new llvm::GlobalVariable(
+          *module, bytecode_type, true, llvm::GlobalValue::PrivateLinkage,
+          bytecode_initializer,
+          "__obf_vm_bc_" + symbol_tag.str() + "_s" +
+              std::to_string(island_index));
+      bytecode_global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+      bytecode_globals[island_index] = bytecode_global;
+    }
   }
 
   llvm::GlobalVariable *retkey_global = nullptr;
@@ -822,6 +788,9 @@ void rewrite_function_body_state_islands(
   entry_builder.CreateStore(
       entry_builder.getInt32(dispatch_index_for_instruction[entry_instruction]),
       dispatch_index_slot);
+  entry_builder.CreateStore(
+      entry_builder.getInt32(island_for_instruction[entry_instruction]),
+      island_id_slot);
 
   std::size_t argument_index = 0;
   for (llvm::Argument &argument : function.args()) {
@@ -844,34 +813,46 @@ void rewrite_function_body_state_islands(
     helper->setDSOLocal(true);
     helper->addFnAttr(llvm::Attribute::NoInline);
     helper->addFnAttr("instcombine-no-verify-fixpoint");
+    helper->addFnAttr("vm.dispatch.shape.switch");
     helper->addFnAttr("vm.island.helper");
+    helper->addFnAttr("vm.island.helper.decode");
+    helper->addFnAttr("vm.island.helper.dispatch");
+    helper->addFnAttr("vm.island.helper.table");
+    helper->addFnAttr("vm.island.next_island");
     helper->addFnAttr("vm.island.state");
+    helper->addFnAttr("vm.island.table.shard");
     helpers.push_back(helper);
   }
 
   entry_builder.CreateBr(route_block);
   llvm::IRBuilder<> route_builder(route_block);
   auto *status_phi = route_builder.CreatePHI(route_builder.getInt32Ty(),
-                                             helpers.size() + 1,
-                                             "vm.island.route.status");
-  status_phi->addIncoming(
-      route_builder.getInt32(island_for_instruction[entry_instruction]),
-      entry_block);
-  auto *route_switch = route_builder.CreateSwitch(status_phi, trap_block,
-                                                  helpers.size() + 2);
-  route_switch->addCase(route_builder.getInt32(vm_island_done_status),
-                        finish_block);
-  route_switch->addCase(route_builder.getInt32(vm_island_trap_status),
-                        trap_block);
+                                              helpers.size() + 1,
+                                              "vm.island.route.status");
+  status_phi->addIncoming(route_builder.getInt32(vm_island_continue_status),
+                          entry_block);
+  auto *island_route_block = llvm::BasicBlock::Create(
+      context, "vm.island.root.route", &function);
+  auto *route_switch = route_builder.CreateSwitch(status_phi, trap_block, 3);
+  route_switch->addCase(route_builder.getInt32(vm_island_continue_status),
+                        island_route_block);
+  route_switch->addCase(route_builder.getInt32(vm_island_done_status), finish_block);
+  route_switch->addCase(route_builder.getInt32(vm_island_trap_status), trap_block);
+
+  llvm::IRBuilder<> island_route_builder(island_route_block);
+  llvm::Value *current_island = island_route_builder.CreateLoad(
+      island_route_builder.getInt32Ty(), island_id_slot, "vm.island.root.route");
+  auto *island_switch = island_route_builder.CreateSwitch(
+      current_island, trap_block, helpers.size());
 
   for (std::uint32_t island_index = 0; island_index < helpers.size();
        ++island_index) {
     auto *call_block = llvm::BasicBlock::Create(
         context, "vm.island.call." + std::to_string(island_index), &function);
-    route_switch->addCase(route_builder.getInt32(island_index), call_block);
+    island_switch->addCase(island_route_builder.getInt32(island_index), call_block);
     llvm::IRBuilder<> call_builder(call_block);
     auto *status = call_builder.CreateCall(helpers[island_index]->getFunctionType(),
-                                           helpers[island_index], {state_storage},
+                                            helpers[island_index], {state_storage},
                                            "vm.island.status");
     call_builder.CreateBr(route_block);
     status_phi->addIncoming(status, call_block);
@@ -882,7 +863,7 @@ void rewrite_function_body_state_islands(
     finish_builder.CreateRetVoid();
   } else {
     finish_builder.CreateRet(finish_builder.CreateLoad(
-        function.getReturnType(), return_value_slot, "vm.island.ret"));
+        function.getReturnType(), return_value_slot, "vm.island.root.finalize"));
   }
 
   llvm::IRBuilder<> trap_builder(trap_block);
@@ -894,7 +875,8 @@ void rewrite_function_body_state_islands(
   for (std::uint32_t island_index = 0; island_index < helpers.size();
        ++island_index) {
     emit_state_island_helper(
-        *helpers[island_index], program, options, state_layout, bytecode_global,
+        *helpers[island_index], program, options, state_layout,
+        bytecode_globals[island_index],
         retkey_global, slot_mappings, dispatch_index_for_instruction, entry_states,
         serialized, opcode_map, opaque_seed_base, bytecode_seed, hidden_token_arg,
         island_for_instruction, island_index);
@@ -904,6 +886,9 @@ void rewrite_function_body_state_islands(
   function.addFnAttr("vm.island.topology.helper_shards");
   function.addFnAttr("vm.island.count." + std::to_string(helpers.size()));
   function.addFnAttr("vm.island.route");
+  function.addFnAttr("vm.island.root.finalize");
+  function.addFnAttr("vm.island.root.route");
+  function.addFnAttr("vm.island.root.small");
   function.addFnAttr("vm.island.state");
 }
 

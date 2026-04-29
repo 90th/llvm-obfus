@@ -68,7 +68,8 @@ void finish_value_in_builder(llvm::IRBuilder<> &builder,
       builder, function_context, context.layout.fallthrough_target_offset,
       0x9000 + static_cast<std::uint64_t>(context.instruction_index) * 32);
   emit_dispatch(builder, function_context, next_target,
-                0xa000 + static_cast<std::uint64_t>(context.instruction_index) * 32);
+                0xa000 + static_cast<std::uint64_t>(context.instruction_index) * 32,
+                static_cast<std::uint32_t>(context.instruction_index + 1));
 }
 
 bool lower_control_instruction(llvm::IRBuilder<> &builder,
@@ -123,7 +124,8 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
           call_builder, function_context, context.layout.fallthrough_target_offset,
           0x14200 + instruction_index);
       emit_dispatch(call_builder, function_context, next_target,
-                    0x14300 + instruction_index);
+                    0x14300 + instruction_index,
+                    static_cast<std::uint32_t>(instruction_index + 1));
     };
     if (select_handler_variant(instruction.op, function_context.opaque_seed_base,
                                0x14800 + instruction_index) == 0) {
@@ -144,7 +146,9 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
                   decode_target_dispatch(builder, function_context,
                                          context.layout.edge_target_offsets[0],
                                          0x15100 + instruction_index),
-                  0x15200 + instruction_index);
+                  0x15200 + instruction_index,
+                  function_context.program.blocks[instruction.edges[0].target_block]
+                      .first_instruction);
     return true;
 
   case opcode::branch: {
@@ -176,7 +180,9 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
                   decode_target_dispatch(true_builder, function_context,
                                          context.layout.edge_target_offsets[0],
                                          0x16200 + instruction_index),
-                  0x16300 + instruction_index);
+                  0x16300 + instruction_index,
+                  function_context.program.blocks[instruction.edges[0].target_block]
+                      .first_instruction);
 
     llvm::IRBuilder<> false_builder(false_block);
     apply_edge_assignments(false_builder, context, instruction.edges[1],
@@ -188,7 +194,9 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
                   decode_target_dispatch(false_builder, function_context,
                                          context.layout.edge_target_offsets[1],
                                          0x16500 + instruction_index),
-                  0x16600 + instruction_index);
+                  0x16600 + instruction_index,
+                  function_context.program.blocks[instruction.edges[1].target_block]
+                      .first_instruction);
     return true;
   }
 
@@ -232,7 +240,9 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
                   decode_target_dispatch(default_builder, function_context,
                                          context.layout.edge_target_offsets[0],
                                          0x17200 + instruction_index),
-                  0x17300 + instruction_index);
+                  0x17300 + instruction_index,
+                  function_context.program.blocks[instruction.edges[0].target_block]
+                      .first_instruction);
 
     for (std::size_t case_index = 0; case_index < case_blocks.size(); ++case_index) {
       llvm::IRBuilder<> case_builder(case_blocks[case_index]);
@@ -248,7 +258,10 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
                                            context.layout.edge_target_offsets[case_index + 1],
                                            0x17500 + instruction_index * 8 +
                                                case_index),
-                    0x17600 + instruction_index * 8 + case_index);
+                    0x17600 + instruction_index * 8 + case_index,
+                    function_context.program
+                        .blocks[instruction.edges[case_index + 1].target_block]
+                        .first_instruction);
     }
     return true;
   }

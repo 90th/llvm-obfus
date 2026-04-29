@@ -38,6 +38,7 @@ inline constexpr std::size_t vm_switch_dispatch_min_instruction_count = 16;
 inline constexpr std::size_t vm_island_min_instruction_count = 16;
 inline constexpr std::size_t vm_island_max_count = 6;
 inline constexpr std::size_t switch_dispatch_max_bank_count = 4;
+inline constexpr std::uint32_t vm_island_continue_status = 0xfffffffdU;
 inline constexpr std::uint32_t vm_island_done_status = 0xfffffffeU;
 inline constexpr std::uint32_t vm_island_trap_status = 0xffffffffU;
 
@@ -106,7 +107,8 @@ struct vm_state_layout {
   llvm::StructType *type = nullptr;
   std::uint32_t bytecode_state_field = 0;
   std::uint32_t dispatch_index_field = 1;
-  std::uint32_t hidden_token_field = 2;
+  std::uint32_t island_id_field = 2;
+  std::uint32_t hidden_token_field = 3;
   std::uint32_t return_value_field = invalid_slot;
   std::vector<std::array<std::uint32_t, vm_slot_rotation_cell_count>> slot_fields;
 };
@@ -135,6 +137,7 @@ struct rewrite_function_context {
   llvm::Value *state_storage = nullptr;
   llvm::Value *state_slot = nullptr;
   llvm::Value *dispatch_index_slot = nullptr;
+  llvm::Value *island_id_slot = nullptr;
   llvm::Value *hidden_token_slot = nullptr;
   llvm::Value *return_value_slot = nullptr;
   llvm::BasicBlock *trap_block = nullptr;
@@ -214,8 +217,9 @@ build_instruction_entry_states(const bytecode_program &program,
 void initialize_dispatch_runtime(llvm::IRBuilder<> &entry_builder,
                                  rewrite_function_context &context);
 void emit_dispatch(llvm::IRBuilder<> &builder,
-                   rewrite_function_context &context,
-                   llvm::Value *dispatch_index, std::uint64_t salt);
+                    rewrite_function_context &context,
+                    llvm::Value *dispatch_index, std::uint64_t salt,
+                    std::uint32_t target_instruction = invalid_slot);
 std::uint32_t outline_vm_islands(rewrite_function_context &context);
 
 serialized_bytecode_program serialize_bytecode_program(

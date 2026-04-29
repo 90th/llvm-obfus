@@ -1177,7 +1177,8 @@ bool lower_scalar_instruction(llvm::IRBuilder<> &builder,
           merge_builder, function_context, context.layout.fallthrough_target_offset,
           0x10300 + instruction_index);
       emit_dispatch(merge_builder, function_context, next_target,
-                    0x10400 + instruction_index);
+                    0x10400 + instruction_index,
+                    static_cast<std::uint32_t>(instruction_index + 1));
     } else if (select_handler_variant(instruction.op,
                                       function_context.opaque_seed_base,
                                       0x10000 + instruction_index) == 0) {

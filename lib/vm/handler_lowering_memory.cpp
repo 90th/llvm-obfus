@@ -208,7 +208,8 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
           store_builder, function_context, context.layout.fallthrough_target_offset,
           0x12200 + instruction_index);
       emit_dispatch(store_builder, function_context, next_target,
-                    0x12300 + instruction_index);
+                    0x12300 + instruction_index,
+                    static_cast<std::uint32_t>(instruction_index + 1));
     };
     if (select_handler_variant(instruction.op, function_context.opaque_seed_base,
                                0x12800 + instruction_index) == 0) {
@@ -276,7 +277,8 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
           store_builder, function_context, context.layout.fallthrough_target_offset,
           0x12200 + instruction_index);
       emit_dispatch(store_builder, function_context, next_target,
-                    0x12300 + instruction_index);
+                    0x12300 + instruction_index,
+                    static_cast<std::uint32_t>(instruction_index + 1));
     };
     if (select_handler_variant(instruction.op, function_context.opaque_seed_base,
                                0x12800 + instruction_index) == 0) {
@@ -517,7 +519,8 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
           mem_builder, function_context, context.layout.fallthrough_target_offset,
           0x13a60 + instruction_index);
       emit_dispatch(mem_builder, function_context, next_target,
-                    0x13a70 + instruction_index);
+                    0x13a70 + instruction_index,
+                    static_cast<std::uint32_t>(instruction_index + 1));
     };
     if (select_handler_variant(instruction.op, function_context.opaque_seed_base,
                                0x13a80 + instruction_index) == 0) {

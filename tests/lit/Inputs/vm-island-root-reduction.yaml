@@ -1,0 +1,9 @@
+seed: 616161
+default_level: none
+targets:
+  - match: root_reduction_target
+    level: strong_vm
+mba:
+  depth: 0
+security:
+  fail_on_public_obf_symbol: true

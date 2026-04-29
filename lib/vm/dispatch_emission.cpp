@@ -398,20 +398,24 @@ void initialize_dispatch_runtime(llvm::IRBuilder<> &entry_builder,
 
 void emit_dispatch(llvm::IRBuilder<> &builder,
                    rewrite_function_context &context,
-                   llvm::Value *dispatch_index, std::uint64_t salt) {
+                   llvm::Value *dispatch_index, std::uint64_t salt,
+                   std::uint32_t target_instruction) {
   if (context.state_island_body) {
-    if (context.island_route_block == nullptr || context.island_route_phi == nullptr) {
-      builder.CreateBr(context.trap_block);
+    if (context.dispatch_index_slot == nullptr || context.island_id_slot == nullptr ||
+        target_instruction >= context.island_for_instruction.size()) {
+      builder.CreateRet(builder.getInt32(vm_island_trap_status));
       return;
     }
-    llvm::BasicBlock *dispatch_source = builder.GetInsertBlock();
     llvm::Value *typed_dispatch_index = dispatch_index;
     if (typed_dispatch_index->getType() != builder.getInt32Ty()) {
       typed_dispatch_index = builder.CreateZExtOrTrunc(
           typed_dispatch_index, builder.getInt32Ty(), "obf.vm.island.dispatch.cast");
     }
-    builder.CreateBr(context.island_route_block);
-    context.island_route_phi->addIncoming(typed_dispatch_index, dispatch_source);
+    builder.CreateStore(typed_dispatch_index, context.dispatch_index_slot);
+    builder.CreateStore(
+        builder.getInt32(context.island_for_instruction[target_instruction]),
+        context.island_id_slot);
+    builder.CreateRet(builder.getInt32(vm_island_continue_status));
     return;
   }
 

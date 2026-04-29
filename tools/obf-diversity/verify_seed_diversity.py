@@ -41,8 +41,16 @@ MARKER_GROUPS = {
         "count": r"vm\.island\.count\.\d+",
         "entry": r"vm\.island\.entry",
         "helper": r"vm\.island\.helper",
+        "helper_decode": r"vm\.island\.helper\.decode",
+        "helper_dispatch": r"vm\.island\.helper\.dispatch",
+        "helper_table": r"vm\.island\.helper\.table",
+        "next_island": r"vm\.island\.next_island",
         "route": r"vm\.island\.route",
+        "root_finalize": r"vm\.island\.root\.finalize",
+        "root_route": r"vm\.island\.root\.route",
+        "root_small": r"vm\.island\.root\.small",
         "state": r"vm\.island\.state",
+        "table_shard": r"vm\.island\.table\.shard",
     },
     "pointer_materialization": {
         "direct": r"ptrmat\.direct",
@@ -254,21 +262,63 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
     ]
     data_symbol_refs: Counter[str] = Counter()
     data_ref_function_counts: list[int] = []
+    helper_data_ref_function_counts: list[int] = []
+    primary_data_ref_function_counts: list[int] = []
     for body in vm_like_bodies.values():
         refs = [match.group("name") for match in VM_DATA_GLOBAL_PATTERN.finditer(body)]
         data_symbol_refs.update(refs)
         data_ref_function_counts.append(len(refs))
+    for body in helper_bodies.values():
+        helper_data_ref_function_counts.append(len(list(VM_DATA_GLOBAL_PATTERN.finditer(body))))
+    for body in primary_bodies.values():
+        primary_data_ref_function_counts.append(len(list(VM_DATA_GLOBAL_PATTERN.finditer(body))))
+
+    primary_root_lines = max(primary_line_counts, default=0)
+    helper_total_lines = sum(helper_line_counts)
+    helper_max_lines = max(helper_line_counts, default=0)
+    root_helper_ratio_x1000 = (
+        int((primary_root_lines * 1000) / helper_total_lines) if helper_total_lines else 0
+    )
+    primary_decode_markers = sum(
+        body.count("obf.vm.bc") + body.count("vm.island.helper.decode")
+        for body in primary_bodies.values()
+    )
+    helper_decode_markers = sum(
+        body.count("obf.vm.bc") + body.count("vm.island.helper.decode")
+        for body in helper_bodies.values()
+    )
+    primary_dispatch_bank_markers = sum(
+        body.count("obf.vm.dispatch.index.bank") for body in primary_bodies.values()
+    )
+    helper_dispatch_markers = sum(
+        body.count("vm.island.helper.dispatch") for body in helper_bodies.values()
+    )
     marker_counts = count_markers(marker_text, MARKER_GROUPS["vm_islands"])
     return {
         "island_marker_count": sum(marker_counts.values()),
         "route_marker_count": marker_counts.get("route", 0),
         "state_marker_count": marker_counts.get("state", 0),
+        "island_root_route_marker_count": marker_counts.get("root_route", 0),
+        "island_state_marker_count": marker_counts.get("state", 0),
+        "island_table_shard_marker_count": marker_counts.get("table_shard", 0),
         "helper_count": len(helper_bodies),
         "vm_like_function_count": len(vm_like_bodies),
         "largest_vm_like_function_lines": max(vm_like_line_counts, default=0),
-        "largest_helper_function_lines": max(helper_line_counts, default=0),
-        "primary_vm_entry_lines": max(primary_line_counts, default=0),
+        "largest_vm_like_function_instruction_proxy": max(vm_like_line_counts, default=0),
+        "largest_helper_function_lines": helper_max_lines,
+        "largest_helper_instruction_proxy": helper_max_lines,
+        "helper_instruction_proxy_total": helper_total_lines,
+        "primary_vm_entry_lines": primary_root_lines,
+        "primary_vm_root_size_proxy": primary_root_lines,
+        "primary_root_instruction_proxy": primary_root_lines,
+        "root_helper_instruction_ratio_x1000": root_helper_ratio_x1000,
+        "primary_root_decode_marker_count": primary_decode_markers,
+        "helper_decode_marker_count": helper_decode_markers,
+        "primary_root_dispatch_bank_marker_count": primary_dispatch_bank_markers,
+        "helper_dispatch_marker_count": helper_dispatch_markers,
         "top_vm_data_ref_function_refs": max(data_ref_function_counts, default=0),
+        "top_primary_data_ref_function_refs": max(primary_data_ref_function_counts, default=0),
+        "top_helper_data_ref_function_refs": max(helper_data_ref_function_counts, default=0),
         "top_vm_data_ref_symbol_refs": max(data_symbol_refs.values(), default=0),
     }
 
