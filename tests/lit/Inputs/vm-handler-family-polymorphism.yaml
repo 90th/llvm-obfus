@@ -1,0 +1,15 @@
+seed: 20260429
+default_level: none
+targets:
+  - match: family_compare_route
+    level: strong_vm
+  - match: family_branch_route
+    level: strong_vm
+  - match: family_memory_route
+    level: strong_vm
+  - match: family_gep_route
+    level: strong_vm
+mba:
+  depth: 2
+security:
+  fail_on_public_obf_symbol: true

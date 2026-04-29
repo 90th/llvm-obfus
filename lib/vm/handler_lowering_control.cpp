@@ -6,6 +6,78 @@
 
 namespace obf::vm {
 
+namespace {
+
+llvm::StringRef branch_shape_marker(branch_handler_shape shape) {
+  switch (shape) {
+  case branch_handler_shape::direct:
+    return "vm.branch.shape.direct";
+  case branch_handler_shape::inverted_condition_swap:
+    return "vm.branch.shape.invert";
+  case branch_handler_shape::neutralized_condition:
+    return "vm.branch.shape.neutral";
+  case branch_handler_shape::select_condition:
+    return "vm.branch.shape.select";
+  }
+  llvm_unreachable("unknown branch handler shape");
+}
+
+llvm::StringRef return_shape_marker(return_handler_shape shape) {
+  switch (shape) {
+  case return_handler_shape::direct:
+    return "vm.return.shape.direct";
+  case return_handler_shape::result_slot_roundtrip:
+    return "vm.return.shape.slot";
+  case return_handler_shape::neutralized_encode:
+    return "vm.return.shape.neutral";
+  case return_handler_shape::split_encode:
+    return "vm.return.shape.split";
+  }
+  llvm_unreachable("unknown return handler shape");
+}
+
+llvm::Value *emit_branch_condition(llvm::IRBuilder<> &builder,
+                                   const instruction_rewrite_context &context,
+                                   branch_handler_shape shape,
+                                   bool &swap_targets) {
+  rewrite_function_context &function_context = context.function_context;
+  const std::uint64_t instruction_index = context.instruction_index;
+  llvm::Value *condition = materialize_value(
+      builder, function_context.slot_allocas, context.current_slot_mapping,
+      function_context.program, context.instruction.operands[0],
+      function_context.opaque_seed_slot, function_context.opaque_seed_base,
+      function_context.mba_context, 0x16000 + instruction_index);
+  swap_targets = false;
+  switch (shape) {
+  case branch_handler_shape::direct:
+    return tag_vm_handler_value(condition, branch_shape_marker(shape));
+  case branch_handler_shape::neutralized_condition:
+    return builder.CreateXor(condition, builder.getFalse(),
+                             branch_shape_marker(shape));
+  case branch_handler_shape::select_condition:
+    return builder.CreateSelect(condition, builder.getTrue(), builder.getFalse(),
+                                branch_shape_marker(shape));
+  case branch_handler_shape::inverted_condition_swap:
+    swap_targets = true;
+    return builder.CreateXor(condition, builder.getTrue(),
+                             branch_shape_marker(shape));
+  }
+
+  llvm_unreachable("unknown branch handler shape");
+}
+
+llvm::Value *convert_return_key(llvm::IRBuilder<> &builder, llvm::Value *key,
+                                llvm::Type *target_type,
+                                llvm::StringRef name) {
+  if (key == nullptr || target_type == nullptr || key->getType() == target_type) {
+    return key;
+  }
+
+  return builder.CreateZExtOrTrunc(key, target_type, name);
+}
+
+} // namespace
+
 void apply_edge_assignments(llvm::IRBuilder<> &builder,
                             const instruction_rewrite_context &context,
                             const control_edge &edge, std::uint64_t salt) {
@@ -80,6 +152,8 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
 
   switch (instruction.op) {
   case opcode::call: {
+    (void)select_call_handler_shape(function_context, instruction,
+                                    instruction_index, 0x14700 + instruction_index);
     const auto emit_call = [&](llvm::IRBuilder<> &call_builder) {
       llvm::SmallVector<llvm::Value *, 8> arguments;
       arguments.reserve(instruction.operands.size() - 1);
@@ -152,6 +226,9 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
     return true;
 
   case opcode::branch: {
+    const branch_handler_shape shape = select_branch_handler_shape(
+        function_context, instruction, instruction_index,
+        0x16700 + instruction_index);
     auto *true_block = llvm::BasicBlock::Create(
         function_context.function.getContext(),
         "vm.edge.true." + std::to_string(instruction_index),
@@ -160,15 +237,11 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
         function_context.function.getContext(),
         "vm.edge.false." + std::to_string(instruction_index),
         &function_context.function);
-    builder.CreateCondBr(
-        materialize_value(builder, function_context.slot_allocas,
-                          context.current_slot_mapping, function_context.program,
-                          instruction.operands[0],
-                          function_context.opaque_seed_slot,
-                          function_context.opaque_seed_base,
-                          function_context.mba_context,
-                          0x16000 + instruction_index),
-        true_block, false_block);
+    bool swap_targets = false;
+    llvm::Value *condition = emit_branch_condition(builder, context, shape,
+                                                   swap_targets);
+    builder.CreateCondBr(condition, swap_targets ? false_block : true_block,
+                         swap_targets ? true_block : false_block);
 
     llvm::IRBuilder<> true_builder(true_block);
     apply_edge_assignments(true_builder, context, instruction.edges[0],
@@ -278,6 +351,9 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
         builder.CreateRetVoid();
       }
     } else {
+      const return_handler_shape shape = select_return_handler_shape(
+          function_context, instruction, instruction_index,
+          0x17f00 + instruction_index);
       llvm::Value *ret_val = materialize_value(
           builder, function_context.slot_allocas, context.current_slot_mapping,
           function_context.program, instruction.operands[0],
@@ -313,17 +389,41 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
         llvm::Value *token_key = mba::create_xor(
             builder, retkey_load, token_component, function_context.mba_context,
             ret_salt + 2, "obf.vm.ret.tokenkey");
-        llvm::Value *full_key = mba::create_xor(
-            builder, token_key, poison, function_context.mba_context,
-            ret_salt + 3, "obf.vm.ret.fullkey");
-        llvm::Value *key_trunc = full_key;
-        if (ret_val->getType() != builder.getInt64Ty()) {
-          key_trunc = builder.CreateZExtOrTrunc(
-              full_key, ret_val->getType(), "obf.vm.ret.key.cast");
+        if (shape == return_handler_shape::result_slot_roundtrip) {
+          ret_val = roundtrip_vm_handler_value(builder, ret_val,
+                                               return_shape_marker(shape));
         }
-        ret_val = mba::create_xor(
-            builder, ret_val, key_trunc, function_context.mba_context,
-            ret_salt + 4, "obf.vm.ret.encoded");
+
+        if (shape == return_handler_shape::split_encode) {
+          llvm::Value *token_key_trunc = convert_return_key(
+              builder, token_key, ret_val->getType(), "obf.vm.ret.token.cast");
+          llvm::Value *poison_trunc = convert_return_key(
+              builder, poison, ret_val->getType(), "obf.vm.ret.poison.cast");
+          llvm::Value *partial = mba::create_xor(
+              builder, ret_val, token_key_trunc, function_context.mba_context,
+              ret_salt + 3, return_shape_marker(shape));
+          ret_val = mba::create_xor(
+              builder, partial, poison_trunc, function_context.mba_context,
+              ret_salt + 4, "obf.vm.ret.encoded");
+        } else {
+          llvm::Value *full_key = mba::create_xor(
+              builder, token_key, poison, function_context.mba_context,
+              ret_salt + 3, "obf.vm.ret.fullkey");
+          llvm::Value *key_trunc = convert_return_key(
+              builder, full_key, ret_val->getType(), "obf.vm.ret.key.cast");
+          if (shape == return_handler_shape::direct) {
+            function_context.function.addFnAttr(return_shape_marker(shape));
+          } else if (shape == return_handler_shape::neutralized_encode) {
+            key_trunc = builder.CreateXor(
+                key_trunc,
+                llvm::ConstantInt::get(
+                    llvm::cast<llvm::IntegerType>(ret_val->getType()), 0),
+                return_shape_marker(shape));
+          }
+          ret_val = mba::create_xor(
+              builder, ret_val, key_trunc, function_context.mba_context,
+              ret_salt + 4, "obf.vm.ret.encoded");
+        }
       }
       if (function_context.state_island_body) {
         if (function_context.return_value_slot != nullptr) {

@@ -10,6 +10,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -66,6 +67,50 @@ enum class scalar_handler_shape : std::uint32_t {
   direct = 0,
   temp_slot_roundtrip = 1,
   mba_neutralized = 2,
+};
+
+enum class compare_handler_shape : std::uint32_t {
+  direct = 0,
+  bool_xor_neutralized = 1,
+  inverted_predicate = 2,
+  select_materialized = 3,
+};
+
+enum class branch_handler_shape : std::uint32_t {
+  direct = 0,
+  inverted_condition_swap = 1,
+  neutralized_condition = 2,
+  select_condition = 3,
+};
+
+enum class memory_handler_shape : std::uint32_t {
+  direct = 0,
+  pointer_roundtrip = 1,
+  offset_neutralized = 2,
+  addr_select_neutralized = 3,
+  value_slot_roundtrip = 4,
+};
+
+enum class gep_handler_shape : std::uint32_t {
+  direct = 0,
+  split_index_add = 1,
+  ptrint_roundtrip = 2,
+  offset_bias = 3,
+  select_equivalent_base = 4,
+};
+
+enum class call_handler_shape : std::uint32_t {
+  direct = 0,
+  argument_shuffle_roundtrip = 1,
+  token_guarded_call = 2,
+  result_slot_roundtrip = 3,
+};
+
+enum class return_handler_shape : std::uint32_t {
+  direct = 0,
+  result_slot_roundtrip = 1,
+  neutralized_encode = 2,
+  split_encode = 3,
 };
 
 struct opcode_permutation {
@@ -186,6 +231,30 @@ scalar_handler_shape select_scalar_handler_shape(std::uint64_t seed_base,
                                                  opcode op,
                                                  std::uint8_t physical_opcode,
                                                  std::uint64_t salt);
+compare_handler_shape select_compare_handler_shape(
+    const rewrite_function_context &context,
+    const micro_instruction &instruction,
+    std::size_t instruction_index, std::uint64_t salt);
+branch_handler_shape select_branch_handler_shape(
+    const rewrite_function_context &context,
+    const micro_instruction &instruction,
+    std::size_t instruction_index, std::uint64_t salt);
+memory_handler_shape select_memory_handler_shape(
+    const rewrite_function_context &context,
+    const micro_instruction &instruction,
+    std::size_t instruction_index, std::uint64_t salt);
+gep_handler_shape select_gep_handler_shape(const rewrite_function_context &context,
+                                           const micro_instruction &instruction,
+                                           std::size_t instruction_index,
+                                           std::uint64_t salt);
+call_handler_shape select_call_handler_shape(
+    const rewrite_function_context &context,
+    const micro_instruction &instruction,
+    std::size_t instruction_index, std::uint64_t salt);
+return_handler_shape select_return_handler_shape(
+    const rewrite_function_context &context,
+    const micro_instruction &instruction,
+    std::size_t instruction_index, std::uint64_t salt);
 
 std::uint32_t select_dispatch_variant(std::uint64_t seed_base, std::uint64_t salt,
                                       std::size_t instruction_count,
@@ -341,6 +410,48 @@ inline void finish_value(llvm::IRBuilder<> &builder,
                          const instruction_rewrite_context &context,
                          llvm::Value *result) {
   finish_value_in_builder(builder, context, result);
+}
+
+inline llvm::AllocaInst *create_vm_handler_temp_slot(llvm::IRBuilder<> &builder,
+                                                     llvm::Type *type,
+                                                     const llvm::Twine &name) {
+  llvm::BasicBlock *block = builder.GetInsertBlock();
+  llvm::Function *function = block != nullptr ? block->getParent() : nullptr;
+  if (function == nullptr || type == nullptr || !type->isSized()) {
+    return nullptr;
+  }
+
+  llvm::BasicBlock &entry_block = function->getEntryBlock();
+  llvm::IRBuilder<> entry_builder(&entry_block, entry_block.begin());
+  return entry_builder.CreateAlloca(type, nullptr, name);
+}
+
+inline llvm::Value *roundtrip_vm_handler_value(llvm::IRBuilder<> &builder,
+                                               llvm::Value *value,
+                                               const llvm::Twine &name) {
+  if (value == nullptr || value->getType()->isVoidTy() ||
+      !value->getType()->isSized()) {
+    return value;
+  }
+
+  llvm::AllocaInst *temp =
+      create_vm_handler_temp_slot(builder, value->getType(), name + ".slot");
+  if (temp == nullptr) {
+    return value;
+  }
+
+  builder.CreateStore(value, temp);
+  return builder.CreateLoad(value->getType(), temp, name);
+}
+
+inline llvm::Value *tag_vm_handler_value(llvm::Value *value,
+                                         llvm::StringRef marker) {
+  if (value == nullptr || llvm::isa<llvm::Constant>(value)) {
+    return value;
+  }
+
+  value->setName(marker);
+  return value;
 }
 
 template <typename EmitFn>

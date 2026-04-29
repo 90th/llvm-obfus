@@ -201,7 +201,7 @@ entry:
 ; CHECK: store i64 %obf.vm.ptr.carrier{{[0-9]*}}, ptr %obf.vm.slot{{[0-9]*}}
 ; CHECK: %obf.vm.slot.ptr.raw{{[0-9]*}} = load i64, ptr %obf.vm.slot{{[0-9]*}}
 ; CHECK: %obf.vm.slot.ptr.value{{[0-9]*}} = inttoptr i64 %obf.vm.slot.ptr.raw{{[0-9]*}} to ptr
-; CHECK: getelementptr inbounds i32, ptr %obf.vm.slot.ptr.value{{[0-9]*}}, i32
+; CHECK: getelementptr inbounds i32, ptr %{{[^,]+}}, i32
 ; CHECK: %obf.vm.ptr.carrier{{[0-9]*}} =
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %tag, i32 %base, i64 %obf.hidden_token)
 ; CHECK: vm.switch.default.
@@ -215,6 +215,6 @@ entry:
 ; CHECK: %obf.vm.trunc.mask = and i32 %{{[^,]+}}, 65535
 ; CHECK: %obf.vm.trunc = trunc i32 %obf.vm.trunc.mask to i16
 ; CHECK-LABEL: define internal float @__obf_vm_i_{{[A-Za-z0-9_]+}}(float %x, float %y, i64 %obf.hidden_token)
-; CHECK: fcmp ogt float
+; CHECK: fcmp {{[a-z]+}} float
 ; CHECK-LABEL: define internal <2 x i32> @__obf_vm_i_{{[A-Za-z0-9_]+}}(<2 x i32> %a, <2 x i32> %b, i64 %obf.hidden_token)
 ; CHECK: add <2 x i32>

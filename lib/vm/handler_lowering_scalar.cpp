@@ -57,6 +57,78 @@ llvm::StringRef scalar_shape_marker(scalar_handler_shape shape) {
   llvm_unreachable("unknown scalar handler shape");
 }
 
+llvm::StringRef compare_shape_marker(compare_handler_shape shape) {
+  switch (shape) {
+  case compare_handler_shape::direct:
+    return "vm.compare.shape.direct";
+  case compare_handler_shape::bool_xor_neutralized:
+    return "vm.compare.shape.xor";
+  case compare_handler_shape::inverted_predicate:
+    return "vm.compare.shape.invert";
+  case compare_handler_shape::select_materialized:
+    return "vm.compare.shape.select";
+  }
+  llvm_unreachable("unknown compare handler shape");
+}
+
+llvm::CmpInst::Predicate icmp_predicate_for_opcode(opcode op);
+llvm::CmpInst::Predicate fcmp_predicate_for_opcode(opcode op);
+llvm::Value *emit_integer_icmp(llvm::IRBuilder<> &builder, opcode predicate,
+                               llvm::Value *lhs, llvm::Value *rhs,
+                               const mba::builder_context &mba_context,
+                               std::uint64_t salt);
+
+std::uint64_t mix_handler_family_shape_seed(
+    const rewrite_function_context &context,
+    const micro_instruction &instruction, std::size_t instruction_index,
+    std::uint64_t salt, std::uint64_t family_salt) {
+  std::uint64_t mixed = mix_seed(context.bytecode_seed, salt ^ family_salt);
+  mixed = mix_seed(mixed,
+                   (static_cast<std::uint64_t>(opcode_to_index(instruction.op)) +
+                    1) *
+                       0x9e3779b97f4a7c15ULL);
+  mixed = mix_seed(
+      mixed,
+      (static_cast<std::uint64_t>(
+           get_physical_opcode(context.opcode_map, instruction.op)) +
+       1) *
+          0xbf58476d1ce4e5b9ULL);
+  mixed = mix_seed(mixed,
+                   (static_cast<std::uint64_t>(instruction_index) + 1) *
+                       0x94d049bb133111ebULL);
+  mixed = mix_seed(mixed,
+                   (static_cast<std::uint64_t>(instruction.operands.size()) +
+                    1) *
+                       0xd6e8feb86659fd93ULL);
+  mixed = mix_seed(
+      mixed,
+      (static_cast<std::uint64_t>(instruction.result_slot == invalid_slot
+                                      ? 0
+                                      : instruction.result_slot + 1) +
+       1) *
+          0x369dea0f31a53f85ULL);
+  mixed = mix_seed(mixed,
+                   (static_cast<std::uint64_t>(instruction.immediate) + 1) *
+                       0xda942042e4dd58b5ULL);
+  return mixed;
+}
+
+template <typename Shape>
+Shape select_handler_family_shape(const rewrite_function_context &context,
+                                  const micro_instruction &instruction,
+                                  std::size_t instruction_index,
+                                  std::uint64_t salt,
+                                  std::uint64_t family_salt,
+                                  std::uint32_t variant_count) {
+  if (variant_count <= 1) {
+    return static_cast<Shape>(0);
+  }
+
+  const std::uint64_t mixed = mix_handler_family_shape_seed(
+      context, instruction, instruction_index, salt, family_salt);
+  return static_cast<Shape>(mixed % variant_count);
+}
+
 llvm::AllocaInst *create_handler_temp_slot(llvm::IRBuilder<> &builder,
                                            llvm::Type *type,
                                            llvm::StringRef name) {
@@ -168,6 +240,103 @@ llvm::Value *apply_scalar_handler_shape(llvm::IRBuilder<> &builder,
 
   auto *integer_type = llvm::cast<llvm::IntegerType>(result->getType());
   return builder.CreateXor(result, llvm::ConstantInt::get(integer_type, 0), marker);
+}
+
+llvm::Value *apply_compare_handler_shape(llvm::IRBuilder<> &builder,
+                                         compare_handler_shape shape,
+                                         llvm::Value *result) {
+  if (result == nullptr || !result->getType()->isIntegerTy(1)) {
+    return result;
+  }
+
+  const llvm::StringRef marker = compare_shape_marker(shape);
+  switch (shape) {
+  case compare_handler_shape::direct:
+    return tag_vm_handler_value(result, marker);
+  case compare_handler_shape::bool_xor_neutralized:
+    return builder.CreateXor(result, builder.getFalse(), marker);
+  case compare_handler_shape::select_materialized:
+    return builder.CreateSelect(result, builder.getTrue(), builder.getFalse(),
+                                marker);
+  case compare_handler_shape::inverted_predicate:
+    llvm_unreachable("inverted compare shape must be emitted explicitly");
+  }
+
+  llvm_unreachable("unknown compare handler shape");
+}
+
+llvm::Value *emit_icmp_result(llvm::IRBuilder<> &builder,
+                              const instruction_rewrite_context &context,
+                              compare_handler_shape shape,
+                              std::uint64_t salt) {
+  rewrite_function_context &function_context = context.function_context;
+  const micro_instruction &instruction = context.instruction;
+  const std::uint64_t instruction_index = context.instruction_index;
+  llvm::Value *lhs = materialize_value(
+      builder, function_context.slot_allocas, context.current_slot_mapping,
+      function_context.program, instruction.operands[0],
+      function_context.opaque_seed_slot, function_context.opaque_seed_base,
+      function_context.mba_context, salt + 0x10 + instruction_index);
+  llvm::Value *rhs = materialize_value(
+      builder, function_context.slot_allocas, context.current_slot_mapping,
+      function_context.program, instruction.operands[1],
+      function_context.opaque_seed_slot, function_context.opaque_seed_base,
+      function_context.mba_context, salt + 0x20 + instruction_index);
+
+  if (shape == compare_handler_shape::inverted_predicate) {
+    llvm::Value *inverted = builder.CreateICmp(
+        llvm::CmpInst::getInversePredicate(
+            icmp_predicate_for_opcode(instruction.op)),
+        lhs, rhs, "obf.vm.icmp.inv");
+    return builder.CreateXor(inverted, builder.getTrue(), compare_shape_marker(shape));
+  }
+
+  llvm::Value *result = nullptr;
+  if (lhs->getType()->isIntegerTy() && lhs->getType() == rhs->getType()) {
+    result = emit_integer_icmp(builder, instruction.op, lhs, rhs,
+                               function_context.mba_context,
+                               salt + 0x30 + instruction_index * 16);
+  } else {
+    result = builder.CreateICmp(icmp_predicate_for_opcode(instruction.op), lhs,
+                                rhs, "obf.vm.icmp");
+  }
+  return apply_compare_handler_shape(builder, shape, result);
+}
+
+llvm::Value *emit_fcmp_result(llvm::IRBuilder<> &builder,
+                              const instruction_rewrite_context &context,
+                              compare_handler_shape shape,
+                              std::uint64_t salt) {
+  rewrite_function_context &function_context = context.function_context;
+  const micro_instruction &instruction = context.instruction;
+  const std::uint64_t instruction_index = context.instruction_index;
+  llvm::CmpInst::Predicate predicate = fcmp_predicate_for_opcode(instruction.op);
+  if (shape == compare_handler_shape::inverted_predicate) {
+    predicate = llvm::CmpInst::getInversePredicate(predicate);
+  }
+
+  auto *compare = llvm::cast<llvm::Instruction>(builder.CreateFCmp(
+      predicate,
+      materialize_value(builder, function_context.slot_allocas,
+                        context.current_slot_mapping, function_context.program,
+                        instruction.operands[0], function_context.opaque_seed_slot,
+                        function_context.opaque_seed_base,
+                        function_context.mba_context,
+                        salt + 0x10 + instruction_index),
+      materialize_value(builder, function_context.slot_allocas,
+                        context.current_slot_mapping, function_context.program,
+                        instruction.operands[1], function_context.opaque_seed_slot,
+                        function_context.opaque_seed_base,
+                        function_context.mba_context,
+                        salt + 0x20 + instruction_index),
+      shape == compare_handler_shape::inverted_predicate ? "obf.vm.fcmp.inv"
+                                                         : "obf.vm.fcmp"));
+  apply_fast_math_flags(compare, instruction.flags);
+  if (shape == compare_handler_shape::inverted_predicate) {
+    return builder.CreateXor(compare, builder.getTrue(), compare_shape_marker(shape));
+  }
+
+  return apply_compare_handler_shape(builder, shape, compare);
 }
 
 bool is_cast_opcode(opcode op) {
@@ -871,6 +1040,54 @@ scalar_handler_shape select_scalar_handler_shape(std::uint64_t seed_base,
   return static_cast<scalar_handler_shape>(mixed % 3);
 }
 
+compare_handler_shape select_compare_handler_shape(
+    const rewrite_function_context &context,
+    const micro_instruction &instruction,
+    std::size_t instruction_index, std::uint64_t salt) {
+  return select_handler_family_shape<compare_handler_shape>(
+      context, instruction, instruction_index, salt, 0x636f6d70617265ULL, 4);
+}
+
+branch_handler_shape select_branch_handler_shape(
+    const rewrite_function_context &context,
+    const micro_instruction &instruction,
+    std::size_t instruction_index, std::uint64_t salt) {
+  return select_handler_family_shape<branch_handler_shape>(
+      context, instruction, instruction_index, salt, 0x6272616e6368ULL, 4);
+}
+
+memory_handler_shape select_memory_handler_shape(
+    const rewrite_function_context &context,
+    const micro_instruction &instruction,
+    std::size_t instruction_index, std::uint64_t salt) {
+  return select_handler_family_shape<memory_handler_shape>(
+      context, instruction, instruction_index, salt, 0x6d656d6f7279ULL, 5);
+}
+
+gep_handler_shape select_gep_handler_shape(const rewrite_function_context &context,
+                                           const micro_instruction &instruction,
+                                           std::size_t instruction_index,
+                                           std::uint64_t salt) {
+  return select_handler_family_shape<gep_handler_shape>(
+      context, instruction, instruction_index, salt, 0x6765707368617065ULL,
+      5);
+}
+
+call_handler_shape select_call_handler_shape(
+    const rewrite_function_context &, const micro_instruction &,
+    std::size_t, std::uint64_t) {
+  // call shapes stay direct until call lowering can vary without abi risk.
+  return call_handler_shape::direct;
+}
+
+return_handler_shape select_return_handler_shape(
+    const rewrite_function_context &context,
+    const micro_instruction &instruction,
+    std::size_t instruction_index, std::uint64_t salt) {
+  return select_handler_family_shape<return_handler_shape>(
+      context, instruction, instruction_index, salt, 0x72657475726eULL, 4);
+}
+
 llvm::Value *emit_unsigned_integer_width_cast(
     llvm::IRBuilder<> &builder, llvm::Value *operand,
     llvm::IntegerType *destination_type,
@@ -1009,26 +1226,12 @@ bool lower_scalar_instruction(llvm::IRBuilder<> &builder,
   case opcode::icmp_sge:
   case opcode::icmp_slt:
   case opcode::icmp_sle: {
+    const compare_handler_shape shape = select_compare_handler_shape(
+        function_context, instruction, instruction_index,
+        0xe700 + instruction_index);
     const auto emit_compare = [&](llvm::IRBuilder<> &compare_builder) {
-      llvm::Value *lhs = materialize_value(
-          compare_builder, function_context.slot_allocas,
-          context.current_slot_mapping, function_context.program,
-          instruction.operands[0], function_context.opaque_seed_slot,
-          function_context.opaque_seed_base, function_context.mba_context,
-          0xe000 + instruction_index);
-      llvm::Value *rhs = materialize_value(
-          compare_builder, function_context.slot_allocas,
-          context.current_slot_mapping, function_context.program,
-          instruction.operands[1], function_context.opaque_seed_slot,
-          function_context.opaque_seed_base, function_context.mba_context,
-          0xe100 + instruction_index);
-      if (lhs->getType()->isIntegerTy() && lhs->getType() == rhs->getType()) {
-        return emit_integer_icmp(compare_builder, instruction.op, lhs, rhs,
-                                 function_context.mba_context,
-                                 0xe200 + instruction_index * 16);
-      }
-      return compare_builder.CreateICmp(
-          icmp_predicate_for_opcode(instruction.op), lhs, rhs, "obf.vm.icmp");
+      return emit_icmp_result(compare_builder, context, shape,
+                              0xe000 + instruction_index * 32);
     };
 
     if (value_ref_type(function_context.program, instruction.operands[0])->isIntegerTy() &&
@@ -1065,53 +1268,27 @@ bool lower_scalar_instruction(llvm::IRBuilder<> &builder,
   case opcode::fcmp_ule:
   case opcode::fcmp_une:
   case opcode::fcmp_true:
+  {
+    const compare_handler_shape shape = select_compare_handler_shape(
+        function_context, instruction, instruction_index,
+        0xf700 + instruction_index);
     if (select_handler_variant(instruction.op, function_context.opaque_seed_base,
                                0xf800 + instruction_index) == 0) {
-      auto *compare = llvm::cast<llvm::Instruction>(builder.CreateFCmp(
-          fcmp_predicate_for_opcode(instruction.op),
-          materialize_value(builder, function_context.slot_allocas,
-                            context.current_slot_mapping,
-                            function_context.program, instruction.operands[0],
-                            function_context.opaque_seed_slot,
-                            function_context.opaque_seed_base,
-                            function_context.mba_context,
-                            0xf000 + instruction_index),
-          materialize_value(builder, function_context.slot_allocas,
-                            context.current_slot_mapping,
-                            function_context.program, instruction.operands[1],
-                            function_context.opaque_seed_slot,
-                            function_context.opaque_seed_base,
-                            function_context.mba_context,
-                            0xf100 + instruction_index),
-          "obf.vm.fcmp"));
-      apply_fast_math_flags(compare, instruction.flags);
-      finish_value(builder, context, compare);
+      finish_value(builder, context,
+                   emit_fcmp_result(builder, context, shape,
+                                    0xf000 + instruction_index * 32));
     } else {
       emit_in_helper_block(
           builder, context, "vm.fcmp.exec.",
           [&](llvm::IRBuilder<> &helper_builder) {
-            auto *compare = llvm::cast<llvm::Instruction>(helper_builder.CreateFCmp(
-                fcmp_predicate_for_opcode(instruction.op),
-                materialize_value(helper_builder, function_context.slot_allocas,
-                                  context.current_slot_mapping,
-                                  function_context.program, instruction.operands[0],
-                                  function_context.opaque_seed_slot,
-                                  function_context.opaque_seed_base,
-                                  function_context.mba_context,
-                                  0xf000 + instruction_index),
-                materialize_value(helper_builder, function_context.slot_allocas,
-                                  context.current_slot_mapping,
-                                  function_context.program, instruction.operands[1],
-                                  function_context.opaque_seed_slot,
-                                  function_context.opaque_seed_base,
-                                  function_context.mba_context,
-                                  0xf100 + instruction_index),
-                "obf.vm.fcmp"));
-            apply_fast_math_flags(compare, instruction.flags);
-            finish_value_in_builder(helper_builder, context, compare);
+            finish_value_in_builder(
+                helper_builder, context,
+                emit_fcmp_result(helper_builder, context, shape,
+                                 0xf000 + instruction_index * 32));
           });
     }
     return true;
+  }
 
   case opcode::select:
     if (instruction.result_slot != invalid_slot &&

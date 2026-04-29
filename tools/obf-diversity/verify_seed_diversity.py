@@ -30,6 +30,44 @@ MARKER_GROUPS = {
         "temp": r"vm\.handler\.shape\.temp",
         "neutral": r"vm\.handler\.shape\.neutral",
     },
+    "cmp_shapes": {
+        "direct": r"vm\.compare\.shape\.direct",
+        "xor": r"vm\.compare\.shape\.xor",
+        "invert": r"vm\.compare\.shape\.invert",
+        "select": r"vm\.compare\.shape\.select",
+    },
+    "branch_shapes": {
+        "direct": r"vm\.branch\.shape\.direct",
+        "invert": r"vm\.branch\.shape\.invert",
+        "neutral": r"vm\.branch\.shape\.neutral",
+        "select": r"vm\.branch\.shape\.select",
+    },
+    "memory_shapes": {
+        "direct": r"vm\.memory\.shape\.direct",
+        "ptr": r"vm\.memory\.shape\.ptr",
+        "offset": r"vm\.memory\.shape\.offset",
+        "select": r"vm\.memory\.shape\.select",
+        "slot": r"vm\.memory\.shape\.slot",
+    },
+    "gep_shapes": {
+        "direct": r"vm\.gep\.shape\.direct",
+        "split": r"vm\.gep\.shape\.split",
+        "ptrint": r"vm\.gep\.shape\.ptrint",
+        "bias": r"vm\.gep\.shape\.bias",
+        "select": r"vm\.gep\.shape\.select",
+    },
+    "call_shapes": {
+        "direct": r"vm\.call\.shape\.direct",
+        "shuffle": r"vm\.call\.shape\.shuffle",
+        "token": r"vm\.call\.shape\.token",
+        "slot": r"vm\.call\.shape\.slot",
+    },
+    "return_shapes": {
+        "direct": r"vm\.return\.shape\.direct",
+        "slot": r"vm\.return\.shape\.slot",
+        "neutral": r"vm\.return\.shape\.neutral",
+        "split": r"vm\.return\.shape\.split",
+    },
     "dispatcher_shapes": {
         "direct": r"vm\.dispatch\.shape\.direct",
         "switch": r"vm\.dispatch\.shape\.switch",
@@ -400,6 +438,18 @@ def dimension_value(fingerprint: dict[str, Any], dimension: str) -> Any:
         return fingerprint["opcode_map_hash"]
     if dimension == "handler_shapes":
         return fingerprint["handler_shapes"]
+    if dimension == "cmp_shapes":
+        return fingerprint["cmp_shapes"]
+    if dimension == "branch_shapes":
+        return fingerprint["branch_shapes"]
+    if dimension == "memory_shapes":
+        return fingerprint["memory_shapes"]
+    if dimension == "gep_shapes":
+        return fingerprint["gep_shapes"]
+    if dimension == "call_shapes":
+        return fingerprint["call_shapes"]
+    if dimension == "return_shapes":
+        return fingerprint["return_shapes"]
     if dimension == "dispatcher_shapes":
         return fingerprint["dispatcher_shapes"]
     if dimension == "vm_islands":
@@ -496,6 +546,12 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
     dimensions = [
         "opcode_mapping",
         "handler_shapes",
+        "cmp_shapes",
+        "branch_shapes",
+        "memory_shapes",
+        "gep_shapes",
+        "call_shapes",
+        "return_shapes",
         "dispatcher_shapes",
         "vm_islands",
         "pointer_materialization",
@@ -521,6 +577,11 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
             for dimension in (
                 "opcode_mapping",
                 "handler_shapes",
+                "cmp_shapes",
+                "branch_shapes",
+                "memory_shapes",
+                "gep_shapes",
+                "return_shapes",
                 "dispatcher_shapes",
                 "vm_islands",
                 "vm_structure",
@@ -607,6 +668,12 @@ def main() -> int:
     dimension_names = [
         "opcode_mapping",
         "handler_shapes",
+        "cmp_shapes",
+        "branch_shapes",
+        "memory_shapes",
+        "gep_shapes",
+        "call_shapes",
+        "return_shapes",
         "dispatcher_shapes",
         "vm_islands",
         "pointer_materialization",

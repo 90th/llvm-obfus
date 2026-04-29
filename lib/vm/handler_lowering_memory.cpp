@@ -98,6 +98,173 @@ bool store_non_pointer_value_to_memory(
   return true;
 }
 
+llvm::StringRef memory_shape_marker(memory_handler_shape shape) {
+  switch (shape) {
+  case memory_handler_shape::direct:
+    return "vm.memory.shape.direct";
+  case memory_handler_shape::pointer_roundtrip:
+    return "vm.memory.shape.ptr";
+  case memory_handler_shape::offset_neutralized:
+    return "vm.memory.shape.offset";
+  case memory_handler_shape::addr_select_neutralized:
+    return "vm.memory.shape.select";
+  case memory_handler_shape::value_slot_roundtrip:
+    return "vm.memory.shape.slot";
+  }
+  llvm_unreachable("unknown memory handler shape");
+}
+
+llvm::StringRef gep_shape_marker(gep_handler_shape shape) {
+  switch (shape) {
+  case gep_handler_shape::direct:
+    return "vm.gep.shape.direct";
+  case gep_handler_shape::split_index_add:
+    return "vm.gep.shape.split";
+  case gep_handler_shape::ptrint_roundtrip:
+    return "vm.gep.shape.ptrint";
+  case gep_handler_shape::offset_bias:
+    return "vm.gep.shape.bias";
+  case gep_handler_shape::select_equivalent_base:
+    return "vm.gep.shape.select";
+  }
+  llvm_unreachable("unknown gep handler shape");
+}
+
+llvm::Value *apply_memory_address_shape(llvm::IRBuilder<> &builder,
+                                        llvm::Value *address,
+                                        memory_handler_shape &shape) {
+  if (address == nullptr || !address->getType()->isPointerTy()) {
+    return address;
+  }
+
+  switch (shape) {
+  case memory_handler_shape::direct:
+    return tag_vm_handler_value(address, memory_shape_marker(shape));
+  case memory_handler_shape::pointer_roundtrip:
+    return roundtrip_vm_handler_value(builder, address, memory_shape_marker(shape));
+  case memory_handler_shape::addr_select_neutralized: {
+    llvm::Value *roundtrip = roundtrip_vm_handler_value(
+        builder, address, "vm.memory.shape.select.base");
+    return builder.CreateSelect(builder.getTrue(), address, roundtrip,
+                                memory_shape_marker(shape));
+  }
+  case memory_handler_shape::offset_neutralized: {
+    auto *carrier_type = get_pointer_carrier_type(builder, address->getType());
+    if (carrier_type == nullptr) {
+      shape = memory_handler_shape::pointer_roundtrip;
+      return roundtrip_vm_handler_value(builder, address, memory_shape_marker(shape));
+    }
+
+    llvm::Value *carrier =
+        builder.CreatePtrToInt(address, carrier_type, "obf.vm.mem.addr.raw");
+    llvm::Value *biased = builder.CreateAdd(
+        carrier, llvm::ConstantInt::get(carrier_type, 1), "obf.vm.mem.addr.bias");
+    llvm::Value *unbiased = builder.CreateSub(
+        biased, llvm::ConstantInt::get(carrier_type, 1), memory_shape_marker(shape));
+    return builder.CreateIntToPtr(unbiased,
+                                  llvm::cast<llvm::PointerType>(address->getType()),
+                                  "obf.vm.mem.addr.ptr");
+  }
+  case memory_handler_shape::value_slot_roundtrip:
+    return address;
+  }
+
+  llvm_unreachable("unknown memory handler shape");
+}
+
+llvm::Value *apply_memory_value_shape(llvm::IRBuilder<> &builder, llvm::Value *value,
+                                      llvm::Value *address,
+                                      memory_handler_shape shape) {
+  switch (shape) {
+  case memory_handler_shape::direct:
+    if (llvm::Value *tagged = tag_vm_handler_value(value, memory_shape_marker(shape))) {
+      return tagged;
+    }
+    (void)tag_vm_handler_value(address, memory_shape_marker(shape));
+    return value;
+  case memory_handler_shape::value_slot_roundtrip:
+    return roundtrip_vm_handler_value(builder, value, memory_shape_marker(shape));
+  case memory_handler_shape::pointer_roundtrip:
+  case memory_handler_shape::offset_neutralized:
+  case memory_handler_shape::addr_select_neutralized:
+    return value;
+  }
+
+  llvm_unreachable("unknown memory handler shape");
+}
+
+bool apply_gep_index_shape(llvm::IRBuilder<> &builder,
+                           llvm::SmallVectorImpl<llvm::Value *> &indices,
+                           gep_handler_shape shape) {
+  if (shape != gep_handler_shape::split_index_add &&
+      shape != gep_handler_shape::offset_bias) {
+    return false;
+  }
+
+  for (llvm::Value *&index : indices) {
+    auto *integer_type = llvm::dyn_cast<llvm::IntegerType>(index->getType());
+    if (integer_type == nullptr || llvm::isa<llvm::Constant>(index)) {
+      continue;
+    }
+
+    if (shape == gep_handler_shape::split_index_add) {
+      index = builder.CreateAdd(index, llvm::ConstantInt::get(integer_type, 0),
+                                gep_shape_marker(shape));
+      return true;
+    }
+
+    llvm::Value *biased = builder.CreateAdd(
+        index, llvm::ConstantInt::get(integer_type, 1), "obf.vm.gep.bias");
+    index = builder.CreateSub(biased, llvm::ConstantInt::get(integer_type, 1),
+                              gep_shape_marker(shape));
+    return true;
+  }
+
+  return false;
+}
+
+llvm::Value *apply_gep_base_shape(llvm::IRBuilder<> &builder, llvm::Value *pointer,
+                                  const micro_instruction &instruction,
+                                  gep_handler_shape &shape) {
+  if (pointer == nullptr || !pointer->getType()->isPointerTy()) {
+    return pointer;
+  }
+
+  switch (shape) {
+  case gep_handler_shape::direct:
+    return tag_vm_handler_value(pointer, gep_shape_marker(shape));
+  case gep_handler_shape::select_equivalent_base: {
+    llvm::Value *roundtrip = roundtrip_vm_handler_value(
+        builder, pointer, "vm.gep.shape.select.base");
+    return builder.CreateSelect(builder.getTrue(), pointer, roundtrip,
+                                gep_shape_marker(shape));
+  }
+  case gep_handler_shape::ptrint_roundtrip: {
+    if (instruction.op == opcode::gep_inbounds) {
+      shape = gep_handler_shape::select_equivalent_base;
+      return apply_gep_base_shape(builder, pointer, instruction, shape);
+    }
+
+    auto *carrier_type = get_pointer_carrier_type(builder, pointer->getType());
+    if (carrier_type == nullptr) {
+      shape = gep_handler_shape::select_equivalent_base;
+      return apply_gep_base_shape(builder, pointer, instruction, shape);
+    }
+
+    llvm::Value *carrier =
+        builder.CreatePtrToInt(pointer, carrier_type, "obf.vm.gep.ptrint");
+    return builder.CreateIntToPtr(carrier,
+                                  llvm::cast<llvm::PointerType>(pointer->getType()),
+                                  gep_shape_marker(shape));
+  }
+  case gep_handler_shape::split_index_add:
+  case gep_handler_shape::offset_bias:
+    return pointer;
+  }
+
+  llvm_unreachable("unknown gep handler shape");
+}
+
 } // namespace
 
 bool lower_memory_instruction(llvm::IRBuilder<> &builder,
@@ -110,13 +277,18 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
   case opcode::load_int:
   case opcode::load_float:
   case opcode::load_vector: {
+    const memory_handler_shape selected_shape = select_memory_handler_shape(
+        function_context, instruction, instruction_index,
+        0x11700 + instruction_index);
     const auto emit_load = [&](llvm::IRBuilder<> &load_builder) {
+      memory_handler_shape shape = selected_shape;
       llvm::Value *pointer_address = materialize_value(
           load_builder, function_context.slot_allocas,
           context.current_slot_mapping, function_context.program,
           instruction.operands[0], function_context.opaque_seed_slot,
           function_context.opaque_seed_base, function_context.mba_context,
           0x11000 + instruction_index);
+      pointer_address = apply_memory_address_shape(load_builder, pointer_address, shape);
       llvm::Value *load = load_non_pointer_value_from_memory(
           load_builder, pointer_address,
           const_cast<llvm::Type *>(instruction.type), instruction.immediate,
@@ -130,6 +302,7 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
         }
         load = direct_load;
       }
+      load = apply_memory_value_shape(load_builder, load, pointer_address, shape);
       finish_value_in_builder(load_builder, context, load);
     };
     if (select_handler_variant(instruction.op, function_context.opaque_seed_base,
@@ -142,13 +315,18 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
   }
 
   case opcode::load_ptr: {
+    const memory_handler_shape selected_shape = select_memory_handler_shape(
+        function_context, instruction, instruction_index,
+        0x11780 + instruction_index);
     const auto emit_pointer_load = [&](llvm::IRBuilder<> &load_builder) {
+      memory_handler_shape shape = selected_shape;
       llvm::Value *pointer_address = materialize_value(
           load_builder, function_context.slot_allocas,
           context.current_slot_mapping, function_context.program,
           instruction.operands[0], function_context.opaque_seed_slot,
           function_context.opaque_seed_base, function_context.mba_context,
           0x11000 + instruction_index);
+      pointer_address = apply_memory_address_shape(load_builder, pointer_address, shape);
       llvm::Value *load = load_pointer_value_from_memory(
           load_builder, pointer_address, const_cast<llvm::Type *>(instruction.type),
           function_context.mba_context, 0x11080 + instruction_index,
@@ -164,6 +342,7 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
         }
         load = direct_load;
       }
+      load = apply_memory_value_shape(load_builder, load, pointer_address, shape);
       finish_value_in_builder(load_builder, context, load);
     };
     if (select_handler_variant(instruction.op, function_context.opaque_seed_base,
@@ -178,7 +357,11 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
   case opcode::store_int:
   case opcode::store_float:
   case opcode::store_vector: {
+    const memory_handler_shape selected_shape = select_memory_handler_shape(
+        function_context, instruction, instruction_index,
+        0x12700 + instruction_index);
     const auto emit_store = [&](llvm::IRBuilder<> &store_builder) {
+      memory_handler_shape shape = selected_shape;
       llvm::Value *value = materialize_value(
           store_builder, function_context.slot_allocas,
           context.current_slot_mapping, function_context.program,
@@ -191,6 +374,8 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
           instruction.operands[1], function_context.opaque_seed_slot,
           function_context.opaque_seed_base, function_context.mba_context,
           0x12100 + instruction_index);
+      pointer_address = apply_memory_address_shape(store_builder, pointer_address, shape);
+      value = apply_memory_value_shape(store_builder, value, pointer_address, shape);
       if (!store_non_pointer_value_to_memory(
               store_builder, pointer_address, value,
               const_cast<llvm::Type *>(instruction.type), instruction.immediate,
@@ -221,18 +406,30 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
   }
 
   case opcode::store_ptr: {
+    const memory_handler_shape selected_shape = select_memory_handler_shape(
+        function_context, instruction, instruction_index,
+        0x12780 + instruction_index);
     const auto emit_pointer_store = [&](llvm::IRBuilder<> &store_builder) {
+      memory_handler_shape shape = selected_shape;
       llvm::Value *pointer_address = materialize_value(
           store_builder, function_context.slot_allocas,
           context.current_slot_mapping, function_context.program,
           instruction.operands[1], function_context.opaque_seed_slot,
           function_context.opaque_seed_base, function_context.mba_context,
           0x12100 + instruction_index);
+      pointer_address = apply_memory_address_shape(store_builder, pointer_address, shape);
       llvm::StoreInst *store = nullptr;
-      if (llvm::Value *carrier = materialize_pointer_carrier_from_value_ref(
-              store_builder, function_context.slot_allocas,
-              context.current_slot_mapping, function_context.program,
-              instruction.operands[0], function_context.opaque_seed_slot,
+      llvm::Value *stored_pointer_value = materialize_value(
+          store_builder, function_context.slot_allocas,
+          context.current_slot_mapping, function_context.program,
+          instruction.operands[0], function_context.opaque_seed_slot,
+          function_context.opaque_seed_base, function_context.mba_context,
+          0x12040 + instruction_index);
+      stored_pointer_value = apply_memory_value_shape(store_builder, stored_pointer_value,
+                                                      pointer_address, shape);
+      if (llvm::Value *carrier = materialize_pointer_carrier(
+              store_builder, stored_pointer_value,
+              function_context.opaque_seed_slot,
               function_context.opaque_seed_base, function_context.mba_context,
               0x12000 + instruction_index)) {
         store = store_pointer_carrier_to_memory(
@@ -243,14 +440,24 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
                                        : llvm::MaybeAlign());
       }
       if (store == nullptr) {
-        llvm::Value *value = materialize_value(
-            store_builder, function_context.slot_allocas,
-            context.current_slot_mapping, function_context.program,
-            instruction.operands[0], function_context.opaque_seed_slot,
-            function_context.opaque_seed_base, function_context.mba_context,
-            0x12040 + instruction_index);
+        if (llvm::Value *carrier = materialize_pointer_carrier_from_value_ref(
+               store_builder, function_context.slot_allocas,
+               context.current_slot_mapping, function_context.program,
+               instruction.operands[0], function_context.opaque_seed_slot,
+               function_context.opaque_seed_base, function_context.mba_context,
+               0x12000 + instruction_index)) {
+          store = store_pointer_carrier_to_memory(
+              store_builder, pointer_address, carrier,
+              const_cast<llvm::Type *>(instruction.type), function_context.mba_context,
+              0x12080 + instruction_index,
+              instruction.immediate != 0
+                  ? llvm::MaybeAlign(llvm::Align(instruction.immediate))
+                  : llvm::MaybeAlign());
+        }
+      }
+      if (store == nullptr) {
         store = store_pointer_value_to_memory(
-            store_builder, pointer_address, value,
+            store_builder, pointer_address, stored_pointer_value,
             const_cast<llvm::Type *>(instruction.type),
             function_context.opaque_seed_slot, function_context.opaque_seed_base,
             function_context.mba_context, 0x120c0 + instruction_index,
@@ -258,13 +465,7 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
                                        : llvm::MaybeAlign());
       }
       if (store == nullptr) {
-        llvm::Value *value = materialize_value(
-            store_builder, function_context.slot_allocas,
-            context.current_slot_mapping, function_context.program,
-            instruction.operands[0], function_context.opaque_seed_slot,
-            function_context.opaque_seed_base, function_context.mba_context,
-            0x12060 + instruction_index);
-        store = store_builder.CreateStore(value, pointer_address);
+        store = store_builder.CreateStore(stored_pointer_value, pointer_address);
         if (instruction.immediate != 0) {
           store->setAlignment(llvm::Align(instruction.immediate));
         }
@@ -424,6 +625,9 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
 
   case opcode::gep:
   case opcode::gep_inbounds: {
+    gep_handler_shape shape = select_gep_handler_shape(
+        function_context, instruction, instruction_index,
+        0x12f00 + instruction_index);
     llvm::SmallVector<llvm::Value *, 4> indices;
     indices.reserve(instruction.operands.size() - 1);
     for (std::size_t operand_index = 1; operand_index < instruction.operands.size();
@@ -441,14 +645,21 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
         function_context.program, instruction.operands[0],
         function_context.opaque_seed_slot, function_context.opaque_seed_base,
         function_context.mba_context, 0x13100 + instruction_index);
+    if ((shape == gep_handler_shape::split_index_add ||
+         shape == gep_handler_shape::offset_bias) &&
+        !apply_gep_index_shape(builder, indices, shape)) {
+      shape = gep_handler_shape::select_equivalent_base;
+    }
+    llvm::Value *base_pointer = apply_gep_base_shape(builder, pointer, instruction, shape);
     llvm::Value *gep = nullptr;
     if (instruction.op == opcode::gep_inbounds) {
       gep = builder.CreateInBoundsGEP(const_cast<llvm::Type *>(instruction.type),
-                                      pointer, indices, "obf.vm.gep");
+                                      base_pointer, indices, "obf.vm.gep");
     } else {
-      gep = builder.CreateGEP(const_cast<llvm::Type *>(instruction.type), pointer,
+      gep = builder.CreateGEP(const_cast<llvm::Type *>(instruction.type), base_pointer,
                               indices, "obf.vm.gep");
     }
+    gep = tag_vm_handler_value(gep, gep_shape_marker(shape));
     finish_value(builder, context, gep);
     return true;
   }
