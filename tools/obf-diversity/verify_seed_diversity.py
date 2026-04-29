@@ -44,12 +44,18 @@ MARKER_GROUPS = {
         "helper_decode": r"vm\.island\.helper\.decode",
         "helper_dispatch": r"vm\.island\.helper\.dispatch",
         "helper_table": r"vm\.island\.helper\.table",
+        "helper_cap": r"vm\.island\.helper\.cap",
+        "helper_large": r"vm\.island\.helper\.large",
+        "helper_split": r"vm\.island\.helper\.split",
         "next_island": r"vm\.island\.next_island",
         "route": r"vm\.island\.route",
         "root_finalize": r"vm\.island\.root\.finalize",
         "root_route": r"vm\.island\.root\.route",
         "root_small": r"vm\.island\.root\.small",
         "state": r"vm\.island\.state",
+        "subhelper": r"vm\.island\.subhelper",
+        "subroute": r"vm\.island\.subroute",
+        "subtable_shard": r"vm\.island\.subtable\.shard",
         "table_shard": r"vm\.island\.table\.shard",
     },
     "pointer_materialization": {
@@ -83,6 +89,7 @@ SYMBOL_PATTERNS = {
     "vm_key": r"__obf_vm_k_[A-Za-z0-9_]+",
     "vm_case": r"__obf_vm_c_[A-Za-z0-9_]+",
     "vm_helper": r"__obf_vm_h_[A-Za-z0-9_]+",
+    "vm_subhelper": r"__obf_vm_hs_[A-Za-z0-9_]+",
     "string": r"__obf_str_[A-Za-z0-9_]+",
     "entropy": r"__obf_entropy_thunk_[A-Za-z0-9_]+",
 }
@@ -215,6 +222,7 @@ def is_vm_like_function(function_name: str, function_body: str) -> bool:
     return (
         function_name.startswith("__obf_vm_i_")
         or function_name.startswith("__obf_vm_h_")
+        or function_name.startswith("__obf_vm_hs_")
         or "obf.vm." in function_body
         or "vm.island." in function_body
     )
@@ -245,9 +253,15 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
     vm_like_bodies = {
         name: body for name, body in functions.items() if is_vm_like_function(name, body)
     }
-    helper_bodies = {
+    first_level_helper_bodies = {
         name: body for name, body in functions.items() if name.startswith("__obf_vm_h_")
     }
+    subhelper_bodies = {
+        name: body
+        for name, body in functions.items()
+        if name.startswith("__obf_vm_hs_") or "vm.island.subhelper" in body
+    }
+    helper_bodies = {**first_level_helper_bodies, **subhelper_bodies}
     primary_bodies = {
         name: body for name, body in functions.items() if name.startswith("__obf_vm_i_")
     }
@@ -257,6 +271,14 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
     primary_line_counts = [
         len([line for line in body.splitlines() if line.strip()]) for body in primary_bodies.values()
     ]
+    first_level_helper_line_counts = [
+        len([line for line in body.splitlines() if line.strip()])
+        for body in first_level_helper_bodies.values()
+    ]
+    subhelper_line_counts = [
+        len([line for line in body.splitlines() if line.strip()]) for body in subhelper_bodies.values()
+    ]
+    top_helper_line_counts = sorted(helper_line_counts, reverse=True)[:5]
     vm_like_line_counts = [
         len([line for line in body.splitlines() if line.strip()]) for body in vm_like_bodies.values()
     ]
@@ -276,6 +298,8 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
     primary_root_lines = max(primary_line_counts, default=0)
     helper_total_lines = sum(helper_line_counts)
     helper_max_lines = max(helper_line_counts, default=0)
+    subhelper_total_lines = sum(subhelper_line_counts)
+    subhelper_max_lines = max(subhelper_line_counts, default=0)
     root_helper_ratio_x1000 = (
         int((primary_root_lines * 1000) / helper_total_lines) if helper_total_lines else 0
     )
@@ -301,13 +325,24 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
         "island_root_route_marker_count": marker_counts.get("root_route", 0),
         "island_state_marker_count": marker_counts.get("state", 0),
         "island_table_shard_marker_count": marker_counts.get("table_shard", 0),
+        "island_subtable_shard_marker_count": marker_counts.get("subtable_shard", 0),
+        "helper_split_marker_count": marker_counts.get("helper_split", 0),
+        "helper_large_marker_count": marker_counts.get("helper_large", 0),
+        "helper_cap_marker_count": marker_counts.get("helper_cap", 0),
+        "subroute_marker_count": marker_counts.get("subroute", 0),
         "helper_count": len(helper_bodies),
+        "first_level_helper_count": len(first_level_helper_bodies),
+        "subhelper_count": len(subhelper_bodies),
         "vm_like_function_count": len(vm_like_bodies),
         "largest_vm_like_function_lines": max(vm_like_line_counts, default=0),
         "largest_vm_like_function_instruction_proxy": max(vm_like_line_counts, default=0),
         "largest_helper_function_lines": helper_max_lines,
         "largest_helper_instruction_proxy": helper_max_lines,
+        "top_helper_instruction_proxies": top_helper_line_counts,
+        "largest_first_level_helper_instruction_proxy": max(first_level_helper_line_counts, default=0),
+        "largest_subhelper_instruction_proxy": subhelper_max_lines,
         "helper_instruction_proxy_total": helper_total_lines,
+        "subhelper_instruction_proxy_total": subhelper_total_lines,
         "primary_vm_entry_lines": primary_root_lines,
         "primary_vm_root_size_proxy": primary_root_lines,
         "primary_root_instruction_proxy": primary_root_lines,
