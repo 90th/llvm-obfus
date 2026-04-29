@@ -62,27 +62,19 @@ entry:
 ; VM-NOT: obf.vm.dispatch.index.bank
 ; VM: call i32 @__obf_vm_h_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
 ; VM-LABEL: define internal i32 @__obf_vm_h_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
-; VM: %vm.island.subroute = load i32, ptr %vm.island.state.dispatch
-; VM: switch i32 %vm.island.subroute
-; VM: call i32 @__obf_vm_hs_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
-; VM-LABEL: define internal i32 @__obf_vm_hs_{{[A-Za-z0-9_]+}}(ptr %vm.island.subhelper.state)
-; VM: %vm.island.subroute.dispatch = load i32, ptr %vm.island.state.dispatch
-; VM: switch i32 %vm.island.subroute.dispatch
-; VM: vm.island.subhelper.decode
-; VM: obf.vm.bc
-; VM: store i32 {{[^,]+}}, ptr %vm.island.state.dispatch
-; VM: store i32 {{[0-9]+}}, ptr %vm.island.state.island
-; VM: ret i32 -3
+; VM: %vm.island.helper.dispatch = load i32, ptr %vm.island.state.dispatch
+; VM: switch i32 %vm.island.helper.dispatch
+; VM: vm.island.helper.decode
 ; VM-DAG: "vm.island.count.3"
-; VM-DAG: "vm.island.helper.split"
 ; VM-DAG: "vm.island.helper.decode"
 ; VM-DAG: "vm.island.helper.dispatch"
 ; VM-DAG: "vm.island.helper.table"
+; VM-DAG: "vm.island.leaf"
+; VM-DAG: "vm.island.leaf.route"
+; VM-DAG: "vm.island.leaf.table.shard"
 ; VM-DAG: "vm.island.next_island"
 ; VM-DAG: "vm.island.root.finalize"
 ; VM-DAG: "vm.island.root.route"
 ; VM-DAG: "vm.island.root.small"
-; VM-DAG: "vm.island.subhelper"
-; VM-DAG: "vm.island.subroute"
 ; VM-DAG: "vm.island.subtable.shard"
 ; VM-DAG: "vm.island.table.shard"

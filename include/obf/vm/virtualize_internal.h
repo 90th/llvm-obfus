@@ -37,9 +37,16 @@ inline constexpr std::size_t vm_opcode_count =
 inline constexpr std::size_t vm_switch_dispatch_min_instruction_count = 16;
 inline constexpr std::size_t vm_island_min_instruction_count = 16;
 inline constexpr std::size_t vm_island_max_count = 6;
-inline constexpr std::size_t vm_subisland_min_instruction_count = 4;
-inline constexpr std::size_t vm_subisland_target_instruction_count = 10;
-inline constexpr std::size_t vm_subisland_max_count = 8;
+inline constexpr std::size_t vm_leaf_split_max_depth = 2;
+inline constexpr std::size_t vm_leaf_split_min_instruction_count = 4;
+inline constexpr std::size_t vm_leaf_split_target_instruction_count = 6;
+inline constexpr std::size_t vm_leaf_split_max_children = 4;
+inline constexpr std::size_t vm_leaf_split_max_total_helpers_per_vm = 48;
+inline constexpr std::size_t vm_subisland_min_instruction_count =
+    vm_leaf_split_min_instruction_count;
+inline constexpr std::size_t vm_subisland_target_instruction_count =
+    vm_leaf_split_target_instruction_count;
+inline constexpr std::size_t vm_subisland_max_count = vm_leaf_split_max_children;
 inline constexpr std::size_t switch_dispatch_max_bank_count = 4;
 inline constexpr std::uint32_t vm_island_continue_status = 0xfffffffdU;
 inline constexpr std::uint32_t vm_island_done_status = 0xfffffffeU;
