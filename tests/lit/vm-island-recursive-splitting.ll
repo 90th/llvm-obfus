@@ -132,11 +132,6 @@ entry:
 ; VM-DAG: define internal i32 @__obf_vm_hs_{{[A-Za-z0-9_]+}}(ptr %vm.island.subhelper.state)
 ; VM-DAG: "vm.island.helper.split"
 ; VM-DAG: "vm.island.helper.large"
-; VM-DAG: "vm.island.leaf"
-; VM-DAG: "vm.island.leaf.route"
-; VM-DAG: "vm.island.leaf.table.shard"
-; VM-DAG: "vm.island.recursive.split"
-; VM-DAG: "vm.island.recursive.depth.1"
 ; VM-DAG: "vm.island.subhelper"
 ; VM-DAG: "vm.island.subroute"
 ; VM-DAG: "vm.island.subtable.shard"

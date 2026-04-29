@@ -373,24 +373,7 @@ std::string make_vm_subisland_helper_name(llvm::Module &module,
   return obf::make_unique_obf_symbol_name(
       module, "__obf_vm_hs", "",
       mix_seed(bytecode_seed, 0x151e0000ULL + island_index * 0x100ULL +
-                                   subisland_index));
-}
-
-std::string make_vm_leaf_helper_name(llvm::Module &module,
-                                     std::uint64_t bytecode_seed,
-                                     std::uint64_t island_index,
-                                     std::uint32_t depth,
-                                     std::uint64_t path_seed,
-                                     std::uint64_t child_index) {
-  if (depth == 1) {
-    return make_vm_subisland_helper_name(module, mix_seed(bytecode_seed, path_seed),
-                                         island_index, child_index);
-  }
-  std::uint64_t name_seed = mix_seed(bytecode_seed,
-                                     0x15200000ULL + island_index * 0x100ULL +
-                                         static_cast<std::uint64_t>(depth));
-  name_seed = mix_seed(name_seed, path_seed ^ (child_index * 0x9e3779b97f4a7c15ULL));
-  return obf::make_unique_obf_symbol_name(module, "__obf_vm_hs", "", name_seed);
+                                  subisland_index));
 }
 
 bool should_use_state_islands(const bytecode_program &program,
@@ -501,33 +484,8 @@ struct subisland_plan {
   llvm::SmallVector<llvm::SmallVector<std::size_t, 16>, 8> instructions;
   llvm::SmallVector<std::uint32_t, 8> route_order;
   bool capped = false;
-  std::uint64_t total_cost = 0;
   bool enabled() const { return instructions.size() >= 2; }
 };
-
-struct recursive_split_budget {
-  std::size_t helper_count = 0;
-  bool capped = false;
-};
-
-struct recursive_split_context {
-  llvm::Module &module;
-  const bytecode_program &program;
-  const virtualization_options &options;
-  const vm_state_layout &state_layout;
-  llvm::GlobalVariable *retkey_global;
-  const std::vector<slot_cell_mapping> &slot_mappings;
-  llvm::ArrayRef<std::uint32_t> dispatch_index_for_instruction;
-  const serialized_bytecode_program &serialized;
-  const opcode_permutation &opcode_map;
-  std::uint64_t opaque_seed_base = 0;
-  std::uint64_t bytecode_seed = 0;
-  llvm::ArrayRef<std::uint32_t> island_for_instruction;
-};
-
-void finalize_subisland_plan(subisland_plan &plan, std::uint64_t split_seed);
-void limit_subisland_plan_children(subisland_plan &plan, std::uint32_t max_children,
-                                   std::uint64_t split_seed);
 
 llvm::SmallVector<std::size_t, 32> collect_island_instruction_indices(
     const bytecode_program &program,
@@ -546,42 +504,34 @@ llvm::SmallVector<std::size_t, 32> collect_island_instruction_indices(
 subisland_plan build_subisland_plan(
     const bytecode_program &program, const serialized_bytecode_program &serialized,
     llvm::ArrayRef<std::size_t> owned_instructions, std::uint64_t bytecode_seed,
-    std::uint32_t island_index, std::uint32_t depth,
-    std::uint64_t path_seed = 0) {
+    std::uint32_t island_index) {
   subisland_plan plan;
   plan.subhelper_for_instruction.assign(program.instructions.size(), invalid_slot);
-  if (owned_instructions.size() < vm_leaf_split_min_instruction_count ||
-      depth >= vm_leaf_split_max_depth) {
+  if (owned_instructions.size() < vm_subisland_min_instruction_count) {
     return plan;
   }
 
-  std::uint64_t split_seed =
-      mix_seed(bytecode_seed, 0x151e1000ULL + island_index * 0x10ULL + depth);
-  split_seed = mix_seed(split_seed, path_seed);
+  const std::uint64_t split_seed = mix_seed(bytecode_seed,
+                                           0x151e1000ULL + island_index);
+  std::uint64_t total_cost = 0;
   for (std::size_t instruction_index : owned_instructions) {
-    plan.total_cost += estimate_instruction_lowering_cost(
+    total_cost += estimate_instruction_lowering_cost(
         program.instructions[instruction_index], serialized.layouts[instruction_index]);
   }
 
-  const std::uint32_t minimum_cost = static_cast<std::uint32_t>(
-      vm_leaf_split_target_instruction_count * 6ULL * (depth + 1U));
-  if (plan.total_cost < minimum_cost) {
-    return plan;
-  }
-
   const std::uint32_t seeded_target =
-      static_cast<std::uint32_t>(vm_leaf_split_target_instruction_count +
-                                 (split_seed % 3ULL) + depth);
+      static_cast<std::uint32_t>(vm_subisland_target_instruction_count +
+                                 (split_seed % 5ULL));
   const std::uint32_t by_instruction_count = static_cast<std::uint32_t>(
       (owned_instructions.size() + seeded_target - 1U) / seeded_target);
   const std::uint64_t cost_target =
-      static_cast<std::uint64_t>(seeded_target) * 6ULL * (depth + 1U);
+      static_cast<std::uint64_t>(seeded_target) * 12ULL;
   const std::uint32_t by_cost = static_cast<std::uint32_t>(
-      (plan.total_cost + cost_target - 1ULL) / cost_target);
+      (total_cost + cost_target - 1ULL) / cost_target);
   std::uint32_t subhelper_count = std::max<std::uint32_t>(2U,
-                                                           std::max(by_instruction_count, by_cost));
-  if (subhelper_count > vm_leaf_split_max_children) {
-    subhelper_count = static_cast<std::uint32_t>(vm_leaf_split_max_children);
+                                                          std::max(by_instruction_count, by_cost));
+  if (subhelper_count > vm_subisland_max_count) {
+    subhelper_count = static_cast<std::uint32_t>(vm_subisland_max_count);
     plan.capped = true;
   }
   if (subhelper_count < 2U) {
@@ -662,28 +612,14 @@ subisland_plan build_subisland_plan(
       plan.subhelper_for_instruction[instruction_index] = subhelper_index;
     }
   }
-
-  llvm::SmallVector<llvm::SmallVector<std::size_t, 16>, 8> filtered_instructions;
-  filtered_instructions.reserve(plan.instructions.size());
-  for (auto &indices : plan.instructions) {
-    if (indices.size() < vm_leaf_split_min_instruction_count &&
-        !filtered_instructions.empty()) {
-      filtered_instructions.back().append(indices.begin(), indices.end());
-      plan.capped = true;
-      continue;
-    }
-    filtered_instructions.push_back(std::move(indices));
-  }
-  if (filtered_instructions.size() < 2) {
-    plan.instructions.clear();
-    plan.route_order.clear();
-    std::fill(plan.subhelper_for_instruction.begin(),
-              plan.subhelper_for_instruction.end(), invalid_slot);
-    return plan;
-  }
-  plan.instructions = std::move(filtered_instructions);
-
-  finalize_subisland_plan(plan, split_seed);
+  std::stable_sort(plan.route_order.begin(), plan.route_order.end(),
+                   [&](std::uint32_t lhs, std::uint32_t rhs) {
+                     const std::uint64_t lhs_key = mix_seed(
+                         split_seed, 0x51572000ULL + lhs);
+                     const std::uint64_t rhs_key = mix_seed(
+                         split_seed, 0x51572000ULL + rhs);
+                     return lhs_key == rhs_key ? lhs < rhs : lhs_key < rhs_key;
+                   });
 
   return plan;
 }
@@ -701,111 +637,6 @@ llvm::GlobalVariable *clone_bytecode_global_for_subhelper(
   clone->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   return clone;
 }
-
-llvm::GlobalVariable *clone_bytecode_global_for_leaf(llvm::GlobalVariable *bytecode_global,
-                                                     std::uint32_t depth,
-                                                     std::uint64_t path_seed,
-                                                     std::uint32_t child_index) {
-  if (bytecode_global == nullptr) {
-    return nullptr;
-  }
-  if (depth == 1) {
-    return clone_bytecode_global_for_subhelper(bytecode_global, child_index);
-  }
-  llvm::Module *module = bytecode_global->getParent();
-  const std::uint64_t shard_seed = mix_seed(
-      mix_seed(path_seed, 0x15220000ULL + depth), child_index + 1ULL);
-  auto *clone = new llvm::GlobalVariable(
-      *module, bytecode_global->getValueType(), true,
-      llvm::GlobalValue::PrivateLinkage, bytecode_global->getInitializer(),
-      bytecode_global->getName().str() + "_h" + std::to_string(depth) + "_" +
-          std::to_string(static_cast<unsigned long long>(shard_seed & 0xffffULL)));
-  clone->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-  return clone;
-}
-
-void add_recursive_helper_attrs(llvm::Function &helper, std::uint32_t depth,
-                                bool leaf, bool capped, bool split) {
-  helper.addFnAttr("vm.dispatch.shape.switch");
-  helper.addFnAttr("vm.island.helper");
-  helper.addFnAttr("vm.island.helper.decode");
-  helper.addFnAttr("vm.island.helper.dispatch");
-  helper.addFnAttr("vm.island.helper.table");
-  helper.addFnAttr("vm.island.next_island");
-  helper.addFnAttr("vm.island.state");
-  helper.addFnAttr("vm.island.recursive.depth." + std::to_string(depth));
-  if (split) {
-    helper.addFnAttr("vm.island.helper.split");
-    helper.addFnAttr("vm.island.helper.large");
-    helper.addFnAttr("vm.island.subroute");
-    helper.addFnAttr("vm.island.recursive.split");
-  }
-  if (leaf) {
-    helper.addFnAttr("vm.island.subhelper");
-    helper.addFnAttr("vm.island.leaf");
-    helper.addFnAttr("vm.island.leaf.route");
-    helper.addFnAttr("vm.island.leaf.table.shard");
-    helper.addFnAttr("vm.island.subtable.shard");
-    helper.addFnAttr("vm.island.table.shard");
-  }
-  if (capped) {
-    helper.addFnAttr("vm.island.helper.cap");
-    helper.addFnAttr("vm.island.leaf.cap");
-  }
-}
-
-void finalize_subisland_plan(subisland_plan &plan, std::uint64_t split_seed) {
-  if (plan.instructions.size() < 2) {
-    plan.instructions.clear();
-    plan.route_order.clear();
-    std::fill(plan.subhelper_for_instruction.begin(),
-              plan.subhelper_for_instruction.end(), invalid_slot);
-    return;
-  }
-
-  std::fill(plan.subhelper_for_instruction.begin(),
-            plan.subhelper_for_instruction.end(), invalid_slot);
-  plan.route_order.clear();
-  for (std::uint32_t subhelper_index = 0;
-       subhelper_index < plan.instructions.size(); ++subhelper_index) {
-    plan.route_order.push_back(subhelper_index);
-    for (std::size_t instruction_index : plan.instructions[subhelper_index]) {
-      plan.subhelper_for_instruction[instruction_index] = subhelper_index;
-    }
-  }
-  std::stable_sort(plan.route_order.begin(), plan.route_order.end(),
-                   [&](std::uint32_t lhs, std::uint32_t rhs) {
-                     const std::uint64_t lhs_key = mix_seed(
-                         split_seed, 0x51572000ULL + lhs);
-                     const std::uint64_t rhs_key = mix_seed(
-                         split_seed, 0x51572000ULL + rhs);
-                     return lhs_key == rhs_key ? lhs < rhs : lhs_key < rhs_key;
-                   });
-}
-
-void limit_subisland_plan_children(subisland_plan &plan, std::uint32_t max_children,
-                                   std::uint64_t split_seed) {
-  if (max_children < 2 || plan.instructions.size() <= max_children) {
-    finalize_subisland_plan(plan, split_seed);
-    return;
-  }
-
-  for (std::uint32_t subhelper_index = max_children;
-       subhelper_index < plan.instructions.size(); ++subhelper_index) {
-    const std::uint32_t target_index = subhelper_index % max_children;
-    plan.instructions[target_index].append(plan.instructions[subhelper_index].begin(),
-                                           plan.instructions[subhelper_index].end());
-  }
-  plan.instructions.resize(max_children);
-  plan.capped = true;
-  finalize_subisland_plan(plan, split_seed);
-}
-
-void emit_recursive_state_island_node(
-    llvm::Function &helper, llvm::GlobalVariable *bytecode_global,
-    const recursive_split_context &context, llvm::ArrayRef<std::size_t> owned_instructions,
-    std::uint32_t island_index, std::uint32_t depth, std::uint64_t path_seed,
-    recursive_split_budget &budget);
 
 vm_state_layout build_vm_state_layout(llvm::LLVMContext &context,
                                       llvm::Type *return_type,
@@ -1115,128 +946,6 @@ void emit_split_state_island_router(
   trap_builder.CreateRet(trap_builder.getInt32(vm_island_trap_status));
 }
 
-void emit_recursive_state_island_node(
-    llvm::Function &helper, llvm::GlobalVariable *bytecode_global,
-    const recursive_split_context &context, llvm::ArrayRef<std::size_t> owned_instructions,
-    std::uint32_t island_index, std::uint32_t depth, std::uint64_t path_seed,
-    recursive_split_budget &budget) {
-  if (budget.helper_count >= vm_leaf_split_max_total_helpers_per_vm) {
-    budget.capped = true;
-    add_recursive_helper_attrs(helper, depth, true, true, false);
-    emit_state_instruction_dispatcher(
-        helper, context.program, context.options, context.state_layout,
-        bytecode_global, context.retkey_global, context.slot_mappings,
-        context.dispatch_index_for_instruction, context.serialized, context.opcode_map,
-        context.opaque_seed_base, context.bytecode_seed, context.island_for_instruction,
-        island_index, depth, owned_instructions, depth > 0);
-    return;
-  }
-
-  budget.helper_count += 1;
-  const std::uint64_t split_seed = mix_seed(
-      mix_seed(context.bytecode_seed,
-               0x151e1000ULL + island_index * 0x10ULL + depth),
-      path_seed);
-  subisland_plan split_plan = build_subisland_plan(
-      context.program, context.serialized, owned_instructions, context.bytecode_seed,
-      island_index, depth, path_seed);
-  if (!split_plan.enabled()) {
-    add_recursive_helper_attrs(helper, depth, true, budget.capped, false);
-    emit_state_instruction_dispatcher(
-        helper, context.program, context.options, context.state_layout,
-        bytecode_global, context.retkey_global, context.slot_mappings,
-        context.dispatch_index_for_instruction, context.serialized, context.opcode_map,
-        context.opaque_seed_base, context.bytecode_seed, context.island_for_instruction,
-        island_index, depth, owned_instructions, depth > 0);
-    return;
-  }
-
-  const std::size_t remaining_budget =
-      vm_leaf_split_max_total_helpers_per_vm > budget.helper_count
-          ? vm_leaf_split_max_total_helpers_per_vm - budget.helper_count
-          : 0;
-  if (remaining_budget == 0) {
-    budget.capped = true;
-    add_recursive_helper_attrs(helper, depth, true, true, false);
-    emit_state_instruction_dispatcher(
-        helper, context.program, context.options, context.state_layout,
-        bytecode_global, context.retkey_global, context.slot_mappings,
-        context.dispatch_index_for_instruction, context.serialized, context.opcode_map,
-        context.opaque_seed_base, context.bytecode_seed, context.island_for_instruction,
-        island_index, depth, owned_instructions, depth > 0);
-    return;
-  }
-
-  const std::uint32_t max_children = static_cast<std::uint32_t>(
-      std::min<std::size_t>(split_plan.instructions.size(), remaining_budget));
-  limit_subisland_plan_children(split_plan, std::max<std::uint32_t>(2U, max_children),
-                                split_seed);
-  if (!split_plan.enabled()) {
-    add_recursive_helper_attrs(helper, depth, true, budget.capped, false);
-    emit_state_instruction_dispatcher(
-        helper, context.program, context.options, context.state_layout,
-        bytecode_global, context.retkey_global, context.slot_mappings,
-        context.dispatch_index_for_instruction, context.serialized, context.opcode_map,
-        context.opaque_seed_base, context.bytecode_seed, context.island_for_instruction,
-        island_index, depth, owned_instructions, depth > 0);
-    return;
-  }
-
-  const bool plan_capped = split_plan.capped || budget.capped;
-  if (budget.helper_count + split_plan.instructions.size() >
-      vm_leaf_split_max_total_helpers_per_vm) {
-    budget.capped = true;
-    add_recursive_helper_attrs(helper, depth, true, true, false);
-    emit_state_instruction_dispatcher(
-        helper, context.program, context.options, context.state_layout,
-        bytecode_global, context.retkey_global, context.slot_mappings,
-        context.dispatch_index_for_instruction, context.serialized, context.opcode_map,
-        context.opaque_seed_base, context.bytecode_seed, context.island_for_instruction,
-        island_index, depth, owned_instructions, depth > 0);
-    return;
-  }
-  budget.helper_count += split_plan.instructions.size();
-  add_recursive_helper_attrs(helper, depth, false, plan_capped, true);
-
-  llvm::LLVMContext &llvm_context = helper.getContext();
-  auto *state_pointer_type = llvm::PointerType::get(llvm_context, 0);
-  auto *helper_type = llvm::FunctionType::get(llvm::Type::getInt32Ty(llvm_context),
-                                              {state_pointer_type}, false);
-  llvm::SmallVector<llvm::Function *, 8> subhelpers;
-  subhelpers.resize(split_plan.instructions.size(), nullptr);
-
-  for (std::uint32_t child_index = 0; child_index < split_plan.instructions.size();
-       ++child_index) {
-    const std::uint64_t child_path_seed =
-        mix_seed(path_seed, 0x15210000ULL + depth * 0x10ULL + child_index + 1ULL);
-    llvm::Function *subhelper = llvm::Function::Create(
-        helper_type, llvm::GlobalValue::InternalLinkage,
-        make_vm_leaf_helper_name(context.module, context.bytecode_seed, island_index,
-                                 depth + 1U, child_path_seed, child_index),
-        &context.module);
-    subhelper->setDSOLocal(true);
-    subhelper->addFnAttr(llvm::Attribute::NoInline);
-    subhelper->addFnAttr("instcombine-no-verify-fixpoint");
-    subhelpers[child_index] = subhelper;
-  }
-
-  emit_split_state_island_router(
-      helper, context.state_layout, context.dispatch_index_for_instruction,
-      split_plan.route_order, split_plan, subhelpers, island_index);
-
-  for (std::uint32_t child_index = 0; child_index < split_plan.instructions.size();
-       ++child_index) {
-    const std::uint64_t child_path_seed =
-        mix_seed(path_seed, 0x15210000ULL + depth * 0x10ULL + child_index + 1ULL);
-    llvm::GlobalVariable *child_bytecode = clone_bytecode_global_for_leaf(
-        bytecode_global, depth + 1U, child_path_seed, child_index);
-    emit_recursive_state_island_node(
-        *subhelpers[child_index], child_bytecode, context,
-        split_plan.instructions[child_index], island_index, depth + 1U,
-        child_path_seed, budget);
-  }
-}
-
 void emit_state_island_helper(
     llvm::Function &helper, const bytecode_program &program,
     const virtualization_options &options, const vm_state_layout &state_layout,
@@ -1248,31 +957,78 @@ void emit_state_island_helper(
     std::uint64_t opaque_seed_base, std::uint64_t bytecode_seed,
     llvm::Argument *hidden_token_arg,
     llvm::ArrayRef<std::uint32_t> island_for_instruction,
-    std::uint32_t island_index, recursive_split_budget &budget) {
+    std::uint32_t island_index) {
   (void)entry_states;
   (void)hidden_token_arg;
 
   const llvm::SmallVector<std::size_t, 32> owned_instructions =
       collect_island_instruction_indices(program, island_for_instruction,
                                          island_index);
-  recursive_split_context split_context{
-      .module = *helper.getParent(),
-      .program = program,
-      .options = options,
-      .state_layout = state_layout,
-      .retkey_global = retkey_global,
-      .slot_mappings = slot_mappings,
-      .dispatch_index_for_instruction = dispatch_index_for_instruction,
-      .serialized = serialized,
-      .opcode_map = opcode_map,
-      .opaque_seed_base = opaque_seed_base,
-      .bytecode_seed = bytecode_seed,
-      .island_for_instruction = island_for_instruction,
-  };
-  emit_recursive_state_island_node(helper, bytecode_global, split_context,
-                                   owned_instructions, island_index, 0U,
-                                   mix_seed(bytecode_seed, 0x15230000ULL + island_index),
-                                   budget);
+  subisland_plan split_plan = build_subisland_plan(
+      program, serialized, owned_instructions, bytecode_seed, island_index);
+  if (!split_plan.enabled()) {
+    emit_state_instruction_dispatcher(
+        helper, program, options, state_layout, bytecode_global, retkey_global,
+        slot_mappings, dispatch_index_for_instruction, serialized, opcode_map,
+        opaque_seed_base, bytecode_seed, island_for_instruction, island_index, 0,
+        owned_instructions, false);
+    return;
+  }
+
+  helper.addFnAttr("vm.island.helper.split");
+  helper.addFnAttr("vm.island.helper.large");
+  helper.addFnAttr("vm.island.subroute");
+  if (split_plan.capped) {
+    helper.addFnAttr("vm.island.helper.cap");
+  }
+
+  llvm::LLVMContext &context = helper.getContext();
+  llvm::Module *module = helper.getParent();
+  auto *state_pointer_type = llvm::PointerType::get(context, 0);
+  auto *helper_type = llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
+                                              {state_pointer_type}, false);
+  llvm::SmallVector<llvm::Function *, 8> subhelpers;
+  subhelpers.resize(split_plan.instructions.size(), nullptr);
+
+  for (std::uint32_t subhelper_index = 0;
+       subhelper_index < split_plan.instructions.size(); ++subhelper_index) {
+    llvm::Function *subhelper = llvm::Function::Create(
+        helper_type, llvm::GlobalValue::InternalLinkage,
+        make_vm_subisland_helper_name(*module, bytecode_seed, island_index,
+                                      subhelper_index),
+        module);
+    subhelper->setDSOLocal(true);
+    subhelper->addFnAttr(llvm::Attribute::NoInline);
+    subhelper->addFnAttr("instcombine-no-verify-fixpoint");
+    subhelper->addFnAttr("vm.dispatch.shape.switch");
+    subhelper->addFnAttr("vm.island.helper");
+    subhelper->addFnAttr("vm.island.helper.decode");
+    subhelper->addFnAttr("vm.island.helper.dispatch");
+    subhelper->addFnAttr("vm.island.helper.table");
+    subhelper->addFnAttr("vm.island.next_island");
+    subhelper->addFnAttr("vm.island.state");
+    subhelper->addFnAttr("vm.island.subhelper");
+    subhelper->addFnAttr("vm.island.subroute");
+    subhelper->addFnAttr("vm.island.subtable.shard");
+    subhelper->addFnAttr("vm.island.table.shard");
+    subhelpers[subhelper_index] = subhelper;
+  }
+
+  emit_split_state_island_router(
+      helper, state_layout, dispatch_index_for_instruction, split_plan.route_order,
+      split_plan, subhelpers, island_index);
+
+  for (std::uint32_t subhelper_index = 0;
+       subhelper_index < split_plan.instructions.size(); ++subhelper_index) {
+    llvm::GlobalVariable *subhelper_bytecode = clone_bytecode_global_for_subhelper(
+        bytecode_global, subhelper_index);
+    emit_state_instruction_dispatcher(
+        *subhelpers[subhelper_index], program, options, state_layout,
+        subhelper_bytecode, retkey_global, slot_mappings,
+        dispatch_index_for_instruction, serialized, opcode_map, opaque_seed_base,
+        bytecode_seed, island_for_instruction, island_index, subhelper_index,
+        split_plan.instructions[subhelper_index], true);
+  }
 }
 
 void rewrite_function_body_state_islands(
@@ -1489,7 +1245,6 @@ void rewrite_function_body_state_islands(
   trap_builder.CreateCall(trap);
   trap_builder.CreateUnreachable();
 
-  recursive_split_budget split_budget;
   for (std::uint32_t island_index = 0; island_index < helpers.size();
        ++island_index) {
     emit_state_island_helper(
@@ -1497,7 +1252,7 @@ void rewrite_function_body_state_islands(
         bytecode_globals[island_index],
         retkey_global, slot_mappings, dispatch_index_for_instruction, entry_states,
         serialized, opcode_map, opaque_seed_base, bytecode_seed, hidden_token_arg,
-        island_for_instruction, island_index, split_budget);
+        island_for_instruction, island_index);
   }
 
   function.addFnAttr("vm.island.entry");

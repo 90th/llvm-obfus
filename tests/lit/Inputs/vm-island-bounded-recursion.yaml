@@ -1,9 +1,0 @@
-seed: 818181
-default_level: none
-targets:
-  - match: bounded_recursion_target
-    level: strong_vm
-mba:
-  depth: 0
-security:
-  fail_on_public_obf_symbol: true

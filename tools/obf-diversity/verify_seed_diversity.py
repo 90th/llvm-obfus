@@ -41,10 +41,6 @@ MARKER_GROUPS = {
         "count": r"vm\.island\.count\.\d+",
         "entry": r"vm\.island\.entry",
         "helper": r"vm\.island\.helper",
-        "leaf": r"vm\.island\.leaf",
-        "leaf_cap": r"vm\.island\.leaf\.cap",
-        "leaf_route": r"vm\.island\.leaf\.route",
-        "leaf_table_shard": r"vm\.island\.leaf\.table\.shard",
         "helper_decode": r"vm\.island\.helper\.decode",
         "helper_dispatch": r"vm\.island\.helper\.dispatch",
         "helper_table": r"vm\.island\.helper\.table",
@@ -52,8 +48,6 @@ MARKER_GROUPS = {
         "helper_large": r"vm\.island\.helper\.large",
         "helper_split": r"vm\.island\.helper\.split",
         "next_island": r"vm\.island\.next_island",
-        "recursive_depth": r"vm\.island\.recursive\.depth\.\d+",
-        "recursive_split": r"vm\.island\.recursive\.split",
         "route": r"vm\.island\.route",
         "root_finalize": r"vm\.island\.root\.finalize",
         "root_route": r"vm\.island\.root\.route",
@@ -268,16 +262,6 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
         if name.startswith("__obf_vm_hs_") or "vm.island.subhelper" in body
     }
     helper_bodies = {**first_level_helper_bodies, **subhelper_bodies}
-    leaf_bodies = {
-        name: body
-        for name, body in helper_bodies.items()
-        if "vm.island.leaf" in body or "vm.island.subhelper" in body
-    }
-    router_bodies = {
-        name: body
-        for name, body in helper_bodies.items()
-        if name not in leaf_bodies
-    }
     primary_bodies = {
         name: body for name, body in functions.items() if name.startswith("__obf_vm_i_")
     }
@@ -294,14 +278,7 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
     subhelper_line_counts = [
         len([line for line in body.splitlines() if line.strip()]) for body in subhelper_bodies.values()
     ]
-    leaf_line_counts = [
-        len([line for line in body.splitlines() if line.strip()]) for body in leaf_bodies.values()
-    ]
-    router_line_counts = [
-        len([line for line in body.splitlines() if line.strip()]) for body in router_bodies.values()
-    ]
     top_helper_line_counts = sorted(helper_line_counts, reverse=True)[:5]
-    top_leaf_line_counts = sorted(leaf_line_counts, reverse=True)[:5]
     vm_like_line_counts = [
         len([line for line in body.splitlines() if line.strip()]) for body in vm_like_bodies.values()
     ]
@@ -323,13 +300,9 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
     helper_max_lines = max(helper_line_counts, default=0)
     subhelper_total_lines = sum(subhelper_line_counts)
     subhelper_max_lines = max(subhelper_line_counts, default=0)
-    leaf_total_lines = sum(leaf_line_counts)
-    leaf_max_lines = max(leaf_line_counts, default=0)
     root_helper_ratio_x1000 = (
         int((primary_root_lines * 1000) / helper_total_lines) if helper_total_lines else 0
     )
-    root_leaf_ratio_x1000 = int((primary_root_lines * 1000) / leaf_total_lines) if leaf_total_lines else 0
-    root_largest_leaf_ratio_x1000 = int((primary_root_lines * 1000) / leaf_max_lines) if leaf_max_lines else 0
     primary_decode_markers = sum(
         body.count("obf.vm.bc") + body.count("vm.island.helper.decode")
         for body in primary_bodies.values()
@@ -344,39 +317,6 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
     helper_dispatch_markers = sum(
         body.count("vm.island.helper.dispatch") for body in helper_bodies.values()
     )
-    leaf_dispatch_markers = sum(
-        body.count("vm.island.helper.dispatch") for body in leaf_bodies.values()
-    )
-    leaf_table_shard_markers = sum(
-        body.count("vm.island.leaf.table.shard") + body.count("vm.island.subtable.shard")
-        for body in leaf_bodies.values()
-    )
-    helper_graph = {
-        name: {
-            callee
-            for callee in helper_bodies
-            if f"@{callee}(" in body
-        }
-        for name, body in helper_bodies.items()
-    }
-    incoming: Counter[str] = Counter()
-    for callees in helper_graph.values():
-        incoming.update(callees)
-    helper_roots = [name for name in helper_bodies if incoming[name] == 0]
-
-    def depth_for(name: str, trail: set[str]) -> int:
-        if name in trail:
-            return 1
-        children = helper_graph.get(name, set())
-        if not children:
-            return 1
-        next_trail = set(trail)
-        next_trail.add(name)
-        return 1 + max(depth_for(child, next_trail) for child in children)
-
-    root_to_leaf_depth_max = max((depth_for(name, set()) for name in helper_roots), default=0)
-    recursive_depth_matches = re.findall(r"vm\.island\.recursive\.depth\.(\d+)", marker_text)
-    recursive_depth_max = max((int(value) for value in recursive_depth_matches), default=0)
     marker_counts = count_markers(marker_text, MARKER_GROUPS["vm_islands"])
     return {
         "island_marker_count": sum(marker_counts.values()),
@@ -386,49 +326,31 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
         "island_state_marker_count": marker_counts.get("state", 0),
         "island_table_shard_marker_count": marker_counts.get("table_shard", 0),
         "island_subtable_shard_marker_count": marker_counts.get("subtable_shard", 0),
-        "island_leaf_table_shard_marker_count": marker_counts.get("leaf_table_shard", 0),
         "helper_split_marker_count": marker_counts.get("helper_split", 0),
         "helper_large_marker_count": marker_counts.get("helper_large", 0),
         "helper_cap_marker_count": marker_counts.get("helper_cap", 0),
-        "leaf_marker_count": marker_counts.get("leaf", 0),
-        "leaf_cap_marker_count": marker_counts.get("leaf_cap", 0),
-        "leaf_route_marker_count": marker_counts.get("leaf_route", 0),
-        "recursive_split_marker_count": marker_counts.get("recursive_split", 0),
-        "recursive_depth_marker_count": marker_counts.get("recursive_depth", 0),
         "subroute_marker_count": marker_counts.get("subroute", 0),
         "helper_count": len(helper_bodies),
         "first_level_helper_count": len(first_level_helper_bodies),
         "subhelper_count": len(subhelper_bodies),
-        "leaf_helper_count": len(leaf_bodies),
-        "router_helper_count": len(router_bodies),
         "vm_like_function_count": len(vm_like_bodies),
         "largest_vm_like_function_lines": max(vm_like_line_counts, default=0),
         "largest_vm_like_function_instruction_proxy": max(vm_like_line_counts, default=0),
         "largest_helper_function_lines": helper_max_lines,
         "largest_helper_instruction_proxy": helper_max_lines,
         "top_helper_instruction_proxies": top_helper_line_counts,
-        "top_leaf_helper_instruction_proxies": top_leaf_line_counts,
         "largest_first_level_helper_instruction_proxy": max(first_level_helper_line_counts, default=0),
         "largest_subhelper_instruction_proxy": subhelper_max_lines,
-        "largest_leaf_helper_instruction_proxy": leaf_max_lines,
         "helper_instruction_proxy_total": helper_total_lines,
         "subhelper_instruction_proxy_total": subhelper_total_lines,
-        "leaf_instruction_proxy_total": leaf_total_lines,
-        "router_instruction_proxy_total": sum(router_line_counts),
         "primary_vm_entry_lines": primary_root_lines,
         "primary_vm_root_size_proxy": primary_root_lines,
         "primary_root_instruction_proxy": primary_root_lines,
         "root_helper_instruction_ratio_x1000": root_helper_ratio_x1000,
-        "root_leaf_instruction_ratio_x1000": root_leaf_ratio_x1000,
-        "root_largest_leaf_ratio_x1000": root_largest_leaf_ratio_x1000,
-        "helper_call_depth_max": root_to_leaf_depth_max,
-        "recursive_split_depth_max": recursive_depth_max,
         "primary_root_decode_marker_count": primary_decode_markers,
         "helper_decode_marker_count": helper_decode_markers,
         "primary_root_dispatch_bank_marker_count": primary_dispatch_bank_markers,
         "helper_dispatch_marker_count": helper_dispatch_markers,
-        "leaf_dispatch_marker_count": leaf_dispatch_markers,
-        "leaf_table_shard_body_marker_count": leaf_table_shard_markers,
         "top_vm_data_ref_function_refs": max(data_ref_function_counts, default=0),
         "top_primary_data_ref_function_refs": max(primary_data_ref_function_counts, default=0),
         "top_helper_data_ref_function_refs": max(helper_data_ref_function_counts, default=0),
