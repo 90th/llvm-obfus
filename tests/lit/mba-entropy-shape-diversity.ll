@@ -27,6 +27,5 @@ entry:
 ; CHECK-DAG: obf.mba.zero.cmp_select_pair
 ; CHECK-DAG: obf.mba.zero.rotate_xor_pair
 ; CHECK-DAG: obf.mba.zero.add_sub_pair
-; CHECK-DAG: obf.entangle.add_zero.zero
 ; CHECK-DAG: obf.entangle.xor_zero.zero
 ; CHECK: ret i32

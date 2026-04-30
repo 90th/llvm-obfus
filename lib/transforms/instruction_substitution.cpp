@@ -1,8 +1,8 @@
 #include "obf/transforms/instruction_substitution.h"
 
+#include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
-#include "llvm/ADT/Hashing.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -32,8 +32,7 @@ bool is_supported_instruction(const llvm::BinaryOperator &instruction) {
 }
 
 std::uint64_t derive_mba_seed(const llvm::Function &function) {
-  std::uint64_t seed =
-      static_cast<std::uint64_t>(llvm::hash_value(function.getName()));
+  std::uint64_t seed = stable_hash_string(function.getName());
   return seed == 0 ? 0x4cf5ad432745937fULL : seed;
 }
 

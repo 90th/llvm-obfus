@@ -1,10 +1,13 @@
 #include "obf/vm/virtualize_internal.h"
 
-#include "llvm/ADT/Hashing.h"
+#include "obf/support/stable_hash.h"
+
 #include "llvm/IR/Constants.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
 #include <bit>
+#include <string>
 
 namespace obf::vm {
 
@@ -22,8 +25,11 @@ std::uint32_t value_descriptor(const value_ref &value) {
     return value.slot;
   }
 
-  return static_cast<std::uint32_t>(
-      llvm::hash_combine(value.constant, value.constant->getType()));
+  std::string printed;
+  llvm::raw_string_ostream stream(printed);
+  value.constant->printAsOperand(stream, /*PrintType=*/true);
+  stream.flush();
+  return static_cast<std::uint32_t>(stable_hash_string(printed));
 }
 
 std::uint8_t derive_bytecode_key(std::uint64_t state, std::uint32_t offset,

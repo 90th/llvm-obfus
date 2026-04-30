@@ -1,6 +1,7 @@
 #include "obf/transforms/artifact_cleanup.h"
 
-#include "llvm/ADT/Hashing.h"
+#include "obf/support/stable_hash.h"
+
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Function.h"
@@ -57,9 +58,8 @@ std::string BuildObfuscatedName(const llvm::Module &module,
                                 std::uint64_t seed_base,
                                 std::uint64_t ordinal) {
   std::uint64_t state = seed_base == 0 ? 0x6d2534f1f6c7a29bULL : seed_base;
-  state = MixSeed(state, static_cast<std::uint64_t>(llvm::hash_value(module.getName())));
-  state = MixSeed(state,
-                  static_cast<std::uint64_t>(llvm::hash_value(original_name)));
+  state = MixSeed(state, stable_hash_string(module.getName()));
+  state = MixSeed(state, stable_hash_string(original_name));
   state = MixSeed(state, ordinal + 1);
 
   const std::size_t hex_length = 12 + static_cast<std::size_t>(state & 0xfU);

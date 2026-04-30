@@ -625,6 +625,27 @@ bool is_high_security_level(protection_level level) {
          level == protection_level::strong_vm;
 }
 
+void sort_function_vector(
+    llvm::SmallVectorImpl<const llvm::Function *> &functions) {
+  std::sort(functions.begin(), functions.end(),
+            [](const llvm::Function *lhs, const llvm::Function *rhs) {
+              if (lhs == rhs) {
+                return false;
+              }
+              if (lhs == nullptr || rhs == nullptr) {
+                return lhs == nullptr;
+              }
+              return lhs->getName() < rhs->getName();
+            });
+}
+
+void sort_string_use_kinds(llvm::SmallVectorImpl<string_use_kind> &observed_kinds) {
+  std::sort(observed_kinds.begin(), observed_kinds.end(),
+            [](string_use_kind lhs, string_use_kind rhs) {
+              return static_cast<int>(lhs) < static_cast<int>(rhs);
+            });
+}
+
 classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
                                                protected_function_seed_lookup get_seed,
                                                protected_function_level_lookup get_level,
@@ -655,6 +676,10 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
     add_use_kind(candidate.summary.observed_kinds,
                  string_use_kind::forwarded_pointer_load);
   }
+
+  sort_function_vector(candidate.summary.protected_functions);
+  sort_function_vector(candidate.summary.unprotected_functions);
+  sort_string_use_kinds(candidate.summary.observed_kinds);
 
   candidate.result.protected_use_count = candidate.summary.protected_uses.size();
   candidate.result.unprotected_use_count = candidate.summary.unprotected_functions.size();
@@ -689,6 +714,10 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
       candidate.result.strong_vm_owner_names.push_back(function->getName().str());
     }
   }
+
+  sort_function_vector(candidate.strong_vm_functions);
+  std::sort(candidate.result.strong_vm_owner_names.begin(),
+            candidate.result.strong_vm_owner_names.end());
 
   candidate.seed =
       mix_seed(candidate.seed, static_cast<std::uint64_t>(get_string_length(global)));
@@ -1056,8 +1085,15 @@ void assign_lazy_descriptor_indices(std::vector<string_strategy_plan> &plans,
     groups[plan.result.merge_group].push_back(index);
   }
 
+  std::vector<int> group_ids;
+  group_ids.reserve(groups.size());
   for (auto &group_entry : groups) {
-    auto &indices = group_entry.second;
+    group_ids.push_back(group_entry.first);
+  }
+  std::sort(group_ids.begin(), group_ids.end());
+
+  for (int group_id : group_ids) {
+    auto &indices = groups[group_id];
     std::sort(indices.begin(), indices.end(),
               [&](std::size_t lhs, std::size_t rhs) {
                 const std::uint64_t lhs_key =
@@ -1689,6 +1725,18 @@ discover_string_candidates(llvm::Module &module) {
     }
   }
 
+  std::sort(globals.begin(), globals.end(),
+            [](const llvm::GlobalVariable *lhs,
+               const llvm::GlobalVariable *rhs) {
+              if (lhs == rhs) {
+                return false;
+              }
+              if (lhs == nullptr || rhs == nullptr) {
+                return lhs == nullptr;
+              }
+              return lhs->getName() < rhs->getName();
+            });
+
   return globals;
 }
 
@@ -1743,8 +1791,15 @@ std::vector<string_encoding_result> build_string_results(
       groups[plan.result.merge_group].push_back(index);
     }
 
+    std::vector<int> group_ids;
+    group_ids.reserve(groups.size());
     for (auto &group_entry : groups) {
-      auto &indices = group_entry.second;
+      group_ids.push_back(group_entry.first);
+    }
+    std::sort(group_ids.begin(), group_ids.end());
+
+    for (int group_id : group_ids) {
+      auto &indices = groups[group_id];
       std::sort(indices.begin(), indices.end(), [&](std::size_t lhs, std::size_t rhs) {
         return plans[lhs].result.descriptor_index <
                plans[rhs].result.descriptor_index;
@@ -1767,7 +1822,7 @@ std::vector<string_encoding_result> build_string_results(
       llvm::GlobalVariable *table = new llvm::GlobalVariable(
           module, table_type, true, llvm::GlobalValue::InternalLinkage,
           llvm::ConstantArray::get(table_type, initializers),
-          "__obf_desc_table_" + std::to_string(group_entry.first));
+          "__obf_desc_table_" + std::to_string(group_id));
 
       for (std::size_t plan_index : indices) {
         descriptor_ptrs[plan_index] =

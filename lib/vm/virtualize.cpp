@@ -118,8 +118,7 @@ llvm::AttributeList build_preserved_function_attributes(llvm::Function &function
 
 std::uint64_t derive_vm_opaque_seed(const llvm::Function &function,
                                     const bytecode_program &program) {
-  std::uint64_t seed =
-      static_cast<std::uint64_t>(llvm::hash_value(function.getName()));
+  std::uint64_t seed = stable_hash_string(function.getName());
   seed ^= static_cast<std::uint64_t>(program.instructions.size()) *
           0x9e3779b97f4a7c15ULL;
   seed ^= static_cast<std::uint64_t>(program.slots.size()) << 32;

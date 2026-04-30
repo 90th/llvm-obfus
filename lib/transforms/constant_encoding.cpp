@@ -1,8 +1,8 @@
 #include "obf/transforms/constant_encoding.h"
 
+#include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
-#include "llvm/ADT/Hashing.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -77,8 +77,7 @@ llvm::APInt derive_key(unsigned bit_width, std::uint64_t seed) {
 
 std::uint64_t derive_opaque_seed(const llvm::Function &function,
                                  std::uint64_t seed) {
-  seed = mix_seed(seed,
-                  static_cast<std::uint64_t>(llvm::hash_value(function.getName())));
+  seed = mix_seed(seed, stable_hash_string(function.getName()));
   if (seed == 0) {
     seed = 0x5aa55aa55aa55aa5ULL;
   }

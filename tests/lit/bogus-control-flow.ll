@@ -28,8 +28,8 @@ entry:
 ; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @branchy
 ; CHECK: %obf.opaque.entropy = load i64, ptr @__obf_entropy_anchor
-; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] = {{(add|sub|xor) i64}}
-; CHECK: [[EXPRB:%obf\.opaque\.expr\.b[^ ]*]] = {{(add|sub|xor) i64}}
+; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] = {{(add|or|sub|xor) i64}}
+; CHECK: [[EXPRB:%obf\.opaque\.expr\.b[^ ]*]] = {{(add|or|sub|xor) i64}}
 ; CHECK: %obf.opaque.true = icmp eq i64 [[EXPRA]], [[EXPRB]]
 ; CHECK: br i1 %obf.opaque.true, label %merge, label %obf.bogus
 ; CHECK: obf.bogus:

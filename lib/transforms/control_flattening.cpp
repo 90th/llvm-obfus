@@ -1,8 +1,8 @@
 #include "obf/transforms/control_flattening.h"
 
+#include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
-#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -58,8 +58,7 @@ std::mt19937 build_state_rng(const llvm::Function &function,
   const std::uint64_t seed_base =
       options.seed == 0 ? 0x6d2534f1f6c7a29bULL : options.seed;
   const std::uint64_t mixed_seed =
-      mix_seed(seed_base,
-               static_cast<std::uint64_t>(llvm::hash_value(function.getName())));
+      mix_seed(seed_base, stable_hash_string(function.getName()));
   std::seed_seq seed_words{
       static_cast<std::uint32_t>(mixed_seed),
       static_cast<std::uint32_t>(mixed_seed >> 32),

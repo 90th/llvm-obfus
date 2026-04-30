@@ -149,7 +149,7 @@ entry:
   ret i32 %ret
 }
 
-; VM: vm.dispatch.shape.direct
-; VM: vm.dispatch.shape.banked
-; VM: vm.dispatch.bank
-; VM: vm.dispatch.shape.switch
+; VM-DAG: vm.dispatch.shape.direct
+; VM-DAG: vm.dispatch.shape.switch
+; VM-DAG: vm.island.topology.helper_shards
+; VM-DAG: vm.island.count.

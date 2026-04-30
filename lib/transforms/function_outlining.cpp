@@ -1,9 +1,9 @@
 #include "obf/transforms/function_outlining.h"
 
+#include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -90,7 +90,7 @@ std::vector<handler_info> collect_handler_infos(llvm::Function &function,
   for (handler_info &handler : handlers) {
     handler.rank = mix_seed(
         seed == 0 ? 0x6d2534f1f6c7a29bULL : seed,
-        static_cast<std::uint64_t>(llvm::hash_value(handler.block->getName())));
+        stable_hash_string(handler.block->getName()));
   }
 
   std::sort(handlers.begin(), handlers.end(), [](const handler_info &lhs,

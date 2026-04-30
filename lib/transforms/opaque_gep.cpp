@@ -1,8 +1,8 @@
 #include "obf/transforms/opaque_gep.h"
 
+#include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
-#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
@@ -39,8 +39,7 @@ bool constant_contains_gep(const llvm::Constant *constant) {
 }
 
 std::uint64_t derive_mba_seed(const llvm::Function &function) {
-  const std::uint64_t seed =
-      static_cast<std::uint64_t>(llvm::hash_value(function.getName()));
+  const std::uint64_t seed = stable_hash_string(function.getName());
   return seed == 0 ? 0x61e1f3b77b6d4c29ULL : seed;
 }
 

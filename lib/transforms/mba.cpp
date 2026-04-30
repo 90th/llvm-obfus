@@ -1,6 +1,7 @@
 #include "obf/transforms/mba.h"
 
-#include "llvm/ADT/Hashing.h"
+#include "obf/support/stable_hash.h"
+
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -80,8 +81,7 @@ entropy_thunk_shape select_entropy_thunk_shape(llvm::Function &owner,
                                                const builder_context &context,
                                                std::uint64_t salt) {
   std::uint64_t selector = context.seed_base;
-  selector = mix_seed(selector,
-                      static_cast<std::uint64_t>(llvm::hash_value(owner.getName())));
+  selector = mix_seed(selector, stable_hash_string(owner.getName()));
   selector = mix_seed(selector, salt ^ 0x64ef22d5c31a91b7ULL);
   switch (selector % 5U) {
   case 0:
@@ -101,10 +101,8 @@ std::uint64_t derive_function_seed(const llvm::Function &function,
                                    llvm::StringRef prefix,
                                    std::uint64_t seed_base) {
   std::uint64_t seed = seed_base;
-  seed = mix_seed(seed,
-                  static_cast<std::uint64_t>(llvm::hash_value(function.getName())));
-  seed = mix_seed(seed,
-                  static_cast<std::uint64_t>(llvm::hash_value(prefix)));
+  seed = mix_seed(seed, stable_hash_string(function.getName()));
+  seed = mix_seed(seed, stable_hash_string(prefix));
   return seed == 0 ? 0xa55aa55aa55aa55aULL : seed;
 }
 
@@ -195,7 +193,7 @@ std::uint64_t derive_entropy_thunk_id(llvm::Function &owner,
                                       std::uint64_t salt,
                                       entropy_thunk_shape shape) {
   std::uint64_t id = context.seed_base;
-  id = mix_seed(id, static_cast<std::uint64_t>(llvm::hash_value(owner.getName())));
+  id = mix_seed(id, stable_hash_string(owner.getName()));
   id = mix_seed(id, salt);
   id = mix_seed(id, static_cast<std::uint64_t>(shape));
   return id == 0 ? 0xa55aa55aa55aa55aULL : id;
@@ -206,8 +204,7 @@ std::uint64_t derive_entropy_thunk_constant(llvm::Function &owner,
                                             std::uint64_t salt,
                                             std::uint64_t family_salt) {
   std::uint64_t value = context.seed_base;
-  value = mix_seed(value,
-                   static_cast<std::uint64_t>(llvm::hash_value(owner.getName())));
+  value = mix_seed(value, stable_hash_string(owner.getName()));
   value = mix_seed(value, salt ^ family_salt);
   return value == 0 ? 0x9e3779b97f4a7c15ULL : value;
 }

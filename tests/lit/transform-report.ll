@@ -57,5 +57,5 @@ entry:
 ; CHECK-DAG: keep_plain|block_split|skipped|0|no viable blocks to split|
 ; CHECK-DAG: main|block_split|applied|1|1 split(s) available|
 ; CHECK-DAG: main|constant_encoding|applied|1|1 constant(s) available|
-; CHECK-DAG: .secret|string_encoding|applied|1|lazy_decode: 1 isolated lazy use(s)|helper_lazy_decode|lazy_flag_unrolled_v0|
-; CHECK-DAG: .plain|string_encoding|applied|1|lazy_decode: 1 lazy use(s)|helper_lazy_decode|lazy_cached_pointer_v3|
+; CHECK-DAG: .secret|string_encoding|applied|1|lazy_decode: 1 isolated lazy use(s)|helper_lazy_decode|lazy_flag_reverse_v1|
+; CHECK-DAG: .plain|string_encoding|applied|1|lazy_decode: 1 lazy use(s)|helper_lazy_decode|lazy_flag_reverse_v1|

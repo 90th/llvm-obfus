@@ -1,6 +1,7 @@
 #pragma once
 
-#include "llvm/ADT/Hashing.h"
+#include "obf/support/stable_hash.h"
+
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Module.h"
@@ -21,9 +22,9 @@ inline std::string make_obf_symbol_name(llvm::StringRef role,
                                         std::uint64_t seed) {
   std::uint64_t state = seed == 0 ? 0x6d2534f1f6c7a29bULL : seed;
   state = mix_generated_name_seed(
-      state, static_cast<std::uint64_t>(llvm::hash_value(role)));
+      state, stable_hash_string(role));
   state = mix_generated_name_seed(
-      state, static_cast<std::uint64_t>(llvm::hash_value(source_name)));
+      state, stable_hash_string(source_name));
 
   std::string material = llvm::utohexstr(state, /*LowerCase=*/true);
   while (material.size() < 12) {
