@@ -1,6 +1,7 @@
 #include "obf/vm/virtualize_internal.h"
 
-#include "llvm/ADT/Hashing.h"
+#include "obf/support/stable_hash.h"
+
 #include "llvm/IR/Constants.h"
 
 #include <algorithm>
@@ -26,8 +27,7 @@ Shape select_vm_choreography_shape(const llvm::Function &function,
 
   std::uint64_t mixed = mix_seed(seed_base, salt ^ family_salt);
   mixed = mix_seed(mixed,
-                   (static_cast<std::uint64_t>(llvm::hash_value(function.getName())) +
-                    1) *
+                   (stable_hash_string(function.getName()) + 1) *
                        0x9e3779b97f4a7c15ULL);
   mixed = mix_seed(mixed, (detail + 1) * 0xbf58476d1ce4e5b9ULL);
   return static_cast<Shape>(mixed % variant_count);
@@ -196,7 +196,7 @@ std::mt19937 build_opcode_rng(const llvm::Function &function,
   std::seed_seq seed_words{
       static_cast<std::uint32_t>(seed_base),
       static_cast<std::uint32_t>(seed_base >> 32),
-      static_cast<std::uint32_t>(llvm::hash_value(function.getName())),
+      static_cast<std::uint32_t>(stable_hash_string(function.getName())),
       static_cast<std::uint32_t>(program.instructions.size())};
   return std::mt19937(seed_words);
 }

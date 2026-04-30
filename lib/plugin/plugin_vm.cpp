@@ -5,7 +5,6 @@
 #include "obf/vm/candidate_analysis.h"
 #include "obf/vm/virtualize.h"
 
-#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
@@ -40,10 +39,8 @@ std::uint64_t mix_vm_handshake_seed(std::uint64_t seed, std::uint64_t salt) {
 std::uint64_t derive_vm_hidden_token(llvm::StringRef callee_name,
                                      llvm::StringRef caller_name,
                                      std::uint64_t ordinal) {
-  std::uint64_t seed =
-      static_cast<std::uint64_t>(llvm::hash_value(callee_name));
-  seed = mix_vm_handshake_seed(
-      seed, static_cast<std::uint64_t>(llvm::hash_value(caller_name)));
+  std::uint64_t seed = stable_hash_string(callee_name);
+  seed = mix_vm_handshake_seed(seed, stable_hash_string(caller_name));
   seed = mix_vm_handshake_seed(seed, ordinal + 1);
   return seed == 0 ? 0xa55aa55aa55aa55aULL : seed;
 }
@@ -156,11 +153,9 @@ vm_seed_resolver_shape select_vm_seed_resolver_shape(protection_level level) {
 vm_pointer_materialization_shape select_vm_pointer_materialization_shape(
     llvm::Function &interface_function, std::uint64_t seed_base,
     llvm::StringRef prefix) {
-  std::uint64_t selector =
-      static_cast<std::uint64_t>(llvm::hash_value(interface_function.getName()));
+  std::uint64_t selector = stable_hash_string(interface_function.getName());
   selector = mix_vm_handshake_seed(selector, seed_base);
-  selector = mix_vm_handshake_seed(
-      selector, static_cast<std::uint64_t>(llvm::hash_value(prefix)));
+  selector = mix_vm_handshake_seed(selector, stable_hash_string(prefix));
 
   switch (selector % 3) {
   case 1:
@@ -749,8 +744,7 @@ void rewrite_vm_interface_wrapper(llvm::Function &interface_function,
       *module, ptr_int_type, binding.decode_key_global_name, key);
 
   const std::uint64_t raw_salt =
-      static_cast<std::uint64_t>(llvm::hash_value(interface_function.getName())) *
-      0x9E3779B97F4A7C15ULL;
+      stable_hash_string(interface_function.getName()) * 0x9E3779B97F4A7C15ULL;
   const llvm::APInt salt(ptr_int_type->getBitWidth(),
                          raw_salt == 0 ? 0xC6EF3720ULL : raw_salt,
                          /*isSigned=*/false, /*implicitTrunc=*/true);
@@ -950,8 +944,7 @@ prepare_virtualized_function_binding(const function_pipeline_state &state,
 
 llvm::APInt derive_vm_target_key(const llvm::Function &function,
                                  llvm::IntegerType *ptr_int_type) {
-  std::uint64_t key_word =
-      static_cast<std::uint64_t>(llvm::hash_value(function.getName()));
+  std::uint64_t key_word = stable_hash_string(function.getName());
   key_word ^= static_cast<std::uint64_t>(ptr_int_type->getBitWidth()) << 32;
   return llvm::APInt(ptr_int_type->getBitWidth(),
                      key_word == 0 ? 0xa55aa55aULL : key_word,
@@ -964,8 +957,7 @@ llvm::APInt derive_vm_target_sentinel(const llvm::APInt &key) {
 
 llvm::APInt derive_vm_target_seed_mask(const llvm::Function &function,
                                        llvm::IntegerType *ptr_int_type) {
-  std::uint64_t mask_word =
-      static_cast<std::uint64_t>(llvm::hash_value(function.getName()));
+  std::uint64_t mask_word = stable_hash_string(function.getName());
   mask_word = mix_vm_handshake_seed(
       mask_word,
       0x7c6ef372fe94f82aULL ^ static_cast<std::uint64_t>(ptr_int_type->getBitWidth()));
@@ -1212,11 +1204,9 @@ get_or_create_vm_decode_key_global(llvm::Module &module,
 llvm::APInt derive_vm_pointer_materialization_mask(
     llvm::Function &interface_function, llvm::IntegerType *ptr_int_type,
     std::uint64_t seed_base, llvm::StringRef prefix, std::uint64_t salt) {
-  std::uint64_t mask =
-      static_cast<std::uint64_t>(llvm::hash_value(interface_function.getName()));
+  std::uint64_t mask = stable_hash_string(interface_function.getName());
   mask = mix_vm_handshake_seed(mask, seed_base ^ salt);
-  mask = mix_vm_handshake_seed(
-      mask, static_cast<std::uint64_t>(llvm::hash_value(prefix)));
+  mask = mix_vm_handshake_seed(mask, stable_hash_string(prefix));
   if (mask == 0) {
     mask = 0x6a09e667f3bcc909ULL ^ salt;
   }
@@ -1495,8 +1485,7 @@ bool rewrite_calls_to_virtualized_function(
       *module, ptr_int_type, binding.decode_key_global_name, key);
 
   const std::uint64_t raw_salt =
-      static_cast<std::uint64_t>(llvm::hash_value(function.getName())) *
-      0x9E3779B97F4A7C15ULL;
+      stable_hash_string(function.getName()) * 0x9E3779B97F4A7C15ULL;
   const llvm::APInt salt(ptr_int_type->getBitWidth(),
                          raw_salt == 0 ? 0xC6EF3720ULL : raw_salt,
                          /*isSigned=*/false, /*implicitTrunc=*/true);

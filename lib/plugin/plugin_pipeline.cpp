@@ -505,8 +505,9 @@ bool apply_string_encoding_stage(
   });
 }
 
-bool apply_entropy_initialization_stage(llvm::Module &module) {
-  return RunEntropyInitialization(module);
+bool apply_entropy_initialization_stage(llvm::Module &module,
+                                        std::uint64_t seed_override) {
+  return RunEntropyInitialization(module, seed_override);
 }
 
 bool apply_cfg_state_cleanup_stage(llvm::Module &module) {

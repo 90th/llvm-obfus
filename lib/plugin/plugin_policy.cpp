@@ -306,6 +306,10 @@ obfuscation_config load_active_config() {
   return config;
 }
 
+std::uint64_t get_obf_seed_override() {
+  return obf_seed_override;
+}
+
 llvm::SmallVector<function_pipeline_state, 32>
 build_pipeline_state(llvm::Module &module, const obfuscation_config &config) {
   const function_annotation_map annotations = collect_function_annotations(module);

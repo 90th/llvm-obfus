@@ -62,7 +62,7 @@ class EntropyInitializationPass
  public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    if (!apply_entropy_initialization_stage(module)) {
+    if (!apply_entropy_initialization_stage(module, get_obf_seed_override())) {
       return llvm::PreservedAnalyses::all();
     }
 
@@ -280,7 +280,7 @@ public:
     const llvm::SmallVector<function_pipeline_state, 32> states =
         build_pipeline_state(module, config);
 
-    bool changed = apply_entropy_initialization_stage(module);
+    bool changed = apply_entropy_initialization_stage(module, get_obf_seed_override());
 
     constexpr protection_level vm_level = protection_level::vm;
     const virtualized_function_map vm_only = apply_vm_stage(states, config, &vm_level);

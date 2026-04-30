@@ -70,6 +70,8 @@ struct vm_target_candidate {
 
 obfuscation_config load_active_config();
 
+std::uint64_t get_obf_seed_override();
+
 llvm::SmallVector<function_pipeline_state, 32>
 build_pipeline_state(llvm::Module &module, const obfuscation_config &config);
 
@@ -127,7 +129,8 @@ bool apply_string_encoding_stage(
     const obfuscation_config &config,
     const virtualized_function_map *virtualized_functions = nullptr);
 
-bool apply_entropy_initialization_stage(llvm::Module &module);
+bool apply_entropy_initialization_stage(llvm::Module &module,
+                                        std::uint64_t seed_override = 0);
 
 bool apply_cfg_state_cleanup_stage(llvm::Module &module);
 
