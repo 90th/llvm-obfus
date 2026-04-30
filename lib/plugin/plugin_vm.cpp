@@ -1504,11 +1504,16 @@ bool rewrite_calls_to_virtualized_function(
   bool changed = false;
   std::size_t callsite_index = 0;
   for (const virtualized_call_site &site : binding.call_sites) {
-    llvm::CallBase *call = site.call;
+    llvm::CallBase *call = llvm::dyn_cast_or_null<llvm::CallBase>(site.call);
     if (call == nullptr) {
       continue;
     }
-    llvm::Function *caller = call->getFunction();
+    llvm::BasicBlock *call_block = call->getParent();
+    if (call_block == nullptr ||
+        call->getCalledOperand()->stripPointerCasts() != &function) {
+      continue;
+    }
+    llvm::Function *caller = call_block->getParent();
     if (caller == nullptr) {
       continue;
     }

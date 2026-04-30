@@ -11,7 +11,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Dynamic Seed Generation
 # Injects entropy at compile time to mutate the structural generation per build
 # -----------------------------------------------------------------------------
-string(RANDOM LENGTH 16 ALPHABET "0123456789" BUILD_SEED)
+string(RANDOM LENGTH 1 ALPHABET "123456789" BUILD_SEED_LEAD)
+string(RANDOM LENGTH 15 ALPHABET "0123456789" BUILD_SEED_TAIL)
+set(BUILD_SEED "${BUILD_SEED_LEAD}${BUILD_SEED_TAIL}")
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_program(OBF_LIT lit REQUIRED)

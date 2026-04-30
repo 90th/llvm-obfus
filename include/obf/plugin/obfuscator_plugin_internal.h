@@ -18,6 +18,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/ValueHandle.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -39,7 +40,7 @@ struct function_pipeline_state {
 };
 
 struct virtualized_call_site {
-  llvm::CallBase *call = nullptr;
+  llvm::WeakTrackingVH call;
   std::uint64_t hidden_token = 0;
 };
 
