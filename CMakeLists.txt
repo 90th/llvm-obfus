@@ -149,6 +149,7 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
   add_custom_command(
     OUTPUT "${obfuscated_ll}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${obfuscated_ll}"
     COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${BUILD_SEED}" -passes=obf-safe-pipeline -S "${baseline_ll}" -o "${obfuscated_ll}"
     DEPENDS obf_plugin "${baseline_ll}" "${config_file}"
     VERBATIM)
@@ -156,6 +157,7 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
   if(OBF_BENCHMARK_CLEAN_IR)
     add_custom_command(
       OUTPUT "${cleaned_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E rm -f "${cleaned_ll}"
       COMMAND "${OBF_OPT}" "-passes=${OBF_BENCHMARK_CLEANUP_PASSES}" -S "${obfuscated_ll}" -o "${cleaned_ll}"
       DEPENDS "${obfuscated_ll}"
       VERBATIM)
@@ -212,6 +214,7 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
   # Added dynamic --obf-seed insertion to the optimizer run
   add_custom_command(
     OUTPUT "${linked_obfuscated_ll}"
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${linked_obfuscated_ll}"
     COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${BUILD_SEED}" -passes=obf-safe-pipeline -S "${linked_baseline_ll}" -o "${linked_obfuscated_ll}"
     DEPENDS obf_plugin "${linked_baseline_ll}" "${config_file}"
     VERBATIM)
@@ -219,6 +222,7 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
   if(OBF_BENCHMARK_CLEAN_IR)
     add_custom_command(
       OUTPUT "${linked_cleaned_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E rm -f "${linked_cleaned_ll}"
       COMMAND "${OBF_OPT}" "-passes=${OBF_BENCHMARK_CLEANUP_PASSES}" -S "${linked_obfuscated_ll}" -o "${linked_cleaned_ll}"
       DEPENDS "${linked_obfuscated_ll}"
       VERBATIM)

@@ -113,6 +113,44 @@ enum class return_handler_shape : std::uint32_t {
   split_encode = 3,
 };
 
+enum class vm_status_choreography_shape : std::uint32_t {
+  direct = 0,
+  temp = 1,
+  split = 2,
+  select = 3,
+};
+
+enum class vm_next_route_choreography_shape : std::uint32_t {
+  direct = 0,
+  dispatch_index_temp = 1,
+  island_id_temp = 2,
+  packed_pair = 3,
+  temp_pair = 4,
+};
+
+enum class vm_slot_update_choreography_shape : std::uint32_t {
+  direct = 0,
+  temp = 1,
+  rotate = 2,
+  select = 3,
+  split = 4,
+};
+
+enum class vm_table_access_choreography_shape : std::uint32_t {
+  direct = 0,
+  temp = 1,
+  bias = 2,
+  split = 3,
+  select = 4,
+};
+
+enum class vm_helper_dispatch_choreography_shape : std::uint32_t {
+  direct = 0,
+  bias = 1,
+  split = 2,
+  select = 3,
+};
+
 struct opcode_permutation {
   std::array<std::uint8_t, vm_opcode_count> physical_for_logical = {};
 };
@@ -255,6 +293,21 @@ return_handler_shape select_return_handler_shape(
     const rewrite_function_context &context,
     const micro_instruction &instruction,
     std::size_t instruction_index, std::uint64_t salt);
+vm_status_choreography_shape select_status_choreography_shape(
+    const llvm::Function &function, std::uint64_t bytecode_seed,
+    std::uint32_t detail, std::uint64_t salt);
+vm_next_route_choreography_shape select_next_route_choreography_shape(
+    const rewrite_function_context &context, std::uint32_t target_instruction,
+    std::uint64_t salt);
+vm_slot_update_choreography_shape select_slot_update_choreography_shape(
+    const rewrite_function_context &context, std::uint32_t slot,
+    std::uint64_t salt);
+vm_table_access_choreography_shape select_table_access_choreography_shape(
+    const rewrite_function_context &context, std::uint32_t table_index,
+    std::uint64_t salt);
+vm_helper_dispatch_choreography_shape select_helper_dispatch_choreography_shape(
+    const llvm::Function &function, std::uint64_t bytecode_seed,
+    std::size_t dispatch_case_count, std::uint64_t salt);
 
 std::uint32_t select_dispatch_variant(std::uint64_t seed_base, std::uint64_t salt,
                                       std::size_t instruction_count,
@@ -405,6 +458,14 @@ void finish_value_in_builder(llvm::IRBuilder<> &builder,
                              llvm::Value *result);
 bool lower_control_instruction(llvm::IRBuilder<> &builder,
                                const instruction_rewrite_context &context);
+llvm::Value *apply_vm_island_status_choreography(
+    llvm::IRBuilder<> &builder, llvm::Function &function,
+    std::uint64_t bytecode_seed, llvm::Value *status_value,
+    std::uint32_t detail, std::uint64_t salt);
+llvm::Value *apply_vm_helper_dispatch_choreography(
+    llvm::IRBuilder<> &builder, llvm::Function &function,
+    std::uint64_t bytecode_seed, llvm::Value *dispatch_value,
+    std::size_t dispatch_case_count, std::uint64_t salt);
 
 inline void finish_value(llvm::IRBuilder<> &builder,
                          const instruction_rewrite_context &context,

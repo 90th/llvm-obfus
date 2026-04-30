@@ -1,0 +1,15 @@
+seed: 20260429
+default_level: none
+targets:
+  - match: helper_choreo_branch
+    level: strong_vm
+  - match: helper_choreo_switch
+    level: strong_vm
+  - match: helper_choreo_chain
+    level: strong_vm
+  - match: helper_choreo_void
+    level: strong_vm
+mba:
+  depth: 1
+security:
+  fail_on_public_obf_symbol: true

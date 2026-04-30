@@ -346,7 +346,11 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
   case opcode::ret:
     if (instruction.operands.empty()) {
       if (function_context.state_island_body) {
-        builder.CreateRet(builder.getInt32(vm_island_done_status));
+        builder.CreateRet(apply_vm_island_status_choreography(
+            builder, function_context.function, function_context.bytecode_seed,
+            builder.getInt32(vm_island_done_status),
+            static_cast<std::uint32_t>(instruction_index),
+            0x17f80 + instruction_index));
       } else {
         builder.CreateRetVoid();
       }
@@ -429,7 +433,11 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
         if (function_context.return_value_slot != nullptr) {
           builder.CreateStore(ret_val, function_context.return_value_slot);
         }
-        builder.CreateRet(builder.getInt32(vm_island_done_status));
+        builder.CreateRet(apply_vm_island_status_choreography(
+            builder, function_context.function, function_context.bytecode_seed,
+            builder.getInt32(vm_island_done_status),
+            static_cast<std::uint32_t>(instruction_index),
+            0x1af00 + instruction_index));
       } else {
         builder.CreateRet(ret_val);
       }

@@ -776,8 +776,13 @@ void emit_state_instruction_dispatcher(
   llvm::Value *initial_dispatch = entry_builder.CreateLoad(
       entry_builder.getInt32Ty(), dispatch_index_slot,
       subhelper ? "vm.island.subroute.dispatch" : "vm.island.helper.dispatch");
+  initial_dispatch = apply_vm_helper_dispatch_choreography(
+      entry_builder, dispatcher, bytecode_seed, initial_dispatch,
+      owned_instructions.size(),
+      0x521000ULL + static_cast<std::uint64_t>(island_index) * 0x100ULL +
+          static_cast<std::uint64_t>(subhelper_index));
   auto *entry_switch = entry_builder.CreateSwitch(initial_dispatch, trap_block,
-                                                   owned_instructions.size());
+                                                    owned_instructions.size());
   for (std::size_t instruction_index : owned_instructions) {
     entry_switch->addCase(
         entry_builder.getInt32(dispatch_index_for_instruction[instruction_index]),
@@ -897,11 +902,16 @@ void emit_state_instruction_dispatcher(
   }
 
   llvm::IRBuilder<> trap_builder(trap_block);
-  trap_builder.CreateRet(trap_builder.getInt32(vm_island_trap_status));
+  trap_builder.CreateRet(apply_vm_island_status_choreography(
+      trap_builder, dispatcher, bytecode_seed,
+      trap_builder.getInt32(vm_island_trap_status), island_index,
+      0x521100ULL + static_cast<std::uint64_t>(island_index) * 0x100ULL +
+          static_cast<std::uint64_t>(subhelper_index)));
 }
 
 void emit_split_state_island_router(
     llvm::Function &helper, const vm_state_layout &state_layout,
+    std::uint64_t bytecode_seed,
     llvm::ArrayRef<std::uint32_t> dispatch_index_for_instruction,
     llvm::ArrayRef<std::uint32_t> route_order,
     const subisland_plan &plan, llvm::ArrayRef<llvm::Function *> subhelpers,
@@ -921,8 +931,12 @@ void emit_split_state_island_router(
       "vm.island.state.dispatch");
   llvm::Value *initial_dispatch = entry_builder.CreateLoad(
       entry_builder.getInt32Ty(), dispatch_index_slot, "vm.island.subroute");
+  initial_dispatch = apply_vm_helper_dispatch_choreography(
+      entry_builder, helper, bytecode_seed,
+      initial_dispatch, plan.subhelper_for_instruction.size(),
+      0x521200ULL + island_index);
   auto *route_switch = entry_builder.CreateSwitch(initial_dispatch, trap_block,
-                                                   plan.subhelper_for_instruction.size());
+                                                    plan.subhelper_for_instruction.size());
 
   for (std::uint32_t subhelper_index : route_order) {
     auto *call_block = llvm::BasicBlock::Create(
@@ -939,11 +953,17 @@ void emit_split_state_island_router(
     auto *status = call_builder.CreateCall(
         subhelpers[subhelper_index]->getFunctionType(), subhelpers[subhelper_index],
         {state_arg}, "vm.island.subroute.status");
-    call_builder.CreateRet(status);
+    call_builder.CreateRet(apply_vm_island_status_choreography(
+        call_builder, helper, bytecode_seed, status, subhelper_index,
+        0x521300ULL + static_cast<std::uint64_t>(island_index) * 0x100ULL +
+            static_cast<std::uint64_t>(subhelper_index)));
   }
 
   llvm::IRBuilder<> trap_builder(trap_block);
-  trap_builder.CreateRet(trap_builder.getInt32(vm_island_trap_status));
+  trap_builder.CreateRet(apply_vm_island_status_choreography(
+      trap_builder, helper, bytecode_seed,
+      trap_builder.getInt32(vm_island_trap_status),
+      island_index, 0x521400ULL + island_index));
 }
 
 void emit_state_island_helper(
@@ -1015,7 +1035,8 @@ void emit_state_island_helper(
   }
 
   emit_split_state_island_router(
-      helper, state_layout, dispatch_index_for_instruction, split_plan.route_order,
+      helper, state_layout, bytecode_seed, dispatch_index_for_instruction,
+      split_plan.route_order,
       split_plan, subhelpers, island_index);
 
   for (std::uint32_t subhelper_index = 0;

@@ -14,8 +14,183 @@ namespace obf::vm {
 
 namespace {
 
+template <typename Shape>
+Shape select_vm_choreography_shape(const llvm::Function &function,
+                                   std::uint64_t seed_base,
+                                   std::uint64_t detail, std::uint64_t salt,
+                                   std::uint64_t family_salt,
+                                   std::uint32_t variant_count) {
+  if (variant_count <= 1) {
+    return static_cast<Shape>(0);
+  }
+
+  std::uint64_t mixed = mix_seed(seed_base, salt ^ family_salt);
+  mixed = mix_seed(mixed,
+                   (static_cast<std::uint64_t>(llvm::hash_value(function.getName())) +
+                    1) *
+                       0x9e3779b97f4a7c15ULL);
+  mixed = mix_seed(mixed, (detail + 1) * 0xbf58476d1ce4e5b9ULL);
+  return static_cast<Shape>(mixed % variant_count);
+}
+
+void note_function_marker(llvm::Function &function, llvm::StringRef marker) {
+  if (!function.hasFnAttribute(marker)) {
+    function.addFnAttr(marker);
+  }
+}
+
+llvm::StringRef status_choreography_marker(vm_status_choreography_shape shape) {
+  switch (shape) {
+  case vm_status_choreography_shape::direct:
+    return "vm.choreo.status.direct";
+  case vm_status_choreography_shape::temp:
+    return "vm.choreo.status.temp";
+  case vm_status_choreography_shape::split:
+    return "vm.choreo.status.split";
+  case vm_status_choreography_shape::select:
+    return "vm.choreo.status.select";
+  }
+
+  llvm_unreachable("unknown vm status choreography shape");
+}
+
+llvm::StringRef route_choreography_marker(
+    vm_next_route_choreography_shape shape) {
+  switch (shape) {
+  case vm_next_route_choreography_shape::direct:
+    return "vm.choreo.route.direct";
+  case vm_next_route_choreography_shape::dispatch_index_temp:
+    return "vm.choreo.route.di";
+  case vm_next_route_choreography_shape::island_id_temp:
+    return "vm.choreo.route.id";
+  case vm_next_route_choreography_shape::packed_pair:
+    return "vm.choreo.route.pack";
+  case vm_next_route_choreography_shape::temp_pair:
+    return "vm.choreo.route.temp";
+  }
+
+  llvm_unreachable("unknown vm route choreography shape");
+}
+
+llvm::StringRef dispatch_choreography_marker(
+    vm_helper_dispatch_choreography_shape shape) {
+  switch (shape) {
+  case vm_helper_dispatch_choreography_shape::direct:
+    return "vm.choreo.dispatch.direct";
+  case vm_helper_dispatch_choreography_shape::bias:
+    return "vm.choreo.dispatch.bias";
+  case vm_helper_dispatch_choreography_shape::split:
+    return "vm.choreo.dispatch.split";
+  case vm_helper_dispatch_choreography_shape::select:
+    return "vm.choreo.dispatch.select";
+  }
+
+  llvm_unreachable("unknown vm helper dispatch choreography shape");
+}
+
+llvm::Value *materialize_i32_value(llvm::IRBuilder<> &builder,
+                                   llvm::Value *value,
+                                   const llvm::Twine &name) {
+  if (value == nullptr || value->getType() == builder.getInt32Ty()) {
+    return value;
+  }
+
+  return builder.CreateZExtOrTrunc(value, builder.getInt32Ty(), name);
+}
+
+std::uint32_t build_dispatch_choreography_bias(std::uint64_t bytecode_seed,
+                                               std::uint64_t salt) {
+  std::uint32_t bias =
+      static_cast<std::uint32_t>(mix_seed(bytecode_seed, 0xd15fa7c10001ULL ^ salt));
+  if (bias == 0) {
+    bias = 0x5a5a5a5aU;
+  }
+  return bias;
+}
+
+std::uint32_t build_dispatch_choreography_mask(std::uint64_t bytecode_seed,
+                                               std::uint64_t salt) {
+  std::uint32_t mask =
+      static_cast<std::uint32_t>(mix_seed(bytecode_seed, 0xd15fa7c10002ULL ^ salt));
+  mask ^= mask >> 11;
+  mask |= 0x0000ffffU;
+  if (mask == 0 || mask == std::numeric_limits<std::uint32_t>::max()) {
+    mask = 0x00ff00ffU;
+  }
+  return mask;
+}
+
+void store_next_route_with_choreography(llvm::IRBuilder<> &builder,
+                                        rewrite_function_context &context,
+                                        llvm::Value *dispatch_index,
+                                        std::uint32_t target_instruction,
+                                        std::uint64_t salt) {
+  llvm::Value *typed_dispatch_index = materialize_i32_value(
+      builder, dispatch_index, "obf.vm.island.dispatch.cast");
+  llvm::Value *typed_island_id = builder.getInt32(
+      context.island_for_instruction[target_instruction]);
+  const vm_next_route_choreography_shape shape =
+      select_next_route_choreography_shape(context, target_instruction, salt);
+  const llvm::StringRef marker = route_choreography_marker(shape);
+  note_function_marker(context.function, marker);
+
+  switch (shape) {
+  case vm_next_route_choreography_shape::direct:
+    builder.CreateStore(typed_dispatch_index, context.dispatch_index_slot);
+    builder.CreateStore(typed_island_id, context.island_id_slot);
+    return;
+  case vm_next_route_choreography_shape::dispatch_index_temp:
+    builder.CreateStore(roundtrip_vm_handler_value(
+                            builder, typed_dispatch_index,
+                            llvm::Twine(marker) + ".dispatch"),
+                        context.dispatch_index_slot);
+    builder.CreateStore(typed_island_id, context.island_id_slot);
+    return;
+  case vm_next_route_choreography_shape::island_id_temp:
+    builder.CreateStore(typed_dispatch_index, context.dispatch_index_slot);
+    builder.CreateStore(roundtrip_vm_handler_value(
+                            builder, typed_island_id,
+                            llvm::Twine(marker) + ".island"),
+                        context.island_id_slot);
+    return;
+  case vm_next_route_choreography_shape::packed_pair: {
+    llvm::Value *packed_pair = builder.CreateOr(
+        builder.CreateZExt(typed_dispatch_index, builder.getInt64Ty(),
+                           llvm::Twine(marker) + ".dispatch.zext"),
+        builder.CreateShl(
+            builder.CreateZExt(typed_island_id, builder.getInt64Ty(),
+                               llvm::Twine(marker) + ".island.zext"),
+            builder.getInt64(32), llvm::Twine(marker) + ".island.shl"),
+        llvm::Twine(marker) + ".pack");
+    builder.CreateStore(
+        builder.CreateTrunc(packed_pair, builder.getInt32Ty(),
+                            llvm::Twine(marker) + ".dispatch"),
+        context.dispatch_index_slot);
+    builder.CreateStore(
+        builder.CreateTrunc(
+            builder.CreateLShr(packed_pair, builder.getInt64(32),
+                               llvm::Twine(marker) + ".unpack"),
+            builder.getInt32Ty(), llvm::Twine(marker) + ".island"),
+        context.island_id_slot);
+    return;
+  }
+  case vm_next_route_choreography_shape::temp_pair:
+    builder.CreateStore(roundtrip_vm_handler_value(
+                            builder, typed_dispatch_index,
+                            llvm::Twine(marker) + ".dispatch"),
+                        context.dispatch_index_slot);
+    builder.CreateStore(roundtrip_vm_handler_value(
+                            builder, typed_island_id,
+                            llvm::Twine(marker) + ".island"),
+                        context.island_id_slot);
+    return;
+  }
+
+  llvm_unreachable("unknown vm route choreography shape");
+}
+
 std::mt19937 build_opcode_rng(const llvm::Function &function,
-                             const bytecode_program &program) {
+                              const bytecode_program &program) {
   const std::uint64_t seed_base = mix_seed(derive_vm_bytecode_seed(function, program),
                                            0x0f4c0d3aa19b27d5ULL);
   std::seed_seq seed_words{
@@ -110,6 +285,156 @@ llvm::Value *remap_switch_dispatch_value(llvm::IRBuilder<> &builder,
 }
 
 } // namespace
+
+vm_status_choreography_shape select_status_choreography_shape(
+    const llvm::Function &function, std::uint64_t bytecode_seed,
+    std::uint32_t detail, std::uint64_t salt) {
+  return select_vm_choreography_shape<vm_status_choreography_shape>(
+      function, bytecode_seed, detail, salt, 0x737461747573ULL, 4);
+}
+
+vm_next_route_choreography_shape select_next_route_choreography_shape(
+    const rewrite_function_context &context, std::uint32_t target_instruction,
+    std::uint64_t salt) {
+  if (!context.state_island_body ||
+      target_instruction >= context.dispatch_index_for_instruction.size() ||
+      target_instruction >= context.island_for_instruction.size()) {
+    return vm_next_route_choreography_shape::direct;
+  }
+
+  std::uint64_t detail =
+      (static_cast<std::uint64_t>(target_instruction) + 1) * 0x9e3779b97f4a7c15ULL;
+  detail ^= static_cast<std::uint64_t>(
+                context.dispatch_index_for_instruction[target_instruction])
+            << 1;
+  detail ^= static_cast<std::uint64_t>(context.island_for_instruction[target_instruction])
+            << 33;
+  return select_vm_choreography_shape<vm_next_route_choreography_shape>(
+      context.function, mix_seed(context.bytecode_seed, context.opaque_seed_base),
+      detail, salt, 0x726f757465ULL, 5);
+}
+
+vm_slot_update_choreography_shape select_slot_update_choreography_shape(
+    const rewrite_function_context &context, std::uint32_t slot,
+    std::uint64_t salt) {
+  return select_vm_choreography_shape<vm_slot_update_choreography_shape>(
+      context.function, mix_seed(context.bytecode_seed, context.opaque_seed_base),
+      slot + 1U, salt, 0x736c6f742063ULL, 5);
+}
+
+vm_table_access_choreography_shape select_table_access_choreography_shape(
+    const rewrite_function_context &context, std::uint32_t table_index,
+    std::uint64_t salt) {
+  return select_vm_choreography_shape<vm_table_access_choreography_shape>(
+      context.function, mix_seed(context.bytecode_seed, context.opaque_seed_base),
+      table_index + 1U, salt, 0x7461626c652063ULL, 5);
+}
+
+vm_helper_dispatch_choreography_shape select_helper_dispatch_choreography_shape(
+    const llvm::Function &function, std::uint64_t bytecode_seed,
+    std::size_t dispatch_case_count, std::uint64_t salt) {
+  if (dispatch_case_count <= 1) {
+    return vm_helper_dispatch_choreography_shape::direct;
+  }
+
+  return select_vm_choreography_shape<vm_helper_dispatch_choreography_shape>(
+      function, bytecode_seed, dispatch_case_count, salt, 0x6469737061746368ULL,
+      4);
+}
+
+llvm::Value *apply_vm_island_status_choreography(
+    llvm::IRBuilder<> &builder, llvm::Function &function,
+    std::uint64_t bytecode_seed, llvm::Value *status_value,
+    std::uint32_t detail, std::uint64_t salt) {
+  llvm::Value *typed_status =
+      materialize_i32_value(builder, status_value, "obf.vm.island.status.cast");
+  if (typed_status == nullptr) {
+    return status_value;
+  }
+
+  const vm_status_choreography_shape shape =
+      select_status_choreography_shape(function, bytecode_seed, detail, salt);
+  const llvm::StringRef marker = status_choreography_marker(shape);
+  note_function_marker(function, marker);
+  llvm::Value *materialized_status = typed_status;
+  if (shape != vm_status_choreography_shape::direct &&
+      llvm::isa<llvm::Constant>(typed_status)) {
+    materialized_status = roundtrip_vm_handler_value(
+        builder, typed_status, llvm::Twine(marker) + ".base");
+  }
+
+  switch (shape) {
+  case vm_status_choreography_shape::direct:
+    return typed_status;
+  case vm_status_choreography_shape::temp:
+    return roundtrip_vm_handler_value(builder, materialized_status,
+                                      llvm::Twine(marker) + ".slot");
+  case vm_status_choreography_shape::split: {
+    llvm::Value *lo = builder.CreateAnd(materialized_status,
+                                        builder.getInt32(0x0000ffffU),
+                                        llvm::Twine(marker) + ".lo");
+    llvm::Value *hi = builder.CreateAnd(materialized_status,
+                                        builder.getInt32(0xffff0000U),
+                                        llvm::Twine(marker) + ".hi");
+    return builder.CreateOr(lo, hi, marker);
+  }
+  case vm_status_choreography_shape::select: {
+    llvm::Value *roundtrip = roundtrip_vm_handler_value(
+        builder, materialized_status, llvm::Twine(marker) + ".rt");
+    llvm::Value *take_primary = builder.CreateICmpEQ(
+        materialized_status, roundtrip, llvm::Twine(marker) + ".eq");
+    return builder.CreateSelect(take_primary, materialized_status, roundtrip,
+                                marker);
+  }
+  }
+
+  llvm_unreachable("unknown vm status choreography shape");
+}
+
+llvm::Value *apply_vm_helper_dispatch_choreography(
+    llvm::IRBuilder<> &builder, llvm::Function &function,
+    std::uint64_t bytecode_seed, llvm::Value *dispatch_value,
+    std::size_t dispatch_case_count, std::uint64_t salt) {
+  llvm::Value *typed_dispatch = materialize_i32_value(
+      builder, dispatch_value, "obf.vm.island.route.cast");
+  if (typed_dispatch == nullptr) {
+    return dispatch_value;
+  }
+
+  const vm_helper_dispatch_choreography_shape shape =
+      select_helper_dispatch_choreography_shape(function, bytecode_seed,
+                                                dispatch_case_count, salt);
+  const llvm::StringRef marker = dispatch_choreography_marker(shape);
+  note_function_marker(function, marker);
+
+  switch (shape) {
+  case vm_helper_dispatch_choreography_shape::direct:
+    return typed_dispatch;
+  case vm_helper_dispatch_choreography_shape::bias: {
+    const std::uint32_t bias = build_dispatch_choreography_bias(bytecode_seed, salt);
+    llvm::Value *biased = builder.CreateAdd(typed_dispatch, builder.getInt32(bias),
+                                            llvm::Twine(marker) + ".add");
+    return builder.CreateSub(biased, builder.getInt32(bias), marker);
+  }
+  case vm_helper_dispatch_choreography_shape::split: {
+    const std::uint32_t mask = build_dispatch_choreography_mask(bytecode_seed, salt);
+    llvm::Value *lo = builder.CreateAnd(typed_dispatch, builder.getInt32(mask),
+                                        llvm::Twine(marker) + ".lo");
+    llvm::Value *hi = builder.CreateAnd(typed_dispatch, builder.getInt32(~mask),
+                                        llvm::Twine(marker) + ".hi");
+    return builder.CreateOr(lo, hi, marker);
+  }
+  case vm_helper_dispatch_choreography_shape::select: {
+    llvm::Value *roundtrip = roundtrip_vm_handler_value(
+        builder, typed_dispatch, llvm::Twine(marker) + ".rt");
+    llvm::Value *take_primary = builder.CreateICmpEQ(
+        typed_dispatch, roundtrip, llvm::Twine(marker) + ".eq");
+    return builder.CreateSelect(take_primary, typed_dispatch, roundtrip, marker);
+  }
+  }
+
+  llvm_unreachable("unknown vm helper dispatch choreography shape");
+}
 
 std::uint32_t select_dispatch_variant(std::uint64_t seed_base, std::uint64_t salt,
                                       std::size_t instruction_count,
@@ -403,19 +728,19 @@ void emit_dispatch(llvm::IRBuilder<> &builder,
   if (context.state_island_body) {
     if (context.dispatch_index_slot == nullptr || context.island_id_slot == nullptr ||
         target_instruction >= context.island_for_instruction.size()) {
-      builder.CreateRet(builder.getInt32(vm_island_trap_status));
+      builder.CreateRet(apply_vm_island_status_choreography(
+          builder, context.function, context.bytecode_seed,
+          builder.getInt32(vm_island_trap_status), target_instruction,
+          salt ^ 0x51170001ULL));
       return;
     }
-    llvm::Value *typed_dispatch_index = dispatch_index;
-    if (typed_dispatch_index->getType() != builder.getInt32Ty()) {
-      typed_dispatch_index = builder.CreateZExtOrTrunc(
-          typed_dispatch_index, builder.getInt32Ty(), "obf.vm.island.dispatch.cast");
-    }
-    builder.CreateStore(typed_dispatch_index, context.dispatch_index_slot);
-    builder.CreateStore(
-        builder.getInt32(context.island_for_instruction[target_instruction]),
-        context.island_id_slot);
-    builder.CreateRet(builder.getInt32(vm_island_continue_status));
+    store_next_route_with_choreography(builder, context, dispatch_index,
+                                       target_instruction,
+                                       salt ^ 0x51170002ULL);
+    builder.CreateRet(apply_vm_island_status_choreography(
+        builder, context.function, context.bytecode_seed,
+        builder.getInt32(vm_island_continue_status), target_instruction,
+        salt ^ 0x51170003ULL));
     return;
   }
 

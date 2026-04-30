@@ -74,6 +74,39 @@ MARKER_GROUPS = {
         "banked": r"vm\.dispatch\.shape\.banked",
         "bank": r"vm\.dispatch\.bank",
     },
+    "status_choreography": {
+        "direct": r"vm\.choreo\.status\.direct",
+        "temp": r"vm\.choreo\.status\.temp",
+        "split": r"vm\.choreo\.status\.split",
+        "select": r"vm\.choreo\.status\.select",
+    },
+    "route_choreography": {
+        "direct": r"vm\.choreo\.route\.direct",
+        "di": r"vm\.choreo\.route\.di",
+        "id": r"vm\.choreo\.route\.id",
+        "pack": r"vm\.choreo\.route\.pack",
+        "temp": r"vm\.choreo\.route\.temp",
+    },
+    "slot_choreography": {
+        "direct": r"vm\.choreo\.slot\.direct",
+        "temp": r"vm\.choreo\.slot\.temp",
+        "rotate": r"vm\.choreo\.slot\.rotate",
+        "select": r"vm\.choreo\.slot\.select",
+        "split": r"vm\.choreo\.slot\.split",
+    },
+    "table_choreography": {
+        "direct": r"vm\.choreo\.table\.direct",
+        "temp": r"vm\.choreo\.table\.temp",
+        "bias": r"vm\.choreo\.table\.bias",
+        "split": r"vm\.choreo\.table\.split",
+        "select": r"vm\.choreo\.table\.select",
+    },
+    "dispatch_choreography": {
+        "direct": r"vm\.choreo\.dispatch\.direct",
+        "bias": r"vm\.choreo\.dispatch\.bias",
+        "split": r"vm\.choreo\.dispatch\.split",
+        "select": r"vm\.choreo\.dispatch\.select",
+    },
     "vm_islands": {
         "topology": r"vm\.island\.topology\.helper_shards",
         "count": r"vm\.island\.count\.\d+",
@@ -452,6 +485,16 @@ def dimension_value(fingerprint: dict[str, Any], dimension: str) -> Any:
         return fingerprint["return_shapes"]
     if dimension == "dispatcher_shapes":
         return fingerprint["dispatcher_shapes"]
+    if dimension == "status_choreography":
+        return fingerprint["status_choreography"]
+    if dimension == "route_choreography":
+        return fingerprint["route_choreography"]
+    if dimension == "slot_choreography":
+        return fingerprint["slot_choreography"]
+    if dimension == "table_choreography":
+        return fingerprint["table_choreography"]
+    if dimension == "dispatch_choreography":
+        return fingerprint["dispatch_choreography"]
     if dimension == "vm_islands":
         return fingerprint["vm_island_hash"]
     if dimension == "pointer_materialization":
@@ -553,6 +596,11 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
         "call_shapes",
         "return_shapes",
         "dispatcher_shapes",
+        "status_choreography",
+        "route_choreography",
+        "slot_choreography",
+        "table_choreography",
+        "dispatch_choreography",
         "vm_islands",
         "pointer_materialization",
         "entropy_thunks",
@@ -583,6 +631,11 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
                 "gep_shapes",
                 "return_shapes",
                 "dispatcher_shapes",
+                "status_choreography",
+                "route_choreography",
+                "slot_choreography",
+                "table_choreography",
+                "dispatch_choreography",
                 "vm_islands",
                 "vm_structure",
             )
@@ -675,6 +728,11 @@ def main() -> int:
         "call_shapes",
         "return_shapes",
         "dispatcher_shapes",
+        "status_choreography",
+        "route_choreography",
+        "slot_choreography",
+        "table_choreography",
+        "dispatch_choreography",
         "vm_islands",
         "pointer_materialization",
         "entropy_thunks",
