@@ -100,6 +100,7 @@ MARKER_GROUPS = {
         "bias": r"vm\.choreo\.table\.bias",
         "split": r"vm\.choreo\.table\.split",
         "select": r"vm\.choreo\.table\.select",
+        "keyed": r"vm\.choreo\.table\.keyed",
     },
     "dispatch_choreography": {
         "direct": r"vm\.choreo\.dispatch\.direct",

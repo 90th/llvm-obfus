@@ -142,6 +142,7 @@ enum class vm_table_access_choreography_shape : std::uint32_t {
   bias = 2,
   split = 3,
   select = 4,
+  keyed = 5,
 };
 
 enum class vm_helper_dispatch_choreography_shape : std::uint32_t {
@@ -217,6 +218,8 @@ struct rewrite_function_context {
   std::uint32_t island_count = 0;
   std::uint32_t switch_dispatch_bank_count = 1;
   llvm::ArrayRef<std::uint32_t> dispatch_index_for_instruction;
+  std::uint32_t current_island_index = invalid_slot;
+  std::uint32_t current_subhelper_index = invalid_slot;
   llvm::GlobalVariable *bytecode_global = nullptr;
   llvm::GlobalVariable *retkey_global = nullptr;
   const vm_state_layout *state_layout = nullptr;
@@ -303,8 +306,9 @@ vm_slot_update_choreography_shape select_slot_update_choreography_shape(
     const rewrite_function_context &context, std::uint32_t slot,
     std::uint64_t salt);
 vm_table_access_choreography_shape select_table_access_choreography_shape(
-    const rewrite_function_context &context, std::uint32_t table_index,
-    std::uint64_t salt);
+    const rewrite_function_context &context, std::size_t instruction_index,
+    opcode logical_opcode, std::uint32_t table_index,
+    std::uint32_t byte_offset, std::uint64_t salt);
 vm_helper_dispatch_choreography_shape select_helper_dispatch_choreography_shape(
     const llvm::Function &function, std::uint64_t bytecode_seed,
     std::size_t dispatch_case_count, std::uint64_t salt);
@@ -355,10 +359,14 @@ serialized_bytecode_program serialize_bytecode_program(
 llvm::Value *consume_metadata(llvm::IRBuilder<> &builder,
                               const rewrite_function_context &context,
                               const bytecode_layout &layout,
-                              std::uint64_t salt);
+                              std::uint64_t salt,
+                              std::size_t instruction_index,
+                              opcode logical_opcode);
 llvm::Value *decode_target_dispatch(llvm::IRBuilder<> &builder,
                                     const rewrite_function_context &context,
-                                    std::uint32_t offset, std::uint64_t salt);
+                                    std::uint32_t offset, std::uint64_t salt,
+                                    std::size_t instruction_index,
+                                    opcode logical_opcode);
 void emit_instruction_integrity_probes(llvm::IRBuilder<> &builder,
                                        const instruction_rewrite_context &context);
 
@@ -466,6 +474,14 @@ llvm::Value *apply_vm_helper_dispatch_choreography(
     llvm::IRBuilder<> &builder, llvm::Function &function,
     std::uint64_t bytecode_seed, llvm::Value *dispatch_value,
     std::size_t dispatch_case_count, std::uint64_t salt);
+llvm::Value *create_vm_table_access_ptr(
+    llvm::IRBuilder<> &builder, const rewrite_function_context &context,
+    llvm::Value *table_base, llvm::ArrayType *table_type,
+    llvm::Value *table_index, std::size_t instruction_index,
+    opcode logical_opcode, std::uint32_t table_index_detail,
+    std::uint32_t byte_offset,
+    std::uint64_t salt, llvm::StringRef name_prefix,
+    bool allow_inbounds = true);
 
 inline void finish_value(llvm::IRBuilder<> &builder,
                          const instruction_rewrite_context &context,

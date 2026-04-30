@@ -139,6 +139,82 @@ llvm::Value *load_byte_through_window(
   return builder.CreateTrunc(window_value, builder.getInt8Ty(), base_name);
 }
 
+llvm::Value *load_byte_through_window(
+    llvm::IRBuilder<> &builder, const rewrite_function_context &context,
+    llvm::Value *array_base, llvm::ArrayType *array_type,
+    std::size_t instruction_index, opcode logical_opcode,
+    std::uint32_t table_index_detail, std::uint32_t byte_offset,
+    std::uint64_t salt, llvm::StringRef name_prefix = "obf.vm.byte") {
+  if (array_base == nullptr || array_type == nullptr ||
+      !array_base->getType()->isPointerTy() ||
+      array_type->getElementType() != builder.getInt8Ty()) {
+    return nullptr;
+  }
+
+  const llvm::DataLayout *data_layout = get_builder_data_layout(builder);
+  if (data_layout == nullptr) {
+    return nullptr;
+  }
+
+  const std::uint64_t byte_count = array_type->getNumElements();
+  if (byte_offset >= byte_count) {
+    return nullptr;
+  }
+
+  std::uint32_t window_bytes = 0;
+  if (byte_count >= 4) {
+    window_bytes = 4;
+  } else if (byte_count >= 2) {
+    window_bytes = 2;
+  } else {
+    return nullptr;
+  }
+
+  const std::uint64_t max_base = byte_count - window_bytes;
+  std::uint64_t base_index =
+      byte_offset >= window_bytes - 1 ? byte_offset - (window_bytes - 1) : 0;
+  if (base_index > max_base) {
+    base_index = max_base;
+  }
+
+  const std::uint64_t byte_index = byte_offset - base_index;
+  const std::string base_name =
+      name_prefix.empty() ? "obf.vm.byte" : name_prefix.str();
+  auto *window_type = builder.getIntNTy(window_bytes * 8);
+  llvm::Value *base_index_value = materialize_integer_constant(
+      builder, *llvm::ConstantInt::get(builder.getInt32Ty(), base_index),
+      context.opaque_seed_slot, context.opaque_seed_base, context.mba_context,
+      salt ^ 0x5c0cULL);
+  if (base_index_value == nullptr) {
+    base_index_value = builder.getInt32(base_index);
+  }
+  llvm::Value *window_ptr = create_vm_table_access_ptr(
+      builder, context, array_base, array_type, base_index_value,
+      instruction_index, logical_opcode, table_index_detail, byte_offset,
+      salt ^ 0x5c1dULL, base_name, /*allow_inbounds=*/true);
+  auto *window_load =
+      builder.CreateLoad(window_type, window_ptr, base_name + ".window");
+  window_load->setAlignment(llvm::Align(1));
+
+  const std::uint64_t shift_bits = data_layout->isLittleEndian()
+                                       ? byte_index * 8
+                                       : (window_bytes - 1 - byte_index) * 8;
+  llvm::Value *window_value = window_load;
+  if (shift_bits != 0) {
+    llvm::Value *shift_value = materialize_integer_constant(
+        builder, *llvm::ConstantInt::get(window_type, shift_bits),
+        context.opaque_seed_slot, context.opaque_seed_base,
+        context.mba_context, salt ^ 0x5d0dULL);
+    if (shift_value == nullptr) {
+      shift_value = llvm::ConstantInt::get(window_type, shift_bits);
+    }
+    window_value =
+        builder.CreateLShr(window_value, shift_value, base_name + ".shr");
+  }
+
+  return builder.CreateTrunc(window_value, builder.getInt8Ty(), base_name);
+}
+
 llvm::Value *materialize_decode_round_constant(
     llvm::IRBuilder<> &builder, const rewrite_function_context &context,
     llvm::IntegerType *type, std::uint64_t value, std::uint64_t salt) {
@@ -189,7 +265,10 @@ llvm::Value *decode_byte_and_advance_state(
 
 llvm::Value *fetch_byte(llvm::IRBuilder<> &builder,
                         const rewrite_function_context &context,
-                        std::uint32_t offset, std::uint64_t salt) {
+                        std::uint32_t offset, std::uint64_t salt,
+                        std::size_t instruction_index = 0,
+                        opcode logical_opcode = opcode::ret,
+                        std::uint32_t table_index_detail = 0) {
   llvm::Value *bytecode_base = materialize_pointer_value(
       builder, context.bytecode_global, context.opaque_seed_slot,
       context.opaque_seed_base, context.mba_context, salt ^ 0x5707ULL);
@@ -201,11 +280,17 @@ llvm::Value *fetch_byte(llvm::IRBuilder<> &builder,
       context.bytecode_global->getValueType(), bytecode_base,
       {builder.getInt32(0), builder.getInt32(offset)}, "obf.vm.bc.slot");
   llvm::Value *encoded = load_byte_through_window(
-      builder, bytecode_base,
-      llvm::cast<llvm::ArrayType>(context.bytecode_global->getValueType()), offset,
-      context.opaque_seed_slot, context.opaque_seed_base, context.mba_context,
+      builder, context, bytecode_base,
+      llvm::cast<llvm::ArrayType>(context.bytecode_global->getValueType()),
+      instruction_index, logical_opcode, table_index_detail, offset,
       salt ^ 0x5e0eULL, "obf.vm.bc.enc");
   if (encoded == nullptr) {
+    slot = create_vm_table_access_ptr(
+        builder, context, bytecode_base,
+        llvm::cast<llvm::ArrayType>(context.bytecode_global->getValueType()),
+        builder.getInt32(offset), instruction_index, logical_opcode,
+        table_index_detail, offset, salt ^ 0x5e1eULL, "obf.vm.bc.slot",
+        /*allow_inbounds=*/true);
     encoded = builder.CreateLoad(builder.getInt8Ty(), slot, "obf.vm.bc.enc");
   }
   auto *state_type = builder.getInt64Ty();
@@ -227,7 +312,9 @@ llvm::Value *fetch_byte(llvm::IRBuilder<> &builder,
 decoded_metadata_span_result decode_metadata_span(
     llvm::IRBuilder<> &builder, const rewrite_function_context &context,
     std::uint32_t offset, std::uint32_t length, bool assemble_first_word,
-    std::uint64_t salt) {
+    std::uint64_t salt, std::size_t instruction_index = 0,
+    opcode logical_opcode = opcode::ret,
+    std::uint32_t table_index_detail = 0) {
   decoded_metadata_span_result result;
   auto *array_type =
       llvm::dyn_cast<llvm::ArrayType>(context.bytecode_global->getValueType());
@@ -270,10 +357,16 @@ decoded_metadata_span_result decode_metadata_span(
         {builder.getInt32(0), builder.getInt32(byte_offset)},
         "obf.vm.bc.span.ptr");
     llvm::Value *encoded = load_byte_through_window(
-        builder, bytecode_base, array_type, byte_offset,
-        context.opaque_seed_slot, context.opaque_seed_base,
-        context.mba_context, byte_salt ^ 0x6000ULL, "obf.vm.bc.span.enc");
+        builder, context, bytecode_base, array_type, instruction_index,
+        logical_opcode, table_index_detail + processed, byte_offset,
+        byte_salt ^ 0x6000ULL, "obf.vm.bc.span.enc");
     if (encoded == nullptr) {
+      slot = create_vm_table_access_ptr(
+          builder, context, bytecode_base, array_type,
+          builder.getInt32(byte_offset), instruction_index, logical_opcode,
+          table_index_detail + processed, byte_offset,
+          byte_salt ^ 0x6001ULL, "obf.vm.bc.span.ptr",
+          /*allow_inbounds=*/true);
       encoded = builder.CreateLoad(builder.getInt8Ty(), slot,
                                    "obf.vm.bc.span.enc");
     }
@@ -306,22 +399,30 @@ decoded_metadata_span_result decode_metadata_span(
 
 llvm::Value *fetch_u32(llvm::IRBuilder<> &builder,
                        const rewrite_function_context &context,
-                       std::uint32_t offset, std::uint64_t salt) {
+                       std::uint32_t offset, std::uint64_t salt,
+                       std::size_t instruction_index = 0,
+                       opcode logical_opcode = opcode::ret,
+                       std::uint32_t table_index_detail = 0) {
   if (decoded_metadata_span_result span =
           decode_metadata_span(builder, context, offset, 4,
                                /*assemble_first_word=*/true,
-                               salt ^ 0x6100ULL);
+                               salt ^ 0x6100ULL, instruction_index,
+                               logical_opcode, table_index_detail);
       span.valid()) {
     return span.assembled_word;
   }
 
-  llvm::Value *word = builder.CreateZExt(fetch_byte(builder, context, offset, salt),
+  llvm::Value *word = builder.CreateZExt(
+      fetch_byte(builder, context, offset, salt, instruction_index,
+                 logical_opcode, table_index_detail),
                                          builder.getInt32Ty(),
                                          "obf.vm.bc.word.0");
   for (unsigned byte_index = 1; byte_index < 4; ++byte_index) {
     llvm::Value *piece = builder.CreateShl(
         builder.CreateZExt(fetch_byte(builder, context, offset + byte_index,
-                                      salt + byte_index),
+                                      salt + byte_index, instruction_index,
+                                      logical_opcode,
+                                      table_index_detail + byte_index),
                            builder.getInt32Ty(), "obf.vm.bc.word.byte"),
         builder.getInt32(byte_index * 8), "obf.vm.bc.word.shl");
     word = builder.CreateOr(word, piece, "obf.vm.bc.word");
@@ -490,30 +591,38 @@ serialized_bytecode_program serialize_bytecode_program(
 llvm::Value *consume_metadata(llvm::IRBuilder<> &builder,
                               const rewrite_function_context &context,
                               const bytecode_layout &layout,
-                              std::uint64_t salt) {
+                              std::uint64_t salt,
+                              std::size_t instruction_index,
+                              opcode logical_opcode) {
   std::uint64_t local_salt = salt;
   llvm::Value *decoded_opcode = nullptr;
   for (const bytecode_header_chunk &chunk : layout.header_chunks) {
     if (chunk.carries_opcode) {
-      decoded_opcode = fetch_byte(builder, context, chunk.offset, local_salt++);
+      decoded_opcode = fetch_byte(builder, context, chunk.offset, local_salt++,
+                                  instruction_index, logical_opcode,
+                                  chunk.offset);
       continue;
     }
     if (chunk.size == 4) {
-      (void)fetch_u32(builder, context, chunk.offset, local_salt);
+      (void)fetch_u32(builder, context, chunk.offset, local_salt,
+                      instruction_index, logical_opcode, chunk.offset);
       local_salt += 4;
       continue;
     }
     if (chunk.size > 1) {
       if (decode_metadata_span(builder, context, chunk.offset, chunk.size,
                                /*assemble_first_word=*/false,
-                               local_salt ^ 0x6200ULL)
+                               local_salt ^ 0x6200ULL, instruction_index,
+                               logical_opcode, chunk.offset)
               .valid()) {
         local_salt += chunk.size;
         continue;
       }
     }
     for (std::uint32_t byte_index = 0; byte_index < chunk.size; ++byte_index) {
-      (void)fetch_byte(builder, context, chunk.offset + byte_index, local_salt++);
+      (void)fetch_byte(builder, context, chunk.offset + byte_index,
+                       local_salt++, instruction_index, logical_opcode,
+                       chunk.offset + byte_index);
     }
   }
   if (decoded_opcode != nullptr) {
@@ -524,19 +633,24 @@ llvm::Value *consume_metadata(llvm::IRBuilder<> &builder,
 
 llvm::Value *decode_target_dispatch(llvm::IRBuilder<> &builder,
                                     const rewrite_function_context &context,
-                                    std::uint32_t offset, std::uint64_t salt) {
+                                    std::uint32_t offset, std::uint64_t salt,
+                                    std::size_t instruction_index,
+                                    opcode logical_opcode) {
   if (decoded_metadata_span_result span =
           decode_metadata_span(builder, context, offset, 12,
                                /*assemble_first_word=*/true,
-                               salt ^ 0x6300ULL);
+                               salt ^ 0x6300ULL, instruction_index,
+                               logical_opcode, offset);
       span.valid()) {
     return span.assembled_word;
   }
 
-  llvm::Value *target = fetch_u32(builder, context, offset, salt);
+  llvm::Value *target = fetch_u32(builder, context, offset, salt,
+                                  instruction_index, logical_opcode, offset);
   for (unsigned byte_index = 0; byte_index < 8; ++byte_index) {
     (void)fetch_byte(builder, context, offset + 4 + byte_index,
-                     salt + 4 + byte_index);
+                     salt + 4 + byte_index, instruction_index,
+                     logical_opcode, offset + 4 + byte_index);
   }
   return target;
 }
@@ -573,14 +687,21 @@ void emit_instruction_integrity_probes(llvm::IRBuilder<> &builder,
         {builder.getInt32(0), builder.getInt32(probe_offset)},
         "obf.vm.integrity.ptr");
     llvm::Value *cipher_byte = load_byte_through_window(
-        builder, bytecode_base,
+        builder, context.function_context, bytecode_base,
         llvm::cast<llvm::ArrayType>(context.function_context.bytecode_global->getValueType()),
-        probe_offset, context.function_context.opaque_seed_slot,
-        context.function_context.opaque_seed_base,
-        context.function_context.mba_context,
+        context.instruction_index, context.instruction.op,
+        probe_offset, probe_offset,
         0x5900 + static_cast<std::uint64_t>(context.instruction_index) * 4 + probe,
         "obf.vm.integrity.byte");
     if (cipher_byte == nullptr) {
+      byte_ptr = create_vm_table_access_ptr(
+          builder, context.function_context, bytecode_base,
+          llvm::cast<llvm::ArrayType>(context.function_context.bytecode_global->getValueType()),
+          builder.getInt32(probe_offset), context.instruction_index,
+          context.instruction.op, probe_offset, probe_offset,
+          0x5901 + static_cast<std::uint64_t>(context.instruction_index) * 4 + probe,
+          "obf.vm.integrity.byte",
+          /*allow_inbounds=*/true);
       cipher_byte = builder.CreateLoad(builder.getInt8Ty(), byte_ptr,
                                        "obf.vm.integrity.byte");
     }

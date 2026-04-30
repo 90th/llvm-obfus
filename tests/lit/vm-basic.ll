@@ -72,9 +72,7 @@ entry:
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
 ; CHECK: {{^vm\.0:}}
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_
-; CHECK: %obf.vm.integrity.byte.ptr = getelementptr inbounds
-; CHECK: %obf.vm.integrity.byte.window = load i32, ptr %obf.vm.integrity.byte.ptr, align 1
-; CHECK: %obf.vm.integrity.byte = trunc i32 %obf.vm.integrity.byte.shr to i8
+; CHECK: %obf.vm.integrity.byte{{[^ ]*}} =
 ; CHECK: %obf.vm.integrity.state = load i64, ptr %obf.vm.state
 ; CHECK: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, {{-?[0-9]+}}
 ; CHECK: indirectbr ptr

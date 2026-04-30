@@ -1352,7 +1352,8 @@ bool lower_scalar_instruction(llvm::IRBuilder<> &builder,
       }
       llvm::Value *next_target = decode_target_dispatch(
           merge_builder, function_context, context.layout.fallthrough_target_offset,
-          0x10300 + instruction_index);
+          0x10300 + instruction_index, context.instruction_index,
+          instruction.op);
       emit_dispatch(merge_builder, function_context, next_target,
                     0x10400 + instruction_index,
                     static_cast<std::uint32_t>(instruction_index + 1));

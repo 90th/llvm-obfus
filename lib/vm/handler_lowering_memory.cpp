@@ -391,7 +391,8 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
       }
       llvm::Value *next_target = decode_target_dispatch(
           store_builder, function_context, context.layout.fallthrough_target_offset,
-          0x12200 + instruction_index);
+          0x12200 + instruction_index, context.instruction_index,
+          instruction.op);
       emit_dispatch(store_builder, function_context, next_target,
                     0x12300 + instruction_index,
                     static_cast<std::uint32_t>(instruction_index + 1));
@@ -476,7 +477,8 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
       }
       llvm::Value *next_target = decode_target_dispatch(
           store_builder, function_context, context.layout.fallthrough_target_offset,
-          0x12200 + instruction_index);
+          0x12200 + instruction_index, context.instruction_index,
+          instruction.op);
       emit_dispatch(store_builder, function_context, next_target,
                     0x12300 + instruction_index,
                     static_cast<std::uint32_t>(instruction_index + 1));
@@ -728,7 +730,8 @@ bool lower_memory_instruction(llvm::IRBuilder<> &builder,
       }
       llvm::Value *next_target = decode_target_dispatch(
           mem_builder, function_context, context.layout.fallthrough_target_offset,
-          0x13a60 + instruction_index);
+          0x13a60 + instruction_index, context.instruction_index,
+          instruction.op);
       emit_dispatch(mem_builder, function_context, next_target,
                     0x13a70 + instruction_index,
                     static_cast<std::uint32_t>(instruction_index + 1));
