@@ -2,6 +2,21 @@
 
 #include "obf/report/function_report.h"
 
+// Transform headers needed for pass function implementations
+#include "obf/transforms/artifact_cleanup.h"
+#include "obf/transforms/block_split.h"
+#include "obf/transforms/bogus_control_flow.h"
+#include "obf/transforms/constant_encoding.h"
+#include "obf/transforms/control_flattening.h"
+#include "obf/transforms/function_outlining.h"
+#include "obf/transforms/instruction_substitution.h"
+#include "obf/transforms/opaque_gep.h"
+#include "obf/transforms/opaque_predicates.h"
+#include "obf/transforms/string_encoding.h"
+#include "obf/transforms/entropy_initialization.h"
+
+// Note: apply_cfg_state_cleanup_stage() is defined in plugin_pipeline.cpp (no header needed)
+
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Module.h"
@@ -15,6 +30,16 @@
 namespace obf {
 
 namespace {
+
+// Boilerplate helpers for pass execution pattern:
+// - run_stateful_stage: For transforming passes that use function_pipeline_state
+// - run_config_stage: For passes that only need config, not function state
+//
+// Exceptions (direct config/state loading, not using helpers):
+// - feature_report_pass: Read-only reporting pass; doesn't transform IR; no bool return
+// - EntropyInitializationPass: Creates new functions; can't use standard state pattern
+// - CfgStateCleanupPass: Module-level cleanup; doesn't use function_pipeline_state
+// - safe_pipeline_pass: Complex orchestrator with custom control flow; too specialized
 
 template <typename StageFn>
 llvm::PreservedAnalyses run_stateful_stage(llvm::Module &module,

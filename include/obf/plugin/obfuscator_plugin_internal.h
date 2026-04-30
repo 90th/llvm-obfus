@@ -3,6 +3,10 @@
 
 #include "obf/frontend/config.h"
 #include "obf/report/function_report.h"
+#include "obf/plugin/stage_signatures.h"
+
+// Option type declarations - minimal includes needed for build_*_options() signatures
+// (These types are part of the internal API and must be exposed)
 #include "obf/transforms/artifact_cleanup.h"
 #include "obf/transforms/block_split.h"
 #include "obf/transforms/bogus_control_flow.h"
@@ -118,102 +122,8 @@ build_transform_reports(llvm::Module &module,
 
 void verify_changed_module(llvm::Module &module);
 
-bool apply_block_split_stage(
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const llvm::StringSet<> *skip_functions = nullptr);
-
-bool apply_string_encoding_stage(
-    llvm::Module &module,
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const virtualized_function_map *virtualized_functions = nullptr);
-
-bool apply_entropy_initialization_stage(llvm::Module &module,
-                                        std::uint64_t seed_override = 0);
-
-bool apply_cfg_state_cleanup_stage(llvm::Module &module);
-
-bool apply_artifact_cleanup_stage(llvm::Module &module,
-                                  const obfuscation_config &config);
-
-bool apply_constant_encoding_stage(
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const llvm::StringSet<> *skip_functions = nullptr);
-
-bool apply_instruction_substitution_stage(
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const llvm::StringSet<> *skip_functions = nullptr);
-
-bool apply_opaque_gep_stage(
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const llvm::StringSet<> *skip_functions = nullptr);
-
-bool apply_instruction_substitution_to_functions(
-    const virtualized_function_map &virtualized_functions,
-    const obfuscation_config &config);
-
-bool apply_opaque_gep_to_functions(
-    const virtualized_function_map &virtualized_functions,
-    const obfuscation_config &config);
-
-bool apply_function_outlining_stage(
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const llvm::StringSet<> *skip_functions = nullptr);
-
-bool apply_function_outlining_to_functions(
-    const virtualized_function_map &virtualized_functions,
-    const obfuscation_config &config);
-
-bool apply_opaque_predicate_stage(
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const llvm::StringSet<> *skip_functions = nullptr);
-
-llvm::StringSet<> apply_control_flattening_stage(
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const llvm::StringSet<> *skip_functions = nullptr);
-
-llvm::StringSet<> apply_control_flattening_to_functions(
-    const virtualized_function_map &virtualized_functions,
-    const obfuscation_config &config);
-
-bool apply_bogus_control_flow_stage(
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const obfuscation_config &config,
-    const llvm::StringSet<> *skip_functions = nullptr);
-
-bool apply_bogus_control_flow_to_functions(
-    const virtualized_function_map &virtualized_functions,
-    const obfuscation_config &config);
-
-virtualized_function_map
-apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state> &states,
-               const obfuscation_config &config,
-               const protection_level *only_level = nullptr);
-
-bool rewrite_calls_to_virtualized_functions(
-    llvm::Module &module,
-    const virtualized_function_map &virtualized_functions,
-    std::uint32_t mba_depth);
-
-llvm::StringSet<> collect_virtualized_function_names(
-    const virtualized_function_map &virtualized_functions);
-
-void include_vm_parent_functions(
-    llvm::StringSet<> &virtualized_names,
-    const virtualized_function_map &virtualized_functions);
-
-bool enforce_security_gates(
-    llvm::Module &module,
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    const virtualized_function_map &virtualized_functions,
-    const obfuscation_config &config);
+// All apply_*_stage() functions are declared in stage_signatures.h
+// to reduce transitive includes and compilation coupling.
 
 template <typename Predicate>
 llvm::StringMap<std::uint64_t> build_function_seed_map(

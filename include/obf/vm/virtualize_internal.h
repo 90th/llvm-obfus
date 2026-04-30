@@ -4,6 +4,8 @@
 #include "obf/transforms/mba.h"
 #include "obf/vm/micro_ir.h"
 #include "obf/vm/virtualize.h"
+#include "obf/vm/vm_types.h"
+#include "obf/vm/vm_layout.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
@@ -31,173 +33,6 @@ namespace obf::vm {
 using slot_cells = llvm::SmallVector<llvm::Value *, 4>;
 using slot_storage = llvm::SmallVector<slot_cells, 16>;
 using slot_cell_mapping = std::vector<std::uint32_t>;
-
-inline constexpr std::uint32_t vm_slot_rotation_cell_count = 3;
-inline constexpr std::size_t vm_opcode_count =
-    static_cast<std::size_t>(opcode::ret) + 1;
-inline constexpr std::size_t vm_switch_dispatch_min_instruction_count = 16;
-inline constexpr std::size_t vm_island_min_instruction_count = 16;
-inline constexpr std::size_t vm_island_max_count = 6;
-inline constexpr std::size_t vm_subisland_min_instruction_count = 4;
-inline constexpr std::size_t vm_subisland_target_instruction_count = 10;
-inline constexpr std::size_t vm_subisland_max_count = 8;
-inline constexpr std::size_t switch_dispatch_max_bank_count = 4;
-inline constexpr std::uint32_t vm_island_continue_status = 0xfffffffdU;
-inline constexpr std::uint32_t vm_island_done_status = 0xfffffffeU;
-inline constexpr std::uint32_t vm_island_trap_status = 0xffffffffU;
-
-enum class dispatch_backend_variant : std::uint32_t {
-  switch_index = 0,
-  direct_threaded_match = 1,
-  direct_threaded_switch = 2,
-};
-
-enum class vm_dispatcher_shape : std::uint32_t {
-  direct_threaded = 0,
-  switch_biased = 1,
-  banked = 2,
-};
-
-enum class vm_island_topology : std::uint32_t {
-  none = 0,
-  helper_shards = 1,
-};
-
-enum class scalar_handler_shape : std::uint32_t {
-  direct = 0,
-  temp_slot_roundtrip = 1,
-  mba_neutralized = 2,
-};
-
-enum class compare_handler_shape : std::uint32_t {
-  direct = 0,
-  bool_xor_neutralized = 1,
-  inverted_predicate = 2,
-  select_materialized = 3,
-};
-
-enum class branch_handler_shape : std::uint32_t {
-  direct = 0,
-  inverted_condition_swap = 1,
-  neutralized_condition = 2,
-  select_condition = 3,
-};
-
-enum class memory_handler_shape : std::uint32_t {
-  direct = 0,
-  pointer_roundtrip = 1,
-  offset_neutralized = 2,
-  addr_select_neutralized = 3,
-  value_slot_roundtrip = 4,
-};
-
-enum class gep_handler_shape : std::uint32_t {
-  direct = 0,
-  split_index_add = 1,
-  ptrint_roundtrip = 2,
-  offset_bias = 3,
-  select_equivalent_base = 4,
-};
-
-enum class call_handler_shape : std::uint32_t {
-  direct = 0,
-  argument_shuffle_roundtrip = 1,
-  token_guarded_call = 2,
-  result_slot_roundtrip = 3,
-};
-
-enum class return_handler_shape : std::uint32_t {
-  direct = 0,
-  result_slot_roundtrip = 1,
-  neutralized_encode = 2,
-  split_encode = 3,
-};
-
-enum class vm_status_choreography_shape : std::uint32_t {
-  direct = 0,
-  temp = 1,
-  split = 2,
-  select = 3,
-};
-
-enum class vm_next_route_choreography_shape : std::uint32_t {
-  direct = 0,
-  dispatch_index_temp = 1,
-  island_id_temp = 2,
-  packed_pair = 3,
-  temp_pair = 4,
-};
-
-enum class vm_slot_update_choreography_shape : std::uint32_t {
-  direct = 0,
-  temp = 1,
-  rotate = 2,
-  select = 3,
-  split = 4,
-};
-
-enum class vm_table_access_choreography_shape : std::uint32_t {
-  direct = 0,
-  temp = 1,
-  bias = 2,
-  split = 3,
-  select = 4,
-};
-
-enum class vm_helper_dispatch_choreography_shape : std::uint32_t {
-  direct = 0,
-  bias = 1,
-  split = 2,
-  select = 3,
-};
-
-struct opcode_permutation {
-  std::array<std::uint8_t, vm_opcode_count> physical_for_logical = {};
-};
-
-struct bytecode_header_chunk {
-  std::uint32_t offset = 0;
-  std::uint8_t size = 0;
-  bool carries_opcode = false;
-};
-
-struct pending_bytecode_header_chunk {
-  std::array<std::uint8_t, 4> decoded_bytes = {};
-  std::uint64_t order_key = 0;
-  std::uint8_t size = 0;
-  bool carries_opcode = false;
-};
-
-struct bytecode_layout {
-  std::uint32_t header_offset = 0;
-  std::vector<bytecode_header_chunk> header_chunks;
-  std::uint32_t fallthrough_target_offset = invalid_slot;
-  std::vector<std::uint32_t> edge_target_offsets;
-  std::uint32_t integrity_probe_range = 0;
-  std::uint64_t expected_post_header_state = 0;
-};
-
-struct serialized_bytecode_program {
-  std::vector<std::uint8_t> bytes;
-  std::vector<bytecode_layout> layouts;
-};
-
-struct switch_dispatch_bank {
-  llvm::BasicBlock *block = nullptr;
-  llvm::PHINode *dispatch_index_phi = nullptr;
-  llvm::SwitchInst *switch_inst = nullptr;
-  std::uint64_t salt = 0;
-};
-
-struct vm_state_layout {
-  llvm::StructType *type = nullptr;
-  std::uint32_t bytecode_state_field = 0;
-  std::uint32_t dispatch_index_field = 1;
-  std::uint32_t island_id_field = 2;
-  std::uint32_t hidden_token_field = 3;
-  std::uint32_t return_value_field = invalid_slot;
-  std::vector<std::array<std::uint32_t, vm_slot_rotation_cell_count>> slot_fields;
-};
 
 struct rewrite_function_context {
   llvm::Function &function;
@@ -247,13 +82,7 @@ struct instruction_rewrite_context {
   llvm::ArrayRef<std::uint32_t> current_slot_mapping;
 };
 
-inline std::size_t opcode_to_index(opcode op) {
-  return static_cast<std::size_t>(op);
-}
-
-inline std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
-  return obf::mix_seed(seed, salt);
-}
+// opcode_to_index moved to vm_types.h
 
 std::uint64_t derive_vm_bytecode_seed(const llvm::Function &function,
                                       const bytecode_program &program);

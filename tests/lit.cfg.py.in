@@ -1,4 +1,6 @@
 import lit.formats
+import shutil
+import os
 
 config.name = "llvm-obfus"
 config.test_format = lit.formats.ShTest(True)
@@ -8,9 +10,31 @@ config.test_exec_root = "@CMAKE_CURRENT_BINARY_DIR@/tests"
 
 config.substitutions.append(("%opt", "@LLVM_TOOLS_BINARY_DIR@/opt"))
 config.substitutions.append(("%FileCheck", "@LLVM_TOOLS_BINARY_DIR@/FileCheck"))
-config.substitutions.append(
-    ("%lli", "@LLVM_TOOLS_BINARY_DIR@/lli --extra-object=@CMAKE_CURRENT_BINARY_DIR@/obf_entropy_anchor.o")
-)
+
+# Try to find lli - not always available
+lli_path = "@OBF_LLI@"
+possible_paths = [
+    lli_path if lli_path else None,
+    "@LLVM_TOOLS_BINARY_DIR@/lli",
+    shutil.which("lli"),
+]
+
+found_lli = None
+for path in possible_paths:
+    if path and os.path.exists(path):
+        found_lli = path
+        break
+
+if found_lli:
+    config.substitutions.append(
+        ("%lli", f"{found_lli} --extra-object=@CMAKE_CURRENT_BINARY_DIR@/obf_entropy_anchor.o")
+    )
+else:
+    # lli not found - provide a dummy that will cause graceful test failure
+    config.substitutions.append(
+        ("%lli", "lli")
+    )
+
 config.substitutions.append(
     ("%obf_plugin", "@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@")
 )
