@@ -88,26 +88,6 @@ llvm::StringRef dispatch_choreography_marker(
   llvm_unreachable("unknown vm helper dispatch choreography shape");
 }
 
-llvm::StringRef table_choreography_marker(
-    vm_table_access_choreography_shape shape) {
-  switch (shape) {
-  case vm_table_access_choreography_shape::direct:
-    return "vm.choreo.table.direct";
-  case vm_table_access_choreography_shape::temp:
-    return "vm.choreo.table.temp";
-  case vm_table_access_choreography_shape::bias:
-    return "vm.choreo.table.bias";
-  case vm_table_access_choreography_shape::split:
-    return "vm.choreo.table.split";
-  case vm_table_access_choreography_shape::select:
-    return "vm.choreo.table.select";
-  case vm_table_access_choreography_shape::keyed:
-    return "vm.choreo.table.keyed";
-  }
-
-  llvm_unreachable("unknown vm table choreography shape");
-}
-
 llvm::Value *materialize_i32_value(llvm::IRBuilder<> &builder,
                                    llvm::Value *value,
                                    const llvm::Twine &name) {
@@ -138,92 +118,6 @@ std::uint32_t build_dispatch_choreography_mask(std::uint64_t bytecode_seed,
     mask = 0x00ff00ffU;
   }
   return mask;
-}
-
-llvm::Value *materialize_table_index_value(
-    llvm::IRBuilder<> &builder, const rewrite_function_context &context,
-    llvm::IntegerType *type, std::uint64_t value, std::uint64_t salt,
-    const llvm::Twine &name) {
-  auto *constant = llvm::ConstantInt::get(type, value);
-  llvm::Value *materialized = materialize_integer_constant(
-      builder, *constant, context.opaque_seed_slot, context.opaque_seed_base,
-      context.mba_context, salt);
-  return materialized != nullptr ? materialized : constant;
-}
-
-llvm::Value *materialize_table_index_to_type(llvm::IRBuilder<> &builder,
-                                             const rewrite_function_context &context,
-                                             llvm::Value *value,
-                                             llvm::IntegerType *type,
-                                             std::uint64_t salt,
-                                             const llvm::Twine &name) {
-  if (value == nullptr || type == nullptr) {
-    return value;
-  }
-  if (value->getType() == type) {
-    return value;
-  }
-
-  if (auto *constant = llvm::dyn_cast<llvm::ConstantInt>(value)) {
-    return materialize_table_index_value(builder, context, type,
-                                         constant->getZExtValue(), salt, name);
-  }
-
-  return builder.CreateZExtOrTrunc(value, type, name);
-}
-
-std::uint64_t build_table_access_bias_seed(const rewrite_function_context &context,
-                                           std::uint64_t salt) {
-  std::uint64_t mixed = mix_seed(context.bytecode_seed,
-                                 context.opaque_seed_base ^ 0x7461621e0001ULL);
-  if (context.current_island_index != invalid_slot) {
-    mixed = mix_seed(mixed,
-                     (static_cast<std::uint64_t>(context.current_island_index) + 1) *
-                         0x9e3779b97f4a7c15ULL);
-  }
-  if (context.current_subhelper_index != invalid_slot) {
-    mixed = mix_seed(mixed,
-                     (static_cast<std::uint64_t>(context.current_subhelper_index) + 1) *
-                         0xbf58476d1ce4e5b9ULL);
-  }
-  return mix_seed(mixed, salt ^ 0x7461621e0002ULL);
-}
-
-std::uint64_t build_table_access_mask_value(unsigned bit_width,
-                                            std::uint64_t seed) {
-  if (bit_width == 0) {
-    return 0;
-  }
-
-  std::uint64_t full_mask = bit_width >= 64 ? std::numeric_limits<std::uint64_t>::max()
-                                            : ((1ULL << bit_width) - 1ULL);
-  std::uint64_t mask = seed & full_mask;
-  if (mask == 0 || mask == full_mask) {
-    if (bit_width == 1) {
-      mask = 1;
-    } else {
-      mask = (full_mask >> 1) ^ 0x5a5a5a5a5a5a5a5aULL;
-      mask &= full_mask;
-      if (mask == 0 || mask == full_mask) {
-        mask = full_mask >> 1;
-      }
-    }
-  }
-  return mask;
-}
-
-llvm::Value *create_vm_table_gep(llvm::IRBuilder<> &builder, llvm::Value *table_base,
-                                 llvm::ArrayType *table_type,
-                                 llvm::Value *table_index,
-                                 llvm::StringRef name_prefix,
-                                 bool allow_inbounds) {
-  llvm::Value *zero = builder.getInt32(0);
-  if (allow_inbounds) {
-    return builder.CreateInBoundsGEP(table_type, table_base, {zero, table_index},
-                                     name_prefix + ".ptr");
-  }
-  return builder.CreateGEP(table_type, table_base, {zero, table_index},
-                           name_prefix + ".ptr");
 }
 
 void store_next_route_with_choreography(llvm::IRBuilder<> &builder,
@@ -429,38 +323,11 @@ vm_slot_update_choreography_shape select_slot_update_choreography_shape(
 }
 
 vm_table_access_choreography_shape select_table_access_choreography_shape(
-    const rewrite_function_context &context, std::size_t instruction_index,
-    opcode logical_opcode, std::uint32_t table_index, std::uint32_t byte_offset,
+    const rewrite_function_context &context, std::uint32_t table_index,
     std::uint64_t salt) {
-  if (!context.state_island_body) {
-    return vm_table_access_choreography_shape::direct;
-  }
-
-  std::uint64_t detail =
-      (static_cast<std::uint64_t>(instruction_index) + 1) * 0x9e3779b97f4a7c15ULL;
-  detail ^= (static_cast<std::uint64_t>(opcode_to_index(logical_opcode)) + 1)
-            << 7;
-  detail ^= static_cast<std::uint64_t>(table_index + 1U) << 19;
-  detail ^= static_cast<std::uint64_t>(byte_offset + 1U) << 33;
-  if (instruction_index < context.dispatch_index_for_instruction.size()) {
-    detail ^= static_cast<std::uint64_t>(
-                  context.dispatch_index_for_instruction[instruction_index] + 1U)
-              << 41;
-  }
-  if (context.current_island_index != invalid_slot) {
-    detail ^= static_cast<std::uint64_t>(context.current_island_index + 1U) << 11;
-  }
-  if (context.current_subhelper_index != invalid_slot) {
-    detail ^= static_cast<std::uint64_t>(context.current_subhelper_index + 1U)
-              << 27;
-  }
-  const std::uint8_t physical_opcode =
-      get_physical_opcode(context.opcode_map, logical_opcode);
-  detail ^= static_cast<std::uint64_t>(physical_opcode + 1U) << 49;
-
   return select_vm_choreography_shape<vm_table_access_choreography_shape>(
       context.function, mix_seed(context.bytecode_seed, context.opaque_seed_base),
-      detail, salt, 0x7461626c652063ULL, 6);
+      table_index + 1U, salt, 0x7461626c652063ULL, 5);
 }
 
 vm_helper_dispatch_choreography_shape select_helper_dispatch_choreography_shape(
@@ -567,132 +434,6 @@ llvm::Value *apply_vm_helper_dispatch_choreography(
   }
 
   llvm_unreachable("unknown vm helper dispatch choreography shape");
-}
-
-llvm::Value *create_vm_table_access_ptr(
-    llvm::IRBuilder<> &builder, const rewrite_function_context &context,
-    llvm::Value *table_base, llvm::ArrayType *table_type,
-    llvm::Value *table_index, std::size_t instruction_index,
-    opcode logical_opcode, std::uint32_t table_index_detail,
-    std::uint32_t byte_offset,
-    std::uint64_t salt, llvm::StringRef name_prefix, bool allow_inbounds) {
-  auto *base_type = llvm::dyn_cast_or_null<llvm::PointerType>(
-      table_base != nullptr ? table_base->getType() : nullptr);
-  auto *index_type = llvm::dyn_cast_or_null<llvm::IntegerType>(
-      table_index != nullptr ? table_index->getType() : nullptr);
-  if (base_type == nullptr || table_type == nullptr || index_type == nullptr) {
-    return create_vm_table_gep(builder, table_base, table_type, table_index,
-                               name_prefix, allow_inbounds);
-  }
-
-  if (!context.state_island_body) {
-    return create_vm_table_gep(builder, table_base, table_type, table_index,
-                               name_prefix, allow_inbounds);
-  }
-
-  const vm_table_access_choreography_shape shape =
-      select_table_access_choreography_shape(context, instruction_index,
-                                             logical_opcode, table_index_detail,
-                                             byte_offset, salt);
-  const llvm::StringRef marker = table_choreography_marker(shape);
-  note_function_marker(context.function, marker);
-
-  llvm::Value *shaped_base = table_base;
-  llvm::Value *shaped_index = table_index;
-  bool preserve_inbounds = allow_inbounds &&
-                           shape == vm_table_access_choreography_shape::direct;
-  const std::uint64_t bias_seed = build_table_access_bias_seed(context, salt);
-
-  switch (shape) {
-  case vm_table_access_choreography_shape::direct:
-    break;
-  case vm_table_access_choreography_shape::temp:
-    shaped_base = roundtrip_vm_handler_value(builder, table_base,
-                                             llvm::Twine(marker) + ".base");
-    break;
-  case vm_table_access_choreography_shape::bias: {
-    const std::uint64_t full_mask = index_type->getBitWidth() >= 64
-                                        ? std::numeric_limits<std::uint64_t>::max()
-                                        : ((1ULL << index_type->getBitWidth()) - 1ULL);
-    std::uint64_t bias_value = (bias_seed ^ 0x5a5aa55aa55a5a5aULL) & full_mask;
-    if (bias_value == 0) {
-      bias_value = 1;
-    }
-    llvm::Value *bias = materialize_table_index_value(
-        builder, context, index_type, bias_value, salt ^ 0x7461621e0101ULL,
-        llvm::Twine(marker) + ".k");
-    if ((bias_seed & 1ULL) == 0) {
-      llvm::Value *biased = builder.CreateAdd(shaped_index, bias,
-                                              llvm::Twine(marker) + ".add");
-      shaped_index = builder.CreateSub(biased, bias, marker);
-    } else {
-      llvm::Value *biased = builder.CreateXor(shaped_index, bias,
-                                              llvm::Twine(marker) + ".xor");
-      shaped_index = builder.CreateXor(biased, bias, marker);
-    }
-    break;
-  }
-  case vm_table_access_choreography_shape::split: {
-    const std::uint64_t mask_value =
-        build_table_access_mask_value(index_type->getBitWidth(), bias_seed);
-    llvm::Value *mask = materialize_table_index_value(
-        builder, context, index_type, mask_value, salt ^ 0x7461621e0202ULL,
-        llvm::Twine(marker) + ".mask");
-    llvm::Value *lo = builder.CreateAnd(shaped_index, mask,
-                                        llvm::Twine(marker) + ".lo");
-    llvm::Value *hi = builder.CreateAnd(
-        shaped_index,
-        llvm::ConstantInt::get(index_type, ~mask_value),
-        llvm::Twine(marker) + ".hi");
-    shaped_index = builder.CreateOr(lo, hi, marker);
-    break;
-  }
-  case vm_table_access_choreography_shape::select: {
-    llvm::Value *alt_base = roundtrip_vm_handler_value(
-        builder, table_base, llvm::Twine(marker) + ".base");
-    llvm::Value *base_raw = nullptr;
-    llvm::Value *alt_raw = nullptr;
-    if (llvm::IntegerType *carrier_type =
-            get_pointer_carrier_type(builder, table_base->getType())) {
-      base_raw = builder.CreatePtrToInt(table_base, carrier_type,
-                                        llvm::Twine(marker) + ".raw");
-      alt_raw = builder.CreatePtrToInt(alt_base, carrier_type,
-                                       llvm::Twine(marker) + ".alt.raw");
-    }
-    llvm::Value *take_primary = builder.CreateICmpEQ(
-        base_raw != nullptr ? base_raw : table_base,
-        alt_raw != nullptr ? alt_raw : alt_base,
-        llvm::Twine(marker) + ".eq");
-    shaped_base = builder.CreateSelect(take_primary, table_base, alt_base,
-                                       marker);
-    break;
-  }
-  case vm_table_access_choreography_shape::keyed: {
-    llvm::IntegerType *carrier_type = get_pointer_carrier_type(builder, table_base->getType());
-    if (carrier_type != nullptr) {
-      const std::uint64_t key_value =
-          build_table_access_mask_value(carrier_type->getBitWidth(),
-                                        bias_seed ^ 0x6b657965645f6261ULL);
-      llvm::Value *raw = builder.CreatePtrToInt(table_base, carrier_type,
-                                                llvm::Twine(marker) + ".raw");
-      llvm::Value *key = materialize_table_index_value(
-          builder, context, carrier_type, key_value,
-          salt ^ 0x7461621e0303ULL, llvm::Twine(marker) + ".key");
-      llvm::Value *mixed = builder.CreateXor(raw, key,
-                                             llvm::Twine(marker) + ".mix");
-      llvm::Value *final = builder.CreateXor(mixed, key, llvm::Twine(marker) + ".int");
-      shaped_base = builder.CreateIntToPtr(final, base_type, marker);
-    } else {
-      shaped_base = table_base;
-    }
-    break;
-  }
-  }
-
-  llvm::Value *pointer = create_vm_table_gep(builder, shaped_base, table_type,
-                                             shaped_index, name_prefix,
-                                             preserve_inbounds);
-  return tag_vm_handler_value(pointer, marker);
 }
 
 std::uint32_t select_dispatch_variant(std::uint64_t seed_base, std::uint64_t salt,
@@ -959,13 +700,10 @@ void initialize_dispatch_runtime(llvm::IRBuilder<> &entry_builder,
          instruction_index < context.instruction_blocks.size(); ++instruction_index) {
       const std::uint32_t dispatch_index =
           context.dispatch_index_for_instruction[instruction_index];
-      llvm::Value *slot = create_vm_table_access_ptr(
-          entry_builder, context, context.dispatch_table,
-          context.dispatch_table_type, entry_builder.getInt32(dispatch_index),
-          instruction_index, context.program.instructions[instruction_index].op,
-          dispatch_index, dispatch_index, 0x4010 + dispatch_index,
-          "obf.vm.dispatch.slot." + std::to_string(dispatch_index),
-          /*allow_inbounds=*/true);
+      llvm::Value *slot = entry_builder.CreateInBoundsGEP(
+          context.dispatch_table_type, context.dispatch_table,
+          {entry_builder.getInt32(0), entry_builder.getInt32(dispatch_index)},
+          "obf.vm.dispatch.slot." + std::to_string(dispatch_index));
       llvm::Value *plain_target = entry_builder.CreatePtrToInt(
           llvm::BlockAddress::get(&context.function,
                                   context.instruction_blocks[instruction_index]),
@@ -1050,18 +788,9 @@ void emit_dispatch(llvm::IRBuilder<> &builder,
   builder.CreateCondBr(in_range, jump_block, context.trap_block);
 
   llvm::IRBuilder<> jump_builder(jump_block);
-  llvm::Value *dispatch_slot = create_vm_table_access_ptr(
-      jump_builder, context, context.dispatch_table, context.dispatch_table_type,
-      dispatch_index,
-      target_instruction == invalid_slot ? 0U : static_cast<std::size_t>(target_instruction),
-      target_instruction != invalid_slot &&
-              target_instruction < context.program.instructions.size()
-          ? context.program.instructions[target_instruction].op
-          : opcode::ret,
-      target_instruction == invalid_slot ? 0U : target_instruction,
-      target_instruction == invalid_slot ? 0U : target_instruction,
-      salt ^ 0x4004ULL, "obf.vm.dispatch.slot",
-      /*allow_inbounds=*/true);
+  llvm::Value *dispatch_slot = jump_builder.CreateInBoundsGEP(
+      context.dispatch_table_type, context.dispatch_table,
+      {jump_builder.getInt32(0), dispatch_index}, "obf.vm.dispatch.slot");
   auto *encoded_target = jump_builder.CreateLoad(context.ptr_int_type, dispatch_slot,
                                                  "obf.vm.dispatch.encoded");
   llvm::Value *key = build_dispatch_key(jump_builder, context, dispatch_index, salt);

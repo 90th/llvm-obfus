@@ -819,8 +819,6 @@ void emit_state_instruction_dispatcher(
       .island_count = island_count,
       .switch_dispatch_bank_count = 1,
       .dispatch_index_for_instruction = dispatch_index_for_instruction,
-      .current_island_index = island_index,
-      .current_subhelper_index = subhelper ? subhelper_index : invalid_slot,
       .bytecode_global = bytecode_global,
       .retkey_global = retkey_global,
       .state_layout = &state_layout,
@@ -856,8 +854,7 @@ void emit_state_instruction_dispatcher(
 
     llvm::Value *decoded_opcode = consume_metadata(
         header_builder, rewrite_context, layout,
-        0x8000 + static_cast<std::uint64_t>(instruction_index) * 32,
-        instruction_index, instruction.op);
+        0x8000 + static_cast<std::uint64_t>(instruction_index) * 32);
     decoded_opcode->setName(subhelper ? "vm.island.subhelper.decode"
                                        : "vm.island.helper.decode");
 
@@ -1531,8 +1528,7 @@ void rewrite_function_body(llvm::Function &function,
 
     llvm::Value *decoded_opcode = consume_metadata(
         header_builder, rewrite_context, layout,
-        0x8000 + static_cast<std::uint64_t>(instruction_index) * 32,
-        instruction_index, instruction.op);
+        0x8000 + static_cast<std::uint64_t>(instruction_index) * 32);
 
     emit_instruction_integrity_probes(header_builder, instruction_context);
 

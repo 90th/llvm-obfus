@@ -138,8 +138,7 @@ void finish_value_in_builder(llvm::IRBuilder<> &builder,
   }
   llvm::Value *next_target = decode_target_dispatch(
       builder, function_context, context.layout.fallthrough_target_offset,
-      0x9000 + static_cast<std::uint64_t>(context.instruction_index) * 32,
-      context.instruction_index, instruction.op);
+      0x9000 + static_cast<std::uint64_t>(context.instruction_index) * 32);
   emit_dispatch(builder, function_context, next_target,
                 0xa000 + static_cast<std::uint64_t>(context.instruction_index) * 32,
                 static_cast<std::uint32_t>(context.instruction_index + 1));
@@ -197,8 +196,7 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
       }
       llvm::Value *next_target = decode_target_dispatch(
           call_builder, function_context, context.layout.fallthrough_target_offset,
-          0x14200 + instruction_index, context.instruction_index,
-          instruction.op);
+          0x14200 + instruction_index);
       emit_dispatch(call_builder, function_context, next_target,
                     0x14300 + instruction_index,
                     static_cast<std::uint32_t>(instruction_index + 1));
@@ -220,10 +218,8 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
                           .first_instruction);
     emit_dispatch(builder, function_context,
                   decode_target_dispatch(builder, function_context,
-                                          context.layout.edge_target_offsets[0],
-                                          0x15100 + instruction_index,
-                                          context.instruction_index,
-                                          instruction.op),
+                                         context.layout.edge_target_offsets[0],
+                                         0x15100 + instruction_index),
                   0x15200 + instruction_index,
                   function_context.program.blocks[instruction.edges[0].target_block]
                       .first_instruction);
@@ -255,10 +251,8 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
                           .first_instruction);
     emit_dispatch(true_builder, function_context,
                   decode_target_dispatch(true_builder, function_context,
-                                          context.layout.edge_target_offsets[0],
-                                          0x16200 + instruction_index,
-                                          context.instruction_index,
-                                          instruction.op),
+                                         context.layout.edge_target_offsets[0],
+                                         0x16200 + instruction_index),
                   0x16300 + instruction_index,
                   function_context.program.blocks[instruction.edges[0].target_block]
                       .first_instruction);
@@ -271,10 +265,8 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
                           .first_instruction);
     emit_dispatch(false_builder, function_context,
                   decode_target_dispatch(false_builder, function_context,
-                                          context.layout.edge_target_offsets[1],
-                                          0x16500 + instruction_index,
-                                          context.instruction_index,
-                                          instruction.op),
+                                         context.layout.edge_target_offsets[1],
+                                         0x16500 + instruction_index),
                   0x16600 + instruction_index,
                   function_context.program.blocks[instruction.edges[1].target_block]
                       .first_instruction);
@@ -319,10 +311,8 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
                           .first_instruction);
     emit_dispatch(default_builder, function_context,
                   decode_target_dispatch(default_builder, function_context,
-                                          context.layout.edge_target_offsets[0],
-                                          0x17200 + instruction_index,
-                                          context.instruction_index,
-                                          instruction.op),
+                                         context.layout.edge_target_offsets[0],
+                                         0x17200 + instruction_index),
                   0x17300 + instruction_index,
                   function_context.program.blocks[instruction.edges[0].target_block]
                       .first_instruction);
@@ -339,10 +329,8 @@ bool lower_control_instruction(llvm::IRBuilder<> &builder,
       emit_dispatch(case_builder, function_context,
                     decode_target_dispatch(case_builder, function_context,
                                            context.layout.edge_target_offsets[case_index + 1],
-                                            0x17500 + instruction_index * 8 +
-                                                case_index,
-                                           context.instruction_index,
-                                           instruction.op),
+                                           0x17500 + instruction_index * 8 +
+                                               case_index),
                     0x17600 + instruction_index * 8 + case_index,
                     function_context.program
                         .blocks[instruction.edges[case_index + 1].target_block]
