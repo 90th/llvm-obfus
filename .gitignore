@@ -1,10 +1,15 @@
 build/
+build*/
 cmake-build-*/
 out/
 compile_commands.json
 .cache/
 .idea/
 .vscode/
+__pycache__/
+*.pyc
+CMakeFiles/
+CMakeCache.txt
 *.swp
 *.swo
 notes/
