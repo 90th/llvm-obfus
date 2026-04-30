@@ -10,9 +10,37 @@
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <utility>
+
 namespace obf {
 
 namespace {
+
+template <typename StageFn>
+llvm::PreservedAnalyses run_stateful_stage(llvm::Module &module,
+                                           StageFn &&stage) {
+  const obfuscation_config config = load_active_config();
+  const llvm::SmallVector<function_pipeline_state, 32> states =
+      build_pipeline_state(module, config);
+
+  if (!std::forward<StageFn>(stage)(module, states, config)) {
+    return llvm::PreservedAnalyses::all();
+  }
+
+  verify_changed_module(module);
+  return llvm::PreservedAnalyses::none();
+}
+
+template <typename StageFn>
+llvm::PreservedAnalyses run_config_stage(llvm::Module &module, StageFn &&stage) {
+  const obfuscation_config config = load_active_config();
+  if (!std::forward<StageFn>(stage)(module, config)) {
+    return llvm::PreservedAnalyses::all();
+  }
+
+  verify_changed_module(module);
+  return llvm::PreservedAnalyses::none();
+}
 
 class feature_report_pass : public llvm::PassInfoMixin<feature_report_pass> {
 public:
@@ -41,19 +69,11 @@ class block_split_pass : public llvm::PassInfoMixin<block_split_pass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
-
-    const bool changed = apply_block_split_stage(states, config);
-
-    if (!changed) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-
-    return llvm::PreservedAnalyses::none();
+    return run_stateful_stage(
+        module, [](llvm::Module &, const llvm::SmallVectorImpl<function_pipeline_state> &states,
+                   const obfuscation_config &config) {
+          return apply_block_split_stage(states, config);
+        });
   }
 };
 
@@ -88,13 +108,7 @@ class ArtifactCleanupPass : public llvm::PassInfoMixin<ArtifactCleanupPass> {
  public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    if (!apply_artifact_cleanup_stage(module, config)) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-    return llvm::PreservedAnalyses::none();
+    return run_config_stage(module, apply_artifact_cleanup_stage);
   }
 };
 
@@ -102,18 +116,12 @@ class string_encoding_pass : public llvm::PassInfoMixin<string_encoding_pass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
-
-    const bool changed = apply_string_encoding_stage(module, states, config);
-
-    if (!changed) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-    return llvm::PreservedAnalyses::none();
+    return run_stateful_stage(
+        module, [](llvm::Module &current_module,
+                   const llvm::SmallVectorImpl<function_pipeline_state> &states,
+                   const obfuscation_config &config) {
+          return apply_string_encoding_stage(current_module, states, config);
+        });
   }
 };
 
@@ -121,21 +129,17 @@ class vm_pass : public llvm::PassInfoMixin<vm_pass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
-
-    const virtualized_function_map virtualized_functions =
-        apply_vm_stage(states, config);
-    bool changed = !virtualized_functions.empty();
-    changed |= rewrite_calls_to_virtualized_functions(module, virtualized_functions,
-                                                      config.mba.depth);
-    if (!changed) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-    return llvm::PreservedAnalyses::none();
+    return run_stateful_stage(
+        module, [](llvm::Module &current_module,
+                   const llvm::SmallVectorImpl<function_pipeline_state> &states,
+                   const obfuscation_config &config) {
+          const virtualized_function_map virtualized_functions =
+              apply_vm_stage(states, config);
+          bool changed = !virtualized_functions.empty();
+          changed |= rewrite_calls_to_virtualized_functions(
+              current_module, virtualized_functions, config.mba.depth);
+          return changed;
+        });
   }
 };
 
@@ -143,18 +147,11 @@ class constant_encoding_pass : public llvm::PassInfoMixin<constant_encoding_pass
 public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
-
-    const bool changed = apply_constant_encoding_stage(states, config);
-
-    if (!changed) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-    return llvm::PreservedAnalyses::none();
+    return run_stateful_stage(
+        module, [](llvm::Module &, const llvm::SmallVectorImpl<function_pipeline_state> &states,
+                   const obfuscation_config &config) {
+          return apply_constant_encoding_stage(states, config);
+        });
   }
 };
 
@@ -163,17 +160,11 @@ class instruction_substitution_pass
 public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
-
-    const bool changed = apply_instruction_substitution_stage(states, config);
-    if (!changed) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-    return llvm::PreservedAnalyses::none();
+    return run_stateful_stage(
+        module, [](llvm::Module &, const llvm::SmallVectorImpl<function_pipeline_state> &states,
+                   const obfuscation_config &config) {
+          return apply_instruction_substitution_stage(states, config);
+        });
   }
 };
 
@@ -181,17 +172,11 @@ class opaque_gep_pass : public llvm::PassInfoMixin<opaque_gep_pass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
-
-    const bool changed = apply_opaque_gep_stage(states, config);
-    if (!changed) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-    return llvm::PreservedAnalyses::none();
+    return run_stateful_stage(
+        module, [](llvm::Module &, const llvm::SmallVectorImpl<function_pipeline_state> &states,
+                   const obfuscation_config &config) {
+          return apply_opaque_gep_stage(states, config);
+        });
   }
 };
 
@@ -200,17 +185,11 @@ class function_outlining_pass
 public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
-
-    const bool changed = apply_function_outlining_stage(states, config);
-    if (!changed) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-    return llvm::PreservedAnalyses::none();
+    return run_stateful_stage(
+        module, [](llvm::Module &, const llvm::SmallVectorImpl<function_pipeline_state> &states,
+                   const obfuscation_config &config) {
+          return apply_function_outlining_stage(states, config);
+        });
   }
 };
 
@@ -219,18 +198,13 @@ class control_flattening_pass
 public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
-
-    const llvm::StringSet<> flattened_functions =
-        apply_control_flattening_stage(states, config);
-    if (flattened_functions.empty()) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-    return llvm::PreservedAnalyses::none();
+    return run_stateful_stage(
+        module, [](llvm::Module &, const llvm::SmallVectorImpl<function_pipeline_state> &states,
+                   const obfuscation_config &config) {
+          const llvm::StringSet<> flattened_functions =
+              apply_control_flattening_stage(states, config);
+          return !flattened_functions.empty();
+        });
   }
 };
 
@@ -239,17 +213,11 @@ class opaque_predicate_pass
 public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
-
-    const bool changed = apply_opaque_predicate_stage(states, config);
-    if (!changed) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-    return llvm::PreservedAnalyses::none();
+    return run_stateful_stage(
+        module, [](llvm::Module &, const llvm::SmallVectorImpl<function_pipeline_state> &states,
+                   const obfuscation_config &config) {
+          return apply_opaque_predicate_stage(states, config);
+        });
   }
 };
 
@@ -258,17 +226,11 @@ class bogus_control_flow_pass
 public:
   llvm::PreservedAnalyses run(llvm::Module &module,
                               llvm::ModuleAnalysisManager &) {
-    const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
-
-    const bool changed = apply_bogus_control_flow_stage(states, config);
-    if (!changed) {
-      return llvm::PreservedAnalyses::all();
-    }
-
-    verify_changed_module(module);
-    return llvm::PreservedAnalyses::none();
+    return run_stateful_stage(
+        module, [](llvm::Module &, const llvm::SmallVectorImpl<function_pipeline_state> &states,
+                   const obfuscation_config &config) {
+          return apply_bogus_control_flow_stage(states, config);
+        });
   }
 };
 

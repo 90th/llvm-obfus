@@ -55,4 +55,11 @@ llvm::Value *create_xor(llvm::IRBuilder<> &builder, llvm::Value *lhs,
                         llvm::Value *rhs, const builder_context &context,
                         std::uint64_t salt, llvm::StringRef name = {});
 
+llvm::Value *build_entropy_true_predicate(
+  llvm::IRBuilder<> &builder, llvm::Function &function,
+  std::uint32_t mba_depth, std::uint64_t salt_base,
+  std::uint64_t context_a_salt, std::uint64_t context_b_salt,
+  llvm::StringRef context_a_name, llvm::StringRef context_b_name,
+  llvm::StringRef result_name = "obf.opaque.true");
+
 } // namespace obf::mba

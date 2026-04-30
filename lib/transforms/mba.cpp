@@ -40,11 +40,6 @@ enum class entropy_thunk_shape {
   select_neutral,
 };
 
-std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
-  seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-  return seed;
-}
-
 opaque_zero_shape select_opaque_zero_shape(const builder_context &context,
                                            std::uint64_t salt) {
   switch (mix_seed(context.seed_base, salt ^ 0x4f7c2d1b9a031ULL) % 5U) {
@@ -825,6 +820,49 @@ llvm::Value *create_xor(llvm::IRBuilder<> &builder, llvm::Value *lhs,
                         std::uint64_t salt, llvm::StringRef name) {
   return create_xor_impl(builder, lhs, rhs, context, salt, name,
                          std::min(context.depth, max_mba_depth));
+}
+
+llvm::Value *build_entropy_true_predicate(
+  llvm::IRBuilder<> &builder, llvm::Function &function,
+  std::uint32_t mba_depth, std::uint64_t salt_base,
+  std::uint64_t context_a_salt, std::uint64_t context_b_salt,
+  llvm::StringRef context_a_name, llvm::StringRef context_b_name,
+  llvm::StringRef result_name) {
+  llvm::Module *module = function.getParent();
+  if (module == nullptr) {
+  return nullptr;
+  }
+
+  llvm::GlobalVariable *anchor = get_or_create_entropy_anchor(*module);
+  llvm::Value *entropy =
+    builder.CreateLoad(builder.getInt64Ty(), anchor, "obf.opaque.entropy");
+
+  builder_context context_a =
+    get_or_create_builder_context(function, context_a_name,
+                  salt_base ^ context_a_salt);
+  builder_context context_b =
+    get_or_create_builder_context(function, context_b_name,
+                  salt_base ^ context_b_salt);
+  context_a.depth = mba_depth;
+  context_b.depth = mba_depth;
+
+  llvm::Value *seed_a = entangle_value(
+    builder, entropy, context_a, salt_base + 0x11ULL, "obf.opaque.seed.a");
+  llvm::Value *zero_a = create_opaque_integer(
+    builder, builder.getInt64Ty(), context_a, llvm::APInt(64, 0),
+    salt_base + 0x21ULL, "obf.opaque.zero.a");
+  llvm::Value *expr_a = create_add(builder, seed_a, zero_a, context_a,
+                   salt_base + 0x31ULL, "obf.opaque.expr.a");
+
+  llvm::Value *seed_b = entangle_value(
+    builder, entropy, context_b, salt_base + 0x41ULL, "obf.opaque.seed.b");
+  llvm::Value *zero_b = create_opaque_integer(
+    builder, builder.getInt64Ty(), context_b, llvm::APInt(64, 0),
+    salt_base + 0x51ULL, "obf.opaque.zero.b");
+  llvm::Value *expr_b = create_xor(builder, seed_b, zero_b, context_b,
+                   salt_base + 0x61ULL, "obf.opaque.expr.b");
+
+  return builder.CreateICmpEQ(expr_a, expr_b, result_name);
 }
 
 } // namespace obf::mba

@@ -1,11 +1,11 @@
 #pragma once
 
+#include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 #include "obf/vm/micro_ir.h"
 #include "obf/vm/virtualize.h"
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Attributes.h"
@@ -252,8 +252,7 @@ inline std::size_t opcode_to_index(opcode op) {
 }
 
 inline std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
-  seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-  return seed;
+  return obf::mix_seed(seed, salt);
 }
 
 std::uint64_t derive_vm_bytecode_seed(const llvm::Function &function,

@@ -17,11 +17,6 @@
 namespace obf {
 namespace {
 
-std::uint64_t MixSeed(std::uint64_t seed, std::uint64_t salt) {
-  seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-  return seed;
-}
-
 bool IsEssentialGlobalName(llvm::StringRef name) {
   return name == "__obf_entropy_anchor" ||
          name == "__obf_entropy_anchor_ref" || name.starts_with("llvm.");
@@ -58,16 +53,16 @@ std::string BuildObfuscatedName(const llvm::Module &module,
                                 std::uint64_t seed_base,
                                 std::uint64_t ordinal) {
   std::uint64_t state = seed_base == 0 ? 0x6d2534f1f6c7a29bULL : seed_base;
-  state = MixSeed(state, stable_hash_string(module.getName()));
-  state = MixSeed(state, stable_hash_string(original_name));
-  state = MixSeed(state, ordinal + 1);
+  state = mix_seed(state, stable_hash_string(module.getName()));
+  state = mix_seed(state, stable_hash_string(original_name));
+  state = mix_seed(state, ordinal + 1);
 
   const std::size_t hex_length = 12 + static_cast<std::size_t>(state & 0xfU);
   std::string material;
   material.reserve(hex_length + 16);
   while (material.size() < hex_length) {
     material += llvm::utohexstr(state, /*LowerCase=*/true);
-    state = MixSeed(state, material.size() + 1);
+    state = mix_seed(state, material.size() + 1);
   }
 
   return "_" + material.substr(0, hex_length);

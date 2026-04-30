@@ -6,6 +6,11 @@
 
 namespace obf {
 
+inline std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
+  seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+  return seed;
+}
+
 inline std::uint64_t stable_hash_string(llvm::StringRef text,
                                         std::uint64_t seed = 0) {
   constexpr std::uint64_t kOffsetBasis = 1469598103934665603ULL;

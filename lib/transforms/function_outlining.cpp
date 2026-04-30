@@ -33,11 +33,6 @@ struct handler_info {
   std::uint64_t rank = 0;
 };
 
-std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
-  seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-  return seed;
-}
-
 bool is_terminal_handler(const llvm::BasicBlock &block) {
   const llvm::Instruction *terminator = block.getTerminator();
   return llvm::isa<llvm::ReturnInst>(terminator) ||

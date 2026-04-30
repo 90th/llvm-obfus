@@ -1,6 +1,9 @@
 #include "obf/transforms/string_encoding.h"
 
+#include "obf/analysis/annotation_utils.h"
 #include "obf/support/generated_names.h"
+#include "obf/support/stable_hash.h"
+#include "obf/transforms/cfg_state_placeholders.h"
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -26,10 +29,6 @@
 namespace obf {
 
 namespace {
-
-constexpr llvm::StringRef kCfgStatePlaceholderName = "__obf_get_cfg_state";
-constexpr llvm::StringRef kExpectedCfgStatePlaceholderName =
-    "__obf_get_expected_cfg_state";
 
 enum class string_use_kind {
   call_argument,
@@ -99,11 +98,6 @@ int merge_group_for_shape(string_helper_shape shape) {
   default:
     return -1;
   }
-}
-
-bool is_annotation_user(const llvm::User *user) {
-  const auto *global = llvm::dyn_cast<llvm::GlobalVariable>(user);
-  return global != nullptr && global->getName() == "llvm.global.annotations";
 }
 
 bool is_string_like_global(const llvm::GlobalVariable &global) {
@@ -507,24 +501,6 @@ void collect_string_users(const llvm::Value &value, const llvm::GlobalVariable &
   }
 }
 
-std::uint64_t hash_string(llvm::StringRef text, std::uint64_t seed) {
-  constexpr std::uint64_t kOffsetBasis = 1469598103934665603ULL;
-  constexpr std::uint64_t kPrime = 1099511628211ULL;
-
-  std::uint64_t hash = kOffsetBasis ^ seed;
-  for (const char byte : text) {
-    hash ^= static_cast<unsigned char>(byte);
-    hash *= kPrime;
-  }
-
-  return hash;
-}
-
-std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
-  seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-  return seed;
-}
-
 std::uint8_t derive_key_byte_constant(std::uint64_t seed, std::size_t index) {
   const std::uint64_t mixed =
       seed ^ (0x9e3779b97f4a7c15ULL + static_cast<std::uint64_t>(index) * 131ULL);
@@ -665,7 +641,7 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
     return candidate;
   }
 
-  candidate.seed = hash_string(global.getName(), module_seed);
+  candidate.seed = stable_hash_string(global.getName(), module_seed);
 
   llvm::DenseSet<const llvm::User *> visited;
   collect_string_users(global, global, get_seed, visited, candidate.summary);
@@ -700,7 +676,7 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable &global,
     if (seed.has_value()) {
       candidate.seed = mix_seed(candidate.seed, *seed);
       candidate.seed = mix_seed(candidate.seed,
-                                hash_string(function->getName(), *seed));
+                                stable_hash_string(function->getName(), *seed));
     }
 
     const std::optional<protection_level> level = get_level(function->getName());

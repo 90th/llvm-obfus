@@ -1,6 +1,7 @@
 #include "obf/transforms/control_flattening.h"
 
 #include "obf/support/stable_hash.h"
+#include "obf/transforms/cfg_state_placeholders.h"
 #include "obf/transforms/mba.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -27,10 +28,6 @@ namespace obf {
 
 namespace {
 
-constexpr llvm::StringRef kCfgStatePlaceholderName = "__obf_get_cfg_state";
-constexpr llvm::StringRef kExpectedCfgStatePlaceholderName =
-    "__obf_get_expected_cfg_state";
-
 struct carried_value {
   llvm::Value *original = nullptr;
   llvm::PHINode *dispatcher_phi = nullptr;
@@ -47,11 +44,6 @@ struct decoy_state {
   std::uint32_t id = 0;
   llvm::BasicBlock *entry = nullptr;
 };
-
-std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
-  seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-  return seed;
-}
 
 std::mt19937 build_state_rng(const llvm::Function &function,
                             const control_flattening_options &options) {

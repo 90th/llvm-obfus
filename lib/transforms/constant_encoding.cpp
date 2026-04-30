@@ -9,7 +9,6 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/Module.h"
 
 #include <cstdint>
 #include <string>
@@ -59,11 +58,6 @@ bool is_supported_constant_operand(const llvm::Instruction &instruction,
   }
 
   return true;
-}
-
-std::uint64_t mix_seed(std::uint64_t seed, std::uint64_t salt) {
-  seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-  return seed;
 }
 
 llvm::APInt derive_key(unsigned bit_width, std::uint64_t seed) {

@@ -126,6 +126,13 @@ llvm_update_compile_flags(obf-driver)
 target_include_directories(obf-driver PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(obf-driver PRIVATE obf_core ${OBF_LLVM_LIBS})
 
+add_executable(obf-unit-tests
+  tests/unit/obf_unit_tests.cpp
+)
+llvm_update_compile_flags(obf-unit-tests)
+target_include_directories(obf-unit-tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(obf-unit-tests PRIVATE obf_core ${OBF_LLVM_LIBS})
+
 set(OBF_ENTROPY_ANCHOR_LL "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.ll")
 set(OBF_ENTROPY_ANCHOR_RANDOMIZED_LL "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.randomized.ll")
 set(OBF_ENTROPY_ANCHOR_OBJ "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.o")
@@ -148,6 +155,11 @@ configure_file(tests/lit.cfg.py.in
 add_test(
   NAME obf-lit
   COMMAND "${OBF_LIT}" -sv "${CMAKE_CURRENT_BINARY_DIR}/tests"
+)
+
+add_test(
+  NAME obf-unit-tests
+  COMMAND obf-unit-tests
 )
 
 function(add_obf_benchmark target_name source_file config_file compiler std_flag)

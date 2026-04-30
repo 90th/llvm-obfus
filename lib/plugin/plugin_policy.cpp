@@ -285,6 +285,11 @@ llvm::cl::opt<std::uint64_t> obf_seed_override(
 } // namespace
 
 obfuscation_config load_active_config() {
+  static std::optional<obfuscation_config> cached_config;
+  if (cached_config.has_value()) {
+    return *cached_config;
+  }
+
   obfuscation_config config;
   if (obf_config_path.empty()) {
     config = {};
@@ -303,7 +308,8 @@ obfuscation_config load_active_config() {
     config.seed = obf_seed_override;
   }
 
-  return config;
+  cached_config = config;
+  return *cached_config;
 }
 
 std::uint64_t get_obf_seed_override() {

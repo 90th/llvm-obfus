@@ -4,7 +4,6 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -27,49 +26,6 @@ bool is_supported_branch_candidate(llvm::BasicBlock &block) {
 
   llvm::BasicBlock *successor = branch->getSuccessor(0);
   return successor != nullptr && successor->phis().empty();
-}
-
-llvm::Value *build_entropy_mba_predicate(llvm::IRBuilder<> &builder,
-                                         llvm::Function &function,
-                                         const bogus_control_flow_options &options,
-                                         std::uint64_t salt_base) {
-  llvm::Module *module = function.getParent();
-  if (module == nullptr) {
-    return nullptr;
-  }
-
-  auto *anchor = mba::get_or_create_entropy_anchor(*module);
-  llvm::Value *entropy =
-      builder.CreateLoad(builder.getInt64Ty(), anchor, "obf.opaque.entropy");
-
-  mba::builder_context context_a =
-      mba::get_or_create_builder_context(function, "obf.bogus.pred.a",
-                                         salt_base ^ 0x31415926ULL);
-  mba::builder_context context_b =
-      mba::get_or_create_builder_context(function, "obf.bogus.pred.b",
-                                         salt_base ^ 0x27182818ULL);
-  context_a.depth = options.mba_depth;
-  context_b.depth = options.mba_depth;
-
-  llvm::Value *seed_a = mba::entangle_value(
-      builder, entropy, context_a, salt_base + 0x11ULL, "obf.opaque.seed.a");
-  llvm::Value *zero_a = mba::create_opaque_integer(
-      builder, builder.getInt64Ty(), context_a, llvm::APInt(64, 0),
-      salt_base + 0x21ULL, "obf.opaque.zero.a");
-  llvm::Value *expr_a = mba::create_add(builder, seed_a, zero_a, context_a,
-                                        salt_base + 0x31ULL,
-                                        "obf.opaque.expr.a");
-
-  llvm::Value *seed_b = mba::entangle_value(
-      builder, entropy, context_b, salt_base + 0x41ULL, "obf.opaque.seed.b");
-  llvm::Value *zero_b = mba::create_opaque_integer(
-      builder, builder.getInt64Ty(), context_b, llvm::APInt(64, 0),
-      salt_base + 0x51ULL, "obf.opaque.zero.b");
-  llvm::Value *expr_b = mba::create_xor(builder, seed_b, zero_b, context_b,
-                                        salt_base + 0x61ULL,
-                                        "obf.opaque.expr.b");
-
-  return builder.CreateICmpEQ(expr_a, expr_b, "obf.opaque.true");
 }
 
 void populate_dse_trap(llvm::Function &function, llvm::BasicBlock &bogus,
@@ -212,8 +168,10 @@ run_bogus_control_flow(llvm::Function &function,
         function.getContext(), "obf.bogus.sink", &function, successor);
 
     llvm::IRBuilder<> builder(branch);
-    llvm::Value *predicate = build_entropy_mba_predicate(
-        builder, function, options, static_cast<std::uint64_t>(inserted + 1));
+    llvm::Value *predicate = mba::build_entropy_true_predicate(
+      builder, function, options.mba_depth,
+      static_cast<std::uint64_t>(inserted + 1), 0x31415926ULL,
+      0x27182818ULL, "obf.bogus.pred.a", "obf.bogus.pred.b");
     if (predicate == nullptr) {
       sink->eraseFromParent();
       bogus->eraseFromParent();

@@ -1,5 +1,7 @@
 #include "obf/policy/policy_engine.h"
 
+#include "obf/support/stable_hash.h"
+
 #include "llvm/IR/Module.h"
 
 namespace obf {
@@ -43,24 +45,11 @@ bool wildcard_match(llvm::StringRef pattern, llvm::StringRef text) {
   return pattern_index == pattern.size();
 }
 
-std::uint64_t hash_string(llvm::StringRef text, std::uint64_t seed) {
-  constexpr std::uint64_t kOffsetBasis = 1469598103934665603ULL;
-  constexpr std::uint64_t kPrime = 1099511628211ULL;
-
-  std::uint64_t hash = kOffsetBasis ^ seed;
-  for (const char byte : text) {
-    hash ^= static_cast<unsigned char>(byte);
-    hash *= kPrime;
-  }
-
-  return hash;
-}
-
 std::uint64_t derive_seed(const llvm::Module &module,
                           llvm::StringRef function_name,
                           std::uint64_t top_level_seed) {
-  std::uint64_t hash = hash_string(module.getName(), top_level_seed);
-  return hash_string(function_name, hash);
+  std::uint64_t hash = stable_hash_string(module.getName(), top_level_seed);
+  return stable_hash_string(function_name, hash);
 }
 
 const target_rule *find_matching_rule(const obfuscation_config &config,

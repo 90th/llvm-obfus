@@ -1,5 +1,7 @@
 #include "obf/analysis/function_features.h"
 
+#include "obf/analysis/annotation_utils.h"
+
 #include "llvm/Analysis/CFG.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/CFG.h"
@@ -7,31 +9,12 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/IntrinsicInst.h"
 
 #include <utility>
 
 namespace obf {
 
 namespace {
-
-bool is_annotation_user(const llvm::User *user) {
-  if (const auto *global = llvm::dyn_cast<llvm::GlobalVariable>(user)) {
-    return global->getName() == "llvm.global.annotations";
-  }
-
-  if (!llvm::isa<llvm::Constant>(user) || user->user_empty()) {
-    return false;
-  }
-
-  for (const llvm::User *parent : user->users()) {
-    if (!is_annotation_user(parent)) {
-      return false;
-    }
-  }
-
-  return true;
-}
 
 bool has_non_annotation_address_taken(const llvm::Function &function) {
   for (const llvm::Use &use : function.uses()) {
