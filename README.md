@@ -41,6 +41,15 @@ cmake -S . -B build -DLLVM_DIR="$(llvm-config --cmakedir)"
 cmake --build build
 ```
 
+build fixed-seed benchmark artifacts for reproducible checkpoint work with:
+
+```sh
+cmake -S . -B build-ghidra-check \
+  -DLLVM_DIR="$(llvm-config --cmakedir)" \
+  -DOBF_BENCHMARK_SEED=151616
+cmake --build build-ghidra-check --target obf-benchmarks -- -j1
+```
+
 ## usage
 
 ```sh
@@ -142,4 +151,5 @@ overrides:
 - the build, tests, and benchmark flows use an extra object generated from `runtime/entropy_anchor.c`
 - tests are wired through `ctest`; direct `lit -sv build/tests` works too
 - `cmake --build build --target obf-benchmarks` writes benchmark artifacts under `build/benchmarks/`
+- set `OBF_BENCHMARK_SEED` at configure time to pin benchmark obfuscation; leave it empty to keep the generated per-configure seed behavior
 - `cmake --build build --target obf-benchmarks-mir` also emits MIR for the linked benchmark

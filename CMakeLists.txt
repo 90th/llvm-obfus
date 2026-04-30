@@ -7,13 +7,30 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# -----------------------------------------------------------------------------
-# Dynamic Seed Generation
-# Injects entropy at compile time to mutate the structural generation per build
-# -----------------------------------------------------------------------------
-string(RANDOM LENGTH 1 ALPHABET "123456789" BUILD_SEED_LEAD)
-string(RANDOM LENGTH 15 ALPHABET "0123456789" BUILD_SEED_TAIL)
-set(BUILD_SEED "${BUILD_SEED_LEAD}${BUILD_SEED_TAIL}")
+set(OBF_BENCHMARK_SEED "" CACHE STRING
+  "Fixed benchmark obfuscation seed; empty uses a generated seed")
+
+string(RANDOM LENGTH 1 ALPHABET "123456789" OBF_GENERATED_BENCHMARK_SEED_LEAD)
+string(RANDOM LENGTH 15 ALPHABET "0123456789" OBF_GENERATED_BENCHMARK_SEED_TAIL)
+set(OBF_GENERATED_BENCHMARK_SEED
+  "${OBF_GENERATED_BENCHMARK_SEED_LEAD}${OBF_GENERATED_BENCHMARK_SEED_TAIL}")
+
+if(NOT OBF_BENCHMARK_SEED STREQUAL "")
+  if(NOT OBF_BENCHMARK_SEED MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR
+      "OBF_BENCHMARK_SEED must be a non-zero base-10 integer without leading zeroes")
+  endif()
+  set(OBF_EFFECTIVE_BENCHMARK_SEED "${OBF_BENCHMARK_SEED}")
+  set(OBF_BENCHMARK_SEED_SOURCE "cache")
+else()
+  set(OBF_EFFECTIVE_BENCHMARK_SEED "${OBF_GENERATED_BENCHMARK_SEED}")
+  set(OBF_BENCHMARK_SEED_SOURCE "generated")
+endif()
+
+set(OBF_BENCHMARK_SEED_STAMP
+  "${CMAKE_CURRENT_BINARY_DIR}/obf_benchmark_seed.txt")
+file(GENERATE OUTPUT "${OBF_BENCHMARK_SEED_STAMP}"
+  CONTENT "${OBF_EFFECTIVE_BENCHMARK_SEED}\n")
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_program(OBF_LIT lit REQUIRED)
@@ -36,6 +53,8 @@ set(OBF_BENCHMARK_CLEANUP_PASSES "dse" CACHE STRING
   "Cleanup passes used when OBF_BENCHMARK_CLEAN_IR is enabled")
 
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+message(STATUS
+  "Benchmark obfuscation seed (${OBF_BENCHMARK_SEED_SOURCE}): ${OBF_EFFECTIVE_BENCHMARK_SEED}")
 
 if(LLVM_PACKAGE_VERSION VERSION_LESS 21)
   message(FATAL_ERROR "llvm-obfus requires LLVM 21 or newer")
@@ -113,9 +132,9 @@ set(OBF_ENTROPY_ANCHOR_OBJ "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.o")
 add_custom_command(
   OUTPUT "${OBF_ENTROPY_ANCHOR_OBJ}"
   COMMAND "${OBF_CLANG}" -std=c17 -O0 -S -emit-llvm "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_LL}"
-  COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" -passes=obf-entropy-init -S "${OBF_ENTROPY_ANCHOR_LL}" -o "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}"
+  COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}" -passes=obf-entropy-init -S "${OBF_ENTROPY_ANCHOR_LL}" -o "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}"
   COMMAND "${OBF_CLANG}" -c -fPIC "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}" -o "${OBF_ENTROPY_ANCHOR_OBJ}"
-  DEPENDS obf_plugin "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c"
+  DEPENDS obf_plugin "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" "${OBF_BENCHMARK_SEED_STAMP}"
   VERBATIM)
 add_custom_target(obf-entropy-anchor-runtime ALL DEPENDS "${OBF_ENTROPY_ANCHOR_OBJ}")
 
@@ -147,13 +166,12 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
     DEPENDS "${source_file}"
     VERBATIM)
 
-  # Added dynamic --obf-seed insertion to the optimizer run
   add_custom_command(
     OUTPUT "${obfuscated_ll}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
     COMMAND "${CMAKE_COMMAND}" -E rm -f "${obfuscated_ll}"
-    COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${BUILD_SEED}" -passes=obf-safe-pipeline -S "${baseline_ll}" -o "${obfuscated_ll}"
-    DEPENDS obf_plugin "${baseline_ll}" "${config_file}"
+    COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}" -passes=obf-safe-pipeline -S "${baseline_ll}" -o "${obfuscated_ll}"
+    DEPENDS obf_plugin "${baseline_ll}" "${config_file}" "${OBF_BENCHMARK_SEED_STAMP}"
     VERBATIM)
 
   if(OBF_BENCHMARK_CLEAN_IR)
@@ -213,12 +231,11 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
     DEPENDS ${source_lls}
     VERBATIM)
 
-  # Added dynamic --obf-seed insertion to the optimizer run
   add_custom_command(
     OUTPUT "${linked_obfuscated_ll}"
     COMMAND "${CMAKE_COMMAND}" -E rm -f "${linked_obfuscated_ll}"
-    COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${BUILD_SEED}" -passes=obf-safe-pipeline -S "${linked_baseline_ll}" -o "${linked_obfuscated_ll}"
-    DEPENDS obf_plugin "${linked_baseline_ll}" "${config_file}"
+    COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}" -passes=obf-safe-pipeline -S "${linked_baseline_ll}" -o "${linked_obfuscated_ll}"
+    DEPENDS obf_plugin "${linked_baseline_ll}" "${config_file}" "${OBF_BENCHMARK_SEED_STAMP}"
     VERBATIM)
 
   if(OBF_BENCHMARK_CLEAN_IR)
