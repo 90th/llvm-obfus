@@ -632,14 +632,29 @@ slot_storage build_state_slot_storage(llvm::IRBuilder<>& builder,
 }
 
 llvm::Value* build_hidden_token_storage_value(llvm::IRBuilder<>& builder,
-                                              llvm::Argument* hidden_token_arg,
-                                              std::uint64_t fallback_seed) {
+                                               llvm::Argument* hidden_token_arg,
+                                               std::uint64_t fallback_seed) {
   if (hidden_token_arg == nullptr) { return builder.getInt64(fallback_seed); }
   llvm::Value* token = hidden_token_arg;
   if (token->getType() != builder.getInt64Ty()) {
     token = builder.CreateZExtOrTrunc(token, builder.getInt64Ty(), "obf.vm.island.token.cast");
   }
   return token;
+}
+
+llvm::BasicBlock* create_handler_success_route(rewrite_function_context& rewrite_context,
+                                               llvm::BasicBlock* handler_block,
+                                               std::size_t instruction_index) {
+  llvm::Function& function = rewrite_context.function;
+  function.addFnAttr("vm.handler.route.trampoline");
+  auto* route_block = llvm::BasicBlock::Create(function.getContext(),
+                                               "obf.vm.route.entry." +
+                                                   std::to_string(instruction_index),
+                                               &function,
+                                               handler_block);
+  llvm::IRBuilder<> route_builder(route_block);
+  route_builder.CreateBr(handler_block);
+  return route_block;
 }
 
 void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
@@ -707,6 +722,8 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
                                                state_layout.return_value_field,
                                                "vm.island.state.ret");
   }
+  llvm::AllocaInst* opcode_predicate_slot = entry_builder.CreateAlloca(
+      entry_builder.getInt32Ty(), nullptr, "obf.vm.pred.slot");
 
   llvm::SmallVector<llvm::BasicBlock*, 64> instruction_blocks(program.instructions.size(), nullptr);
   for (std::size_t instruction_index : owned_instructions) {
@@ -775,6 +792,7 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
       .hidden_token_slot = hidden_token_slot,
       .return_value_slot = return_value_slot,
       .trap_block = failure_block,
+      .opcode_predicate_slot = opcode_predicate_slot,
       .instruction_blocks = instruction_blocks,
       .island_for_instruction = island_for_instruction,
       .state_island_body = true,
@@ -811,14 +829,16 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
         route_prefix + "exec." + std::to_string(island_index) + "." +
             std::to_string(subhelper_index) + "." + std::to_string(instruction_index),
         &dispatcher);
+    llvm::BasicBlock* route_block =
+        create_handler_success_route(rewrite_context, opcode_block, instruction_index);
     llvm::Value* opcode_match = emit_opcode_match(header_builder,
-                                                  rewrite_context,
-                                                  decoded_opcode,
+                                                   rewrite_context,
+                                                   decoded_opcode,
                                                   instruction.op,
                                                   0x7d000 + instruction_index);
     if (select_handler_variant(instruction.op, opaque_seed_base, 0x7d000 + instruction_index) ==
         0) {
-      header_builder.CreateCondBr(opcode_match, opcode_block, failure_block);
+      header_builder.CreateCondBr(opcode_match, route_block, failure_block);
     } else {
       llvm::Value* match_word = header_builder.CreateZExt(
           opcode_match, header_builder.getInt64Ty(), "obf.vm.opcode.match.word");
@@ -836,7 +856,7 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
                           "obf.vm.opcode.gate");
       llvm::Value* accept = header_builder.CreateICmpNE(
           gated_match, header_builder.getInt64(0), "obf.vm.opcode.accept");
-      header_builder.CreateCondBr(accept, opcode_block, failure_block);
+      header_builder.CreateCondBr(accept, route_block, failure_block);
     }
 
     llvm::IRBuilder<> builder(opcode_block);
@@ -1446,6 +1466,8 @@ void rewrite_function_body(llvm::Function& function,
 
   auto* state_slot =
       entry_builder.CreateAlloca(entry_builder.getInt64Ty(), nullptr, "obf.vm.state");
+  auto* opcode_predicate_slot =
+      entry_builder.CreateAlloca(entry_builder.getInt32Ty(), nullptr, "obf.vm.pred.slot");
 
   const std::uint32_t entry_instruction =
       program.blocks.empty() ? 0 : program.blocks.front().first_instruction;
@@ -1514,6 +1536,7 @@ void rewrite_function_body(llvm::Function& function,
       .retkey_global = retkey_global,
       .state_slot = state_slot,
       .trap_block = failure_block,
+      .opcode_predicate_slot = opcode_predicate_slot,
       .instruction_blocks = instruction_blocks,
       .dispatch_table = dispatch_table,
       .dispatch_table_type = dispatch_table_type,
@@ -1556,14 +1579,16 @@ void rewrite_function_body(llvm::Function& function,
 
     auto* opcode_block = llvm::BasicBlock::Create(
         context, "vm.exec." + std::to_string(instruction_index), &function);
+    llvm::BasicBlock* route_block =
+        create_handler_success_route(rewrite_context, opcode_block, instruction_index);
     llvm::Value* opcode_match = emit_opcode_match(header_builder,
-                                                  rewrite_context,
-                                                  decoded_opcode,
+                                                   rewrite_context,
+                                                   decoded_opcode,
                                                   instruction.op,
                                                   0x7d000 + instruction_index);
     if (select_handler_variant(instruction.op, opaque_seed_base, 0x7d000 + instruction_index) ==
         0) {
-      header_builder.CreateCondBr(opcode_match, opcode_block, failure_block);
+      header_builder.CreateCondBr(opcode_match, route_block, failure_block);
     } else {
       llvm::Value* match_word = header_builder.CreateZExt(
           opcode_match, header_builder.getInt64Ty(), "obf.vm.opcode.match.word");
@@ -1581,7 +1606,7 @@ void rewrite_function_body(llvm::Function& function,
                           "obf.vm.opcode.gate");
       llvm::Value* accept = header_builder.CreateICmpNE(
           gated_match, header_builder.getInt64(0), "obf.vm.opcode.accept");
-      header_builder.CreateCondBr(accept, opcode_block, failure_block);
+      header_builder.CreateCondBr(accept, route_block, failure_block);
     }
 
     llvm::IRBuilder<> builder(opcode_block);

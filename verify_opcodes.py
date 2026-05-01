@@ -37,6 +37,11 @@ NAMED_SPLIT_OPCODE_COMPARE_PATTERN = re.compile(
     r"%[-A-Za-z$._0-9]*obf\.vm\.opcode\.split\.(?:low|high)\.ok"
     r"[-A-Za-z$._0-9]*\s*=\s*\bicmp eq i32\b"
 )
+NONLOCAL_SPLIT_RELOAD_PATTERN = re.compile(
+    r"%[-A-Za-z$._0-9]*obf\.vm\.opcode\.split\.(?:low|high)\.reload"
+    r"[-A-Za-z$._0-9]*\s*=\s*\bload\s+i32\s*,\s*ptr\s+"
+    r"%[-A-Za-z$._0-9]*obf\.vm\.pred\.slot"
+)
 OPCODE_WIDEN_PATTERN = re.compile(r"\bzext\s+i8\b[^\n]*\bto\s+i32\b")
 COND_BRANCH_PATTERN = re.compile(
     r"br\s+i1\s+[^,]+,\s+label\s+%(?P<true>[0-9A-Za-z$._-]+),\s+label\s+%(?P<false>[0-9A-Za-z$._-]+)"
@@ -146,12 +151,16 @@ def split_opcode_compare_count(body: str) -> int:
 
 
 def stable_split_encoding(body: str) -> int:
+    locality = "nonlocal" if NONLOCAL_SPLIT_RELOAD_PATTERN.search(body) else "local"
     relevant_lines = [
         line.strip()
         for line in body.splitlines()
-        if "obf.vm.opcode" in line or "icmp eq i32" in line or "br i1" in line
+        if "obf.vm.opcode" in line
+        or "obf.vm.pred.slot" in line
+        or "icmp eq i32" in line
+        or "br i1" in line
     ]
-    digest = hashlib.sha256("\n".join(relevant_lines).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256((locality + "\n" + "\n".join(relevant_lines)).encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
 
 

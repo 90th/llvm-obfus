@@ -115,6 +115,11 @@ struct opcode_match_transform {
   std::uint32_t final_xor = 0;
 };
 
+enum class opcode_predicate_fragment {
+  low,
+  high,
+};
+
 std::uint32_t nontrivial_word(std::uint64_t seed, std::uint32_t fallback) {
   std::uint32_t word = static_cast<std::uint32_t>(seed);
   if (word == 0 || word == 1 || word == std::numeric_limits<std::uint32_t>::max()) {
@@ -143,6 +148,13 @@ std::uint32_t select_opcode_split_bits(const rewrite_function_context& context,
   std::uint64_t seed = mix_seed(context.bytecode_seed, salt ^ 0x0fc03001ULL);
   seed = mix_seed(seed, context.opaque_seed_base ^ 0x51f11dULL);
   return 8U + static_cast<std::uint32_t>(seed % 17U);
+}
+
+opcode_predicate_fragment select_nonlocal_opcode_fragment(const rewrite_function_context& context,
+                                                          std::uint64_t salt) {
+  std::uint64_t seed = mix_seed(context.bytecode_seed, salt ^ 0x0fc04001ULL);
+  seed = mix_seed(seed, context.opaque_seed_base ^ 0x5f17c0deULL);
+  return (seed & 1U) == 0 ? opcode_predicate_fragment::low : opcode_predicate_fragment::high;
 }
 
 std::uint32_t apply_opcode_match_transform(opcode_match_transform transform, std::uint8_t opcode) {
@@ -607,41 +619,84 @@ llvm::Value* emit_opcode_match(llvm::IRBuilder<>& builder,
       transform, get_physical_opcode(context.opcode_map, logical_opcode));
   const std::uint32_t split_bits = select_opcode_split_bits(context, salt);
   const std::uint32_t low_mask = (1U << split_bits) - 1U;
-  llvm::Value* low_actual =
-      builder.CreateAnd(mixed,
-                        materialize_opcode_word(builder, context, low_mask, salt ^ 0x0fc01004ULL),
-                        "obf.vm.opcode.split.low.actual");
-  llvm::Value* low_delta = mba::create_xor(
-      builder,
-      low_actual,
-      materialize_opcode_word(builder, context, encoded_opcode & low_mask, salt ^ 0x0fc01005ULL),
-      context.mba_context,
-      salt ^ 0x0fc02005ULL,
-      "obf.vm.opcode.split.low.delta");
+
+  auto build_low_delta = [&]() -> llvm::Value* {
+    llvm::Value* low_actual = builder.CreateAnd(
+        mixed,
+        materialize_opcode_word(builder, context, low_mask, salt ^ 0x0fc01004ULL),
+        "obf.vm.opcode.split.low.actual");
+    return mba::create_xor(
+        builder,
+        low_actual,
+        materialize_opcode_word(builder, context, encoded_opcode & low_mask, salt ^ 0x0fc01005ULL),
+        context.mba_context,
+        salt ^ 0x0fc02005ULL,
+        "obf.vm.opcode.split.low.delta");
+  };
+
+  auto build_high_delta = [&]() -> llvm::Value* {
+    llvm::Value* high_zero = mba::create_opaque_integer(builder,
+                                                        builder.getInt32Ty(),
+                                                        context.mba_context,
+                                                        llvm::APInt(32, 0),
+                                                        salt ^ 0x0fc01006ULL,
+                                                        "obf.vm.opcode.split.high.zero");
+    llvm::Value* high_source = mba::create_xor(builder,
+                                               mixed,
+                                               high_zero,
+                                               context.mba_context,
+                                               salt ^ 0x0fc02006ULL,
+                                               "obf.vm.opcode.split.high.source");
+    llvm::Value* high_actual = builder.CreateLShr(
+        high_source, builder.getInt32(split_bits), "obf.vm.opcode.split.high.actual");
+    return mba::create_xor(builder,
+                           high_actual,
+                           materialize_opcode_word(
+                               builder, context, encoded_opcode >> split_bits, salt ^ 0x0fc01007ULL),
+                           context.mba_context,
+                           salt ^ 0x0fc02007ULL,
+                           "obf.vm.opcode.split.high.delta");
+  };
+
+  llvm::Value* low_delta = nullptr;
+  llvm::Value* high_delta = nullptr;
+  if (context.opcode_predicate_slot != nullptr) {
+    note_function_marker(context.function, "vm.opcode.predicate.nonlocal");
+    const opcode_predicate_fragment nonlocal_fragment =
+        select_nonlocal_opcode_fragment(context, salt);
+    if (nonlocal_fragment == opcode_predicate_fragment::low) {
+      low_delta = build_low_delta();
+      builder.CreateStore(low_delta, context.opcode_predicate_slot);
+    } else {
+      high_delta = build_high_delta();
+      builder.CreateStore(high_delta, context.opcode_predicate_slot);
+    }
+
+    llvm::BasicBlock* current_block = builder.GetInsertBlock();
+    llvm::Function* owner = current_block == nullptr ? nullptr : current_block->getParent();
+    if (owner != nullptr) {
+      llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(
+          owner->getContext(), "obf.vm.opcode.pred.merge", owner);
+      builder.CreateBr(merge_block);
+      builder.SetInsertPoint(merge_block);
+    }
+
+    if (nonlocal_fragment == opcode_predicate_fragment::low) {
+      low_delta = builder.CreateLoad(
+          builder.getInt32Ty(), context.opcode_predicate_slot, "obf.vm.opcode.split.low.reload");
+      high_delta = build_high_delta();
+    } else {
+      low_delta = build_low_delta();
+      high_delta = builder.CreateLoad(
+          builder.getInt32Ty(), context.opcode_predicate_slot, "obf.vm.opcode.split.high.reload");
+    }
+  } else {
+    low_delta = build_low_delta();
+    high_delta = build_high_delta();
+  }
+
   llvm::Value* low_ok =
       builder.CreateICmpEQ(low_delta, builder.getInt32(0), "obf.vm.opcode.split.low.ok");
-
-  llvm::Value* high_zero = mba::create_opaque_integer(builder,
-                                                      builder.getInt32Ty(),
-                                                      context.mba_context,
-                                                      llvm::APInt(32, 0),
-                                                      salt ^ 0x0fc01006ULL,
-                                                      "obf.vm.opcode.split.high.zero");
-  llvm::Value* high_source = mba::create_xor(builder,
-                                             mixed,
-                                             high_zero,
-                                             context.mba_context,
-                                             salt ^ 0x0fc02006ULL,
-                                             "obf.vm.opcode.split.high.source");
-  llvm::Value* high_actual = builder.CreateLShr(
-      high_source, builder.getInt32(split_bits), "obf.vm.opcode.split.high.actual");
-  llvm::Value* high_delta = mba::create_xor(
-      builder,
-      high_actual,
-      materialize_opcode_word(builder, context, encoded_opcode >> split_bits, salt ^ 0x0fc01007ULL),
-      context.mba_context,
-      salt ^ 0x0fc02007ULL,
-      "obf.vm.opcode.split.high.delta");
   llvm::Value* high_ok =
       builder.CreateICmpEQ(high_delta, builder.getInt32(0), "obf.vm.opcode.split.high.ok");
 

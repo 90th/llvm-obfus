@@ -38,21 +38,29 @@ done:
 ; ENTROPY: @__obf_entropy_anchor = global i64 {{-?[1-9][0-9]*}}, align 8
 
 ; VM-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
+; VM: %obf.vm.pred.slot = alloca i32
 ; VM: {{^vm\.0:}}
 ; VM: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
 ; VM-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
 ; VM-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
+; VM: {{%obf\.vm\.opcode\.split\.(low|high)\.reload[^ ]* = }}load i32, ptr %obf.vm.pred.slot
 ; VM: {{%obf\.vm\.opcode\.split\.low\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
 ; VM: {{%obf\.vm\.opcode\.split\.high\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
-; VM: {{^vm\.exec\.0:}}
+; VM: br i1 {{[^,]+}}, label %obf.vm.route.entry.{{[0-9]+}}, label %obf.vm.fail.shared
+; VM: {{^obf\.vm\.route\.entry\.[0-9]+:}}
+; VM: br label %vm.exec.{{[0-9]+}}
 ; VM-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
+; VM: %obf.vm.pred.slot = alloca i32
 ; VM: {{^vm\.0:}}
 ; VM: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
 ; VM-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
 ; VM-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
+; VM: {{%obf\.vm\.opcode\.split\.(low|high)\.reload[^ ]* = }}load i32, ptr %obf.vm.pred.slot
 ; VM: {{%obf\.vm\.opcode\.split\.low\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
 ; VM: {{%obf\.vm\.opcode\.split\.high\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
-; VM: {{^vm\.exec\.0:}}
+; VM: br i1 {{[^,]+}}, label %obf.vm.route.entry.{{[0-9]+}}, label %obf.vm.fail.shared
+; VM: {{^obf\.vm\.route\.entry\.[0-9]+:}}
+; VM: br label %vm.exec.{{[0-9]+}}
 
 ; FLAT-LABEL: define i32 @flatten_me(i32 %x)
 ; FLAT: switch i32 %obf.state

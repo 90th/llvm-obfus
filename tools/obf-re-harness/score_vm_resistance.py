@@ -51,6 +51,17 @@ NAMED_SPLIT_OPCODE_COMPARE_PATTERN = re.compile(
     r"%[-A-Za-z$._0-9]*obf\.vm\.opcode\.split\.(?:low|high)\.ok"
     r"[-A-Za-z$._0-9]*\s*=\s*\bicmp\s+eq\s+i32\b"
 )
+NONLOCAL_SPLIT_RELOAD_PATTERN = re.compile(
+    r"%[-A-Za-z$._0-9]*obf\.vm\.opcode\.split\.(?:low|high)\.reload"
+    r"[-A-Za-z$._0-9]*\s*=\s*\bload\s+i32\s*,\s*ptr\s+"
+    r"%[-A-Za-z$._0-9]*obf\.vm\.pred\.slot"
+)
+NONLOCAL_SPLIT_STORE_PATTERN = re.compile(
+    r"\bstore\s+i32\s+%[-A-Za-z$._0-9]*obf\.vm\.opcode\.split\."
+    r"(?:low|high)\.delta[-A-Za-z$._0-9]*\s*,\s*ptr\s+"
+    r"%[-A-Za-z$._0-9]*obf\.vm\.pred\.slot"
+)
+GENERIC_I32_STACK_LOAD_PATTERN = re.compile(r"\bload\s+i32\s*,\s*ptr\s+%[-A-Za-z$._0-9]+")
 OPCODE_WIDEN_PATTERN = re.compile(r"\bzext\s+i8\b[^\n]*\bto\s+i32\b")
 COND_BRANCH_PATTERN = re.compile(
     r"\bbr\s+i1\s+[^,]+,\s+label\s+%(?P<true>[0-9A-Za-z$._-]+),\s+label\s+%(?P<false>[0-9A-Za-z$._-]+)"
@@ -191,6 +202,7 @@ entry:
 define internal i32 @__obf_vm_i_self(i32 %x, i64 %obf.hidden_token) #1 {
 entry.obf.vm:
   %obf.vm.state = alloca i64
+  %obf.vm.pred.slot = alloca i32
   br label %vm.dispatch.shape.switch.vm.dispatch.switch.0
 
 vm.dispatch.shape.switch.vm.dispatch.switch.0:
@@ -207,19 +219,30 @@ vm.0:
   %obf.vm.opcode.mix = xor i32 %obf.vm.opcode.wide, 99
   %obf.vm.opcode.split.low.actual = and i32 %obf.vm.opcode.mix, 15
   %obf.vm.opcode.split.low.delta = xor i32 %obf.vm.opcode.split.low.actual, 9
-  %obf.vm.opcode.split.low.ok = icmp eq i32 %obf.vm.opcode.split.low.delta, 0
+  store i32 %obf.vm.opcode.split.low.delta, ptr %obf.vm.pred.slot
+  br label %vm.pred.0
+
+vm.pred.0:
+  %obf.vm.opcode.split.low.reload = load i32, ptr %obf.vm.pred.slot
+  %obf.vm.opcode.split.low.ok = icmp eq i32 %obf.vm.opcode.split.low.reload, 0
   %obf.vm.opcode.split.high.actual = lshr i32 %obf.vm.opcode.mix, 4
   %obf.vm.opcode.split.high.delta = xor i32 %obf.vm.opcode.split.high.actual, 4
   %obf.vm.opcode.split.high.ok = icmp eq i32 %obf.vm.opcode.split.high.delta, 0
   %obf.vm.opcode.split.match = and i1 %obf.vm.opcode.split.low.ok, %obf.vm.opcode.split.high.ok
-  br i1 %obf.vm.opcode.split.match, label %vm.exec.0, label %obf.vm.fail.shared
+  br i1 %obf.vm.opcode.split.match, label %obf.vm.route.entry.0, label %obf.vm.fail.shared
+
+obf.vm.route.entry.0:
+  br label %vm.exec.0
 
 vm.exec.0:
   br label %vm.dispatch.shape.switch.vm.dispatch.switch.0
 
 vm.1:
   %obf.vm.opcode.match.1 = icmp eq i8 %obf.vm.bc.enc, -3
-  br i1 %obf.vm.opcode.match.1, label %vm.exec.1, label %obf.vm.fail.shared
+  br i1 %obf.vm.opcode.match.1, label %obf.vm.route.entry.1, label %obf.vm.fail.shared
+
+obf.vm.route.entry.1:
+  br label %vm.exec.1
 
 vm.exec.1:
   %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_self
@@ -480,6 +503,8 @@ def classify_vm_function(function: FunctionIR) -> str:
         return "helper"
     if "vm.island.entry" in combined:
         return "implementation"
+    if "vm.opcode.predicate.nonlocal" in combined:
+        return "implementation"
     if (
         "entry.obf.vm" in function.body
         or "obf.vm.opcode.match" in function.body
@@ -505,13 +530,73 @@ def is_failure_block(label: str, body: str, trap_labels: set[str]) -> bool:
     return "fail" in label.lower() or branches_to_trap
 
 
+def is_handler_label(label: str) -> bool:
+    return bool(re.search(r"(^|\.)exec(\.|$)", label)) or label.startswith("vm.exec")
+
+
+def is_route_block(label: str, body: str) -> bool:
+    return "obf.vm.route" in label or "obf.vm.route" in body
+
+
+def classify_handler_mapping(
+    target: str, blocks: dict[str, BlockIR], failure_labels: set[str]
+) -> dict[str, str]:
+    if not target:
+        return {"handler_mapping": "low", "resolved_handler_target": "", "route_target": ""}
+    if is_handler_label(target):
+        return {
+            "handler_mapping": "branch_target",
+            "resolved_handler_target": target,
+            "route_target": "",
+        }
+    target_block = blocks.get(target)
+    if target_block is None or not is_route_block(target, target_block.body):
+        return {"handler_mapping": "routed", "resolved_handler_target": "", "route_target": target}
+
+    branch_match = UNCOND_BRANCH_PATTERN.search(target_block.body)
+    if branch_match is not None:
+        route_target = branch_match.group("target")
+        if is_handler_label(route_target):
+            return {
+                "handler_mapping": "trampoline",
+                "resolved_handler_target": route_target,
+                "route_target": target,
+            }
+        if route_target in failure_labels:
+            return {
+                "handler_mapping": "decoy_ambiguous",
+                "resolved_handler_target": "",
+                "route_target": target,
+            }
+        return {"handler_mapping": "routed", "resolved_handler_target": route_target, "route_target": target}
+
+    branch_match = COND_BRANCH_PATTERN.search(target_block.body)
+    if branch_match is not None:
+        branch_targets = [branch_match.group("true"), branch_match.group("false")]
+        handler_targets = [branch_target for branch_target in branch_targets if is_handler_label(branch_target)]
+        fail_targets = [branch_target for branch_target in branch_targets if branch_target in failure_labels]
+        if handler_targets and fail_targets:
+            return {
+                "handler_mapping": "decoy_ambiguous",
+                "resolved_handler_target": handler_targets[0],
+                "route_target": target,
+            }
+        if handler_targets:
+            return {
+                "handler_mapping": "routed",
+                "resolved_handler_target": handler_targets[0],
+                "route_target": target,
+            }
+    return {"handler_mapping": "routed", "resolved_handler_target": "", "route_target": target}
+
+
 def has_opcode_compare(text: str) -> bool:
     return bool(
         RAW_OPCODE_COMPARE_PATTERN.search(text)
         or (
             (
                 TRANSFORMED_OPCODE_COMPARE_PATTERN.search(text)
-                or looks_like_split_opcode_block(text)
+                or looks_like_split_opcode_block(text, allow_generic_nonlocal=True)
             )
             and looks_like_transformed_opcode_block(text)
         )
@@ -522,22 +607,32 @@ def looks_like_transformed_opcode_block(block_body: str) -> bool:
     return "obf.vm.opcode" in block_body or bool(OPCODE_WIDEN_PATTERN.search(block_body))
 
 
-def split_opcode_compare_count(block_body: str) -> int:
+def split_opcode_compare_count(block_body: str, allow_generic_nonlocal: bool = False) -> int:
     named_count = len(NAMED_SPLIT_OPCODE_COMPARE_PATTERN.findall(block_body))
     if named_count:
         return named_count
-    if not looks_like_transformed_opcode_block(block_body):
+    if not allow_generic_nonlocal and not looks_like_transformed_opcode_block(block_body):
         return 0
     matches = list(SPLIT_OPCODE_COMPARE_PATTERN.finditer(block_body))
     zero_matches = [match for match in matches if int(match.group("opcode")) == 0]
     return len(zero_matches) if len(zero_matches) >= 2 else 0
 
 
-def looks_like_split_opcode_block(block_body: str) -> bool:
-    return "obf.vm.opcode.split" in block_body or split_opcode_compare_count(block_body) >= 2
+def looks_like_split_opcode_block(block_body: str, allow_generic_nonlocal: bool = False) -> bool:
+    return "obf.vm.opcode.split" in block_body or split_opcode_compare_count(
+        block_body, allow_generic_nonlocal
+    ) >= 2
 
 
-def opcode_compare_matches(block_body: str) -> list[dict[str, Any]]:
+def is_nonlocal_split_opcode_block(block_body: str, allow_generic_nonlocal: bool = False) -> bool:
+    return bool(NONLOCAL_SPLIT_RELOAD_PATTERN.search(block_body)) or (
+        allow_generic_nonlocal and bool(GENERIC_I32_STACK_LOAD_PATTERN.search(block_body))
+    )
+
+
+def opcode_compare_matches(
+    block_body: str, allow_generic_nonlocal: bool = False
+) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for match in RAW_OPCODE_COMPARE_PATTERN.finditer(block_body):
         matches.append(
@@ -547,22 +642,26 @@ def opcode_compare_matches(block_body: str) -> list[dict[str, Any]]:
                 "constant": int(match.group("opcode")),
             }
         )
-    if not looks_like_transformed_opcode_block(block_body):
+    if not allow_generic_nonlocal and not looks_like_transformed_opcode_block(block_body):
         return matches
-    split_count = split_opcode_compare_count(block_body)
+    split_count = split_opcode_compare_count(block_body, allow_generic_nonlocal)
     if split_count:
         split_immediates = sorted(
             {int(match.group("opcode")) for match in SPLIT_OPCODE_COMPARE_PATTERN.finditer(block_body)}
         )
+        nonlocal_split = is_nonlocal_split_opcode_block(block_body, allow_generic_nonlocal)
         matches.append(
             {
-                "compare_kind": "split_i32",
+                "compare_kind": "split_i32_nonlocal" if nonlocal_split else "split_i32_local",
                 "compare_width": 32,
                 "constant": None,
+                "predicate_locality": "non_local" if nonlocal_split else "local_complete",
                 "split_compare_count": split_count,
                 "split_immediates": split_immediates,
             }
         )
+        return matches
+    if not looks_like_transformed_opcode_block(block_body):
         return matches
     for match in TRANSFORMED_OPCODE_COMPARE_PATTERN.finditer(block_body):
         matches.append(
@@ -579,13 +678,14 @@ def opcode_compare_matches(block_body: str) -> list[dict[str, Any]]:
 
 def extract_opcode_headers(function: FunctionIR) -> list[dict[str, Any]]:
     blocks = parse_blocks(function.body)
+    allow_generic_nonlocal = "vm.opcode.predicate.nonlocal" in function.attrs
     trap_labels = {label for label, block in blocks.items() if is_trap_block(label, block.body)}
     failure_labels = {
         label for label, block in blocks.items() if is_failure_block(label, block.body, trap_labels)
     }
     headers: list[dict[str, Any]] = []
     for label, block in blocks.items():
-        compare_matches = opcode_compare_matches(block.body)
+        compare_matches = opcode_compare_matches(block.body, allow_generic_nonlocal)
         if not compare_matches:
             continue
         branch_match = COND_BRANCH_PATTERN.search(block.body)
@@ -600,17 +700,24 @@ def extract_opcode_headers(function: FunctionIR) -> list[dict[str, Any]]:
         trap_targets = [target for target in branch_targets if target in trap_labels]
         failure_targets = [target for target in branch_targets if target in failure_labels]
         for compare_match in compare_matches:
+            success_target = handler_targets[0] if handler_targets else ""
+            mapping = classify_handler_mapping(success_target, blocks, failure_labels)
             headers.append(
                 {
                     "block": label,
                     "compare_kind": compare_match["compare_kind"],
                     "compare_width": compare_match["compare_width"],
                     "constant": compare_match["constant"],
+                    "direct_success_to_handler": mapping["handler_mapping"] == "branch_target",
                     "failure_target": failure_targets[0] if failure_targets else "",
-                    "handler_target": handler_targets[0] if handler_targets else "",
+                    "handler_mapping": mapping["handler_mapping"],
+                    "handler_target": mapping["resolved_handler_target"],
                     "opcode": compare_match["constant"],
+                    "predicate_locality": compare_match.get("predicate_locality", "local"),
+                    "route_target": mapping["route_target"],
                     "split_compare_count": compare_match.get("split_compare_count", 0),
                     "split_immediates": compare_match.get("split_immediates", []),
+                    "success_target": success_target,
                     "trap_oracle": "direct" if trap_targets else "indirect" if failure_targets else "none",
                     "trap_target": trap_targets[0] if trap_targets else "",
                 }
@@ -684,7 +791,13 @@ def summarize_vm_function(function: FunctionIR) -> dict[str, Any]:
         header for header in opcode_headers if header["compare_kind"].startswith("transformed_full")
     ]
     split_opcode_headers = [
-        header for header in opcode_headers if header["compare_kind"] == "split_i32"
+        header for header in opcode_headers if header["compare_kind"].startswith("split_i32")
+    ]
+    local_split_opcode_headers = [
+        header for header in split_opcode_headers if header["predicate_locality"] == "local_complete"
+    ]
+    nonlocal_split_opcode_headers = [
+        header for header in split_opcode_headers if header["predicate_locality"] == "non_local"
     ]
     physical_opcodes = sorted({header["constant"] for header in raw_opcode_headers})
     transformed_opcode_constants = sorted(
@@ -718,6 +831,12 @@ def summarize_vm_function(function: FunctionIR) -> dict[str, Any]:
     retkey_refs = sorted(
         ref for ref in collect_vm_data_refs(function.body) if ref.startswith("__obf_vm_retkey_")
     )
+    named_nonlocal_fragment_count = len(NONLOCAL_SPLIT_STORE_PATTERN.findall(function.body))
+    named_nonlocal_reload_count = len(NONLOCAL_SPLIT_RELOAD_PATTERN.findall(function.body))
+    route_target_counts = Counter(
+        header["route_target"] for header in opcode_headers if header["route_target"]
+    )
+    route_family_counts = Counter(header["handler_mapping"] for header in opcode_headers)
     return {
         "alloca_count": len(re.findall(r"\balloca\b", function.body)),
         "basic_block_count": len(blocks),
@@ -728,6 +847,16 @@ def summarize_vm_function(function: FunctionIR) -> dict[str, Any]:
         "function": function.name,
         "handler_block_candidates": handler_candidates,
         "handler_block_candidate_count": len(handler_candidates),
+        "handler_mapped_opcode_header_count": sum(
+            1 for header in opcode_headers if header["handler_target"]
+        ),
+        "direct_success_to_handler_count": route_family_counts.get("branch_target", 0),
+        "success_to_trampoline_count": route_family_counts.get("trampoline", 0),
+        "trampoline_to_handler_count": route_family_counts.get("trampoline", 0),
+        "routed_success_count": route_family_counts.get("routed", 0),
+        "decoy_route_block_count": route_family_counts.get("decoy_ambiguous", 0),
+        "shared_route_block_count": sum(1 for count in route_target_counts.values() if count > 1),
+        "route_family_counts": dict(sorted(route_family_counts.items())),
         "indirectbr_count": len(INDIRECTBR_INST_PATTERN.findall(function.body)),
         "instruction_proxy_count": count_instruction_proxy(function),
         "kind": role,
@@ -752,6 +881,14 @@ def summarize_vm_function(function: FunctionIR) -> dict[str, Any]:
         ),
         "split_opcode_header_count": len(split_opcode_headers),
         "split_opcode_immediates": split_opcode_immediates,
+        "local_split_opcode_header_count": len(local_split_opcode_headers),
+        "nonlocal_split_opcode_header_count": len(nonlocal_split_opcode_headers),
+        "nonlocal_split_fragment_count": max(
+            len(nonlocal_split_opcode_headers), named_nonlocal_fragment_count
+        ),
+        "nonlocal_split_reload_count": max(
+            len(nonlocal_split_opcode_headers), named_nonlocal_reload_count
+        ),
         "transformed_opcode_compare_count": len(transformed_opcode_headers),
         "transformed_opcode_constants": transformed_opcode_constants,
         "trap_count": len(re.findall(r"@llvm\.trap", function.body)),
@@ -927,13 +1064,15 @@ def score_from_counts(metrics: dict[str, int]) -> dict[str, int]:
         "bytecode_data_refs": min(metrics["bytecode_data_ref_count"] * 4, 24),
         "dispatcher_blocks": min(metrics["dispatcher_block_count"] * 2, 24),
         "generated_symbol_roles": min(metrics["generated_symbol_role_count"] * 5, 45),
-        "handler_candidates": min(metrics["handler_candidate_count"] * 2, 36),
+        "handler_candidates": min(metrics["direct_success_to_handler_count"] * 2, 36)
+        + min(metrics["trampoline_to_handler_count"], 18),
         "mapped_wrappers": min(metrics["mapped_wrapper_count"] * 14, 42),
         "raw_opcode_compares": min(metrics["raw_direct_opcode_compare_count"] * 3, 48),
         "physical_opcodes": min(metrics["physical_opcode_count"] * 2, 36),
         "program_counter_candidates": min(metrics["program_counter_candidate_count"] * 2, 24),
         "repeated_helper_shapes": min(metrics["repeated_helper_shape_count"] * 8, 24),
-        "split_opcode_predicates": min(metrics["split_opcode_header_count"], 12),
+        "split_opcode_predicates": min(metrics["local_split_opcode_header_count"], 12)
+        + min(metrics["nonlocal_split_opcode_header_count"], 6),
         "state_candidates": min(metrics["state_candidate_count"] * 2, 24),
         "transformed_opcode_compares": min(metrics["transformed_opcode_compare_count"], 24),
         "transformed_opcode_constants": min(metrics["transformed_opcode_constant_count"], 18),
@@ -1034,7 +1173,9 @@ def build_findings(
                     f"recovered {metrics['raw_direct_opcode_compare_count']} raw i8 opcode compare(s), "
                     f"{metrics['physical_opcode_count']} raw physical opcode constant(s), "
                     f"{metrics['transformed_opcode_compare_count']} one-shot transformed opcode compare(s), "
-                    f"and {metrics['split_opcode_header_count']} split opcode predicate header(s)"
+                    f"and {metrics['split_opcode_header_count']} split opcode predicate header(s) "
+                    f"({metrics['local_split_opcode_header_count']} local complete, "
+                    f"{metrics['nonlocal_split_opcode_header_count']} non-local)"
                 ),
                 "severity": "warn",
             }
@@ -1058,11 +1199,39 @@ def build_findings(
             }
         )
 
-    if metrics["split_opcode_header_count"] and not metrics["raw_direct_opcode_compare_count"]:
+    if metrics["local_split_opcode_header_count"] and not metrics["raw_direct_opcode_compare_count"]:
         findings.append(
             {
                 "check": "opcode_recovery_confidence",
                 "detail": "opcode headers use split transformed predicates; direct constant confidence is partial",
+                "severity": "info",
+            }
+        )
+
+    if metrics["nonlocal_split_opcode_header_count"] and not metrics["raw_direct_opcode_compare_count"]:
+        findings.append(
+            {
+                "check": "predicate_locality_confidence",
+                "detail": (
+                    "opcode predicate material crosses blocks; recovery is limited to "
+                    f"{metrics['nonlocal_split_fragment_count']} non-local fragment store(s) and "
+                    f"{metrics['nonlocal_split_opcode_header_count']} reload-bearing header(s)"
+                ),
+                "severity": "info",
+            }
+        )
+
+    if metrics["handler_mapped_opcode_header_count"]:
+        findings.append(
+            {
+                "check": "handler_mapping_confidence",
+                "detail": (
+                    f"direct success-to-handler: {metrics['direct_success_to_handler_count']}; "
+                    f"success-to-trampoline: {metrics['success_to_trampoline_count']}; "
+                    f"trampoline-to-handler: {metrics['trampoline_to_handler_count']}; "
+                    f"routed: {metrics['routed_success_count']}; "
+                    f"decoy ambiguous: {metrics['decoy_route_block_count']}"
+                ),
                 "severity": "info",
             }
         )
@@ -1226,6 +1395,12 @@ def analyze_ir(
             for ref in summary["vm_data_refs"]
         }
     )
+    route_family_counts = Counter(
+        family
+        for summary in vm_function_summaries
+        for family, count in summary["route_family_counts"].items()
+        for _ in range(count)
+    )
     metrics = {
         "bytecode_data_ref_count": len(bytecode_data_refs),
         "callsite_rewrite_count": len(callsites),
@@ -1237,11 +1412,44 @@ def analyze_ir(
         "handler_candidate_count": sum(
             summary["handler_block_candidate_count"] for summary in vm_function_summaries
         ),
+        "handler_mapped_opcode_header_count": sum(
+            summary["handler_mapped_opcode_header_count"] for summary in vm_function_summaries
+        ),
+        "direct_success_to_handler_count": sum(
+            summary["direct_success_to_handler_count"] for summary in vm_function_summaries
+        ),
+        "success_to_trampoline_count": sum(
+            summary["success_to_trampoline_count"] for summary in vm_function_summaries
+        ),
+        "trampoline_to_handler_count": sum(
+            summary["trampoline_to_handler_count"] for summary in vm_function_summaries
+        ),
+        "routed_success_count": sum(
+            summary["routed_success_count"] for summary in vm_function_summaries
+        ),
+        "decoy_route_block_count": sum(
+            summary["decoy_route_block_count"] for summary in vm_function_summaries
+        ),
+        "shared_route_block_count": sum(
+            summary["shared_route_block_count"] for summary in vm_function_summaries
+        ),
         "mapped_wrapper_count": len(wrapper_to_implementation),
         "opcode_compare_count": sum(
             summary["opcode_compare_count"] for summary in vm_function_summaries
         ),
         "physical_opcode_count": len(physical_opcodes),
+        "local_split_opcode_header_count": sum(
+            summary["local_split_opcode_header_count"] for summary in vm_function_summaries
+        ),
+        "nonlocal_split_fragment_count": sum(
+            summary["nonlocal_split_fragment_count"] for summary in vm_function_summaries
+        ),
+        "nonlocal_split_opcode_header_count": sum(
+            summary["nonlocal_split_opcode_header_count"] for summary in vm_function_summaries
+        ),
+        "nonlocal_split_reload_count": sum(
+            summary["nonlocal_split_reload_count"] for summary in vm_function_summaries
+        ),
         "program_counter_candidate_count": sum(
             summary["program_counter_candidate_count"] for summary in vm_function_summaries
         ),
@@ -1281,8 +1489,26 @@ def analyze_ir(
         opcode_recovery_confidence = "raw_physical"
     elif metrics["transformed_opcode_compare_count"]:
         opcode_recovery_confidence = "transformed"
-    elif metrics["split_opcode_header_count"]:
+    elif metrics["local_split_opcode_header_count"]:
         opcode_recovery_confidence = "split_partial"
+    elif metrics["nonlocal_split_opcode_header_count"] or metrics["nonlocal_split_fragment_count"]:
+        opcode_recovery_confidence = "non_local_partial"
+    predicate_locality_confidence = "none"
+    if metrics["local_split_opcode_header_count"]:
+        predicate_locality_confidence = "local_complete"
+    elif metrics["nonlocal_split_opcode_header_count"] or metrics["nonlocal_split_fragment_count"]:
+        predicate_locality_confidence = "non_local"
+    handler_mapping_confidence = "none"
+    if metrics["direct_success_to_handler_count"]:
+        handler_mapping_confidence = "branch_target"
+    elif metrics["decoy_route_block_count"]:
+        handler_mapping_confidence = "decoy_ambiguous"
+    elif metrics["trampoline_to_handler_count"]:
+        handler_mapping_confidence = "trampoline"
+    elif metrics["routed_success_count"]:
+        handler_mapping_confidence = "routed"
+    elif metrics["opcode_compare_count"]:
+        handler_mapping_confidence = "low"
     trap_oracle_confidence = "none"
     if metrics["trap_oracle_direct_count"]:
         trap_oracle_confidence = "direct"
@@ -1306,12 +1532,15 @@ def analyze_ir(
         "ir_path": ir_path_display,
         "marker_counts": nonzero_marker_counts,
         "metrics": metrics,
+        "handler_mapping_confidence": handler_mapping_confidence,
         "opcode_recovery_confidence": opcode_recovery_confidence,
+        "predicate_locality_confidence": predicate_locality_confidence,
         "physical_opcodes": physical_opcodes,
         "present": True,
         "recovery_score": sum(score_breakdown.values()),
         "repeated_helper_shapes": helper_shape_groups,
         "score_breakdown": score_breakdown,
+        "route_family_counts": dict(sorted(route_family_counts.items())),
         "symbols_by_role": symbols_by_role,
         "split_opcode_immediates": split_opcode_immediates,
         "trap_oracle_confidence": trap_oracle_confidence,
@@ -1338,11 +1567,14 @@ def missing_result(benchmark: str, ir_path_display: str, strict: bool) -> dict[s
         "ir_path": ir_path_display,
         "marker_counts": {},
         "metrics": {},
+        "handler_mapping_confidence": "none",
         "opcode_recovery_confidence": "none",
+        "predicate_locality_confidence": "none",
         "physical_opcodes": [],
         "present": False,
         "recovery_score": 0,
         "repeated_helper_shapes": [],
+        "route_family_counts": {},
         "score_breakdown": {},
         "symbols_by_role": {},
         "split_opcode_immediates": [],
@@ -1495,7 +1727,13 @@ def print_report(payload: dict[str, Any], verbose: bool) -> None:
             f"raw_opcodes={metrics.get('physical_opcode_count', 0)} "
             f"full_transformed={metrics.get('transformed_opcode_constant_count', 0)} "
             f"split_headers={metrics.get('split_opcode_header_count', 0)} "
+            f"local_split={metrics.get('local_split_opcode_header_count', 0)} "
+            f"nonlocal_split={metrics.get('nonlocal_split_opcode_header_count', 0)} "
             f"confidence={result.get('opcode_recovery_confidence', 'none')} "
+            f"locality={result.get('predicate_locality_confidence', 'none')} "
+            f"handler_map={result.get('handler_mapping_confidence', 'none')} "
+            f"direct_handlers={metrics.get('direct_success_to_handler_count', 0)} "
+            f"trampolines={metrics.get('success_to_trampoline_count', 0)} "
             f"trap_oracle={result.get('trap_oracle_confidence', 'none')}"
         )
         if verbose:

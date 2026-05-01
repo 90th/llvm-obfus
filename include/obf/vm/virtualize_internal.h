@@ -61,6 +61,7 @@ struct rewrite_function_context {
   llvm::Value* hidden_token_slot = nullptr;
   llvm::Value* return_value_slot = nullptr;
   llvm::BasicBlock* trap_block = nullptr;
+  llvm::Value* opcode_predicate_slot = nullptr;
   llvm::ArrayRef<llvm::BasicBlock*> instruction_blocks;
   llvm::ArrayRef<std::uint32_t> island_for_instruction;
   bool state_island_body = false;

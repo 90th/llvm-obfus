@@ -1,0 +1,5 @@
+seed: 525252
+default_level: none
+targets:
+  - match: route_me
+    level: vm

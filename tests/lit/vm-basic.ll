@@ -68,6 +68,7 @@ entry:
 ; CHECK-NOT: %obf.vm.pc = alloca i32
 ; CHECK-NOT: dispatch.obf.vm:
 ; CHECK: %obf.vm.state = alloca i64
+; CHECK: %obf.vm.pred.slot = alloca i32
 ; CHECK: %obf.vm.token.state.match = icmp eq i64 %obf.hidden_token,
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
 ; CHECK: {{^vm\.0:}}
@@ -79,12 +80,18 @@ entry:
 ; CHECK: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
 ; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
 ; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
+; CHECK: store i32 {{%obf\.vm\.opcode\.split\.(low|high)\.delta[^,]*}}, ptr %obf.vm.pred.slot
+; CHECK: br label %obf.vm.opcode.pred.merge
+; CHECK: {{^obf\.vm\.opcode\.pred\.merge[0-9]*:}}
+; CHECK: {{%obf\.vm\.opcode\.split\.(low|high)\.reload[^ ]* = }}load i32, ptr %obf.vm.pred.slot
 ; CHECK: {{%obf\.vm\.opcode\.split\.low\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
 ; CHECK: {{%obf\.vm\.opcode\.split\.high\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
 ; CHECK: {{%obf\.vm\.opcode\.split\.match[^ ]* = }}and i1
-; CHECK: br i1 {{[^,]+}}, label %vm.exec.0, label %obf.vm.fail.shared
+; CHECK: br i1 {{[^,]+}}, label %obf.vm.route.entry.{{[0-9]+}}, label %obf.vm.fail.shared
+; CHECK: {{^obf\.vm\.route\.entry\.[0-9]+:}}
+; CHECK: br label %vm.exec.{{[0-9]+}}
 ; CHECK: indirectbr ptr
-; CHECK: {{^vm\.exec\.0:}}
+; CHECK: {{^vm\.exec\.[0-9]+:}}
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @[[RETKEY]]
 ; CHECK: ret i32 %obf.vm.ret.encoded
@@ -114,13 +121,17 @@ entry:
 ; INST: %fold_value.obf.retdec = {{(or|sub) i32}}
 ; INST-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)
 ; INST: %obf.vm.state = alloca i64
+; INST: %obf.vm.pred.slot = alloca i32
 ; INST: {{^vm\.0:}}
 ; INST: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
 ; INST-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
 ; INST-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
+; INST: {{%obf\.vm\.opcode\.split\.(low|high)\.reload[^ ]* = }}load i32, ptr %obf.vm.pred.slot
 ; INST: {{%obf\.vm\.opcode\.split\.low\.(delta|ok)[^ ]* = }}{{(or|sub|icmp eq) i32}}
 ; INST: {{%obf\.vm\.opcode\.split\.high\.(delta|ok)[^ ]* = }}{{(or|sub|icmp eq) i32}}
 ; INST: {{%obf\.vm\.opcode\.split\.match[^ ]* = }}{{(and i1|icmp eq i32)}}
 ; INST: indirectbr ptr
-; INST: {{^vm\.exec\.0:}}
+; INST: {{^obf\.vm\.route\.entry\.[0-9]+:}}
+; INST: br label %vm.exec.{{[0-9]+}}
+; INST: {{^vm\.exec\.[0-9]+:}}
 ; INST: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
