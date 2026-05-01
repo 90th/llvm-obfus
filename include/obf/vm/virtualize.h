@@ -25,7 +25,7 @@ struct virtualization_result {
   std::string detail;
 };
 
-virtualization_result run_virtualization(llvm::Function &function,
-                                        const virtualization_options &options = {});
+virtualization_result run_virtualization(llvm::Function& function,
+                                         const virtualization_options& options = {});
 
-} // namespace obf::vm
+}  // namespace obf::vm

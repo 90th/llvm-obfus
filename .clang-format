@@ -1,0 +1,34 @@
+---
+Language:        Cpp
+BasedOnStyle:    Google
+
+# Enforce K&R Braces
+BreakBeforeBraces: Attach
+
+# --- STOP CLANG FROM BREAKING RAYLIB ---
+SortIncludes:    false
+
+# --- ONE LINER RULES ---
+AllowShortBlocksOnASingleLine: Always
+AllowShortIfStatementsOnASingleLine: Always
+AllowShortLoopsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All
+
+# --- ARGUMENT FORMATTING ---
+BinPackArguments: false
+BinPackParameters: false
+ColumnLimit:     100
+
+# --- PENALTIES ---
+PenaltyBreakBeforeFirstCallParameter: 19
+PenaltyBreakComment: 300
+PenaltyBreakString: 1000
+PenaltyExcessCharacter: 1000000
+PenaltyReturnTypeOnItsOwnLine: 60
+
+# --- INDENTATION ---
+IndentWidth:     2
+TabWidth:        2
+UseTab:          Never
+AccessModifierOffset: -1
+NamespaceIndentation: None

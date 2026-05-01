@@ -76,7 +76,13 @@ entry:
 ; CHECK: %obf.vm.integrity.byte.window = load i32, ptr %obf.vm.integrity.byte.ptr, align 1
 ; CHECK: %obf.vm.integrity.byte = trunc i32 %obf.vm.integrity.byte.shr to i8
 ; CHECK: %obf.vm.integrity.state = load i64, ptr %obf.vm.state
-; CHECK: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, {{-?[0-9]+}}
+; CHECK: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
+; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
+; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
+; CHECK: {{%obf\.vm\.opcode\.split\.low\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
+; CHECK: {{%obf\.vm\.opcode\.split\.high\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
+; CHECK: {{%obf\.vm\.opcode\.split\.match[^ ]* = }}and i1
+; CHECK: br i1 {{[^,]+}}, label %vm.exec.0, label %obf.vm.fail.shared
 ; CHECK: indirectbr ptr
 ; CHECK: {{^vm\.exec\.0:}}
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
@@ -109,7 +115,12 @@ entry:
 ; INST-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)
 ; INST: %obf.vm.state = alloca i64
 ; INST: {{^vm\.0:}}
-; INST: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, {{-?[0-9]+}}
+; INST: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
+; INST-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
+; INST-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
+; INST: {{%obf\.vm\.opcode\.split\.low\.(delta|ok)[^ ]* = }}{{(or|sub|icmp eq) i32}}
+; INST: {{%obf\.vm\.opcode\.split\.high\.(delta|ok)[^ ]* = }}{{(or|sub|icmp eq) i32}}
+; INST: {{%obf\.vm\.opcode\.split\.match[^ ]* = }}{{(and i1|icmp eq i32)}}
 ; INST: indirectbr ptr
 ; INST: {{^vm\.exec\.0:}}
 ; INST: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}

@@ -20,12 +20,10 @@ struct bogus_control_flow_result {
   std::string detail;
 };
 
-bogus_control_flow_result
-analyze_bogus_control_flow(const llvm::Function &function,
-                           const bogus_control_flow_options &options);
+bogus_control_flow_result analyze_bogus_control_flow(const llvm::Function& function,
+                                                     const bogus_control_flow_options& options);
 
-bogus_control_flow_result
-run_bogus_control_flow(llvm::Function &function,
-                       const bogus_control_flow_options &options);
+bogus_control_flow_result run_bogus_control_flow(llvm::Function& function,
+                                                 const bogus_control_flow_options& options);
 
-} // namespace obf
+}  // namespace obf

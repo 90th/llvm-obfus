@@ -10,12 +10,11 @@ namespace llvm {
 class Constant;
 class ConstantInt;
 class Type;
-}
+}  // namespace llvm
 
 namespace obf::vm {
 
-inline constexpr std::uint32_t invalid_slot =
-    std::numeric_limits<std::uint32_t>::max();
+inline constexpr std::uint32_t invalid_slot = std::numeric_limits<std::uint32_t>::max();
 
 enum class slot_kind : std::uint8_t {
   integer,
@@ -26,7 +25,7 @@ enum class slot_kind : std::uint8_t {
 };
 
 struct slot_desc {
-  const llvm::Type *type = nullptr;
+  const llvm::Type* type = nullptr;
   slot_kind kind = slot_kind::integer;
 };
 
@@ -38,7 +37,7 @@ enum class value_ref_kind : std::uint8_t {
 struct value_ref {
   value_ref_kind kind = value_ref_kind::slot;
   std::uint32_t slot = invalid_slot;
-  const llvm::Constant *constant = nullptr;
+  const llvm::Constant* constant = nullptr;
 };
 
 enum class opcode : std::uint8_t {
@@ -140,8 +139,7 @@ inline constexpr std::uint32_t instruction_flag_fast_contract = 1U << 13;
 inline constexpr std::uint32_t instruction_flag_fast_afn = 1U << 14;
 inline constexpr std::uint32_t instruction_flag_fast_fast = 1U << 15;
 
-inline constexpr bool has_instruction_flag(std::uint32_t flags,
-                                           std::uint32_t bit) {
+inline constexpr bool has_instruction_flag(std::uint32_t flags, std::uint32_t bit) {
   return (flags & bit) != 0;
 }
 
@@ -165,11 +163,11 @@ struct micro_instruction {
   std::uint32_t subtype = 0;
   std::uint32_t flags = 0;
   std::uint32_t immediate = 0;
-  const llvm::Type *type = nullptr;
+  const llvm::Type* type = nullptr;
   llvm::AttributeList attributes;
   std::vector<value_ref> operands;
   std::vector<control_edge> edges;
-  std::vector<const llvm::ConstantInt *> case_values;
+  std::vector<const llvm::ConstantInt*> case_values;
 };
 
 struct bytecode_program {
@@ -179,4 +177,4 @@ struct bytecode_program {
   std::vector<micro_instruction> instructions;
 };
 
-} // namespace obf::vm
+}  // namespace obf::vm

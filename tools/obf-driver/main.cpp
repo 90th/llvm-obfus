@@ -6,23 +6,22 @@
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/raw_ostream.h"
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   llvm::InitLLVM init_llvm(argc, argv);
 
   llvm::cl::OptionCategory driver_category("llvm-obfus options");
-  llvm::cl::opt<std::string> config_path(
-      "config", llvm::cl::desc("Path to llvm-obfus milestone-zero config"),
-      llvm::cl::init(""), llvm::cl::cat(driver_category));
+  llvm::cl::opt<std::string> config_path("config",
+                                         llvm::cl::desc("Path to llvm-obfus milestone-zero config"),
+                                         llvm::cl::init(""),
+                                         llvm::cl::cat(driver_category));
   llvm::cl::HideUnrelatedOptions(driver_category);
-  llvm::cl::ParseCommandLineOptions(argc, argv,
-                                    "llvm-obfus driver scaffold\n");
+  llvm::cl::ParseCommandLineOptions(argc, argv, "llvm-obfus driver scaffold\n");
 
   llvm::outs() << "llvm-obfus driver scaffold\n";
   llvm::outs() << "LLVM version target: " << LLVM_VERSION_STRING << "\n";
 
   if (!config_path.empty()) {
-    llvm::Expected<obf::obfuscation_config> config =
-        obf::load_config_from_file(config_path);
+    llvm::Expected<obf::obfuscation_config> config = obf::load_config_from_file(config_path);
     if (!config) {
       llvm::errs() << llvm::toString(config.takeError()) << '\n';
       return 1;

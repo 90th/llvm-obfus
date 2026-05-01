@@ -63,8 +63,7 @@ struct string_encoding_result {
   string_encoding_mode mode = string_encoding_mode::skipped;
   string_strategy_kind strategy_kind = string_strategy_kind::none;
   string_helper_shape helper_shape = string_helper_shape::none;
-  string_key_schedule_kind key_schedule =
-      string_key_schedule_kind::seeded_byte_xor_v0;
+  string_key_schedule_kind key_schedule = string_key_schedule_kind::seeded_byte_xor_v0;
   std::string detail;
   std::string inline_detail;
   std::string fallback_reason;
@@ -91,17 +90,16 @@ std::string to_string(string_helper_shape shape);
 std::string to_string(string_key_schedule_kind schedule);
 
 std::vector<string_encoding_result>
-analyze_string_encoding(const llvm::Module &module,
+analyze_string_encoding(const llvm::Module& module,
                         protected_function_seed_lookup get_seed,
                         protected_function_level_lookup get_level,
-                        const string_encoding_options &options,
+                        const string_encoding_options& options,
                         std::uint64_t module_seed);
 
-std::vector<string_encoding_result>
-run_string_encoding(llvm::Module &module,
-                    protected_function_seed_lookup get_seed,
-                    protected_function_level_lookup get_level,
-                    const string_encoding_options &options,
-                    std::uint64_t module_seed);
+std::vector<string_encoding_result> run_string_encoding(llvm::Module& module,
+                                                        protected_function_seed_lookup get_seed,
+                                                        protected_function_level_lookup get_level,
+                                                        const string_encoding_options& options,
+                                                        std::uint64_t module_seed);
 
-} // namespace obf
+}  // namespace obf

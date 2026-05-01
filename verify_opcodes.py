@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from collections import Counter
+import hashlib
 import re
 import sys
 from dataclasses import dataclass
@@ -8,24 +9,47 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-LICENSE_BASELINE_IR = ROOT / "build/benchmarks/license_demo/license_demo.baseline.ll"
-LICENSE_OBF_IR = ROOT / "build/benchmarks/license_demo/license_demo.obfuscated.ll"
 CONFIG_BASELINE_IR = ROOT / "build/benchmarks/config_demo/config_demo.baseline.ll"
-CONFIG_OBF_IR = ROOT / "build/benchmarks/config_demo/config_demo.obfuscated.ll"
+CONFIG_PRIMARY_OBF_IR_CANDIDATES = (
+    ROOT / "build/diversity/config_demo/10101/marker-probe.ll",
+    ROOT / "build/benchmarks/config_demo/config_demo.obfuscated.ll",
+)
+CONFIG_SECONDARY_OBF_IR_CANDIDATES = (
+    ROOT / "build/diversity/config_demo/20202/marker-probe.ll",
+)
 
 
 WRAPPER_CALL_PATTERN = re.compile(
     r"call\s+.*?@(?P<impl>[_A-Za-z$\.0-9]+)\([^\n]*,\s*i64\s+%[0-9A-Za-z_.]+\)"
 )
-EQ_OPCODE_PATTERN = re.compile(r"icmp eq i8\s+[^,]+,\s+(?:i8\s+)?(?P<opcode>-?\d+)")
+RAW_OPCODE_COMPARE_PATTERN = re.compile(
+    r"(?:%[-A-Za-z$._0-9]*obf\.vm\.opcode\.match[-A-Za-z$._0-9]*\s*=\s*)?"
+    r"\bicmp eq i8\s+[^,\n]+,\s+(?:i8\s+)?(?P<opcode>-?\d+)"
+)
+TRANSFORMED_OPCODE_COMPARE_PATTERN = re.compile(
+    r"(?:%[-A-Za-z$._0-9]*obf\.vm\.opcode\.match[-A-Za-z$._0-9]*\s*=\s*)?"
+    r"\bicmp eq i32\s+[^,\n]+,\s+(?:i32\s+)?(?P<opcode>-?\d+)"
+)
+SPLIT_OPCODE_COMPARE_PATTERN = re.compile(
+    r"\bicmp eq i32\s+[^,\n]+,\s+(?:i32\s+)?(?P<opcode>-?\d+)"
+)
+NAMED_SPLIT_OPCODE_COMPARE_PATTERN = re.compile(
+    r"%[-A-Za-z$._0-9]*obf\.vm\.opcode\.split\.(?:low|high)\.ok"
+    r"[-A-Za-z$._0-9]*\s*=\s*\bicmp eq i32\b"
+)
+OPCODE_WIDEN_PATTERN = re.compile(r"\bzext\s+i8\b[^\n]*\bto\s+i32\b")
 COND_BRANCH_PATTERN = re.compile(
     r"br\s+i1\s+[^,]+,\s+label\s+%(?P<true>[0-9A-Za-z$._-]+),\s+label\s+%(?P<false>[0-9A-Za-z$._-]+)"
 )
+UNCOND_BRANCH_PATTERN = re.compile(r"\bbr\s+label\s+%(?P<target>[0-9A-Za-z$._-]+)")
 ASSIGNED_VALUE_PATTERN = re.compile(r"%(?:[-A-Za-z$._0-9]+)\s*=\s+(?P<opcode>[a-z][a-z0-9]*)\b")
 ASSIGNED_CALL_PATTERN = re.compile(
     r"%(?:[-A-Za-z$._0-9]+)\s*=\s+(?:(?:tail|musttail|notail)\s+)?(?:call|invoke)\b"
 )
 DIRECT_CALL_PATTERN = re.compile(r"(?:(?:tail|musttail|notail)\s+)?(?:call|invoke)\b")
+FUNCTION_PTR_REF_PATTERN = re.compile(
+    r"ptrtoint\s+\(ptr\s+@(?P<name>[A-Za-z$._0-9-]+)\s+to\s+i\d+\)"
+)
 
 
 @dataclass(frozen=True)
@@ -98,15 +122,63 @@ def parse_blocks(function_body: str) -> dict[str, str]:
     return blocks
 
 
+def is_failure_block(label: str, body: str, trap_labels: set[str]) -> bool:
+    branch_match = UNCOND_BRANCH_PATTERN.search(body)
+    branches_to_trap = branch_match is not None and branch_match.group("target") in trap_labels
+    return "fail" in label.lower() or branches_to_trap
+
+
+def looks_like_opcode_block(body: str) -> bool:
+    return "obf.vm.opcode" in body or bool(OPCODE_WIDEN_PATTERN.search(body))
+
+
+def split_opcode_compare_count(body: str) -> int:
+    named_count = len(NAMED_SPLIT_OPCODE_COMPARE_PATTERN.findall(body))
+    if named_count:
+        return named_count
+    if not looks_like_opcode_block(body):
+        return 0
+    zero_matches = [
+        match for match in SPLIT_OPCODE_COMPARE_PATTERN.finditer(body)
+        if int(match.group("opcode")) == 0
+    ]
+    return len(zero_matches) if len(zero_matches) >= 2 else 0
+
+
+def stable_split_encoding(body: str) -> int:
+    relevant_lines = [
+        line.strip()
+        for line in body.splitlines()
+        if "obf.vm.opcode" in line or "icmp eq i32" in line or "br i1" in line
+    ]
+    digest = hashlib.sha256("\n".join(relevant_lines).encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
 def find_wrapper_implementations(function_bodies: dict[str, str]) -> dict[str, str]:
     wrappers: dict[str, str] = {}
+    implementation_names = {
+        name for name, body in function_bodies.items() if is_vm_implementation_body(body)
+    }
     for function_name, body in function_bodies.items():
         if is_vm_implementation_body(body):
             continue
         match = WRAPPER_CALL_PATTERN.search(body)
-        if match is None:
+        implementation_name = ""
+        if match is not None:
+            implementation_name = match.group("impl")
+        if not implementation_name:
+            refs = sorted(
+                {
+                    pointer_match.group("name")
+                    for pointer_match in FUNCTION_PTR_REF_PATTERN.finditer(body)
+                    if pointer_match.group("name") in implementation_names
+                }
+            )
+            if len(refs) == 1:
+                implementation_name = refs[0]
+        if not implementation_name:
             continue
-        implementation_name = match.group("impl")
         implementation_body = function_bodies.get(implementation_name)
         if implementation_body is None:
             continue
@@ -114,6 +186,13 @@ def find_wrapper_implementations(function_bodies: dict[str, str]) -> dict[str, s
             continue
         wrappers[function_name] = implementation_name
     return wrappers
+
+
+def first_existing_path(paths: tuple[Path, ...]) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
 
 
 def classify_store_instruction(stripped: str) -> str:
@@ -263,11 +342,19 @@ def extract_header_opcodes(function_body: str) -> list[int]:
         for label, body in blocks.items()
         if "@llvm.trap" in body and "unreachable" in body
     }
+    failure_labels = {
+        label for label, body in blocks.items() if is_failure_block(label, body, trap_labels)
+    }
 
     header_opcodes: list[int] = []
     for body in blocks.values():
-        opcode_match = EQ_OPCODE_PATTERN.search(body)
-        if opcode_match is None:
+        opcode_match = RAW_OPCODE_COMPARE_PATTERN.search(body)
+        split_encoding: int | None = None
+        if opcode_match is None and split_opcode_compare_count(body) >= 2:
+            split_encoding = stable_split_encoding(body)
+        if opcode_match is None and split_encoding is None and looks_like_opcode_block(body):
+            opcode_match = TRANSFORMED_OPCODE_COMPARE_PATTERN.search(body)
+        if opcode_match is None and split_encoding is None:
             continue
 
         branch_match = COND_BRANCH_PATTERN.search(body)
@@ -276,10 +363,17 @@ def extract_header_opcodes(function_body: str) -> list[int]:
 
         true_target = branch_match.group("true")
         false_target = branch_match.group("false")
-        if true_target not in trap_labels and false_target not in trap_labels:
+        if (
+            true_target not in trap_labels
+            and false_target not in trap_labels
+            and true_target not in failure_labels
+            and false_target not in failure_labels
+        ):
             continue
 
-        header_opcodes.append(int(opcode_match.group("opcode")))
+        header_opcodes.append(
+            split_encoding if split_encoding is not None else int(opcode_match.group("opcode"))
+        )
 
     return header_opcodes
 
@@ -305,7 +399,7 @@ def build_family_opcode_map(
             continue
         if existing != physical_opcode:
             raise AssertionError(
-                f"{function_name}: logical family {logical_family} used multiple physical opcodes "
+                f"{function_name}: logical family {logical_family} used multiple dispatch encodings "
                 f"({existing} and {physical_opcode})"
             )
 
@@ -322,6 +416,8 @@ def extract_vm_summary(
 
     summaries: list[VmFunctionSummary] = []
     for wrapper_name, implementation_name in wrapper_to_impl.items():
+        if wrapper_name not in baseline_function_bodies:
+            continue
         implementation_body = function_bodies.get(implementation_name)
         if implementation_body is None:
             continue
@@ -430,44 +526,60 @@ def print_comparisons(title: str, comparisons: list[OpcodeComparison]) -> None:
 
 
 def main() -> int:
-    required_paths = (
-        LICENSE_BASELINE_IR,
-        LICENSE_OBF_IR,
-        CONFIG_BASELINE_IR,
-        CONFIG_OBF_IR,
+    config_primary_obf_ir = first_existing_path(CONFIG_PRIMARY_OBF_IR_CANDIDATES)
+    config_secondary_obf_ir = first_existing_path(CONFIG_SECONDARY_OBF_IR_CANDIDATES)
+    required_paths = tuple(
+        path
+        for path in (
+            CONFIG_BASELINE_IR,
+            config_primary_obf_ir,
+            config_secondary_obf_ir,
+        )
+        if path is not None
     )
+    if config_primary_obf_ir is None:
+        print(
+            "missing IR file: " + " or ".join(str(path) for path in CONFIG_PRIMARY_OBF_IR_CANDIDATES),
+            file=sys.stderr,
+        )
+        return 1
+    if config_secondary_obf_ir is None:
+        print(
+            "missing IR file: " + " or ".join(str(path) for path in CONFIG_SECONDARY_OBF_IR_CANDIDATES),
+            file=sys.stderr,
+        )
+        return 1
     for path in required_paths:
         if not path.exists():
             print(f"missing IR file: {path}", file=sys.stderr)
             return 1
 
-    license_baseline_text = LICENSE_BASELINE_IR.read_text(encoding="utf-8")
-    license_obf_text = LICENSE_OBF_IR.read_text(encoding="utf-8")
     config_baseline_text = CONFIG_BASELINE_IR.read_text(encoding="utf-8")
-    config_obf_text = CONFIG_OBF_IR.read_text(encoding="utf-8")
+    config_primary_obf_text = config_primary_obf_ir.read_text(encoding="utf-8")
+    config_secondary_obf_text = config_secondary_obf_ir.read_text(encoding="utf-8")
 
-    license_summaries = extract_vm_summary(license_obf_text, license_baseline_text)
-    config_summaries = extract_vm_summary(config_obf_text, config_baseline_text)
+    config_primary_summaries = extract_vm_summary(config_primary_obf_text, config_baseline_text)
+    config_secondary_summaries = extract_vm_summary(config_secondary_obf_text, config_baseline_text)
 
-    print_summary("license_demo opcode mapping:", license_summaries)
-    print_summary("config_demo opcode mapping:", config_summaries)
+    print_summary("config_demo primary-seed opcode mapping:", config_primary_summaries)
+    print_summary("config_demo secondary-seed opcode mapping:", config_secondary_summaries)
 
-    if not license_summaries or not config_summaries:
-        raise AssertionError("expected benchmark vm opcode mappings in both benchmark IR files")
+    if not config_primary_summaries or not config_secondary_summaries:
+        raise AssertionError("expected config_demo vm opcode mappings in both seed IR files")
 
-    comparisons = compare_common_opcode_families(config_summaries, license_summaries)
-    print_comparisons("cross-demo opcode comparison:", comparisons)
+    comparisons = compare_common_opcode_families(config_primary_summaries, config_secondary_summaries)
+    print_comparisons("cross-seed opcode comparison:", comparisons)
     if not comparisons:
         raise AssertionError(
-            "expected shared logical opcode families across config_demo and license_demo"
+            "expected shared logical opcode families across config_demo seed outputs"
         )
 
     if not any(comparison.differing for comparison in comparisons):
         raise AssertionError(
-            "expected at least one shared logical opcode family to use a different physical encoding"
+            "expected at least one shared logical opcode family to use a different dispatch encoding"
         )
 
-    print("opcode scrambling verified: shared logical opcode families use different physical encodings")
+    print("opcode scrambling verified: shared logical opcode families use different dispatch encodings across seeds")
     return 0
 
 

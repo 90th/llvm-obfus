@@ -338,6 +338,20 @@ add_custom_target(obf-audit-benchmarks
   DEPENDS obf-benchmarks
   VERBATIM)
 
+set(OBF_RE_HARNESS_JSON
+  "${CMAKE_CURRENT_BINARY_DIR}/re-harness/vm_recovery.json")
+add_custom_target(obf-re-harness
+  COMMAND "${CMAKE_COMMAND}" -E make_directory
+          "${CMAKE_CURRENT_BINARY_DIR}/re-harness"
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/obf-re-harness/score_vm_resistance.py"
+          "--benchmarks-dir" "${CMAKE_CURRENT_BINARY_DIR}/benchmarks"
+          "--benchmarks" "license_demo,config_demo,vm_workflow_demo"
+          "--json-out" "${OBF_RE_HARNESS_JSON}"
+          "--strict"
+  DEPENDS obf-benchmarks
+  VERBATIM)
+
 add_custom_target(obf-seed-diversity
   COMMAND "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/obf-diversity/verify_seed_diversity.py"

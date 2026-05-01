@@ -39,12 +39,19 @@ done:
 
 ; VM-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; VM: {{^vm\.0:}}
-; VM: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[ALPHA_OP:-?[0-9]+]]
+; VM: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
+; VM-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
+; VM-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
+; VM: {{%obf\.vm\.opcode\.split\.low\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
+; VM: {{%obf\.vm\.opcode\.split\.high\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
 ; VM: {{^vm\.exec\.0:}}
 ; VM-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; VM: {{^vm\.0:}}
-; VM-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[ALPHA_OP]]
-; VM: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[BETA_OP:-?[0-9]+]]
+; VM: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
+; VM-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
+; VM-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
+; VM: {{%obf\.vm\.opcode\.split\.low\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
+; VM: {{%obf\.vm\.opcode\.split\.high\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
 ; VM: {{^vm\.exec\.0:}}
 
 ; FLAT-LABEL: define i32 @flatten_me(i32 %x)

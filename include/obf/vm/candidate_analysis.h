@@ -17,7 +17,7 @@ struct candidate_result {
   std::string detail;
 };
 
-candidate_result analyze_candidate(const llvm::Function &function,
-                                   bytecode_program *program = nullptr);
+candidate_result analyze_candidate(const llvm::Function& function,
+                                   bytecode_program* program = nullptr);
 
-} // namespace obf::vm
+}  // namespace obf::vm

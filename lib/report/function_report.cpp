@@ -16,20 +16,16 @@ std::string format_feature_report(llvm::StringRef module_name,
   llvm::json::Array functions_json;
   llvm::json::Array transforms_json;
 
-  for (const function_report_entry &entry : entries) {
-    const function_features &feature = entry.features;
+  for (const function_report_entry& entry : entries) {
+    const function_features& feature = entry.features;
     llvm::json::Object function_json;
     function_json["name"] = feature.name;
-    function_json["instruction_count"] =
-        static_cast<std::int64_t>(feature.instruction_count);
-    function_json["basic_block_count"] =
-        static_cast<std::int64_t>(feature.basic_block_count);
+    function_json["instruction_count"] = static_cast<std::int64_t>(feature.instruction_count);
+    function_json["basic_block_count"] = static_cast<std::int64_t>(feature.basic_block_count);
     function_json["cyclomatic_complexity"] =
         static_cast<std::int64_t>(feature.cyclomatic_complexity);
-    function_json["call_count"] =
-        static_cast<std::int64_t>(feature.call_count);
-    function_json["string_ref_count"] =
-        static_cast<std::int64_t>(feature.string_ref_count);
+    function_json["call_count"] = static_cast<std::int64_t>(feature.call_count);
+    function_json["string_ref_count"] = static_cast<std::int64_t>(feature.string_ref_count);
     function_json["has_loops"] = feature.has_loops;
     function_json["has_exception_edges"] = feature.has_exception_edges;
     function_json["has_inline_asm"] = feature.has_inline_asm;
@@ -47,33 +43,25 @@ std::string format_feature_report(llvm::StringRef module_name,
       policy_json["minimum_security_floor"] =
           std::string(to_string(*entry.decision.minimum_security_floor));
     }
-    policy_json["allow_string_encoding"] =
-        entry.decision.policy.allow_string_encoding;
-    policy_json["allow_constant_encoding"] =
-        entry.decision.policy.allow_constant_encoding;
+    policy_json["allow_string_encoding"] = entry.decision.policy.allow_string_encoding;
+    policy_json["allow_constant_encoding"] = entry.decision.policy.allow_constant_encoding;
     policy_json["allow_instruction_substitution"] =
         entry.decision.policy.allow_instruction_substitution;
-    policy_json["allow_function_outlining"] =
-        entry.decision.policy.allow_function_outlining;
-    policy_json["allow_bogus_control_flow"] =
-        entry.decision.policy.allow_bogus_control_flow;
-    policy_json["allow_opaque_predicates"] =
-        entry.decision.policy.allow_opaque_predicates;
+    policy_json["allow_function_outlining"] = entry.decision.policy.allow_function_outlining;
+    policy_json["allow_bogus_control_flow"] = entry.decision.policy.allow_bogus_control_flow;
+    policy_json["allow_opaque_predicates"] = entry.decision.policy.allow_opaque_predicates;
     policy_json["allow_flattening"] = entry.decision.policy.allow_flattening;
     policy_json["allow_split"] = entry.decision.policy.allow_split;
-    policy_json["allow_indirect_calls"] =
-        entry.decision.policy.allow_indirect_calls;
+    policy_json["allow_indirect_calls"] = entry.decision.policy.allow_indirect_calls;
     policy_json["allow_vm"] = entry.decision.policy.allow_vm;
     function_json["policy"] = llvm::json::Value(std::move(policy_json));
 
-    if (!entry.annotation.empty()) {
-      function_json["annotation"] = entry.annotation;
-    }
+    if (!entry.annotation.empty()) { function_json["annotation"] = entry.annotation; }
 
     functions_json.push_back(llvm::json::Value(std::move(function_json)));
   }
 
-  for (const transform_report_entry &entry : transforms) {
+  for (const transform_report_entry& entry : transforms) {
     llvm::json::Object transform_json;
     transform_json["pass"] = entry.pass;
     transform_json["target_kind"] = entry.target_kind;
@@ -90,22 +78,17 @@ std::string format_feature_report(llvm::StringRef module_name,
       strategy_json["inline_eligible"] = entry.inline_eligible;
       strategy_json["inline_detail"] = entry.inline_detail;
       strategy_json["fallback_reason"] = entry.fallback_reason;
-      strategy_json["protected_use_count"] =
-          static_cast<std::int64_t>(entry.protected_use_count);
+      strategy_json["protected_use_count"] = static_cast<std::int64_t>(entry.protected_use_count);
       strategy_json["unprotected_use_count"] =
           static_cast<std::int64_t>(entry.unprotected_use_count);
       if (entry.descriptor_index >= 0) {
         strategy_json["descriptor_index"] = entry.descriptor_index;
       }
 
-      if (entry.merge_group >= 0) {
-        strategy_json["merge_group"] = entry.merge_group;
-      }
+      if (entry.merge_group >= 0) { strategy_json["merge_group"] = entry.merge_group; }
 
       llvm::json::Array use_kinds_json;
-      for (const std::string &use_kind : entry.use_kinds) {
-        use_kinds_json.push_back(use_kind);
-      }
+      for (const std::string& use_kind : entry.use_kinds) { use_kinds_json.push_back(use_kind); }
       strategy_json["use_kinds"] = std::move(use_kinds_json);
       transform_json["strategy"] = llvm::json::Value(std::move(strategy_json));
     }
@@ -126,4 +109,4 @@ std::string format_feature_report(llvm::StringRef module_name,
   return output;
 }
 
-} // namespace obf
+}  // namespace obf

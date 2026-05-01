@@ -35,16 +35,16 @@ struct policy_decision {
 
 constexpr std::string_view to_string(policy_source source) {
   switch (source) {
-  case policy_source::default_policy:
-    return "default";
-  case policy_source::automatic_analysis:
-    return "automatic_analysis";
-  case policy_source::config_rule:
-    return "config_rule";
-  case policy_source::source_annotation:
-    return "source_annotation";
-  case policy_source::explicit_override:
-    return "explicit_override";
+    case policy_source::default_policy:
+      return "default";
+    case policy_source::automatic_analysis:
+      return "automatic_analysis";
+    case policy_source::config_rule:
+      return "config_rule";
+    case policy_source::source_annotation:
+      return "source_annotation";
+    case policy_source::explicit_override:
+      return "explicit_override";
   }
 
   return "default";
@@ -53,9 +53,9 @@ constexpr std::string_view to_string(policy_source source) {
 std::optional<protection_level> parse_protection_level(llvm::StringRef text);
 function_policy make_function_policy(protection_level level);
 
-policy_decision select_policy(const llvm::Module &module,
-                              const function_features &features,
-                              const obfuscation_config &config,
+policy_decision select_policy(const llvm::Module& module,
+                              const function_features& features,
+                              const obfuscation_config& config,
                               llvm::StringRef annotation_text);
 
-} // namespace obf
+}  // namespace obf

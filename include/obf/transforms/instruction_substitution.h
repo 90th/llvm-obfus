@@ -21,11 +21,11 @@ struct instruction_substitution_result {
 };
 
 instruction_substitution_result
-analyze_instruction_substitution(const llvm::Function &function,
-                                 const instruction_substitution_options &options);
+analyze_instruction_substitution(const llvm::Function& function,
+                                 const instruction_substitution_options& options);
 
 instruction_substitution_result
-run_instruction_substitution(llvm::Function &function,
-                             const instruction_substitution_options &options);
+run_instruction_substitution(llvm::Function& function,
+                             const instruction_substitution_options& options);
 
-} // namespace obf
+}  // namespace obf

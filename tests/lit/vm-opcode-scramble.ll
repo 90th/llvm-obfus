@@ -27,10 +27,20 @@ entry:
 
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK: {{^vm\.0:}}
-; CHECK: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[ALPHA_OP:-?[0-9]+]]
+; CHECK: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
+; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
+; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
+; CHECK: {{%obf\.vm\.opcode\.split\.high\.actual[^ ]* = }}lshr i32 {{[^,]+}}, [[ALPHA_SHIFT:[0-9]+]]
+; CHECK: {{%obf\.vm\.opcode\.split\.low\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
+; CHECK: {{%obf\.vm\.opcode\.split\.high\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
 ; CHECK: {{^vm\.exec\.0:}}
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK: {{^vm\.0:}}
-; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[ALPHA_OP]]
-; CHECK: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8 {{[^,]+}}, [[BETA_OP:-?[0-9]+]]
+; CHECK: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
+; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
+; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
+; CHECK-NOT: {{%obf\.vm\.opcode\.split\.high\.actual[^ ]* = }}lshr i32 {{[^,]+}}, [[ALPHA_SHIFT]]
+; CHECK: {{%obf\.vm\.opcode\.split\.high\.actual[^ ]* = }}lshr i32 {{[^,]+}}, [[BETA_SHIFT:[0-9]+]]
+; CHECK: {{%obf\.vm\.opcode\.split\.low\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
+; CHECK: {{%obf\.vm\.opcode\.split\.high\.ok[^ ]* = }}icmp eq i32 {{[^,]+}}, 0
 ; CHECK: {{^vm\.exec\.0:}}

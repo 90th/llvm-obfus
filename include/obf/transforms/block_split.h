@@ -20,12 +20,11 @@ struct block_split_result {
   std::string detail;
 };
 
-block_split_result analyze_block_split(const llvm::Function &function,
-                                       const block_split_options &options,
+block_split_result analyze_block_split(const llvm::Function& function,
+                                       const block_split_options& options,
                                        std::uint64_t seed);
 
-block_split_result run_block_split(llvm::Function &function,
-                                   const block_split_options &options,
-                                   std::uint64_t seed);
+block_split_result
+run_block_split(llvm::Function& function, const block_split_options& options, std::uint64_t seed);
 
-} // namespace obf
+}  // namespace obf

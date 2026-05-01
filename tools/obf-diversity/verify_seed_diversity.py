@@ -14,10 +14,26 @@ from pathlib import Path
 from typing import Any
 
 
-VM_OPCODE_PATTERN = re.compile(r"icmp eq i8\s+[^,]+,\s+(?:i8\s+)?(?P<opcode>-?\d+)")
+VM_OPCODE_PATTERN = re.compile(
+    r"(?:%[-A-Za-z$._0-9]*obf\.vm\.opcode\.match[-A-Za-z$._0-9]*\s*=\s*)?"
+    r"\bicmp eq i8\s+[^,\n]+,\s+(?:i8\s+)?(?P<opcode>-?\d+)"
+)
+VM_TRANSFORMED_OPCODE_PATTERN = re.compile(
+    r"(?:%[-A-Za-z$._0-9]*obf\.vm\.opcode\.match[-A-Za-z$._0-9]*\s*=\s*)?"
+    r"\bicmp eq i32\s+[^,\n]+,\s+(?:i32\s+)?(?P<opcode>-?\d+)"
+)
+VM_SPLIT_OPCODE_PATTERN = re.compile(
+    r"\bicmp eq i32\s+[^,\n]+,\s+(?:i32\s+)?(?P<opcode>-?\d+)"
+)
+NAMED_SPLIT_OPCODE_COMPARE_PATTERN = re.compile(
+    r"%[-A-Za-z$._0-9]*obf\.vm\.opcode\.split\.(?:low|high)\.ok"
+    r"[-A-Za-z$._0-9]*\s*=\s*\bicmp eq i32\b"
+)
+OPCODE_WIDEN_PATTERN = re.compile(r"\bzext\s+i8\b[^\n]*\bto\s+i32\b")
 COND_BRANCH_PATTERN = re.compile(
     r"br\s+i1\s+[^,]+,\s+label\s+%(?P<true>[0-9A-Za-z$._-]+),\s+label\s+%(?P<false>[0-9A-Za-z$._-]+)"
 )
+UNCOND_BRANCH_PATTERN = re.compile(r"\bbr\s+label\s+%(?P<target>[0-9A-Za-z$._-]+)")
 FUNCTION_NAME_PATTERN = re.compile(r"@(?P<name>[^\(]+)\(")
 LABEL_PATTERN = re.compile(r"^(?P<label>[0-9A-Za-z_.]+):\s*(?:;.*)?$")
 VM_DATA_GLOBAL_PATTERN = re.compile(
@@ -265,28 +281,82 @@ def parse_blocks(function_body: str) -> dict[str, str]:
     return blocks
 
 
+def is_failure_block(label: str, body: str, trap_labels: set[str]) -> bool:
+    branch_match = UNCOND_BRANCH_PATTERN.search(body)
+    branches_to_trap = branch_match is not None and branch_match.group("target") in trap_labels
+    return "fail" in label.lower() or branches_to_trap
+
+
+def looks_like_opcode_block(body: str) -> bool:
+    return "obf.vm.opcode" in body or bool(OPCODE_WIDEN_PATTERN.search(body))
+
+
+def split_opcode_compare_count(body: str) -> int:
+    named_count = len(NAMED_SPLIT_OPCODE_COMPARE_PATTERN.findall(body))
+    if named_count:
+        return named_count
+    if not looks_like_opcode_block(body):
+        return 0
+    zero_matches = [
+        match for match in VM_SPLIT_OPCODE_PATTERN.finditer(body)
+        if int(match.group("opcode")) == 0
+    ]
+    return len(zero_matches) if len(zero_matches) >= 2 else 0
+
+
+def stable_split_encoding(body: str) -> int:
+    relevant_lines = [
+        line.strip()
+        for line in body.splitlines()
+        if "obf.vm.opcode" in line or "icmp eq i32" in line or "br i1" in line
+    ]
+    digest = hashlib.sha256("\n".join(relevant_lines).encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
 def extract_header_opcodes(function_body: str) -> list[int]:
     blocks = parse_blocks(function_body)
     trap_labels = {
         label for label, body in blocks.items() if "@llvm.trap" in body and "unreachable" in body
     }
+    failure_labels = {
+        label for label, body in blocks.items() if is_failure_block(label, body, trap_labels)
+    }
 
     opcodes: list[int] = []
     for body in blocks.values():
         opcode_match = VM_OPCODE_PATTERN.search(body)
-        if opcode_match is None:
+        split_encoding: int | None = None
+        if opcode_match is None and split_opcode_compare_count(body) >= 2:
+            split_encoding = stable_split_encoding(body)
+        if opcode_match is None and split_encoding is None and looks_like_opcode_block(body):
+            opcode_match = VM_TRANSFORMED_OPCODE_PATTERN.search(body)
+        if opcode_match is None and split_encoding is None:
             continue
         branch_match = COND_BRANCH_PATTERN.search(body)
         if branch_match is None:
             continue
-        if branch_match.group("true") not in trap_labels and branch_match.group("false") not in trap_labels:
+        if (
+            branch_match.group("true") not in trap_labels
+            and branch_match.group("false") not in trap_labels
+            and branch_match.group("true") not in failure_labels
+            and branch_match.group("false") not in failure_labels
+        ):
             continue
-        opcodes.append(int(opcode_match.group("opcode")))
+        opcodes.append(
+            split_encoding if split_encoding is not None else int(opcode_match.group("opcode"))
+        )
     return opcodes
 
 
 def is_vm_implementation(function_body: str) -> bool:
     return "indirectbr" in function_body and bool(extract_header_opcodes(function_body))
+
+
+def functions_with_opcode_headers(functions: dict[str, str]) -> dict[str, str]:
+    return {
+        name: body for name, body in functions.items() if extract_header_opcodes(body)
+    }
 
 
 def is_vm_like_function(function_name: str, function_body: str) -> bool:
@@ -431,10 +501,16 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
 
 def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
     functions = parse_functions(ir_text)
+    marker_functions = parse_functions(marker_text)
     vm_bodies = {name: body for name, body in functions.items() if is_vm_implementation(body)}
-    opcode_sequences = sorted(extract_header_opcodes(body) for body in vm_bodies.values())
+    opcode_bodies = functions_with_opcode_headers(marker_functions)
+    if not opcode_bodies:
+        opcode_bodies = functions_with_opcode_headers(functions)
+    if not opcode_bodies:
+        opcode_bodies = vm_bodies
+    opcode_sequences = sorted(extract_header_opcodes(body) for body in opcode_bodies.values())
     opcode_histograms = sorted(
-        tuple(sorted(Counter(extract_header_opcodes(body)).items())) for body in vm_bodies.values()
+        tuple(sorted(Counter(extract_header_opcodes(body)).items())) for body in opcode_bodies.values()
     )
     structures = sorted(
         tuple(sorted(vm_structure(body).items())) for body in vm_bodies.values()
@@ -446,7 +522,7 @@ def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
     island_structure = vm_island_structure(functions, marker_text)
 
     fingerprint: dict[str, Any] = {
-        "vm_function_count": len(vm_bodies),
+        "vm_function_count": len(vm_bodies) if vm_bodies else len(opcode_bodies),
         "opcode_sequences": opcode_sequences,
         "opcode_histograms": opcode_histograms,
         "opcode_map_hash": hash_json(opcode_sequences) if opcode_sequences else "",

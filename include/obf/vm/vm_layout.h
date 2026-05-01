@@ -51,15 +51,15 @@ struct serialized_bytecode_program {
 
 // Switch dispatch bank for split dispatchers
 struct switch_dispatch_bank {
-  llvm::BasicBlock *block = nullptr;
-  llvm::PHINode *dispatch_index_phi = nullptr;
-  llvm::SwitchInst *switch_inst = nullptr;
+  llvm::BasicBlock* block = nullptr;
+  llvm::PHINode* dispatch_index_phi = nullptr;
+  llvm::SwitchInst* switch_inst = nullptr;
   std::uint64_t salt = 0;
 };
 
 // VM runtime state struct layout
 struct vm_state_layout {
-  llvm::StructType *type = nullptr;
+  llvm::StructType* type = nullptr;
   std::uint32_t bytecode_state_field = 0;
   std::uint32_t dispatch_index_field = 1;
   std::uint32_t island_id_field = 2;
@@ -68,4 +68,4 @@ struct vm_state_layout {
   std::vector<std::array<std::uint32_t, vm_slot_rotation_cell_count>> slot_fields;
 };
 
-} // namespace obf::vm
+}  // namespace obf::vm

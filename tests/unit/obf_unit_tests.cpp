@@ -19,10 +19,8 @@ namespace {
 
 int g_failures = 0;
 
-void ExpectTrue(bool condition, const std::string &message) {
-  if (condition) {
-    return;
-  }
+void ExpectTrue(bool condition, const std::string& message) {
+  if (condition) { return; }
 
   ++g_failures;
   std::cerr << "[fail] " << message << '\n';
@@ -48,10 +46,8 @@ void TestGeneratedNames() {
 
   const std::string base_name =
       obf::make_unique_obf_symbol_name(module, "obf_sym", "source", 0x42ULL);
-  llvm::FunctionType *type =
-      llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
-  llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage, base_name,
-                         module);
+  llvm::FunctionType* type = llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
+  llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage, base_name, module);
   const std::string next_name =
       obf::make_unique_obf_symbol_name(module, "obf_sym", "source", 0x42ULL);
 
@@ -67,8 +63,7 @@ void TestPolicySelection() {
   obf::obfuscation_config config;
   config.seed = 0x777ULL;
   config.default_level = obf::protection_level::none;
-  config.targets.push_back(
-      {.match = "check_*", .level = obf::protection_level::strong});
+  config.targets.push_back({.match = "check_*", .level = obf::protection_level::strong});
 
   obf::function_features features;
   features.name = "check_license";
@@ -76,12 +71,10 @@ void TestPolicySelection() {
   features.cyclomatic_complexity = 4;
   features.address_taken = false;
 
-  const obf::policy_decision decision =
-      obf::select_policy(module, features, config, "");
+  const obf::policy_decision decision = obf::select_policy(module, features, config, "");
   ExpectTrue(decision.policy.level == obf::protection_level::strong,
              "target rule should produce strong policy level");
-  ExpectTrue(decision.seed != 0,
-             "policy selection should derive a non-zero deterministic seed");
+  ExpectTrue(decision.seed != 0, "policy selection should derive a non-zero deterministic seed");
 
   const auto parsed = obf::parse_protection_level("obf:strong_vm");
   ExpectTrue(parsed.has_value() && *parsed == obf::protection_level::strong_vm,
@@ -98,10 +91,8 @@ void TestConfigLoader() {
     out << "default_level: light\n";
   }
 
-  llvm::Expected<obf::obfuscation_config> loaded =
-      obf::load_config_from_file(path.string());
-  ExpectTrue(static_cast<bool>(loaded),
-             "load_config_from_file should parse a valid YAML config");
+  llvm::Expected<obf::obfuscation_config> loaded = obf::load_config_from_file(path.string());
+  ExpectTrue(static_cast<bool>(loaded), "load_config_from_file should parse a valid YAML config");
   if (loaded) {
     ExpectTrue(loaded->profile.has_value(), "profile should be present");
     ExpectTrue(loaded->seed == 99, "seed should match parsed yaml value");
@@ -118,42 +109,39 @@ void TestConfigLoader() {
 void TestPolicyPrecedenceAndFloors() {
   // Test that protection level precedence is correctly enforced
   // Expected: none < light < strong < vm < strong_vm
-  
+
   // Test: Verify level ordering (conceptual check)
   const auto none_val = static_cast<std::uint32_t>(obf::protection_level::none);
   const auto light_val = static_cast<std::uint32_t>(obf::protection_level::light);
   const auto strong_val = static_cast<std::uint32_t>(obf::protection_level::strong);
   const auto vm_val = static_cast<std::uint32_t>(obf::protection_level::vm);
   const auto strong_vm_val = static_cast<std::uint32_t>(obf::protection_level::strong_vm);
-  
-  ExpectTrue(none_val < light_val && light_val < strong_val && strong_val < vm_val && vm_val < strong_vm_val,
+
+  ExpectTrue(none_val < light_val && light_val < strong_val && strong_val < vm_val &&
+                 vm_val < strong_vm_val,
              "protection levels should follow precedence: none < light < strong < vm < strong_vm");
 }
 
 void TestConfigEdgeCases() {
   // Test edge cases in config loading
-  
+
   // Test 1: Config with minimal fields
-  const std::filesystem::path path1 =
-      std::filesystem::temp_directory_path() / "obf_minimal.yaml";
+  const std::filesystem::path path1 = std::filesystem::temp_directory_path() / "obf_minimal.yaml";
   {
     std::ofstream out(path1);
     out << "default_level: strong\n";
     // No profile, seed, or other fields
   }
-  
-  llvm::Expected<obf::obfuscation_config> loaded1 = 
-      obf::load_config_from_file(path1.string());
-  ExpectTrue(static_cast<bool>(loaded1),
-             "config with minimal fields should load successfully");
+
+  llvm::Expected<obf::obfuscation_config> loaded1 = obf::load_config_from_file(path1.string());
+  ExpectTrue(static_cast<bool>(loaded1), "config with minimal fields should load successfully");
   if (loaded1) {
     ExpectTrue(loaded1->default_level == obf::protection_level::strong,
                "default_level should parse correctly");
   }
-  
+
   // Test 2: Config with multiple rules
-  const std::filesystem::path path2 =
-      std::filesystem::temp_directory_path() / "obf_rules.yaml";
+  const std::filesystem::path path2 = std::filesystem::temp_directory_path() / "obf_rules.yaml";
   {
     std::ofstream out(path2);
     out << "default_level: light\n";
@@ -163,16 +151,13 @@ void TestConfigEdgeCases() {
     out << "  - match: \"hash_*\"\n";
     out << "    level: vm\n";
   }
-  
-  llvm::Expected<obf::obfuscation_config> loaded2 =
-      obf::load_config_from_file(path2.string());
-  ExpectTrue(static_cast<bool>(loaded2),
-             "config with multiple rules should load successfully");
+
+  llvm::Expected<obf::obfuscation_config> loaded2 = obf::load_config_from_file(path2.string());
+  ExpectTrue(static_cast<bool>(loaded2), "config with multiple rules should load successfully");
   if (loaded2) {
-    ExpectTrue(loaded2->targets.size() == 2,
-               "config should parse multiple target rules");
+    ExpectTrue(loaded2->targets.size() == 2, "config should parse multiple target rules");
   }
-  
+
   // Cleanup
   std::error_code ec;
   std::filesystem::remove(path1, ec);
@@ -182,47 +167,44 @@ void TestConfigEdgeCases() {
 void TestSeedStability() {
   // Verify that seed generation is deterministic and produces different results
   // for different inputs
-  
+
   llvm::LLVMContext context;
   llvm::Module module("seed_stability_test", context);
-  
+
   obf::obfuscation_config config1, config2;
   config1.seed = 0x111ULL;
   config2.seed = 0x222ULL;
-  
+
   config1.default_level = obf::protection_level::strong;
   config2.default_level = obf::protection_level::strong;
-  
+
   obf::function_features features;
   features.name = "test_func";
   features.instruction_count = 100;
   features.cyclomatic_complexity = 5;
   features.address_taken = false;
-  
+
   // Test 1: Same inputs produce same seed
   obf::policy_decision d1a = obf::select_policy(module, features, config1, "");
   obf::policy_decision d1b = obf::select_policy(module, features, config1, "");
   ExpectTrue(d1a.seed == d1b.seed,
              "deterministic seed generation - same inputs must produce same seed");
-  
+
   // Test 2: Different base seeds produce different derived seeds
   obf::policy_decision d2a = obf::select_policy(module, features, config1, "");
   obf::policy_decision d2b = obf::select_policy(module, features, config2, "");
-  ExpectTrue(d2a.seed != d2b.seed,
-             "different base seeds should produce different derived seeds");
-  
+  ExpectTrue(d2a.seed != d2b.seed, "different base seeds should produce different derived seeds");
+
   // Test 3: mix_seed is deterministic and provides sufficient entropy
   const std::uint64_t mixed1 = obf::mix_seed(0xDEADBEEFULL, 0x12345678ULL);
   const std::uint64_t mixed2 = obf::mix_seed(0xDEADBEEFULL, 0x12345678ULL);
   const std::uint64_t mixed3 = obf::mix_seed(0xDEADBEEFULL, 0x87654321ULL);
-  
-  ExpectTrue(mixed1 == mixed2,
-             "mix_seed must be deterministic");
-  ExpectTrue(mixed1 != mixed3,
-             "different seeds should produce different mix_seed results");
+
+  ExpectTrue(mixed1 == mixed2, "mix_seed must be deterministic");
+  ExpectTrue(mixed1 != mixed3, "different seeds should produce different mix_seed results");
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   TestStableHashAndSeedMix();

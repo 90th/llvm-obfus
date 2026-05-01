@@ -21,12 +21,12 @@ struct constant_encoding_result {
   std::string detail;
 };
 
-constant_encoding_result analyze_constant_encoding(const llvm::Function &function,
-                                                   const constant_encoding_options &options,
+constant_encoding_result analyze_constant_encoding(const llvm::Function& function,
+                                                   const constant_encoding_options& options,
                                                    std::uint64_t seed);
 
-constant_encoding_result run_constant_encoding(llvm::Function &function,
-                                               const constant_encoding_options &options,
+constant_encoding_result run_constant_encoding(llvm::Function& function,
+                                               const constant_encoding_options& options,
                                                std::uint64_t seed);
 
-} // namespace obf
+}  // namespace obf

@@ -25,12 +25,10 @@ struct control_flattening_result {
   std::string detail;
 };
 
-control_flattening_result
-analyze_control_flattening(const llvm::Function &function,
-                           const control_flattening_options &options);
+control_flattening_result analyze_control_flattening(const llvm::Function& function,
+                                                     const control_flattening_options& options);
 
-control_flattening_result
-run_control_flattening(llvm::Function &function,
-                       const control_flattening_options &options);
+control_flattening_result run_control_flattening(llvm::Function& function,
+                                                 const control_flattening_options& options);
 
-} // namespace obf
+}  // namespace obf

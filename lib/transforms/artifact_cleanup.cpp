@@ -18,11 +18,11 @@ namespace obf {
 namespace {
 
 bool IsEssentialGlobalName(llvm::StringRef name) {
-  return name == "__obf_entropy_anchor" ||
-         name == "__obf_entropy_anchor_ref" || name.starts_with("llvm.");
+  return name == "__obf_entropy_anchor" || name == "__obf_entropy_anchor_ref" ||
+         name.starts_with("llvm.");
 }
 
-bool ShouldRenameFunction(const llvm::Function &function) {
+bool ShouldRenameFunction(const llvm::Function& function) {
   if (function.isDeclaration() || function.getName().empty() ||
       function.getName().starts_with("llvm.")) {
     return false;
@@ -31,7 +31,7 @@ bool ShouldRenameFunction(const llvm::Function &function) {
   return function.getName().starts_with("__obf_") || function.hasLocalLinkage();
 }
 
-bool ShouldRenameGlobal(const llvm::GlobalVariable &global) {
+bool ShouldRenameGlobal(const llvm::GlobalVariable& global) {
   if (global.isDeclaration() || global.getName().empty() ||
       IsEssentialGlobalName(global.getName())) {
     return false;
@@ -40,15 +40,13 @@ bool ShouldRenameGlobal(const llvm::GlobalVariable &global) {
   return global.getName().starts_with("__obf_") || global.hasLocalLinkage();
 }
 
-bool ShouldRenameAlias(const llvm::GlobalAlias &alias) {
-  if (alias.getName().empty() || IsEssentialGlobalName(alias.getName())) {
-    return false;
-  }
+bool ShouldRenameAlias(const llvm::GlobalAlias& alias) {
+  if (alias.getName().empty() || IsEssentialGlobalName(alias.getName())) { return false; }
 
   return alias.getName().starts_with("__obf_") || alias.hasLocalLinkage();
 }
 
-std::string BuildObfuscatedName(const llvm::Module &module,
+std::string BuildObfuscatedName(const llvm::Module& module,
                                 llvm::StringRef original_name,
                                 std::uint64_t seed_base,
                                 std::uint64_t ordinal) {
@@ -69,23 +67,19 @@ std::string BuildObfuscatedName(const llvm::Module &module,
 }
 
 template <typename GlobalT>
-bool RenameGlobalLike(GlobalT &value, const llvm::Module &module,
+bool RenameGlobalLike(GlobalT& value,
+                      const llvm::Module& module,
                       artifact_cleanup_options options,
                       std::uint64_t ordinal) {
   const std::string original_name = value.getName().str();
-  if (original_name.empty()) {
-    return false;
-  }
+  if (original_name.empty()) { return false; }
 
   std::uint64_t salt = ordinal;
   while (true) {
-    const std::string candidate =
-        BuildObfuscatedName(module, original_name, options.seed, salt);
-    llvm::GlobalValue *existing = module.getNamedValue(candidate);
+    const std::string candidate = BuildObfuscatedName(module, original_name, options.seed, salt);
+    llvm::GlobalValue* existing = module.getNamedValue(candidate);
     if (existing == nullptr || existing == &value) {
-      if (candidate == original_name) {
-        return false;
-      }
+      if (candidate == original_name) { return false; }
 
       value.setName(candidate);
       return true;
@@ -95,23 +89,23 @@ bool RenameGlobalLike(GlobalT &value, const llvm::Module &module,
   }
 }
 
-bool StripLocalNames(llvm::Module &module) {
+bool StripLocalNames(llvm::Module& module) {
   bool changed = false;
-  for (llvm::Function &function : module) {
-    for (llvm::Argument &argument : function.args()) {
+  for (llvm::Function& function : module) {
+    for (llvm::Argument& argument : function.args()) {
       if (!argument.getName().empty()) {
         argument.setName("");
         changed = true;
       }
     }
 
-    for (llvm::BasicBlock &block : function) {
+    for (llvm::BasicBlock& block : function) {
       if (!block.getName().empty()) {
         block.setName("");
         changed = true;
       }
 
-      for (llvm::Instruction &instruction : block) {
+      for (llvm::Instruction& instruction : block) {
         if (!instruction.getName().empty()) {
           instruction.setName("");
           changed = true;
@@ -123,26 +117,25 @@ bool StripLocalNames(llvm::Module &module) {
   return changed;
 }
 
-} // namespace
+}  // namespace
 
-bool RunArtifactCleanup(llvm::Module &module,
-                        const artifact_cleanup_options &options) {
+bool RunArtifactCleanup(llvm::Module& module, const artifact_cleanup_options& options) {
   bool changed = llvm::StripDebugInfo(module);
 
   std::uint64_t ordinal = 0;
-  for (llvm::GlobalVariable &global : module.globals()) {
+  for (llvm::GlobalVariable& global : module.globals()) {
     if (ShouldRenameGlobal(global)) {
       changed |= RenameGlobalLike(global, module, options, ordinal++);
     }
   }
 
-  for (llvm::Function &function : module) {
+  for (llvm::Function& function : module) {
     if (ShouldRenameFunction(function)) {
       changed |= RenameGlobalLike(function, module, options, ordinal++);
     }
   }
 
-  for (llvm::GlobalAlias &alias : module.aliases()) {
+  for (llvm::GlobalAlias& alias : module.aliases()) {
     if (ShouldRenameAlias(alias)) {
       changed |= RenameGlobalLike(alias, module, options, ordinal++);
     }
@@ -152,4 +145,4 @@ bool RunArtifactCleanup(llvm::Module &module,
   return changed;
 }
 
-} // namespace obf
+}  // namespace obf

@@ -1,0 +1,5 @@
+seed: 424242
+default_level: none
+targets:
+  - match: split_me
+    level: vm

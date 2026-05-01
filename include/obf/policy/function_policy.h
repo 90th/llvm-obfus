@@ -29,19 +29,19 @@ struct function_policy {
 
 constexpr std::string_view to_string(protection_level level) {
   switch (level) {
-  case protection_level::none:
-    return "none";
-  case protection_level::light:
-    return "light";
-  case protection_level::strong:
-    return "strong";
-  case protection_level::vm:
-    return "vm";
-  case protection_level::strong_vm:
-    return "strong_vm";
+    case protection_level::none:
+      return "none";
+    case protection_level::light:
+      return "light";
+    case protection_level::strong:
+      return "strong";
+    case protection_level::vm:
+      return "vm";
+    case protection_level::strong_vm:
+      return "strong_vm";
   }
 
   return "none";
 }
 
-} // namespace obf
+}  // namespace obf

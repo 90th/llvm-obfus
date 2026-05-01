@@ -7,7 +7,7 @@
 namespace llvm {
 class Function;
 class Module;
-}
+}  // namespace llvm
 
 namespace obf {
 
@@ -21,14 +21,12 @@ struct opaque_predicate_result {
   std::string detail;
 };
 
-opaque_predicate_result
-analyze_opaque_predicates(const llvm::Function &function,
-                          const opaque_predicate_options &options);
+opaque_predicate_result analyze_opaque_predicates(const llvm::Function& function,
+                                                  const opaque_predicate_options& options);
 
-opaque_predicate_result
-run_opaque_predicates(llvm::Function &function,
-                      const opaque_predicate_options &options);
+opaque_predicate_result run_opaque_predicates(llvm::Function& function,
+                                              const opaque_predicate_options& options);
 
-bool RunCfgStateCleanup(llvm::Module &module);
+bool RunCfgStateCleanup(llvm::Module& module);
 
-} // namespace obf
+}  // namespace obf

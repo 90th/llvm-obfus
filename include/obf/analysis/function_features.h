@@ -25,6 +25,6 @@ struct function_features {
   bool is_declaration = false;
 };
 
-function_features collect_function_features(const llvm::Function &function);
+function_features collect_function_features(const llvm::Function& function);
 
-} // namespace obf
+}  // namespace obf

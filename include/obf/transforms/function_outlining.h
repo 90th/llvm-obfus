@@ -22,12 +22,10 @@ struct function_outlining_result {
   std::string detail;
 };
 
-function_outlining_result
-analyze_function_outlining(const llvm::Function &function,
-                           const function_outlining_options &options);
+function_outlining_result analyze_function_outlining(const llvm::Function& function,
+                                                     const function_outlining_options& options);
 
-function_outlining_result
-run_function_outlining(llvm::Function &function,
-                       const function_outlining_options &options);
+function_outlining_result run_function_outlining(llvm::Function& function,
+                                                 const function_outlining_options& options);
 
-} // namespace obf
+}  // namespace obf

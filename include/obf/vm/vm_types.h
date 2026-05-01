@@ -8,14 +8,13 @@
 namespace obf::vm {
 
 // Type aliases for VM slot storage
-using slot_cells = llvm::SmallVector<llvm::Value *, 4>;
+using slot_cells = llvm::SmallVector<llvm::Value*, 4>;
 using slot_storage = llvm::SmallVector<slot_cells, 16>;
 using slot_cell_mapping = std::vector<std::uint32_t>;
 
 // VM configuration constants
 inline constexpr std::uint32_t vm_slot_rotation_cell_count = 3;
-inline constexpr std::size_t vm_opcode_count = 
-    static_cast<std::size_t>(opcode::ret) + 1;
+inline constexpr std::size_t vm_opcode_count = static_cast<std::size_t>(opcode::ret) + 1;
 inline constexpr std::size_t vm_switch_dispatch_min_instruction_count = 16;
 inline constexpr std::size_t vm_island_min_instruction_count = 16;
 inline constexpr std::size_t vm_island_max_count = 6;
@@ -144,8 +143,6 @@ enum class vm_helper_dispatch_choreography_shape : std::uint32_t {
 };
 
 // Utility: convert opcode to array index
-inline std::size_t opcode_to_index(opcode op) {
-  return static_cast<std::size_t>(op);
-}
+inline std::size_t opcode_to_index(opcode op) { return static_cast<std::size_t>(op); }
 
-} // namespace obf::vm
+}  // namespace obf::vm

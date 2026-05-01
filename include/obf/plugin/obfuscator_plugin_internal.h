@@ -34,12 +34,12 @@ class CallBase;
 class Function;
 class Module;
 
-} // namespace llvm
+}  // namespace llvm
 
 namespace obf {
 
 struct function_pipeline_state {
-  llvm::Function *function = nullptr;
+  llvm::Function* function = nullptr;
   function_report_entry report;
 };
 
@@ -49,9 +49,9 @@ struct virtualized_call_site {
 };
 
 struct virtualized_function_binding {
-  llvm::Function *interface_function = nullptr;
-  llvm::Function *implementation_function = nullptr;
-  const function_pipeline_state *state = nullptr;
+  llvm::Function* interface_function = nullptr;
+  llvm::Function* implementation_function = nullptr;
+  const function_pipeline_state* state = nullptr;
   llvm::SmallVector<virtualized_call_site, 8> call_sites;
   std::uint64_t wrapper_token = 0;
   std::string vm_symbol_tag;
@@ -63,12 +63,11 @@ struct virtualized_function_binding {
   bool uses_shared_seed_resolver = false;
 };
 
-using virtualized_function_map =
-    llvm::StringMap<virtualized_function_binding>;
+using virtualized_function_map = llvm::StringMap<virtualized_function_binding>;
 
 struct vm_target_candidate {
-  llvm::Function *function = nullptr;
-  const function_pipeline_state *state = nullptr;
+  llvm::Function* function = nullptr;
+  const function_pipeline_state* state = nullptr;
   std::size_t nesting_depth = 0;
 };
 
@@ -77,67 +76,56 @@ obfuscation_config load_active_config();
 std::uint64_t get_obf_seed_override();
 
 llvm::SmallVector<function_pipeline_state, 32>
-build_pipeline_state(llvm::Module &module, const obfuscation_config &config);
+build_pipeline_state(llvm::Module& module, const obfuscation_config& config);
 
-artifact_cleanup_options
-build_artifact_cleanup_options(const obfuscation_config &config);
+artifact_cleanup_options build_artifact_cleanup_options(const obfuscation_config& config);
 
-block_split_options build_block_split_options(const obfuscation_config &config,
-                                              const policy_decision &decision);
+block_split_options build_block_split_options(const obfuscation_config& config,
+                                              const policy_decision& decision);
 
-string_encoding_options
-build_string_encoding_options(const obfuscation_config &config);
+string_encoding_options build_string_encoding_options(const obfuscation_config& config);
 
-constant_encoding_options
-build_constant_encoding_options(const obfuscation_config &config,
-                                const policy_decision &decision);
+constant_encoding_options build_constant_encoding_options(const obfuscation_config& config,
+                                                          const policy_decision& decision);
 
-control_flattening_options
-build_control_flattening_options(const obfuscation_config &config,
-                                 const policy_decision &decision);
+control_flattening_options build_control_flattening_options(const obfuscation_config& config,
+                                                            const policy_decision& decision);
 
 instruction_substitution_options
-build_instruction_substitution_options(const obfuscation_config &config,
-                                       const policy_decision &decision);
+build_instruction_substitution_options(const obfuscation_config& config,
+                                       const policy_decision& decision);
 
-opaque_gep_options build_opaque_gep_options(const obfuscation_config &config,
-                                            const policy_decision &decision);
+opaque_gep_options build_opaque_gep_options(const obfuscation_config& config,
+                                            const policy_decision& decision);
 
-function_outlining_options
-build_function_outlining_options(const obfuscation_config &config,
-                                 const policy_decision &decision);
+function_outlining_options build_function_outlining_options(const obfuscation_config& config,
+                                                            const policy_decision& decision);
 
-bogus_control_flow_options
-build_bogus_control_flow_options(const obfuscation_config &config,
-                                 const policy_decision &decision);
+bogus_control_flow_options build_bogus_control_flow_options(const obfuscation_config& config,
+                                                            const policy_decision& decision);
 
-opaque_predicate_options
-build_opaque_predicate_options(const obfuscation_config &config,
-                               const policy_decision &decision);
+opaque_predicate_options build_opaque_predicate_options(const obfuscation_config& config,
+                                                        const policy_decision& decision);
 
 llvm::SmallVector<transform_report_entry, 64>
-build_transform_reports(llvm::Module &module,
-                        const llvm::SmallVectorImpl<function_pipeline_state> &states,
-                        const obfuscation_config &config);
+build_transform_reports(llvm::Module& module,
+                        const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                        const obfuscation_config& config);
 
-void verify_changed_module(llvm::Module &module);
+void verify_changed_module(llvm::Module& module);
 
 // All apply_*_stage() functions are declared in stage_signatures.h
 // to reduce transitive includes and compilation coupling.
 
 template <typename Predicate>
-llvm::StringMap<std::uint64_t> build_function_seed_map(
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    Predicate predicate) {
+llvm::StringMap<std::uint64_t>
+build_function_seed_map(const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                        Predicate predicate) {
   llvm::StringMap<std::uint64_t> seeds;
-  for (const function_pipeline_state &state : states) {
-    if (state.function == nullptr || state.function->isDeclaration()) {
-      continue;
-    }
+  for (const function_pipeline_state& state : states) {
+    if (state.function == nullptr || state.function->isDeclaration()) { continue; }
 
-    if (!predicate(state.report.decision.policy)) {
-      continue;
-    }
+    if (!predicate(state.report.decision.policy)) { continue; }
 
     seeds[state.function->getName()] = state.report.decision.seed;
   }
@@ -146,18 +134,14 @@ llvm::StringMap<std::uint64_t> build_function_seed_map(
 }
 
 template <typename Predicate>
-llvm::StringMap<protection_level> build_function_level_map(
-    const llvm::SmallVectorImpl<function_pipeline_state> &states,
-    Predicate predicate) {
+llvm::StringMap<protection_level>
+build_function_level_map(const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                         Predicate predicate) {
   llvm::StringMap<protection_level> levels;
-  for (const function_pipeline_state &state : states) {
-    if (state.function == nullptr || state.function->isDeclaration()) {
-      continue;
-    }
+  for (const function_pipeline_state& state : states) {
+    if (state.function == nullptr || state.function->isDeclaration()) { continue; }
 
-    if (!predicate(state.report.decision.policy)) {
-      continue;
-    }
+    if (!predicate(state.report.decision.policy)) { continue; }
 
     levels[state.function->getName()] = state.report.decision.policy.level;
   }
@@ -166,19 +150,14 @@ llvm::StringMap<protection_level> build_function_level_map(
 }
 
 template <typename Predicate>
-void append_virtualized_function_seeds(
-    llvm::StringMap<std::uint64_t> &seeds,
-    const virtualized_function_map *virtualized_functions, Predicate predicate) {
-  if (virtualized_functions == nullptr) {
-    return;
-  }
+void append_virtualized_function_seeds(llvm::StringMap<std::uint64_t>& seeds,
+                                       const virtualized_function_map* virtualized_functions,
+                                       Predicate predicate) {
+  if (virtualized_functions == nullptr) { return; }
 
-  for (const auto &entry : *virtualized_functions) {
-    const virtualized_function_binding &binding = entry.second;
-    if (binding.state == nullptr ||
-        !predicate(binding.state->report.decision.policy)) {
-      continue;
-    }
+  for (const auto& entry : *virtualized_functions) {
+    const virtualized_function_binding& binding = entry.second;
+    if (binding.state == nullptr || !predicate(binding.state->report.decision.policy)) { continue; }
 
     const std::uint64_t seed = binding.state->report.decision.seed;
     if (binding.interface_function != nullptr) {
@@ -191,19 +170,14 @@ void append_virtualized_function_seeds(
 }
 
 template <typename Predicate>
-void append_virtualized_function_levels(
-    llvm::StringMap<protection_level> &levels,
-    const virtualized_function_map *virtualized_functions, Predicate predicate) {
-  if (virtualized_functions == nullptr) {
-    return;
-  }
+void append_virtualized_function_levels(llvm::StringMap<protection_level>& levels,
+                                        const virtualized_function_map* virtualized_functions,
+                                        Predicate predicate) {
+  if (virtualized_functions == nullptr) { return; }
 
-  for (const auto &entry : *virtualized_functions) {
-    const virtualized_function_binding &binding = entry.second;
-    if (binding.state == nullptr ||
-        !predicate(binding.state->report.decision.policy)) {
-      continue;
-    }
+  for (const auto& entry : *virtualized_functions) {
+    const virtualized_function_binding& binding = entry.second;
+    if (binding.state == nullptr || !predicate(binding.state->report.decision.policy)) { continue; }
 
     const protection_level level = binding.state->report.decision.policy.level;
     if (binding.interface_function != nullptr) {
@@ -215,6 +189,6 @@ void append_virtualized_function_levels(
   }
 }
 
-} // namespace obf
+}  // namespace obf
 
 #endif

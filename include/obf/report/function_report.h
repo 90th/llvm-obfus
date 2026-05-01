@@ -42,4 +42,4 @@ std::string format_feature_report(llvm::StringRef module_name,
                                   llvm::ArrayRef<function_report_entry> entries,
                                   llvm::ArrayRef<transform_report_entry> transforms);
 
-} // namespace obf
+}  // namespace obf
