@@ -61,6 +61,8 @@ struct virtualized_function_binding {
   std::string seed_case_function_name;
   bool uses_target_cache = false;
   bool uses_shared_seed_resolver = false;
+  llvm::Function* entry_thunk_function = nullptr;
+  std::string entry_thunk_function_name;
 };
 
 using virtualized_function_map = llvm::StringMap<virtualized_function_binding>;

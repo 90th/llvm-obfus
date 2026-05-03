@@ -192,6 +192,15 @@ def find_wrapper_implementations(function_bodies: dict[str, str]) -> dict[str, s
         if implementation_body is None:
             continue
         if not is_vm_implementation_body(implementation_body):
+            # possibly an entry thunk — check for a direct impl call in its body
+            thunk_call_match = WRAPPER_CALL_PATTERN.search(implementation_body)
+            if thunk_call_match:
+                thunk_impl_name = thunk_call_match.group("impl")
+                thunk_impl_body = function_bodies.get(thunk_impl_name, "")
+                if is_vm_implementation_body(thunk_impl_body):
+                    implementation_name = thunk_impl_name
+                    implementation_body = thunk_impl_body
+        if not is_vm_implementation_body(implementation_body):
             continue
         wrappers[function_name] = implementation_name
     return wrappers

@@ -102,6 +102,15 @@ std::string make_vm_retkey_global_name(llvm::StringRef symbol_tag) {
   return ("__obf_vm_retkey_" + symbol_tag).str();
 }
 
+std::string make_vm_entry_thunk_name(llvm::Module& module,
+                                     bool preserve_generated_names,
+                                     llvm::StringRef source_name,
+                                     std::uint64_t seed) {
+  return make_vm_generated_symbol_name(
+      module, preserve_generated_names, "__obf_vm_e", source_name, seed ^ 0xe4754ULL,
+      "__obf_vm_entry_");
+}
+
 struct vm_region_candidate {
   llvm::BasicBlock* header = nullptr;
   llvm::SmallVector<llvm::BasicBlock*, 8> region_blocks;
@@ -517,6 +526,61 @@ void sanitize_vm_wrapper_attributes(llvm::Function& interface_function) {
   interface_function.setAttributes(build_vm_abi_attribute_list(interface_function));
 }
 
+llvm::Function* create_vm_entry_thunk(llvm::Function& interface_function,
+                                      llvm::Function& implementation_function,
+                                      llvm::StringRef thunk_name) {
+  llvm::Module* module = interface_function.getParent();
+  if (module == nullptr) { return nullptr; }
+
+  // thunk has the same function type as the implementation
+  auto* thunk = llvm::Function::Create(
+      implementation_function.getFunctionType(),
+      llvm::GlobalValue::InternalLinkage,
+      thunk_name,
+      module);
+  thunk->setCallingConv(interface_function.getCallingConv());
+  thunk->setDSOLocal(true);
+  // abi-safe attributes from the interface function, not implementation
+  thunk->setAttributes(build_vm_abi_attribute_list(interface_function));
+  thunk->addFnAttr(llvm::Attribute::NoInline);
+  // string attribute survives artifact cleanup (fn attrs are not stripped, only local value names are)
+  thunk->addFnAttr("obf.vm.entry.thunk");
+
+  // copy arg names from the implementation
+  auto impl_arg = implementation_function.arg_begin();
+  for (llvm::Argument& thunk_arg : thunk->args()) {
+    thunk_arg.setName(impl_arg->getName());
+    ++impl_arg;
+  }
+
+  llvm::BasicBlock* entry =
+      llvm::BasicBlock::Create(module->getContext(), "obf.vm.entry.thunk", thunk);
+  llvm::IRBuilder<> builder(entry);
+
+  llvm::SmallVector<llvm::Value*, 8> forward_args;
+  forward_args.reserve(thunk->arg_size());
+  for (llvm::Argument& thunk_arg : thunk->args()) { forward_args.push_back(&thunk_arg); }
+
+  if (implementation_function.getReturnType()->isVoidTy()) {
+    auto* inner_call = builder.CreateCall(
+        implementation_function.getFunctionType(), &implementation_function, forward_args);
+    inner_call->setCallingConv(interface_function.getCallingConv());
+    inner_call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
+    builder.CreateRetVoid();
+  } else {
+    auto* inner_call = builder.CreateCall(
+        implementation_function.getFunctionType(),
+        &implementation_function,
+        forward_args,
+        "obf.vm.entry.thunk.call");
+    inner_call->setCallingConv(interface_function.getCallingConv());
+    inner_call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
+    builder.CreateRet(inner_call);
+  }
+
+  return thunk;
+}
+
 llvm::Function* clone_vm_implementation(llvm::Function& interface_function,
                                         llvm::StringRef implementation_name) {
   llvm::Module* module = interface_function.getParent();
@@ -699,6 +763,9 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
   llvm::Module* module = interface_function.getParent();
   if (module == nullptr) { llvm_unreachable("vm wrapper missing parent module"); }
 
+  // wrapper resolves/calls the entry thunk, not the implementation directly
+  llvm::Function& thunk_function = *binding.entry_thunk_function;
+
   auto* ptr_int_type = get_vm_pointer_int_type(interface_function);
   if (ptr_int_type == nullptr) { llvm_unreachable("vm wrapper missing pointer integer type"); }
 
@@ -713,7 +780,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
   const llvm::APInt sentinel = derive_vm_target_sentinel(key);
   llvm::GlobalVariable* target_seed_global =
       get_or_create_vm_target_seed_global(interface_function,
-                                          implementation_function,
+                                          thunk_function,
                                           binding.target_seed_global_name,
                                           binding.seed_case_function_name,
                                           ptr_int_type,
@@ -745,7 +812,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
     llvm::Value* encoded_target = build_encoded_vm_target_value(builder,
                                                                 interface_function,
                                                                 interface_function,
-                                                                implementation_function,
+                                                                thunk_function,
                                                                 *target_seed_global,
                                                                 *decode_key_global,
                                                                 hidden_token,
@@ -766,7 +833,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
                                                                  0x620000ULL,
                                                                  mba_depth);
     llvm::Value* indirect_target = builder.CreateIntToPtr(
-        decoded_target, implementation_function.getType(), wrapper_prefix + ".indirect");
+        decoded_target, thunk_function.getType(), wrapper_prefix + ".indirect");
 
     llvm::SmallVector<llvm::Value*, 8> arguments;
     arguments.reserve(interface_function.arg_size() + 1);
@@ -774,12 +841,12 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
     arguments.push_back(hidden_token);
 
     auto* call = builder.CreateCall(
-        implementation_function.getFunctionType(),
+        thunk_function.getFunctionType(),
         indirect_target,
         arguments,
         interface_function.getReturnType()->isVoidTy() ? "" : wrapper_prefix + ".call");
     call->setCallingConv(interface_function.getCallingConv());
-    call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
+    call->setAttributes(build_vm_safe_callsite_attributes(thunk_function));
     if (interface_function.getReturnType()->isVoidTy()) {
       builder.CreateRetVoid();
     } else {
@@ -819,7 +886,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
   llvm::Value* new_encoded = build_encoded_vm_target_value(resolve_builder,
                                                            interface_function,
                                                            interface_function,
-                                                           implementation_function,
+                                                           thunk_function,
                                                            *target_seed_global,
                                                            *decode_key_global,
                                                            hidden_token,
@@ -848,7 +915,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
                                                                0x620000ULL,
                                                                mba_depth);
   llvm::Value* indirect_target = call_builder.CreateIntToPtr(
-      decoded_target, implementation_function.getType(), wrapper_prefix + ".indirect");
+      decoded_target, thunk_function.getType(), wrapper_prefix + ".indirect");
 
   llvm::SmallVector<llvm::Value*, 8> arguments;
   arguments.reserve(interface_function.arg_size() + 1);
@@ -856,12 +923,12 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
   arguments.push_back(hidden_token);
 
   auto* call = call_builder.CreateCall(
-      implementation_function.getFunctionType(),
+      thunk_function.getFunctionType(),
       indirect_target,
       arguments,
       interface_function.getReturnType()->isVoidTy() ? "" : wrapper_prefix + ".call");
   call->setCallingConv(interface_function.getCallingConv());
-  call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
+  call->setAttributes(build_vm_safe_callsite_attributes(thunk_function));
   if (interface_function.getReturnType()->isVoidTy()) {
     call_builder.CreateRetVoid();
   } else {
@@ -929,13 +996,21 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
                                                                   source_name,
                                                                   seed ^ 0xca5eULL,
                                                                   "__obf_vm_seedcase_");
+  const std::string entry_thunk_name =
+      make_vm_entry_thunk_name(*module, preserve_generated_names, source_name, seed);
 
   llvm::Function* implementation_function =
       clone_vm_implementation(*interface_function, implementation_name);
   if (implementation_function == nullptr) { return binding; }
 
+  llvm::Function* entry_thunk_function =
+      create_vm_entry_thunk(*interface_function, *implementation_function, entry_thunk_name);
+  if (entry_thunk_function == nullptr) { return binding; }
+
   binding.interface_function = interface_function;
   binding.implementation_function = implementation_function;
+  binding.entry_thunk_function = entry_thunk_function;
+  binding.entry_thunk_function_name = entry_thunk_name;
   binding.state = &state;
   binding.wrapper_token = derive_vm_wrapper_token(interface_function->getName());
 
@@ -1501,12 +1576,13 @@ llvm::Value* decode_virtualized_integer_return(llvm::IRBuilder<>& builder,
 
 bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& binding,
                                            std::uint32_t mba_depth) {
-  if (binding.interface_function == nullptr || binding.implementation_function == nullptr) {
+  if (binding.interface_function == nullptr || binding.implementation_function == nullptr
+      || binding.entry_thunk_function == nullptr) {
     return false;
   }
 
   llvm::Function& function = *binding.interface_function;
-  llvm::Function& implementation_function = *binding.implementation_function;
+  llvm::Function& thunk_function = *binding.entry_thunk_function;
   llvm::Module* module = function.getParent();
   if (module == nullptr) { return false; }
 
@@ -1531,7 +1607,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
   const llvm::APInt sentinel = derive_vm_target_sentinel(key);
   llvm::GlobalVariable* target_seed_global =
       get_or_create_vm_target_seed_global(function,
-                                          implementation_function,
+                                          thunk_function,
                                           binding.target_seed_global_name,
                                           binding.seed_case_function_name,
                                           ptr_int_type,
@@ -1572,7 +1648,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
           build_encoded_vm_target_value(builder,
                                         *caller,
                                         function,
-                                        implementation_function,
+                                        thunk_function,
                                         *target_seed_global,
                                         *decode_key_global,
                                         hidden_token,
@@ -1606,12 +1682,12 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
       arguments.push_back(hidden_token);
 
       auto* rewritten_call = builder.CreateCall(
-          implementation_function.getFunctionType(),
+          thunk_function.getFunctionType(),
           indirect_target,
           arguments,
           call->getType()->isVoidTy() ? "" : function.getName() + ".obf.callsite");
       rewritten_call->setCallingConv(call->getCallingConv());
-      rewritten_call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
+      rewritten_call->setAttributes(build_vm_safe_callsite_attributes(thunk_function));
 
       llvm::Type* call_ret_type = rewritten_call->getType();
       if (call_ret_type->isIntegerTy()) {
@@ -1663,7 +1739,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
     llvm::Value* new_encoded = build_encoded_vm_target_value(resolve_builder,
                                                              *caller,
                                                              function,
-                                                             implementation_function,
+                                                             thunk_function,
                                                              *target_seed_global,
                                                              *decode_key_global,
                                                              hidden_token,
@@ -1705,12 +1781,12 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
     arguments.push_back(hidden_token);
 
     auto* rewritten_call = call_builder.CreateCall(
-        implementation_function.getFunctionType(),
+        thunk_function.getFunctionType(),
         indirect_target,
         arguments,
         call->getType()->isVoidTy() ? "" : function.getName() + ".obf.callsite");
     rewritten_call->setCallingConv(call->getCallingConv());
-    rewritten_call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
+    rewritten_call->setAttributes(build_vm_safe_callsite_attributes(thunk_function));
 
     llvm::Type* call_ret_type = rewritten_call->getType();
     if (call_ret_type->isIntegerTy()) {

@@ -70,6 +70,10 @@ UNCOND_BRANCH_PATTERN = re.compile(r"\bbr\s+label\s+%(?P<target>[0-9A-Za-z$._-]+
 DIRECT_CALL_PATTERN = re.compile(
     r"\b(?:tail\s+|musttail\s+|notail\s+)?(?:call|invoke)\b[^@\n]*@(?P<name>[A-Za-z$._0-9-]+)\s*\("
 )
+# Matches a call to a named function that passes a hidden i64 token — used to detect thunk→impl calls
+HIDDEN_TOKEN_CALL_PATTERN = re.compile(
+    r"\b(?:tail\s+|musttail\s+|notail\s+)?(?:call|invoke)\b[^@\n]*@(?P<impl>[A-Za-z$._0-9-]+)\s*\([^\n]*,\s*i64\s+%[-A-Za-z$._0-9]+"
+)
 FUNCTION_PTR_REF_PATTERN = re.compile(
     r"ptrtoint\s+\(ptr\s+@(?P<name>[A-Za-z$._0-9-]+)\s+to\s+i\d+\)"
 )
@@ -192,6 +196,7 @@ SELF_TEST_IR = r'''
 
 define i32 @self_wrapper(i32 %x) #0 {
 entry:
+  %self_wrapper.obf.wrapper.thunkref = ptrtoint (ptr @__obf_vm_e_self to i64)
   %self_wrapper.obf.wrapper.check = load i64, ptr @__obf_vm_t_self
   %self_wrapper.obf.wrapper.indirect = inttoptr i64 %self_wrapper.obf.wrapper.check to ptr
   %self_wrapper.obf.wrapper.call = call i32 %self_wrapper.obf.wrapper.indirect(i32 %x, i64 123)
@@ -258,8 +263,15 @@ trap.obf.vm:
 
 declare void @llvm.trap()
 
+define internal i32 @__obf_vm_e_self(i32 %x, i64 %obf.hidden_token) #2 {
+obf.vm.entry.thunk:
+  %thunk.call = call i32 @__obf_vm_i_self(i32 %x, i64 %obf.hidden_token)
+  ret i32 %thunk.call
+}
+
 attributes #0 = { noinline }
 attributes #1 = { noinline "vm.dispatch.shape.switch" "vm.handler.shape.direct" "vm.island.entry" "vm.island.count.1" "vm.island.state" }
+attributes #2 = { noinline "obf.vm.entry.thunk" }
 '''
 
 
@@ -491,6 +503,15 @@ def collect_tags_from_refs(text: str) -> list[str]:
 def classify_vm_function(function: FunctionIR) -> str:
     name = function.name
     combined = function.body + "\n" + function.attrs
+    if name.startswith("__obf_vm_e_"):
+        return "entry_thunk"
+    if '"obf.vm.entry.thunk"' in combined:
+        return "entry_thunk"
+    # structural fallback: single block, direct call to vm impl, no indirectbr
+    if "obf.vm.entry.thunk" in function.body and "indirectbr" not in function.body:
+        body_call = HIDDEN_TOKEN_CALL_PATTERN.search(function.body)
+        if body_call and not name.startswith("__obf_vm_i_"):
+            return "entry_thunk"
     if name.startswith("__obf_vm_hs_"):
         return "subhelper"
     if name.startswith("__obf_vm_h_"):
@@ -973,10 +994,17 @@ def summarize_wrapper(
     implementation_by_tag: dict[str, str],
     implementation_functions: dict[str, FunctionIR],
     implementation_names: set[str],
+    entry_thunk_functions: dict[str, FunctionIR] | None = None,
+    entry_thunk_names: set[str] | None = None,
 ) -> dict[str, Any]:
+    if entry_thunk_functions is None:
+        entry_thunk_functions = {}
+    if entry_thunk_names is None:
+        entry_thunk_names = set()
     refs = collect_vm_data_refs(function.body)
     tags = collect_tags_from_refs(function.body)
     implementation_pointer_refs = extract_function_pointer_refs(function, implementation_names)
+    thunk_pointer_refs = extract_function_pointer_refs(function, entry_thunk_names)
     signature_impl_matches = find_signature_impl_matches(function, implementation_functions)
     direct_impl_calls = sorted(
         {
@@ -993,7 +1021,15 @@ def summarize_wrapper(
     elif implementation_pointer_refs:
         mapped_impl = implementation_pointer_refs[0]
         mapping_reason = "implementation_pointer"
-    else:
+    # thunk chain detection: wrapper → thunk → impl (checked before tag fallback)
+    if not mapped_impl and thunk_pointer_refs:
+        thunk_fn = entry_thunk_functions.get(thunk_pointer_refs[0])
+        if thunk_fn is not None:
+            thunk_body_call = HIDDEN_TOKEN_CALL_PATTERN.search(thunk_fn.body)
+            if thunk_body_call and thunk_body_call.group("impl") in implementation_names:
+                mapped_impl = thunk_body_call.group("impl")
+                mapping_reason = "thunked"
+    if not mapped_impl:
         for tag in tags:
             candidate = implementation_by_tag.get(tag)
             if candidate is not None:
@@ -1028,6 +1064,7 @@ def summarize_wrapper(
         "tags": tags,
         "target_cache_refs": target_cache_refs,
         "target_seed_refs": target_seed_refs,
+        "thunk_refs": thunk_pointer_refs,
         "vm_data_refs": refs,
     }
 
@@ -1036,25 +1073,45 @@ def summarize_callsite_rewrite(
     function: FunctionIR,
     implementation_by_tag: dict[str, str],
     implementation_names: set[str],
+    entry_thunk_functions: dict[str, FunctionIR] | None = None,
+    entry_thunk_names: set[str] | None = None,
 ) -> dict[str, Any]:
+    if entry_thunk_functions is None:
+        entry_thunk_functions = {}
+    if entry_thunk_names is None:
+        entry_thunk_names = set()
     refs = collect_vm_data_refs(function.body)
     tags = collect_tags_from_refs(function.body)
     implementation_pointer_refs = extract_function_pointer_refs(function, implementation_names)
+    thunk_pointer_refs = extract_function_pointer_refs(function, entry_thunk_names)
     mapped = ""
+    mapping_reason = "unmapped"
     if implementation_pointer_refs:
         mapped = implementation_pointer_refs[0]
+        mapping_reason = "implementation_pointer"
     else:
         for tag in tags:
             candidate = implementation_by_tag.get(tag)
             if candidate is not None:
                 mapped = candidate
+                mapping_reason = "shared_vm_tag"
                 break
+    # thunk chain detection: callsite → thunk → impl
+    if not mapped and thunk_pointer_refs:
+        thunk_fn = entry_thunk_functions.get(thunk_pointer_refs[0])
+        if thunk_fn is not None:
+            thunk_body_call = HIDDEN_TOKEN_CALL_PATTERN.search(thunk_fn.body)
+            if thunk_body_call and thunk_body_call.group("impl") in implementation_names:
+                mapped = thunk_body_call.group("impl")
+                mapping_reason = "thunked"
     return {
         "function": function.name,
         "implementation_pointer_refs": implementation_pointer_refs,
         "line_range": [function.start_line, function.end_line],
         "mapped_implementation": mapped,
+        "mapping_reason": mapping_reason,
         "tags": tags,
+        "thunk_refs": thunk_pointer_refs,
         "vm_data_refs": refs,
     }
 
@@ -1066,7 +1123,9 @@ def score_from_counts(metrics: dict[str, int]) -> dict[str, int]:
         "generated_symbol_roles": min(metrics["generated_symbol_role_count"] * 5, 45),
         "handler_candidates": min(metrics["direct_success_to_handler_count"] * 2, 36)
         + min(metrics["trampoline_to_handler_count"], 18),
-        "mapped_wrappers": min(metrics["mapped_wrapper_count"] * 14, 42),
+        "mapped_wrappers": min(metrics["direct_wrapper_mapping_count"] * 14, 42)
+        + min(metrics["thunked_wrapper_mapping_count"] * 7, 21),
+        "entry_thunks": min(metrics["entry_thunk_count"] * 2, 8),
         "raw_opcode_compares": min(metrics["raw_direct_opcode_compare_count"] * 3, 48),
         "physical_opcodes": min(metrics["physical_opcode_count"] * 2, 36),
         "program_counter_candidates": min(metrics["program_counter_candidate_count"] * 2, 24),
@@ -1330,7 +1389,17 @@ def analyze_ir(
         [function for function in functions.values() if is_vm_function(function)],
         key=lambda function: function.name,
     )
-    vm_function_summaries = [summarize_vm_function(function) for function in vm_functions]
+    entry_thunk_functions = {
+        function.name: function
+        for function in vm_functions
+        if classify_vm_function(function) == "entry_thunk"
+    }
+    entry_thunk_names = set(entry_thunk_functions)
+    vm_function_summaries = [
+        summarize_vm_function(function)
+        for function in vm_functions
+        if classify_vm_function(function) != "entry_thunk"
+    ]
     implementation_functions = {
         function.name: function
         for function in vm_functions
@@ -1344,13 +1413,24 @@ def analyze_ir(
     }
     wrappers = [
         summarize_wrapper(
-            function, implementation_by_tag, implementation_functions, implementation_names
+            function,
+            implementation_by_tag,
+            implementation_functions,
+            implementation_names,
+            entry_thunk_functions,
+            entry_thunk_names,
         )
         for function in sorted(functions.values(), key=lambda item: item.name)
         if is_wrapper_candidate(function, implementation_functions)
     ]
     callsites = [
-        summarize_callsite_rewrite(function, implementation_by_tag, implementation_names)
+        summarize_callsite_rewrite(
+            function,
+            implementation_by_tag,
+            implementation_names,
+            entry_thunk_functions,
+            entry_thunk_names,
+        )
         for function in sorted(functions.values(), key=lambda item: item.name)
         if is_callsite_rewrite_candidate(
             function, implementation_functions, implementation_names
@@ -1434,6 +1514,18 @@ def analyze_ir(
             summary["shared_route_block_count"] for summary in vm_function_summaries
         ),
         "mapped_wrapper_count": len(wrapper_to_implementation),
+        "direct_wrapper_mapping_count": sum(
+            1
+            for w in wrappers
+            if w["mapped_implementation"]
+            and w["mapping_reason"] not in ("thunked", "unmapped")
+        ),
+        "thunked_wrapper_mapping_count": sum(
+            1 for w in wrappers if w["mapping_reason"] == "thunked"
+        ),
+        "indirect_wrapper_mapping_count": 0,
+        "unmapped_wrapper_count": sum(1 for w in wrappers if not w["mapped_implementation"]),
+        "entry_thunk_count": len(entry_thunk_functions),
         "opcode_compare_count": sum(
             summary["opcode_compare_count"] for summary in vm_function_summaries
         ),
@@ -1509,6 +1601,16 @@ def analyze_ir(
         handler_mapping_confidence = "routed"
     elif metrics["opcode_compare_count"]:
         handler_mapping_confidence = "low"
+    direct_count = metrics["direct_wrapper_mapping_count"]
+    thunked_count = metrics["thunked_wrapper_mapping_count"]
+    if thunked_count and direct_count:
+        wrapper_mapping_confidence = "partial_thunked"
+    elif thunked_count:
+        wrapper_mapping_confidence = "thunked"
+    elif direct_count:
+        wrapper_mapping_confidence = "direct"
+    else:
+        wrapper_mapping_confidence = "none"
     trap_oracle_confidence = "none"
     if metrics["trap_oracle_direct_count"]:
         trap_oracle_confidence = "direct"
@@ -1547,6 +1649,7 @@ def analyze_ir(
         "transformed_opcode_constants": transformed_opcode_constants,
         "vm_data_refs": bytecode_data_refs,
         "vm_functions": vm_function_summaries,
+        "wrapper_mapping_confidence": wrapper_mapping_confidence,
         "wrapper_to_implementation": wrapper_to_implementation,
         "wrappers": wrappers,
     }

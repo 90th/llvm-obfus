@@ -43,13 +43,14 @@ entry:
 ; VM-LABEL: define i32 @verify_license(i32 %x)
 ; VM-NOT: verify_license.obf.wrapper.check
 ; VM-NOT: @__obf_vm_seed_resolve
-; VM: ptrtoint (ptr @[[VERIFY_IMPL:__obf_vm_i_[A-Za-z0-9_]+]] to i{{[0-9]+}})
+; VM: ptrtoint (ptr @[[VERIFY_THUNK:__obf_vm_e_[A-Za-z0-9_]+]] to i{{[0-9]+}})
 ; VM: call i32 %verify_license.obf.wrapper.indirect(i32 %x, i64 %verify_license.obf.wrapper.token)
 ; VM-LABEL: define i32 @parse_secret_token(i32 %x)
 ; VM: %parse_secret_token.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; VM: %parse_secret_token.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve
 ; VM: call i32 %parse_secret_token.obf.wrapper.indirect(i32 %x, i64 %parse_secret_token.obf.wrapper.token)
-; VM: define internal i32 @[[VERIFY_IMPL]](i32 %x, i64 %obf.hidden_token)
+; VM: define internal i32 @[[VERIFY_THUNK]](i32 {{.*}}, i64 %obf.hidden_token)
+; VM: define internal i32 @{{__obf_vm_i_[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; VM: define private i{{[0-9]+}} @__obf_vm_c_{{[A-Za-z0-9_]+}}
 
 ; DEBUG: @__obf_vm_retkey_verify_license = private global i64

@@ -135,3 +135,6 @@ entry:
 ; INST: br label %vm.exec.{{[0-9]+}}
 ; INST: {{^vm\.exec\.[0-9]+:}}
 ; INST: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
+; INST-LABEL: define internal i32 @__obf_vm_e_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)
+; INST: obf.vm.entry.thunk:
+; INST: call i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)

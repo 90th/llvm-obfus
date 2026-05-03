@@ -31,12 +31,12 @@ entry:
 }
 
 ; STRONG-LABEL: define i32 @strong_target(i32 %x)
-; STRONG: ptrtoint (ptr @[[STRONGIMPL:__obf_vm_i_[A-Za-z0-9_]+]] to i{{[0-9]+}})
-; STRONG: define internal i32 @[[STRONGIMPL]](i32 %x, i64 %obf.hidden_token){{.*}}
+; STRONG: ptrtoint (ptr @[[STRONGTHUNK:__obf_vm_e_[A-Za-z0-9_]+]] to i{{[0-9]+}})
+; STRONG: define internal i32 @[[STRONGTHUNK]](i32 {{.*}}, i64 %obf.hidden_token){{.*}}
 
-; MIXED: ptrtoint (ptr @[[MIXEDSTRONG:__obf_vm_i_[A-Za-z0-9_]+]] to i{{[0-9]+}})
+; MIXED: ptrtoint (ptr @[[MIXEDSTRONG_THUNK:__obf_vm_e_[A-Za-z0-9_]+]] to i{{[0-9]+}})
 ; MIXED: call i{{[0-9]+}} @__obf_vm_seed_resolve
-; MIXED: define internal i32 @[[MIXEDSTRONG]](i32 %x, i64 %obf.hidden_token){{.*}}
+; MIXED: define internal i32 @[[MIXEDSTRONG_THUNK]](i32 {{.*}}, i64 %obf.hidden_token){{.*}}
 ; MIXED: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token){{.*}}
 ; MIXED: define private i{{[0-9]+}} @__obf_vm_seed_resolve
 ; MIXED: define private i{{[0-9]+}} @__obf_vm_c_{{[A-Za-z0-9_]+}}
