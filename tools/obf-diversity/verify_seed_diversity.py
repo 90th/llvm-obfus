@@ -537,6 +537,20 @@ def vm_data_anchor_structure(functions: dict[str, str], ir_text: str) -> dict[st
     vm_data_ref_concentration = (
         round(max_refs_to_single_vm_data / vm_data_ref_count, 4) if vm_data_ref_count else 0.0
     )
+    # detect decoy globals by _d<hex> name suffix (pr27.5+) and by unreferenced
+    # globals (pre-pr27.5 inference). union of both for accurate reporting.
+    bytecode_named_decoys = {
+        name for name in bytecode_globals if re.search(r"_d[0-9A-Fa-f]+$", name)
+    }
+    bytecode_named_decoy_count = len(bytecode_named_decoys)
+    inferred_decoy_count = max(0, len(bytecode_globals) - len(bytecode_ref_occurrences))
+    bytecode_decoy_count = max(bytecode_named_decoy_count, inferred_decoy_count)
+    bytecode_real_anchor_count = max(
+        0, len(bytecode_ref_occurrences) - min(bytecode_named_decoy_count, len(bytecode_ref_occurrences))
+    )
+    # anchor_order_hash captures the relative ordering of anchor globals in ir
+    # emission order — useful for verifying that two seeds produce different layouts.
+    anchor_order_hash = hash_json(bytecode_globals)
 
     return {
         "vm_data_ref_count": vm_data_ref_count,
@@ -544,11 +558,13 @@ def vm_data_anchor_structure(functions: dict[str, str], ir_text: str) -> dict[st
         "bytecode_global_count": len(bytecode_globals),
         "bytecode_ref_count": sum(bytecode_ref_occurrences.values()),
         "bytecode_anchor_count": len(bytecode_ref_occurrences),
+        "bytecode_real_anchor_count": bytecode_real_anchor_count,
         "bytecode_shard_count": len(bytecode_ref_occurrences),
-        "bytecode_decoy_count": max(0, len(bytecode_globals) - len(bytecode_ref_occurrences)),
+        "bytecode_decoy_count": bytecode_decoy_count,
         "max_refs_to_single_vm_data": max_refs_to_single_vm_data,
         "vm_data_ref_concentration": vm_data_ref_concentration,
         "anchor_assignment_hash": hash_json(sorted(vm_data_ref_occurrences.items())),
+        "anchor_order_hash": anchor_order_hash,
     }
 
 

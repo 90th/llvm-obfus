@@ -591,6 +591,20 @@ std::uint32_t select_bytecode_anchor_real_count(std::uint64_t bytecode_size,
   return 2U + static_cast<std::uint32_t>(selector % (max_real_count - 1U));
 }
 
+// returns how many content-identical decoy anchor globals to create alongside
+// the real anchors. decoys are placed in the selection pool so every anchor
+// (real or decoy) receives actual decode-site references, making xref-based
+// distinction impossible at binary level.
+std::uint32_t select_bytecode_anchor_decoy_count(std::uint64_t bytecode_size,
+                                                  std::uint64_t bytecode_seed,
+                                                  std::uint64_t salt,
+                                                  std::uint32_t real_count) {
+  if (bytecode_size < 32 || real_count == 0) { return 0; }
+  const std::uint32_t max_decoys = bytecode_size < 128 ? 1U : 2U;
+  const std::uint64_t selector = mix_seed(bytecode_seed, 0x27200001ULL ^ salt);
+  return 1U + static_cast<std::uint32_t>(selector % max_decoys);
+}
+
 llvm::SmallVector<llvm::GlobalVariable*, 8> build_bytecode_anchor_globals(
     llvm::GlobalVariable* bytecode_global,
     std::uint64_t bytecode_seed,
@@ -609,10 +623,16 @@ llvm::SmallVector<llvm::GlobalVariable*, 8> build_bytecode_anchor_globals(
     return anchors;
   }
 
+  const std::uint64_t bytecode_size = array_type->getNumElements();
   const std::uint32_t real_count =
-      select_bytecode_anchor_real_count(array_type->getNumElements(), bytecode_seed, salt);
+      select_bytecode_anchor_real_count(bytecode_size, bytecode_seed, salt);
+  const std::uint32_t decoy_count =
+      select_bytecode_anchor_decoy_count(bytecode_size, bytecode_seed, salt ^ 0x100ULL, real_count);
+
   llvm::Module* module = bytecode_global->getParent();
-  anchors.push_back(bytecode_global);
+
+  // build real clones first (indices 1..real_count-1; index 0 is bytecode_global)
+  llvm::SmallVector<llvm::GlobalVariable*, 4> real_clones;
   for (std::uint32_t anchor_index = 1; anchor_index < real_count; ++anchor_index) {
     const std::uint64_t name_seed =
         mix_seed(bytecode_seed, salt ^ (0x27110000ULL + static_cast<std::uint64_t>(anchor_index)));
@@ -624,10 +644,60 @@ llvm::SmallVector<llvm::GlobalVariable*, 8> build_bytecode_anchor_globals(
                                            bytecode_global->getName().str() + "_a" +
                                                llvm::utohexstr(name_seed & 0xffffffffULL));
     clone->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-    anchors.push_back(clone);
+    real_clones.push_back(clone);
+  }
+
+  // build decoy globals — content-identical to real anchors so any read is
+  // semantically valid, but named with _d suffix to distinguish in ir analysis.
+  // interleave in module global list: decoy[i] is created before real_clone[i]
+  // so binary layout breaks the all-real contiguous stride pattern.
+  llvm::SmallVector<llvm::GlobalVariable*, 4> decoys;
+  const std::uint32_t interleave_count = std::max(real_count - 1U, decoy_count);
+  for (std::uint32_t slot = 0; slot < interleave_count; ++slot) {
+    // insert real clone at this slot first if it exists
+    if (slot < real_clones.size()) {
+      // decoy goes before the real clone: create decoy first so linker places
+      // it between the preceding real anchor and this real clone.
+      if (slot < decoy_count) {
+        const std::uint64_t name_seed =
+            mix_seed(bytecode_seed, salt ^ (0x27210000ULL + static_cast<std::uint64_t>(slot)));
+        auto* decoy = new llvm::GlobalVariable(*module,
+                                               bytecode_global->getValueType(),
+                                               true,
+                                               llvm::GlobalValue::PrivateLinkage,
+                                               bytecode_global->getInitializer(),
+                                               bytecode_global->getName().str() + "_d" +
+                                                   llvm::utohexstr(name_seed & 0xffffffffULL));
+        decoy->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+        decoys.push_back(decoy);
+      }
+    } else if (slot < decoy_count) {
+      // extra decoys beyond the real clone slots
+      const std::uint64_t name_seed =
+          mix_seed(bytecode_seed, salt ^ (0x27210000ULL + static_cast<std::uint64_t>(slot)));
+      auto* decoy = new llvm::GlobalVariable(*module,
+                                             bytecode_global->getValueType(),
+                                             true,
+                                             llvm::GlobalValue::PrivateLinkage,
+                                             bytecode_global->getInitializer(),
+                                             bytecode_global->getName().str() + "_d" +
+                                                 llvm::utohexstr(name_seed & 0xffffffffULL));
+      decoy->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+      decoys.push_back(decoy);
+    }
+  }
+
+  // build returned selection vector: real_0, decoy_0, real_1, decoy_1, ...
+  // this interleaving ensures the anchor selection hash distributes reads across
+  // all globals and that ptrconst wrapper globals are also interleaved.
+  anchors.push_back(bytecode_global);
+  for (std::uint32_t i = 0; i < std::max(real_clones.size(), decoys.size()); ++i) {
+    if (i < decoys.size()) { anchors.push_back(decoys[i]); }
+    if (i < real_clones.size()) { anchors.push_back(real_clones[i]); }
   }
 
   out_real_count = real_count;
+  out_decoy_count = decoy_count;
   return anchors;
 }
 
@@ -635,6 +705,7 @@ void annotate_bytecode_anchor_scattering(llvm::Function& function,
                                          std::uint32_t real_count,
                                          std::uint32_t decoy_count) {
   if (real_count > 1) { function.addFnAttr("vm.bytecode.anchor.scattered"); }
+  if (decoy_count > 0) { function.addFnAttr("vm.bytecode.anchor.decoys"); }
   function.addFnAttr("vm.bytecode.anchor.count." + std::to_string(real_count + decoy_count));
   function.addFnAttr("vm.bytecode.anchor.real." + std::to_string(real_count));
   function.addFnAttr("vm.bytecode.anchor.decoy." + std::to_string(decoy_count));

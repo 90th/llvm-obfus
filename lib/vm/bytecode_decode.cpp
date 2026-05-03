@@ -173,17 +173,20 @@ bytecode_anchor_selection select_bytecode_anchor(llvm::IRBuilder<>& builder,
   if (context.bytecode_global == nullptr) { return selection; }
 
   llvm::GlobalVariable* anchor = context.bytecode_global;
-  const std::uint32_t real_anchor_count =
-      std::min<std::uint32_t>(context.bytecode_anchor_real_count,
-                              static_cast<std::uint32_t>(context.bytecode_anchor_globals.size()));
-  const std::uint32_t candidate_count = real_anchor_count == 0
-                                            ? static_cast<std::uint32_t>(context.bytecode_anchor_globals.size())
-                                            : real_anchor_count;
+  // use all anchors (real + decoy) as candidates — decoys have identical content
+  // so any selection is semantically correct; spreading reads across both pools
+  // reduces xref concentration on any single anchor global.
+  const std::uint32_t candidate_count =
+      static_cast<std::uint32_t>(context.bytecode_anchor_globals.size());
   if (candidate_count > 0) {
-    const std::uint64_t selector =
-        mix_seed(context.bytecode_seed,
-                 (static_cast<std::uint64_t>(offset) + 1) * 0x9e3779b97f4a7c15ULL ^
-                     context.opaque_seed_base ^ salt);
+    // double-mix for better per-site entropy: first fold offset and salt
+    // together with a different multiplier, then mix with the function seed.
+    // this reduces the modulo-clustering that a single mix_seed exhibits for
+    // small candidate_count values (2-6) over a large range of offset values.
+    const std::uint64_t site_key =
+        mix_seed(static_cast<std::uint64_t>(offset) * 0xc4ceb9fe1a85ec53ULL ^ salt,
+                 context.opaque_seed_base ^ (static_cast<std::uint64_t>(offset) + 1));
+    const std::uint64_t selector = mix_seed(context.bytecode_seed, site_key);
     llvm::GlobalVariable* candidate =
         context.bytecode_anchor_globals[selector % static_cast<std::uint64_t>(candidate_count)];
     if (candidate != nullptr) { anchor = candidate; }

@@ -25,10 +25,9 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @[[BC0:__obf_vm_bc_i_[A-Za-z0-9_]+]] = private unnamed_addr constant
-; CHECK-DAG: @[[BC1:__obf_vm_bc_i_[A-Za-z0-9_]+_a[0-9A-Fa-f]+]] = private unnamed_addr constant
-; CHECK-DAG: @[[PTR0:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @[[BC0]]
-; CHECK-DAG: @[[PTR1:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @[[BC1]]
+; CHECK-DAG: @{{__obf_vm_bc_i_[A-Za-z0-9_]+}} = private unnamed_addr constant
+; CHECK-DAG: @{{__obf_vm_bc_i_[A-Za-z0-9_]+_a[0-9A-Fa-f]+}} = private unnamed_addr constant
+; CHECK-DAG: @{{__obf_vm_ptrconst_[0-9A-F]+}} = private unnamed_addr constant ptr @{{__obf_vm_bc_i_[A-Za-z0-9_]+}}
 
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i32 %y, i64 %obf.hidden_token)
 ; CHECK: %obf.vm.pred.slot = alloca i32

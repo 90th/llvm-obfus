@@ -185,6 +185,8 @@ MARKER_PATTERNS = {
     "return.neutral": r"vm\.return\.shape\.neutral",
     "return.slot": r"vm\.return\.shape\.slot",
     "return.split": r"vm\.return\.shape\.split",
+    "anchor.scattered": r"vm\.bytecode\.anchor\.scattered",
+    "anchor.decoys": r"vm\.bytecode\.anchor\.decoys",
 }
 
 ENTRY_THUNK_SHAPE_MARKERS = {
@@ -1231,6 +1233,7 @@ def score_from_counts(metrics: dict[str, Any]) -> dict[str, int]:
         "sharded": 4,
         "sharded_with_decoys": 3,
         "scattered": 2,
+        "scattered_with_decoys": 1,
         "low": 0,
     }.get(str(metrics.get("data_mapping_confidence", "low")), 0)
     return {
@@ -1665,7 +1668,17 @@ def analyze_ir(
     bytecode_anchor_count = len(bytecode_ref_occurrences)
     bytecode_shard_count = bytecode_anchor_count
     bytecode_global_count = len(bytecode_global_defs)
-    bytecode_decoy_count = max(0, bytecode_global_count - bytecode_anchor_count)
+    # count decoys explicitly by name pattern (_d<hex> suffix) so that decoys
+    # which receive actual reads (pr27.5 behavior) are still detected correctly.
+    bytecode_named_decoy_count = len(
+        {name for name in bytecode_global_defs if re.search(r"_d[0-9A-Fa-f]+$", name)}
+    )
+    bytecode_decoy_count = max(
+        bytecode_named_decoy_count, max(0, bytecode_global_count - bytecode_anchor_count)
+    )
+    bytecode_real_anchor_count = bytecode_anchor_count - min(
+        bytecode_named_decoy_count, bytecode_anchor_count
+    )
 
     if bytecode_anchor_count <= 1 and max_refs_to_single_vm_data:
         if max_refs_to_single_vm_data >= 96:
@@ -1682,8 +1695,13 @@ def analyze_ir(
     else:
         data_mapping_confidence = "low"
 
+    # upgrade confidence label when decoys are present (harder to distinguish
+    # real anchors from decoys at binary analysis level).
     if bytecode_decoy_count > 0 and data_mapping_confidence in {"sharded", "scattered"}:
-        bytecode_recovery_confidence = "sharded_with_decoys"
+        if data_mapping_confidence == "scattered":
+            bytecode_recovery_confidence = "scattered_with_decoys"
+        else:
+            bytecode_recovery_confidence = "sharded_with_decoys"
     else:
         bytecode_recovery_confidence = data_mapping_confidence
     route_family_counts = Counter(
@@ -1694,6 +1712,7 @@ def analyze_ir(
     )
     metrics = {
         "bytecode_anchor_count": bytecode_anchor_count,
+        "bytecode_real_anchor_count": bytecode_real_anchor_count,
         "bytecode_decoy_count": bytecode_decoy_count,
         "bytecode_data_ref_count": len(bytecode_data_refs),
         "bytecode_global_count": bytecode_global_count,
