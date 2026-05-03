@@ -59,27 +59,6 @@ bool can_materialize_pointer_through_integer(const llvm::DataLayout& data_layout
          !data_layout.isNonIntegralPointerType(const_cast<llvm::PointerType*>(pointer_type));
 }
 
-llvm::GlobalVariable* get_or_create_pointer_constant_cell(llvm::Module& module,
-                                                          const llvm::Constant& constant) {
-  const std::string global_name =
-      ("__obf_vm_ptrconst_" + llvm::utohexstr(stable_hash_constant(constant)));
-  if (llvm::GlobalVariable* existing = module.getNamedGlobal(global_name)) {
-    if (existing->getValueType() != constant.getType()) {
-      llvm_unreachable("vm pointer constant cell has unexpected type");
-    }
-    return existing;
-  }
-
-  auto* cell = new llvm::GlobalVariable(module,
-                                        const_cast<llvm::Type*>(constant.getType()),
-                                        /*isConstant=*/true,
-                                        llvm::GlobalValue::PrivateLinkage,
-                                        const_cast<llvm::Constant*>(&constant),
-                                        global_name);
-  cell->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-  return cell;
-}
-
 llvm::Value* materialize_constant(llvm::IRBuilder<>& builder,
                                   const llvm::Constant& constant,
                                   llvm::AllocaInst* opaque_seed_slot,
@@ -107,6 +86,27 @@ llvm::Value* materialize_constant(llvm::IRBuilder<>& builder,
 }
 
 }  // namespace
+
+llvm::GlobalVariable* get_or_create_pointer_constant_cell(llvm::Module& module,
+                                                          const llvm::Constant& constant) {
+  const std::string global_name =
+      ("__obf_vm_ptrconst_" + llvm::utohexstr(stable_hash_constant(constant)));
+  if (llvm::GlobalVariable* existing = module.getNamedGlobal(global_name)) {
+    if (existing->getValueType() != constant.getType()) {
+      llvm_unreachable("vm pointer constant cell has unexpected type");
+    }
+    return existing;
+  }
+
+  auto* cell = new llvm::GlobalVariable(module,
+                                        const_cast<llvm::Type*>(constant.getType()),
+                                        /*isConstant=*/true,
+                                        llvm::GlobalValue::PrivateLinkage,
+                                        const_cast<llvm::Constant*>(&constant),
+                                        global_name);
+  cell->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  return cell;
+}
 
 llvm::Value* load_slot(llvm::IRBuilder<>& builder,
                        const slot_storage& slot_allocas,

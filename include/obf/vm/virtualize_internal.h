@@ -245,6 +245,11 @@ llvm::Value* materialize_pointer_value(llvm::IRBuilder<>& builder,
                                        std::uint64_t opaque_seed_base,
                                        const mba::builder_context& mba_context,
                                        std::uint64_t salt);
+// pre-warm pointer-constant indirection cell for a global; calling this right
+// after creating a GlobalVariable ensures its 8-byte cell is placed adjacent
+// in the module global list instead of grouping with all other cells later.
+llvm::GlobalVariable* get_or_create_pointer_constant_cell(llvm::Module& module,
+                                                          const llvm::Constant& constant);
 llvm::Value* materialize_value(llvm::IRBuilder<>& builder,
                                const slot_storage& slot_allocas,
                                llvm::ArrayRef<std::uint32_t> slot_mapping,

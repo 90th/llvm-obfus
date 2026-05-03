@@ -50,5 +50,6 @@ attributes #1 = { mustprogress nofree norecurse nosync willreturn memory(read) }
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK-SAME: #[[IMPL:[0-9]+]] {
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(ptr %base, i32 %index, i64 %obf.hidden_token)
-; CHECK-SAME: #[[IMPL]] {
-; CHECK: attributes #[[IMPL]] = { {{.*}}noinline{{.*}}"instcombine-no-verify-fixpoint"{{.*}} }
+; CHECK-SAME: #[[IMPL2:[0-9]+]] {
+; CHECK-DAG: attributes #[[IMPL]] = { {{.*}}noinline{{.*}}"instcombine-no-verify-fixpoint"{{.*}} }
+; CHECK-DAG: attributes #[[IMPL2]] = { {{.*}}noinline{{.*}}"instcombine-no-verify-fixpoint"{{.*}} }

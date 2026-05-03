@@ -584,6 +584,8 @@ std::uint32_t select_bytecode_anchor_real_count(std::uint64_t bytecode_size,
     max_real_count = 2;
   } else if (bytecode_size < 512) {
     max_real_count = 3;
+  } else {
+    max_real_count = 8;
   }
 
   if (max_real_count <= 2) { return 2; }
@@ -600,7 +602,9 @@ std::uint32_t select_bytecode_anchor_decoy_count(std::uint64_t bytecode_size,
                                                   std::uint64_t salt,
                                                   std::uint32_t real_count) {
   if (bytecode_size < 32 || real_count == 0) { return 0; }
-  const std::uint32_t max_decoys = bytecode_size < 128 ? 1U : 2U;
+  const std::uint32_t max_decoys = bytecode_size < 128 ? 1U
+                                  : bytecode_size < 512 ? 3U
+                                  :                       8U;
   const std::uint64_t selector = mix_seed(bytecode_seed, 0x27200001ULL ^ salt);
   return 1U + static_cast<std::uint32_t>(selector % max_decoys);
 }
@@ -631,6 +635,10 @@ llvm::SmallVector<llvm::GlobalVariable*, 8> build_bytecode_anchor_globals(
 
   llvm::Module* module = bytecode_global->getParent();
 
+  // pre-warm pointer cell for the original bytecode_global so it is placed
+  // adjacent to it in the module global list, not grouped with later cells.
+  get_or_create_pointer_constant_cell(*module, *bytecode_global);
+
   // build real clones first (indices 1..real_count-1; index 0 is bytecode_global)
   llvm::SmallVector<llvm::GlobalVariable*, 4> real_clones;
   for (std::uint32_t anchor_index = 1; anchor_index < real_count; ++anchor_index) {
@@ -645,6 +653,8 @@ llvm::SmallVector<llvm::GlobalVariable*, 8> build_bytecode_anchor_globals(
                                                llvm::utohexstr(name_seed & 0xffffffffULL));
     clone->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
     real_clones.push_back(clone);
+    // pre-warm pointer cell immediately so it appears adjacent to the clone
+    get_or_create_pointer_constant_cell(*module, *clone);
   }
 
   // build decoy globals — content-identical to real anchors so any read is
@@ -670,6 +680,8 @@ llvm::SmallVector<llvm::GlobalVariable*, 8> build_bytecode_anchor_globals(
                                                    llvm::utohexstr(name_seed & 0xffffffffULL));
         decoy->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
         decoys.push_back(decoy);
+        // pre-warm pointer cell immediately so it appears adjacent to the decoy
+        get_or_create_pointer_constant_cell(*module, *decoy);
       }
     } else if (slot < decoy_count) {
       // extra decoys beyond the real clone slots
@@ -684,6 +696,8 @@ llvm::SmallVector<llvm::GlobalVariable*, 8> build_bytecode_anchor_globals(
                                                  llvm::utohexstr(name_seed & 0xffffffffULL));
       decoy->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
       decoys.push_back(decoy);
+      // pre-warm pointer cell immediately so it appears adjacent to the decoy
+      get_or_create_pointer_constant_cell(*module, *decoy);
     }
   }
 
