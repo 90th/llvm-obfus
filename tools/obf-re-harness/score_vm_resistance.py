@@ -501,6 +501,10 @@ def collect_vm_data_refs(text: str) -> list[str]:
     return sorted(set(match.group("name") for match in VM_DATA_SYMBOL_REF_PATTERN.finditer(text)))
 
 
+def collect_vm_data_ref_mentions(text: str) -> list[str]:
+    return [match.group("name") for match in VM_DATA_SYMBOL_REF_PATTERN.finditer(text)]
+
+
 def collect_tags_from_refs(text: str) -> list[str]:
     tags = {tag_from_symbol_name(ref) for ref in collect_vm_data_refs(text)}
     return sorted(tag for tag in tags if tag is not None)
@@ -930,6 +934,7 @@ def summarize_vm_function(function: FunctionIR) -> dict[str, Any]:
         ),
         "raw_direct_opcode_compare_count": len(raw_opcode_headers),
         "vm_data_refs": collect_vm_data_refs(function.body),
+        "vm_data_ref_mentions": collect_vm_data_ref_mentions(function.body),
     }
 
 
@@ -1219,8 +1224,18 @@ def summarize_callsite_rewrite(
 
 
 def score_from_counts(metrics: dict[str, Any]) -> dict[str, int]:
+    concentration_score = min(int(metrics["max_refs_to_single_vm_data"]) // 6, 36)
+    confidence_penalty = {
+        "single_blob": 12,
+        "concentrated": 8,
+        "sharded": 4,
+        "sharded_with_decoys": 3,
+        "scattered": 2,
+        "low": 0,
+    }.get(str(metrics.get("data_mapping_confidence", "low")), 0)
     return {
         "bytecode_data_refs": min(metrics["bytecode_data_ref_count"] * 4, 24),
+        "data_ref_concentration": concentration_score + confidence_penalty,
         "dispatcher_blocks": min(metrics["dispatcher_block_count"] * 2, 24),
         "generated_symbol_roles": min(metrics["generated_symbol_role_count"] * 5, 45),
         "handler_candidates": min(metrics["direct_success_to_handler_count"] * 2, 36)
@@ -1434,8 +1449,19 @@ def build_findings(
         findings.append(
             {
                 "check": "bytecode_data_references",
-                "detail": f"recovered {metrics['bytecode_data_ref_count']} vm bytecode/global data reference(s)",
-                "severity": "warn",
+                "detail": (
+                    f"recovered {metrics['vm_data_ref_count']} vm data ref(s) across "
+                    f"{metrics['unique_vm_data_ref_count']} unique symbol(s); "
+                    f"max single-symbol refs={metrics['max_refs_to_single_vm_data']}; "
+                    f"concentration={metrics['vm_data_ref_concentration']}; "
+                    f"anchors={metrics['bytecode_anchor_count']}; "
+                    f"shards={metrics['bytecode_shard_count']}; "
+                    f"decoys={metrics['bytecode_decoy_count']}; "
+                    f"confidence={metrics['bytecode_recovery_confidence']}"
+                ),
+                "severity": "warn"
+                if metrics["data_mapping_confidence"] in {"single_blob", "concentrated"}
+                else "info",
             }
         )
 
@@ -1610,6 +1636,15 @@ def analyze_ir(
             for immediate in summary["split_opcode_immediates"]
         }
     )
+    vm_data_ref_occurrences = Counter(
+        ref for summary in vm_function_summaries for ref in summary["vm_data_ref_mentions"]
+    )
+    bytecode_ref_occurrences = Counter(
+        ref
+        for summary in vm_function_summaries
+        for ref in summary["vm_data_ref_mentions"]
+        if ref.startswith("__obf_vm_bc_")
+    )
     bytecode_data_refs = sorted(
         {
             ref
@@ -1617,6 +1652,40 @@ def analyze_ir(
             for ref in summary["vm_data_refs"]
         }
     )
+    bytecode_global_defs = sorted(
+        name for name in global_definitions if name.startswith("__obf_vm_bc_")
+    )
+    vm_data_ref_count = sum(vm_data_ref_occurrences.values())
+    unique_vm_data_ref_count = len(vm_data_ref_occurrences)
+    max_refs_to_single_vm_data = max(vm_data_ref_occurrences.values(), default=0)
+    vm_data_ref_concentration = (
+        round(max_refs_to_single_vm_data / vm_data_ref_count, 4) if vm_data_ref_count else 0.0
+    )
+    bytecode_ref_count = sum(bytecode_ref_occurrences.values())
+    bytecode_anchor_count = len(bytecode_ref_occurrences)
+    bytecode_shard_count = bytecode_anchor_count
+    bytecode_global_count = len(bytecode_global_defs)
+    bytecode_decoy_count = max(0, bytecode_global_count - bytecode_anchor_count)
+
+    if bytecode_anchor_count <= 1 and max_refs_to_single_vm_data:
+        if max_refs_to_single_vm_data >= 96:
+            data_mapping_confidence = "single_blob"
+        else:
+            data_mapping_confidence = "concentrated"
+    elif bytecode_anchor_count >= 2:
+        if vm_data_ref_concentration >= 0.6:
+            data_mapping_confidence = "sharded"
+        elif vm_data_ref_concentration >= 0.35:
+            data_mapping_confidence = "sharded"
+        else:
+            data_mapping_confidence = "scattered"
+    else:
+        data_mapping_confidence = "low"
+
+    if bytecode_decoy_count > 0 and data_mapping_confidence in {"sharded", "scattered"}:
+        bytecode_recovery_confidence = "sharded_with_decoys"
+    else:
+        bytecode_recovery_confidence = data_mapping_confidence
     route_family_counts = Counter(
         family
         for summary in vm_function_summaries
@@ -1624,8 +1693,15 @@ def analyze_ir(
         for _ in range(count)
     )
     metrics = {
+        "bytecode_anchor_count": bytecode_anchor_count,
+        "bytecode_decoy_count": bytecode_decoy_count,
         "bytecode_data_ref_count": len(bytecode_data_refs),
+        "bytecode_global_count": bytecode_global_count,
+        "bytecode_recovery_confidence": bytecode_recovery_confidence,
+        "bytecode_ref_count": bytecode_ref_count,
+        "bytecode_shard_count": bytecode_shard_count,
         "callsite_rewrite_count": len(callsites),
+        "data_mapping_confidence": data_mapping_confidence,
         "direct_callsite_mapping_count": sum(
             1
             for callsite in callsites
@@ -1725,6 +1801,9 @@ def analyze_ir(
             summary["transformed_opcode_compare_count"] for summary in vm_function_summaries
         ),
         "transformed_opcode_constant_count": len(transformed_opcode_constants),
+        "unique_vm_data_ref_count": unique_vm_data_ref_count,
+        "vm_data_ref_concentration": vm_data_ref_concentration,
+        "vm_data_ref_count": vm_data_ref_count,
         "trap_oracle_direct_count": sum(
             summary["trap_oracle_direct_count"] for summary in vm_function_summaries
         ),
@@ -1737,6 +1816,7 @@ def analyze_ir(
         "vm_function_count": len(vm_function_summaries),
         "vm_marker_count": sum(nonzero_marker_counts.values()),
         "wrapper_count": len(wrappers),
+        "max_refs_to_single_vm_data": max_refs_to_single_vm_data,
     }
     opcode_recovery_confidence = "none"
     if metrics["raw_direct_opcode_compare_count"]:
@@ -1813,6 +1893,8 @@ def analyze_ir(
         "marker_counts": nonzero_marker_counts,
         "metrics": metrics,
         "handler_mapping_confidence": handler_mapping_confidence,
+        "data_mapping_confidence": data_mapping_confidence,
+        "bytecode_recovery_confidence": bytecode_recovery_confidence,
         "opcode_recovery_confidence": opcode_recovery_confidence,
         "predicate_locality_confidence": predicate_locality_confidence,
         "physical_opcodes": physical_opcodes,
@@ -2012,6 +2094,15 @@ def print_report(payload: dict[str, Any], verbose: bool) -> None:
             f"nonlocal_split={metrics.get('nonlocal_split_opcode_header_count', 0)} "
             f"confidence={result.get('opcode_recovery_confidence', 'none')} "
             f"locality={result.get('predicate_locality_confidence', 'none')} "
+            f"vm_data_refs={metrics.get('vm_data_ref_count', 0)} "
+            f"vm_data_unique={metrics.get('unique_vm_data_ref_count', 0)} "
+            f"vm_data_max={metrics.get('max_refs_to_single_vm_data', 0)} "
+            f"vm_data_conc={metrics.get('vm_data_ref_concentration', 0.0)} "
+            f"bytecode_anchors={metrics.get('bytecode_anchor_count', 0)} "
+            f"bytecode_shards={metrics.get('bytecode_shard_count', 0)} "
+            f"bytecode_decoys={metrics.get('bytecode_decoy_count', 0)} "
+            f"bytecode_conf={result.get('bytecode_recovery_confidence', 'none')} "
+            f"data_map={result.get('data_mapping_confidence', 'none')} "
             f"handler_map={result.get('handler_mapping_confidence', 'none')} "
             f"direct_handlers={metrics.get('direct_success_to_handler_count', 0)} "
             f"trampolines={metrics.get('success_to_trampoline_count', 0)} "

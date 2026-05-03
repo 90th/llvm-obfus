@@ -20,6 +20,16 @@ struct decoded_metadata_span_result {
   [[nodiscard]] bool valid() const { return consumed; }
 };
 
+struct bytecode_anchor_selection {
+  llvm::GlobalVariable* anchor = nullptr;
+  llvm::Value* base = nullptr;
+  llvm::ArrayType* array_type = nullptr;
+
+  [[nodiscard]] bool valid() const {
+    return anchor != nullptr && base != nullptr && array_type != nullptr;
+  }
+};
+
 std::uint32_t value_descriptor(const value_ref& value) {
   if (value.kind == value_ref_kind::slot) { return value.slot; }
 
@@ -155,6 +165,47 @@ llvm::Value* materialize_decode_round_constant(llvm::IRBuilder<>& builder,
   return materialized != nullptr ? materialized : constant;
 }
 
+bytecode_anchor_selection select_bytecode_anchor(llvm::IRBuilder<>& builder,
+                                                 const rewrite_function_context& context,
+                                                 std::uint32_t offset,
+                                                 std::uint64_t salt) {
+  bytecode_anchor_selection selection;
+  if (context.bytecode_global == nullptr) { return selection; }
+
+  llvm::GlobalVariable* anchor = context.bytecode_global;
+  const std::uint32_t real_anchor_count =
+      std::min<std::uint32_t>(context.bytecode_anchor_real_count,
+                              static_cast<std::uint32_t>(context.bytecode_anchor_globals.size()));
+  const std::uint32_t candidate_count = real_anchor_count == 0
+                                            ? static_cast<std::uint32_t>(context.bytecode_anchor_globals.size())
+                                            : real_anchor_count;
+  if (candidate_count > 0) {
+    const std::uint64_t selector =
+        mix_seed(context.bytecode_seed,
+                 (static_cast<std::uint64_t>(offset) + 1) * 0x9e3779b97f4a7c15ULL ^
+                     context.opaque_seed_base ^ salt);
+    llvm::GlobalVariable* candidate =
+        context.bytecode_anchor_globals[selector % static_cast<std::uint64_t>(candidate_count)];
+    if (candidate != nullptr) { anchor = candidate; }
+  }
+
+  auto* array_type = llvm::dyn_cast<llvm::ArrayType>(anchor->getValueType());
+  if (array_type == nullptr) { return selection; }
+
+  llvm::Value* base = materialize_pointer_value(builder,
+                                                anchor,
+                                                context.opaque_seed_slot,
+                                                context.opaque_seed_base,
+                                                context.mba_context,
+                                                salt ^ 0x5707ULL);
+  if (base == nullptr) { base = anchor; }
+
+  selection.anchor = anchor;
+  selection.base = base;
+  selection.array_type = array_type;
+  return selection;
+}
+
 llvm::Value* decode_byte_and_advance_state(llvm::IRBuilder<>& builder,
                                            const rewrite_function_context& context,
                                            llvm::Value* encoded,
@@ -199,22 +250,17 @@ llvm::Value* fetch_byte(llvm::IRBuilder<>& builder,
                         const rewrite_function_context& context,
                         std::uint32_t offset,
                         std::uint64_t salt) {
-  llvm::Value* bytecode_base = materialize_pointer_value(builder,
-                                                         context.bytecode_global,
-                                                         context.opaque_seed_slot,
-                                                         context.opaque_seed_base,
-                                                         context.mba_context,
-                                                         salt ^ 0x5707ULL);
-  if (bytecode_base == nullptr) { bytecode_base = context.bytecode_global; }
+  bytecode_anchor_selection selection = select_bytecode_anchor(builder, context, offset, salt);
+  if (!selection.valid()) { return builder.getInt8(0); }
 
-  llvm::Value* slot = builder.CreateInBoundsGEP(context.bytecode_global->getValueType(),
-                                                bytecode_base,
+  llvm::Value* slot = builder.CreateInBoundsGEP(selection.anchor->getValueType(),
+                                                selection.base,
                                                 {builder.getInt32(0), builder.getInt32(offset)},
                                                 "obf.vm.bc.slot");
   llvm::Value* encoded =
       load_byte_through_window(builder,
-                               bytecode_base,
-                               llvm::cast<llvm::ArrayType>(context.bytecode_global->getValueType()),
+                               selection.base,
+                               selection.array_type,
                                offset,
                                context.opaque_seed_slot,
                                context.opaque_seed_base,
@@ -254,6 +300,7 @@ decoded_metadata_span_result decode_metadata_span(llvm::IRBuilder<>& builder,
                                                   bool assemble_first_word,
                                                   std::uint64_t salt) {
   decoded_metadata_span_result result;
+  if (context.bytecode_global == nullptr) { return result; }
   auto* array_type = llvm::dyn_cast<llvm::ArrayType>(context.bytecode_global->getValueType());
   const llvm::DataLayout* data_layout = get_builder_data_layout(builder);
   if (array_type == nullptr || data_layout == nullptr || !data_layout->isLittleEndian() ||
@@ -263,14 +310,6 @@ decoded_metadata_span_result decode_metadata_span(llvm::IRBuilder<>& builder,
 
   const std::uint64_t byte_count = array_type->getNumElements();
   if (static_cast<std::uint64_t>(offset) + length > byte_count) { return result; }
-
-  llvm::Value* bytecode_base = materialize_pointer_value(builder,
-                                                         context.bytecode_global,
-                                                         context.opaque_seed_slot,
-                                                         context.opaque_seed_base,
-                                                         context.mba_context,
-                                                         salt ^ 0x5f0fULL);
-  if (bytecode_base == nullptr) { bytecode_base = context.bytecode_global; }
 
   llvm::Value* state =
       builder.CreateLoad(builder.getInt64Ty(), context.state_slot, "obf.vm.bc.state.span.load");
@@ -285,15 +324,18 @@ decoded_metadata_span_result decode_metadata_span(llvm::IRBuilder<>& builder,
   for (std::uint32_t processed = 0; processed < length; ++processed) {
     const std::uint64_t byte_salt = salt + static_cast<std::uint64_t>(processed) * 8;
     const std::uint32_t byte_offset = offset + processed;
+    bytecode_anchor_selection selection =
+      select_bytecode_anchor(builder, context, byte_offset, byte_salt ^ 0x5f0fULL);
+    if (!selection.valid()) { return result; }
 
     llvm::Value* slot =
-        builder.CreateInBoundsGEP(array_type,
-                                  bytecode_base,
+      builder.CreateInBoundsGEP(selection.array_type,
+                    selection.base,
                                   {builder.getInt32(0), builder.getInt32(byte_offset)},
                                   "obf.vm.bc.span.ptr");
     llvm::Value* encoded = load_byte_through_window(builder,
-                                                    bytecode_base,
-                                                    array_type,
+                            selection.base,
+                            selection.array_type,
                                                     byte_offset,
                                                     context.opaque_seed_slot,
                                                     context.opaque_seed_base,
@@ -589,23 +631,20 @@ void emit_instruction_integrity_probes(llvm::IRBuilder<>& builder,
         mix_seed(context.function_context.bytecode_seed,
                  static_cast<std::uint64_t>(context.instruction_index) * 0x1337ULL + probe + 1) %
         layout.integrity_probe_range);
-    llvm::Value* bytecode_base = materialize_pointer_value(
-        builder,
-        context.function_context.bytecode_global,
-        context.function_context.opaque_seed_slot,
-        context.function_context.opaque_seed_base,
-        context.function_context.mba_context,
-        0x5800 + static_cast<std::uint64_t>(context.instruction_index) * 4 + probe);
-    if (bytecode_base == nullptr) { bytecode_base = context.function_context.bytecode_global; }
+    const std::uint64_t probe_salt =
+      0x5800 + static_cast<std::uint64_t>(context.instruction_index) * 4 + probe;
+    bytecode_anchor_selection selection =
+      select_bytecode_anchor(builder, context.function_context, probe_offset, probe_salt);
+    if (!selection.valid()) { continue; }
     llvm::Value* byte_ptr =
-        builder.CreateInBoundsGEP(context.function_context.bytecode_global->getValueType(),
-                                  bytecode_base,
+      builder.CreateInBoundsGEP(selection.anchor->getValueType(),
+                    selection.base,
                                   {builder.getInt32(0), builder.getInt32(probe_offset)},
                                   "obf.vm.integrity.ptr");
     llvm::Value* cipher_byte = load_byte_through_window(
         builder,
-        bytecode_base,
-        llvm::cast<llvm::ArrayType>(context.function_context.bytecode_global->getValueType()),
+      selection.base,
+      selection.array_type,
         probe_offset,
         context.function_context.opaque_seed_slot,
         context.function_context.opaque_seed_base,

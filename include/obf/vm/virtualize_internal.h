@@ -52,6 +52,9 @@ struct rewrite_function_context {
   std::uint32_t switch_dispatch_bank_count = 1;
   llvm::ArrayRef<std::uint32_t> dispatch_index_for_instruction;
   llvm::GlobalVariable* bytecode_global = nullptr;
+  llvm::ArrayRef<llvm::GlobalVariable*> bytecode_anchor_globals;
+  std::uint32_t bytecode_anchor_real_count = 0;
+  std::uint32_t bytecode_anchor_decoy_count = 0;
   llvm::GlobalVariable* retkey_global = nullptr;
   const vm_state_layout* state_layout = nullptr;
   llvm::Value* state_storage = nullptr;

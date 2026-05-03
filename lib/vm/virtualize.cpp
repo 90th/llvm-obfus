@@ -3,6 +3,7 @@
 #include "obf/support/generated_names.h"
 #include "obf/vm/candidate_analysis.h"
 
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
@@ -573,6 +574,72 @@ llvm::GlobalVariable* clone_bytecode_global_for_subhelper(llvm::GlobalVariable* 
   return clone;
 }
 
+std::uint32_t select_bytecode_anchor_real_count(std::uint64_t bytecode_size,
+                                                std::uint64_t bytecode_seed,
+                                                std::uint64_t salt) {
+  if (bytecode_size < 48) { return 1; }
+
+  std::uint32_t max_real_count = 4;
+  if (bytecode_size < 160) {
+    max_real_count = 2;
+  } else if (bytecode_size < 512) {
+    max_real_count = 3;
+  }
+
+  if (max_real_count <= 2) { return 2; }
+  const std::uint64_t selector = mix_seed(bytecode_seed, 0x27100001ULL ^ salt);
+  return 2U + static_cast<std::uint32_t>(selector % (max_real_count - 1U));
+}
+
+llvm::SmallVector<llvm::GlobalVariable*, 8> build_bytecode_anchor_globals(
+    llvm::GlobalVariable* bytecode_global,
+    std::uint64_t bytecode_seed,
+    std::uint64_t salt,
+    std::uint32_t& out_real_count,
+    std::uint32_t& out_decoy_count) {
+  llvm::SmallVector<llvm::GlobalVariable*, 8> anchors;
+  out_real_count = 0;
+  out_decoy_count = 0;
+  if (bytecode_global == nullptr) { return anchors; }
+
+  auto* array_type = llvm::dyn_cast<llvm::ArrayType>(bytecode_global->getValueType());
+  if (array_type == nullptr || bytecode_global->getInitializer() == nullptr) {
+    anchors.push_back(bytecode_global);
+    out_real_count = 1;
+    return anchors;
+  }
+
+  const std::uint32_t real_count =
+      select_bytecode_anchor_real_count(array_type->getNumElements(), bytecode_seed, salt);
+  llvm::Module* module = bytecode_global->getParent();
+  anchors.push_back(bytecode_global);
+  for (std::uint32_t anchor_index = 1; anchor_index < real_count; ++anchor_index) {
+    const std::uint64_t name_seed =
+        mix_seed(bytecode_seed, salt ^ (0x27110000ULL + static_cast<std::uint64_t>(anchor_index)));
+    auto* clone = new llvm::GlobalVariable(*module,
+                                           bytecode_global->getValueType(),
+                                           true,
+                                           llvm::GlobalValue::PrivateLinkage,
+                                           bytecode_global->getInitializer(),
+                                           bytecode_global->getName().str() + "_a" +
+                                               llvm::utohexstr(name_seed & 0xffffffffULL));
+    clone->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    anchors.push_back(clone);
+  }
+
+  out_real_count = real_count;
+  return anchors;
+}
+
+void annotate_bytecode_anchor_scattering(llvm::Function& function,
+                                         std::uint32_t real_count,
+                                         std::uint32_t decoy_count) {
+  if (real_count > 1) { function.addFnAttr("vm.bytecode.anchor.scattered"); }
+  function.addFnAttr("vm.bytecode.anchor.count." + std::to_string(real_count + decoy_count));
+  function.addFnAttr("vm.bytecode.anchor.real." + std::to_string(real_count));
+  function.addFnAttr("vm.bytecode.anchor.decoy." + std::to_string(decoy_count));
+}
+
 vm_state_layout build_vm_state_layout(llvm::LLVMContext& context,
                                       llvm::Type* return_type,
                                       const bytecode_program& program) {
@@ -757,6 +824,18 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
                                              mba::get_or_create_entropy_anchor(*module),
                                          .seed_base = opaque_seed_base,
                                          .depth = options.mba_depth};
+    std::uint32_t bytecode_anchor_real_count = 0;
+    std::uint32_t bytecode_anchor_decoy_count = 0;
+    llvm::SmallVector<llvm::GlobalVariable*, 8> bytecode_anchor_globals =
+      build_bytecode_anchor_globals(bytecode_global,
+                    bytecode_seed,
+                    0x273000ULL +
+                      static_cast<std::uint64_t>(island_index) * 0x100ULL +
+                      static_cast<std::uint64_t>(subhelper_index),
+                    bytecode_anchor_real_count,
+                    bytecode_anchor_decoy_count);
+    annotate_bytecode_anchor_scattering(
+      dispatcher, bytecode_anchor_real_count, bytecode_anchor_decoy_count);
   std::size_t dispatch_site_counter = 0;
   std::vector<switch_dispatch_bank> switch_dispatch_banks;
   const std::uint32_t island_count =
@@ -783,6 +862,9 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
       .switch_dispatch_bank_count = 1,
       .dispatch_index_for_instruction = dispatch_index_for_instruction,
       .bytecode_global = bytecode_global,
+      .bytecode_anchor_globals = bytecode_anchor_globals,
+      .bytecode_anchor_real_count = bytecode_anchor_real_count,
+      .bytecode_anchor_decoy_count = bytecode_anchor_decoy_count,
       .retkey_global = retkey_global,
       .state_layout = &state_layout,
       .state_storage = state_arg,
@@ -1442,6 +1524,17 @@ void rewrite_function_body(llvm::Function& function,
     bytecode_global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   }
 
+  std::uint32_t bytecode_anchor_real_count = 0;
+  std::uint32_t bytecode_anchor_decoy_count = 0;
+  llvm::SmallVector<llvm::GlobalVariable*, 8> bytecode_anchor_globals =
+      build_bytecode_anchor_globals(bytecode_global,
+                                    bytecode_seed,
+                                    0x272000ULL,
+                                    bytecode_anchor_real_count,
+                                    bytecode_anchor_decoy_count);
+  annotate_bytecode_anchor_scattering(
+      function, bytecode_anchor_real_count, bytecode_anchor_decoy_count);
+
   llvm::GlobalVariable* retkey_global = nullptr;
   if (function.getReturnType()->isIntegerTy()) {
     const std::uint64_t retkey_value = derive_vm_return_key(function, program);
@@ -1533,11 +1626,15 @@ void rewrite_function_body(llvm::Function& function,
       .switch_dispatch_bank_count = switch_dispatch_bank_count,
       .dispatch_index_for_instruction = dispatch_index_for_instruction,
       .bytecode_global = bytecode_global,
+      .bytecode_anchor_globals = bytecode_anchor_globals,
+      .bytecode_anchor_real_count = bytecode_anchor_real_count,
+      .bytecode_anchor_decoy_count = bytecode_anchor_decoy_count,
       .retkey_global = retkey_global,
       .state_slot = state_slot,
       .trap_block = failure_block,
       .opcode_predicate_slot = opcode_predicate_slot,
       .instruction_blocks = instruction_blocks,
+      .island_for_instruction = {},
       .dispatch_table = dispatch_table,
       .dispatch_table_type = dispatch_table_type,
       .ptr_int_type = ptr_int_type,

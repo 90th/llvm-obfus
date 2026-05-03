@@ -515,6 +515,43 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
     }
 
 
+def vm_data_anchor_structure(functions: dict[str, str], ir_text: str) -> dict[str, Any]:
+    vm_like_bodies = {
+        name: body for name, body in functions.items() if is_vm_like_function(name, body)
+    }
+    vm_data_ref_occurrences: Counter[str] = Counter()
+    for body in vm_like_bodies.values():
+        refs = [match.group("name") for match in VM_DATA_GLOBAL_PATTERN.finditer(body)]
+        vm_data_ref_occurrences.update(refs)
+
+    bytecode_ref_occurrences = Counter(
+        {
+            name: count
+            for name, count in vm_data_ref_occurrences.items()
+            if name.startswith("__obf_vm_bc_")
+        }
+    )
+    bytecode_globals = sorted(set(re.findall(r"__obf_vm_bc_[A-Za-z0-9_]+", ir_text)))
+    vm_data_ref_count = sum(vm_data_ref_occurrences.values())
+    max_refs_to_single_vm_data = max(vm_data_ref_occurrences.values(), default=0)
+    vm_data_ref_concentration = (
+        round(max_refs_to_single_vm_data / vm_data_ref_count, 4) if vm_data_ref_count else 0.0
+    )
+
+    return {
+        "vm_data_ref_count": vm_data_ref_count,
+        "unique_vm_data_ref_count": len(vm_data_ref_occurrences),
+        "bytecode_global_count": len(bytecode_globals),
+        "bytecode_ref_count": sum(bytecode_ref_occurrences.values()),
+        "bytecode_anchor_count": len(bytecode_ref_occurrences),
+        "bytecode_shard_count": len(bytecode_ref_occurrences),
+        "bytecode_decoy_count": max(0, len(bytecode_globals) - len(bytecode_ref_occurrences)),
+        "max_refs_to_single_vm_data": max_refs_to_single_vm_data,
+        "vm_data_ref_concentration": vm_data_ref_concentration,
+        "anchor_assignment_hash": hash_json(sorted(vm_data_ref_occurrences.items())),
+    }
+
+
 def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
     functions = parse_functions(ir_text)
     marker_functions = parse_functions(marker_text)
@@ -536,6 +573,7 @@ def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
         for name, pattern in SYMBOL_PATTERNS.items()
     }
     island_structure = vm_island_structure(functions, marker_text)
+    data_anchor_structure = vm_data_anchor_structure(functions, ir_text)
 
     fingerprint: dict[str, Any] = {
         "vm_function_count": len(vm_bodies) if vm_bodies else len(opcode_bodies),
@@ -549,6 +587,10 @@ def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
         "vm_island_structure": island_structure,
         "vm_island_hash": hash_json(island_structure)
         if island_structure["island_marker_count"] or island_structure["helper_count"]
+        else "",
+        "vm_data_anchor_structure": data_anchor_structure,
+        "vm_data_anchor_hash": hash_json(data_anchor_structure)
+        if data_anchor_structure["vm_data_ref_count"] or data_anchor_structure["bytecode_global_count"]
         else "",
     }
     for group_name, patterns in MARKER_GROUPS.items():
@@ -589,6 +631,8 @@ def dimension_value(fingerprint: dict[str, Any], dimension: str) -> Any:
         return fingerprint["dispatch_choreography"]
     if dimension == "vm_islands":
         return fingerprint["vm_island_hash"]
+    if dimension == "vm_data_anchors":
+        return fingerprint["vm_data_anchor_hash"]
     if dimension == "pointer_materialization":
         return fingerprint["pointer_materialization"]
     if dimension == "entropy_thunks":
@@ -696,6 +740,7 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
         "table_choreography",
         "dispatch_choreography",
         "vm_islands",
+        "vm_data_anchors",
         "pointer_materialization",
         "entropy_thunks",
         "entry_thunks",
@@ -732,6 +777,7 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
                 "table_choreography",
                 "dispatch_choreography",
                 "vm_islands",
+                "vm_data_anchors",
                 "vm_structure",
             )
         ]

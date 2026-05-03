@@ -1,0 +1,5 @@
+seed: 151616
+default_level: none
+targets:
+  - match: scatter_target
+    level: vm
