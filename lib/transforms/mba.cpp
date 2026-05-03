@@ -40,6 +40,14 @@ enum class entropy_thunk_shape {
   select_neutral,
 };
 
+enum class entropy_accessor_variant {
+  direct,
+  stack_roundtrip,
+  split_recombine,
+  xor_neutral,
+  add_sub_neutral,
+};
+
 opaque_zero_shape select_opaque_zero_shape(const builder_context& context, std::uint64_t salt) {
   switch (mix_seed(context.seed_base, salt ^ 0x4f7c2d1b9a031ULL) % 5U) {
     case 0:
@@ -87,6 +95,26 @@ entropy_thunk_shape select_entropy_thunk_shape(llvm::Function& owner,
       return entropy_thunk_shape::add_sub_neutral;
     default:
       return entropy_thunk_shape::select_neutral;
+  }
+}
+
+entropy_accessor_variant select_entropy_accessor_variant(llvm::Function& owner,
+                                                         const builder_context& context,
+                                                         std::uint64_t salt) {
+  std::uint64_t selector = context.seed_base;
+  selector = mix_seed(selector, stable_hash_string(owner.getName()));
+  selector = mix_seed(selector, salt ^ 0x45c0a77e91d5b33dULL);
+  switch (selector % 5U) {
+    case 0:
+      return entropy_accessor_variant::direct;
+    case 1:
+      return entropy_accessor_variant::stack_roundtrip;
+    case 2:
+      return entropy_accessor_variant::split_recombine;
+    case 3:
+      return entropy_accessor_variant::xor_neutral;
+    default:
+      return entropy_accessor_variant::add_sub_neutral;
   }
 }
 
@@ -214,6 +242,23 @@ llvm::Value* build_entropy_thunk_xor_neutral(llvm::IRBuilder<>& builder,
   return builder.CreateInsertValue(result, indirect_real, {1}, (prefix + ".insert.indirect").str());
 }
 
+llvm::StringRef get_entropy_accessor_name(entropy_accessor_variant variant) {
+  switch (variant) {
+    case entropy_accessor_variant::direct:
+      return "__obf_load_entropy_pair";
+    case entropy_accessor_variant::stack_roundtrip:
+      return "__obf_load_entropy_pair_v1";
+    case entropy_accessor_variant::split_recombine:
+      return "__obf_load_entropy_pair_v2";
+    case entropy_accessor_variant::xor_neutral:
+      return "__obf_load_entropy_pair_v3";
+    case entropy_accessor_variant::add_sub_neutral:
+      return "__obf_load_entropy_pair_v4";
+  }
+
+  llvm_unreachable("unknown entropy accessor variant");
+}
+
 llvm::Function* get_or_create_entropy_thunk(llvm::Module& module,
                                             llvm::Function& owner,
                                             llvm::Function& entropy_anchor,
@@ -323,20 +368,23 @@ llvm::Function* get_or_create_entropy_thunk(llvm::Module& module,
   return thunk;
 }
 
-llvm::Function* get_or_create_entropy_pair_accessor(llvm::Module& module) {
+llvm::Function* get_or_create_entropy_pair_accessor_variant(
+    llvm::Module& module, entropy_accessor_variant variant) {
   auto* pair_type = llvm::StructType::get(
       module.getContext(),
       {llvm::Type::getInt64Ty(module.getContext()), llvm::Type::getInt64Ty(module.getContext())});
-  if (llvm::Function* existing = module.getFunction("__obf_load_entropy_pair")) {
+  const llvm::StringRef accessor_name = get_entropy_accessor_name(variant);
+  if (llvm::Function* existing = module.getFunction(accessor_name)) {
     if (existing->getReturnType() != pair_type || !existing->arg_empty()) {
-      llvm::report_fatal_error("__obf_load_entropy_pair has unexpected signature");
+      const std::string message = accessor_name.str() + " has unexpected signature";
+      llvm::report_fatal_error(llvm::StringRef(message));
     }
     return existing;
   }
 
   auto* function_type = llvm::FunctionType::get(pair_type, /*isVarArg=*/false);
   auto* function = llvm::Function::Create(
-      function_type, llvm::GlobalValue::ExternalLinkage, "__obf_load_entropy_pair", module);
+      function_type, llvm::GlobalValue::ExternalLinkage, accessor_name, module);
   function->setDoesNotThrow();
   return function;
 }
@@ -387,7 +435,10 @@ entropy_pair load_entropy_anchor_pair(llvm::IRBuilder<>& builder,
   llvm::Module* module = entropy_anchor->getParent();
   if (module == nullptr || function == nullptr) { return {}; }
 
-  llvm::Function* accessor = get_or_create_entropy_pair_accessor(*module);
+    const entropy_accessor_variant accessor_variant =
+      select_entropy_accessor_variant(*function, context, salt);
+    llvm::Function* accessor =
+      get_or_create_entropy_pair_accessor_variant(*module, accessor_variant);
   llvm::AllocaInst* cache =
       get_or_create_function_entropy_pair_cache(*function, *accessor, context, salt);
   llvm::Value* pair = builder.CreateLoad(accessor->getReturnType(), cache, (name + ".pair").str());

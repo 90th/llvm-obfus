@@ -70,6 +70,7 @@ UNCOND_BRANCH_PATTERN = re.compile(r"\bbr\s+label\s+%(?P<target>[0-9A-Za-z$._-]+
 DIRECT_CALL_PATTERN = re.compile(
     r"\b(?:tail\s+|musttail\s+|notail\s+)?(?:call|invoke)\b[^@\n]*@(?P<name>[A-Za-z$._0-9-]+)\s*\("
 )
+ENTROPY_ACCESSOR_PATTERN = re.compile(r"__obf_load_entropy_pair(?:_v[1-9][0-9]*)?")
 # Matches a call to a named function that passes a hidden i64 token — used to detect thunk→impl calls
 HIDDEN_TOKEN_CALL_PATTERN = re.compile(
     r"\b(?:tail\s+|musttail\s+|notail\s+)?(?:call|invoke)\b[^@\n]*@(?P<impl>[A-Za-z$._0-9-]+)\s*\([^\n]*,\s*i64\s+%[-A-Za-z$._0-9]+"
@@ -1303,6 +1304,75 @@ def build_helper_shape_groups(vm_function_summaries: list[dict[str, Any]]) -> li
     return groups
 
 
+def classify_entropy_thunk_shape(function_body: str) -> str:
+    if " freeze " in function_body and " select " in function_body:
+        return "select"
+    if function_body.count(" xor i64 ") >= 4:
+        return "xor"
+    if function_body.count(" add i64 ") >= 2 and function_body.count(" sub i64 ") >= 2:
+        return "addsub"
+    if function_body.count(" extractvalue ") >= 4 and function_body.count(" insertvalue ") >= 4:
+        return "swap"
+    return "direct"
+
+
+def summarize_entropy_fingerprint(
+    functions: dict[str, FunctionIR], marker_counts: dict[str, int]
+) -> dict[str, Any]:
+    thunk_shape_counts: Counter[str] = Counter()
+    accessor_shape_counts: Counter[str] = Counter()
+    thunk_to_accessor: list[tuple[str, str]] = []
+
+    for function in sorted(functions.values(), key=lambda item: item.name):
+        accessor_names: list[str] = []
+        for match in DIRECT_CALL_PATTERN.finditer(function.body):
+            accessor_name = match.group("name")
+            if not ENTROPY_ACCESSOR_PATTERN.fullmatch(accessor_name):
+                continue
+            accessor_names.append(accessor_name)
+            accessor_shape_counts[accessor_name] += 1
+            thunk_to_accessor.append((function.name, accessor_name))
+
+        if not accessor_names:
+            continue
+
+        thunk_shape_counts[classify_entropy_thunk_shape(function.body)] += 1
+
+    entropy_thunk_count = sum(thunk_shape_counts.values())
+    entropy_reader_xref_count = sum(accessor_shape_counts.values())
+    dominant_entropy_shape_count = max(accessor_shape_counts.values(), default=0)
+    entropy_accessor_variant_count = len(accessor_shape_counts)
+
+    entropy_fingerprint_confidence = "low"
+    if entropy_reader_xref_count:
+        if entropy_accessor_variant_count <= 1:
+            entropy_fingerprint_confidence = "single_shape"
+        elif dominant_entropy_shape_count * 10 >= entropy_reader_xref_count * 7:
+            entropy_fingerprint_confidence = "few_shapes"
+        else:
+            entropy_fingerprint_confidence = "polymorphic"
+
+    return {
+        "entropy_accessor_count": entropy_reader_xref_count,
+        "entropy_accessor_variant_count": entropy_accessor_variant_count,
+        "entropy_accessor_shape_counts": dict(sorted(accessor_shape_counts.items())),
+        "dominant_entropy_shape_count": dominant_entropy_shape_count,
+        "entropy_reader_xref_count": entropy_reader_xref_count,
+        "entropy_thunk_count": entropy_thunk_count,
+        "entropy_thunk_shape_counts": dict(sorted(thunk_shape_counts.items())),
+        "entropy_fingerprint_confidence": entropy_fingerprint_confidence,
+        "entropy_thunk_to_accessor": [
+            {"thunk": thunk_name, "accessor": accessor_name}
+            for thunk_name, accessor_name in thunk_to_accessor
+        ],
+        "entropy_marker_counts": {
+            key: value
+            for key, value in marker_counts.items()
+            if key.startswith("entropy.thunk.") and value
+        },
+    }
+
+
 def build_findings(
     benchmark: str,
     wrappers: list[dict[str, Any]],
@@ -1468,6 +1538,23 @@ def build_findings(
             }
         )
 
+    if metrics["entropy_thunk_count"]:
+        findings.append(
+            {
+                "check": "entropy_accessor_fingerprint",
+                "detail": (
+                    f"entropy thunks={metrics['entropy_thunk_count']}; "
+                    f"accessor xrefs={metrics['entropy_reader_xref_count']}; "
+                    f"variants={metrics['entropy_accessor_variant_count']}; "
+                    f"dominant_shape={metrics['dominant_entropy_shape_count']}; "
+                    f"confidence={metrics['entropy_fingerprint_confidence']}"
+                ),
+                "severity": "warn"
+                if metrics["entropy_fingerprint_confidence"] in {"single_shape", "few_shapes"}
+                else "info",
+            }
+        )
+
     expected_wrappers = STRONG_VM_EXPECTED_WRAPPERS.get(benchmark, ())
     wrappers_by_name = {wrapper["function"]: wrapper for wrapper in wrappers}
     for expected_wrapper in expected_wrappers:
@@ -1617,6 +1704,7 @@ def analyze_ir(
     marker_counts = count_markers(ir_text)
     nonzero_marker_counts = {key: value for key, value in marker_counts.items() if value}
     helper_shape_groups = build_helper_shape_groups(vm_function_summaries)
+    entropy_fingerprint = summarize_entropy_fingerprint(functions, marker_counts)
     global_definitions = sorted(set(GLOBAL_DEFINITION_PATTERN.findall(ir_text)))
     physical_opcodes = sorted(
         {
@@ -1764,6 +1852,14 @@ def analyze_ir(
         ),
         "entry_thunk_count": len(entry_thunk_functions),
         "entry_thunk_shape_counts": entry_thunk_shape_counts,
+        "entropy_accessor_count": entropy_fingerprint["entropy_accessor_count"],
+        "entropy_accessor_variant_count": entropy_fingerprint["entropy_accessor_variant_count"],
+        "entropy_accessor_shape_counts": entropy_fingerprint["entropy_accessor_shape_counts"],
+        "dominant_entropy_shape_count": entropy_fingerprint["dominant_entropy_shape_count"],
+        "entropy_fingerprint_confidence": entropy_fingerprint["entropy_fingerprint_confidence"],
+        "entropy_reader_xref_count": entropy_fingerprint["entropy_reader_xref_count"],
+        "entropy_thunk_count": entropy_fingerprint["entropy_thunk_count"],
+        "entropy_thunk_shape_counts": entropy_fingerprint["entropy_thunk_shape_counts"],
         "indirect_wrapper_mapping_count": sum(
             1 for w in wrappers if w["mapping_reason"] == "indirect"
         ),
@@ -1906,6 +2002,7 @@ def analyze_ir(
         "benchmark": benchmark,
         "callsite_rewrites": callsites,
         "entry_thunks": entry_thunk_summaries,
+        "entropy_fingerprint": entropy_fingerprint,
         "findings": findings,
         "global_definitions": global_definitions,
         "ir_path": ir_path_display,

@@ -24,6 +24,11 @@ struct ObfEntropyPair {
   uint64_t indirect;
 };
 
+static struct ObfEntropyPair BuildEntropyPair(uint64_t direct, uint64_t indirect) {
+  const struct ObfEntropyPair pair = {direct, indirect};
+  return pair;
+}
+
 #if defined(_MSC_VER)
 __declspec(noinline)
 #else
@@ -34,8 +39,75 @@ struct ObfEntropyPair __obf_load_entropy_pair(void) {
   uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
   *ref_ptr = direct;
   const uint64_t indirect = __obf_entropy_anchor;
-  const struct ObfEntropyPair pair = {direct, indirect};
-  return pair;
+  return BuildEntropyPair(direct, indirect);
+}
+
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+struct ObfEntropyPair __obf_load_entropy_pair_v1(void) {
+  const uint64_t direct = __obf_entropy_anchor;
+  uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
+  volatile uint64_t scratch_direct = direct;
+  volatile uint64_t scratch_indirect = 0;
+  *ref_ptr = scratch_direct;
+  scratch_indirect = *ref_ptr;
+  return BuildEntropyPair((uint64_t)scratch_direct, (uint64_t)scratch_indirect);
+}
+
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+struct ObfEntropyPair __obf_load_entropy_pair_v2(void) {
+  const uint64_t base = __obf_entropy_anchor;
+  uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
+  const uint64_t low = base & 0xffffffffULL;
+  const uint64_t high = (base >> 32) & 0xffffffffULL;
+  const uint64_t direct = low | (high << 32);
+  *ref_ptr = direct;
+  const uint64_t indirect_source = *ref_ptr;
+  const uint64_t indirect_low = indirect_source & 0xffffffffULL;
+  const uint64_t indirect_high = (indirect_source >> 32) & 0xffffffffULL;
+  const uint64_t indirect = indirect_low | (indirect_high << 32);
+  return BuildEntropyPair(direct, indirect);
+}
+
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+struct ObfEntropyPair __obf_load_entropy_pair_v3(void) {
+  const uint64_t base = __obf_entropy_anchor;
+  uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
+  volatile uint64_t key = 0x9e3779b97f4a7c15ULL;
+  const uint64_t direct_masked = base ^ key;
+  const uint64_t direct = direct_masked ^ key;
+  *ref_ptr = direct;
+  const uint64_t indirect_masked = (*ref_ptr) ^ key;
+  const uint64_t indirect = indirect_masked ^ key;
+  return BuildEntropyPair(direct, indirect);
+}
+
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+struct ObfEntropyPair __obf_load_entropy_pair_v4(void) {
+  const uint64_t base = __obf_entropy_anchor;
+  uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
+  volatile uint64_t bias = 0x6a09e667f3bcc909ULL;
+  const uint64_t direct_biased = base + bias;
+  const uint64_t direct = direct_biased - bias;
+  *ref_ptr = direct;
+  const uint64_t indirect_biased = (*ref_ptr) + bias;
+  const uint64_t indirect = indirect_biased - bias;
+  return BuildEntropyPair(direct, indirect);
 }
 
 static uint64_t ReadTimestampEntropy(void) {

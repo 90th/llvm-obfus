@@ -39,6 +39,10 @@ COND_BRANCH_PATTERN = re.compile(
     r"br\s+i1\s+[^,]+,\s+label\s+%(?P<true>[0-9A-Za-z$._-]+),\s+label\s+%(?P<false>[0-9A-Za-z$._-]+)"
 )
 UNCOND_BRANCH_PATTERN = re.compile(r"\bbr\s+label\s+%(?P<target>[0-9A-Za-z$._-]+)")
+DIRECT_CALL_PATTERN = re.compile(
+    r"\b(?:tail\s+|musttail\s+|notail\s+)?(?:call|invoke)\b[^@\n]*@(?P<name>[A-Za-z$._0-9-]+)\s*\("
+)
+ENTROPY_ACCESSOR_PATTERN = re.compile(r"__obf_load_entropy_pair(?:_v[1-9][0-9]*)?")
 FUNCTION_NAME_PATTERN = re.compile(r"@(?P<name>[^\(]+)\(")
 LABEL_PATTERN = re.compile(r"^(?P<label>[0-9A-Za-z_.]+):\s*(?:;.*)?$")
 VM_DATA_GLOBAL_PATTERN = re.compile(
@@ -191,6 +195,7 @@ SYMBOL_PATTERNS = {
     "vm_subhelper": r"__obf_vm_hs_[A-Za-z0-9_]+",
     "string": r"__obf_str_[A-Za-z0-9_]+",
     "entropy": r"__obf_entropy_thunk_[A-Za-z0-9_]+",
+    "entropy_accessor": r"__obf_load_entropy_pair(?:_v[1-9][0-9]*)?",
 }
 
 
@@ -568,6 +573,49 @@ def vm_data_anchor_structure(functions: dict[str, str], ir_text: str) -> dict[st
     }
 
 
+def classify_entropy_thunk_shape(function_body: str) -> str:
+    if " freeze " in function_body and " select " in function_body:
+        return "select"
+    if function_body.count(" xor i64 ") >= 4:
+        return "xor"
+    if function_body.count(" add i64 ") >= 2 and function_body.count(" sub i64 ") >= 2:
+        return "addsub"
+    if function_body.count(" extractvalue ") >= 4 and function_body.count(" insertvalue ") >= 4:
+        return "swap"
+    return "direct"
+
+
+def entropy_accessor_structure(functions: dict[str, str]) -> dict[str, Any]:
+    thunk_shape_counts: Counter[str] = Counter()
+    accessor_shape_counts: Counter[str] = Counter()
+    thunk_to_accessor: list[tuple[str, str]] = []
+
+    for name, body in sorted(functions.items()):
+        accessor_names: list[str] = []
+        for match in DIRECT_CALL_PATTERN.finditer(body):
+            accessor_name = match.group("name")
+            if not ENTROPY_ACCESSOR_PATTERN.fullmatch(accessor_name):
+                continue
+            accessor_names.append(accessor_name)
+            accessor_shape_counts[accessor_name] += 1
+            thunk_to_accessor.append((name, accessor_name))
+
+        if not accessor_names:
+            continue
+
+        thunk_shape_counts[classify_entropy_thunk_shape(body)] += 1
+
+    return {
+        "thunk_count": sum(thunk_shape_counts.values()),
+        "thunk_shape_counts": dict(sorted(thunk_shape_counts.items())),
+        "accessor_count": sum(accessor_shape_counts.values()),
+        "accessor_variant_count": len(accessor_shape_counts),
+        "accessor_shape_counts": dict(sorted(accessor_shape_counts.items())),
+        "dominant_accessor": max(accessor_shape_counts.values(), default=0),
+        "callgraph_hash": hash_json(thunk_to_accessor) if thunk_to_accessor else "",
+    }
+
+
 def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
     functions = parse_functions(ir_text)
     marker_functions = parse_functions(marker_text)
@@ -590,6 +638,7 @@ def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
     }
     island_structure = vm_island_structure(functions, marker_text)
     data_anchor_structure = vm_data_anchor_structure(functions, ir_text)
+    entropy_structure = entropy_accessor_structure(functions)
 
     fingerprint: dict[str, Any] = {
         "vm_function_count": len(vm_bodies) if vm_bodies else len(opcode_bodies),
@@ -607,6 +656,10 @@ def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
         "vm_data_anchor_structure": data_anchor_structure,
         "vm_data_anchor_hash": hash_json(data_anchor_structure)
         if data_anchor_structure["vm_data_ref_count"] or data_anchor_structure["bytecode_global_count"]
+        else "",
+        "entropy_accessor_structure": entropy_structure,
+        "entropy_accessor_hash": hash_json(entropy_structure)
+        if entropy_structure["accessor_count"] or entropy_structure["thunk_count"]
         else "",
     }
     for group_name, patterns in MARKER_GROUPS.items():
@@ -653,6 +706,8 @@ def dimension_value(fingerprint: dict[str, Any], dimension: str) -> Any:
         return fingerprint["pointer_materialization"]
     if dimension == "entropy_thunks":
         return fingerprint["entropy_thunks"]
+    if dimension == "entropy_accessors":
+        return fingerprint["entropy_accessor_hash"]
     if dimension == "entry_thunks":
         return fingerprint["entry_thunks"]
     if dimension == "mba_shapes":
@@ -759,6 +814,7 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
         "vm_data_anchors",
         "pointer_materialization",
         "entropy_thunks",
+        "entropy_accessors",
         "entry_thunks",
         "mba_shapes",
         "symbol_names",
@@ -893,6 +949,7 @@ def main() -> int:
         "vm_islands",
         "pointer_materialization",
         "entropy_thunks",
+        "entropy_accessors",
         "entry_thunks",
         "mba_shapes",
         "symbol_names",
@@ -912,6 +969,7 @@ def main() -> int:
         "handler_shapes": args.require_handler_diversity,
         "pointer_materialization": args.require_pointer_materialization_diversity,
         "entropy_thunks": args.require_entropy_thunk_diversity,
+        "entropy_accessors": args.require_entropy_thunk_diversity,
         "mba_shapes": args.require_mba_diversity,
     }
     for dimension, required in required_dimensions.items():

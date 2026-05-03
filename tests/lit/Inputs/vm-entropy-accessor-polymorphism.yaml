@@ -1,0 +1,13 @@
+seed: 28028
+default_level: none
+targets:
+  - match: entropy_alpha
+    level: vm
+  - match: entropy_beta
+    level: vm
+  - match: entropy_gamma
+    level: vm
+  - match: entropy_delta
+    level: vm
+  - match: entropy_epsilon
+    level: vm

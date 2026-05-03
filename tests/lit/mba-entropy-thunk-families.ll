@@ -63,7 +63,7 @@ entry:
 ; IR-NOT: call { i64, i64 } @__obf_load_entropy_pair()
 ; IR: ret i32
 ; IR-LABEL: define internal { i64, i64 } @__obf_entropy_thunk_
-; IR: call { i64, i64 } @__obf_load_entropy_pair()
+; IR: call { i64, i64 } @__obf_load_entropy_pair{{(_v[1-4])?}}()
 
 ; SHAPES-DAG: entropy.thunk.select
 ; SHAPES-DAG: entropy.thunk.addsub
