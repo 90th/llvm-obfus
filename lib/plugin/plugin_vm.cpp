@@ -88,7 +88,8 @@ std::string make_vm_symbol_tag(llvm::Module& module,
                                std::uint64_t seed) {
   if (preserve_generated_names) { return source_name.str(); }
 
-  const std::string base = make_obf_symbol_name("i", source_name, seed);
+  const std::uint64_t tag_seed = mix_generated_name_seed(seed, 0x71a6c0de2f00dULL);
+  const std::string base = make_obf_symbol_name("i", source_name, tag_seed);
   for (std::uint64_t suffix = 0;; ++suffix) {
     const std::string candidate = suffix == 0 ? base : base + "_" + std::to_string(suffix);
     if (module.getNamedValue(std::string("__obf_vm_bc_") + candidate) == nullptr &&
@@ -132,6 +133,32 @@ enum class vm_pointer_materialization_shape {
   split_xor_chunks,
   add_sub_bias,
 };
+
+enum class vm_entry_thunk_shape {
+  direct_forward,
+  neutral_forward,
+  split_forward,
+};
+
+vm_entry_thunk_shape select_vm_entry_thunk_shape(llvm::StringRef source_name,
+                                                 std::uint64_t seed) {
+  std::uint64_t state = mix_generated_name_seed(seed, 0xe17e7f00dULL);
+  state = mix_generated_name_seed(state, stable_hash_string(source_name));
+  return static_cast<vm_entry_thunk_shape>(state % 3U);
+}
+
+llvm::StringRef vm_entry_thunk_shape_marker(vm_entry_thunk_shape shape) {
+  switch (shape) {
+    case vm_entry_thunk_shape::direct_forward:
+      return "vm.entry.thunk.shape.direct";
+    case vm_entry_thunk_shape::neutral_forward:
+      return "vm.entry.thunk.shape.neutral";
+    case vm_entry_thunk_shape::split_forward:
+      return "vm.entry.thunk.shape.split";
+  }
+
+  llvm_unreachable("unknown vm entry thunk shape");
+}
 
 vm_resolver_shape select_vm_resolver_shape(protection_level level) {
   if (level == protection_level::strong_vm) { return vm_resolver_shape::local_always_decode; }
@@ -526,9 +553,38 @@ void sanitize_vm_wrapper_attributes(llvm::Function& interface_function) {
   interface_function.setAttributes(build_vm_abi_attribute_list(interface_function));
 }
 
+llvm::CallInst* emit_vm_entry_thunk_call(llvm::IRBuilder<>& builder,
+                                         llvm::Function& interface_function,
+                                         llvm::Function& implementation_function,
+                                         llvm::ArrayRef<llvm::Value*> forward_args) {
+  const bool returns_void = implementation_function.getReturnType()->isVoidTy();
+  auto* inner_call = builder.CreateCall(implementation_function.getFunctionType(),
+                                       &implementation_function,
+                                       forward_args,
+                                       returns_void ? "" : "obf.vm.entry.thunk.call");
+  inner_call->setCallingConv(interface_function.getCallingConv());
+  inner_call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
+  return inner_call;
+}
+
+void emit_vm_entry_thunk_call_and_return(llvm::IRBuilder<>& builder,
+                                         llvm::Function& interface_function,
+                                         llvm::Function& implementation_function,
+                                         llvm::ArrayRef<llvm::Value*> forward_args) {
+  llvm::CallInst* inner_call =
+      emit_vm_entry_thunk_call(builder, interface_function, implementation_function, forward_args);
+  if (implementation_function.getReturnType()->isVoidTy()) {
+    builder.CreateRetVoid();
+    return;
+  }
+
+  builder.CreateRet(inner_call);
+}
+
 llvm::Function* create_vm_entry_thunk(llvm::Function& interface_function,
                                       llvm::Function& implementation_function,
-                                      llvm::StringRef thunk_name) {
+                                      llvm::StringRef thunk_name,
+                                      vm_entry_thunk_shape shape) {
   llvm::Module* module = interface_function.getParent();
   if (module == nullptr) { return nullptr; }
 
@@ -545,6 +601,7 @@ llvm::Function* create_vm_entry_thunk(llvm::Function& interface_function,
   thunk->addFnAttr(llvm::Attribute::NoInline);
   // string attribute survives artifact cleanup (fn attrs are not stripped, only local value names are)
   thunk->addFnAttr("obf.vm.entry.thunk");
+  thunk->addFnAttr(vm_entry_thunk_shape_marker(shape));
 
   // copy arg names from the implementation
   auto impl_arg = implementation_function.arg_begin();
@@ -561,21 +618,44 @@ llvm::Function* create_vm_entry_thunk(llvm::Function& interface_function,
   forward_args.reserve(thunk->arg_size());
   for (llvm::Argument& thunk_arg : thunk->args()) { forward_args.push_back(&thunk_arg); }
 
+  if (shape == vm_entry_thunk_shape::neutral_forward && !forward_args.empty() &&
+      forward_args.back()->getType()->isIntegerTy(64)) {
+    auto* token_type = llvm::cast<llvm::IntegerType>(forward_args.back()->getType());
+    forward_args.back() = builder.CreateXor(forward_args.back(),
+                                            llvm::ConstantInt::get(token_type, 0),
+                                            "obf.vm.entry.thunk.neutral");
+  }
+
+  if (shape != vm_entry_thunk_shape::split_forward) {
+    emit_vm_entry_thunk_call_and_return(builder,
+                                        interface_function,
+                                        implementation_function,
+                                        forward_args);
+    return thunk;
+  }
+
+  llvm::BasicBlock* route = llvm::BasicBlock::Create(
+      module->getContext(), "obf.vm.entry.thunk.route", thunk);
+  llvm::BasicBlock* call_block = llvm::BasicBlock::Create(
+      module->getContext(), "obf.vm.entry.thunk.call", thunk);
+  llvm::BasicBlock* ret_block = llvm::BasicBlock::Create(
+      module->getContext(), "obf.vm.entry.thunk.ret", thunk);
+
+  builder.CreateBr(route);
+
+  llvm::IRBuilder<> route_builder(route);
+  route_builder.CreateBr(call_block);
+
+  llvm::IRBuilder<> call_builder(call_block);
+  llvm::CallInst* inner_call = emit_vm_entry_thunk_call(
+      call_builder, interface_function, implementation_function, forward_args);
+  call_builder.CreateBr(ret_block);
+
+  llvm::IRBuilder<> ret_builder(ret_block);
   if (implementation_function.getReturnType()->isVoidTy()) {
-    auto* inner_call = builder.CreateCall(
-        implementation_function.getFunctionType(), &implementation_function, forward_args);
-    inner_call->setCallingConv(interface_function.getCallingConv());
-    inner_call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
-    builder.CreateRetVoid();
+    ret_builder.CreateRetVoid();
   } else {
-    auto* inner_call = builder.CreateCall(
-        implementation_function.getFunctionType(),
-        &implementation_function,
-        forward_args,
-        "obf.vm.entry.thunk.call");
-    inner_call->setCallingConv(interface_function.getCallingConv());
-    inner_call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
-    builder.CreateRet(inner_call);
+    ret_builder.CreateRet(inner_call);
   }
 
   return thunk;
@@ -985,8 +1065,8 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
                                                                   seed ^ 0x5eedULL,
                                                                   "__obf_vm_targetseed_");
   binding.decode_key_global_name = make_vm_generated_symbol_name(*module,
-                                                                 preserve_generated_names,
-                                                                 "__obf_vm_k",
+                                                                  preserve_generated_names,
+                                                                  "__obf_vm_k",
                                                                  source_name,
                                                                  seed ^ 0xdec0deULL,
                                                                  "__obf_vm_key_");
@@ -998,13 +1078,15 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
                                                                   "__obf_vm_seedcase_");
   const std::string entry_thunk_name =
       make_vm_entry_thunk_name(*module, preserve_generated_names, source_name, seed);
+  const vm_entry_thunk_shape entry_thunk_shape = select_vm_entry_thunk_shape(source_name, seed);
 
   llvm::Function* implementation_function =
       clone_vm_implementation(*interface_function, implementation_name);
   if (implementation_function == nullptr) { return binding; }
 
   llvm::Function* entry_thunk_function =
-      create_vm_entry_thunk(*interface_function, *implementation_function, entry_thunk_name);
+      create_vm_entry_thunk(
+          *interface_function, *implementation_function, entry_thunk_name, entry_thunk_shape);
   if (entry_thunk_function == nullptr) { return binding; }
 
   binding.interface_function = interface_function;

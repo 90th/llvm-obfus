@@ -163,6 +163,12 @@ MARKER_GROUPS = {
         "select": r"entropy\.thunk\.select",
         "definition": r"@__obf_entropy_thunk_",
     },
+    "entry_thunks": {
+        "direct": r"vm\.entry\.thunk\.shape\.direct",
+        "neutral": r"vm\.entry\.thunk\.shape\.neutral",
+        "split": r"vm\.entry\.thunk\.shape\.split",
+        "definition": r"obf\.vm\.entry\.thunk",
+    },
     "mba_shapes": {
         "zero_xor_pair": r"obf\.mba\.zero\.xor_pair",
         "zero_add_sub_pair": r"obf\.mba\.zero\.add_sub_pair",
@@ -175,6 +181,7 @@ MARKER_GROUPS = {
 
 SYMBOL_PATTERNS = {
     "vm_impl": r"__obf_vm_i_[A-Za-z0-9_]+",
+    "vm_entry": r"__obf_vm_e_[A-Za-z0-9_]+",
     "vm_global": r"__obf_vm_g_[A-Za-z0-9_]+",
     "vm_target": r"__obf_vm_t_[A-Za-z0-9_]+",
     "vm_seed": r"__obf_vm_s_[A-Za-z0-9_]+",
@@ -586,6 +593,8 @@ def dimension_value(fingerprint: dict[str, Any], dimension: str) -> Any:
         return fingerprint["pointer_materialization"]
     if dimension == "entropy_thunks":
         return fingerprint["entropy_thunks"]
+    if dimension == "entry_thunks":
+        return fingerprint["entry_thunks"]
     if dimension == "mba_shapes":
         return fingerprint["mba_shapes"]
     if dimension == "symbol_names":
@@ -689,6 +698,7 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
         "vm_islands",
         "pointer_materialization",
         "entropy_thunks",
+        "entry_thunks",
         "mba_shapes",
         "symbol_names",
         "vm_structure",
@@ -821,6 +831,7 @@ def main() -> int:
         "vm_islands",
         "pointer_materialization",
         "entropy_thunks",
+        "entry_thunks",
         "mba_shapes",
         "symbol_names",
         "vm_structure",

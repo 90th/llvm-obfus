@@ -1,0 +1,11 @@
+seed: 26026
+default_level: none
+targets:
+  - match: poly_alpha
+    level: vm
+  - match: poly_beta
+    level: vm
+  - match: poly_gamma
+    level: vm
+  - match: poly_delta
+    level: vm

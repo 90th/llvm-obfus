@@ -20,7 +20,10 @@ CONFIG_SECONDARY_OBF_IR_CANDIDATES = (
 
 
 WRAPPER_CALL_PATTERN = re.compile(
-    r"call\s+.*?@(?P<impl>[_A-Za-z$\.0-9]+)\([^\n]*,\s*i64\s+%[0-9A-Za-z_.]+\)"
+    r"call\s+.*?@(?P<impl>[_A-Za-z$\.0-9]+)\([^\n]*,\s*i64\s+%[0-9A-Za-z$_.-]+\)"
+)
+INDIRECT_HIDDEN_TOKEN_CALL_PATTERN = re.compile(
+    r"\bcall\b[^\n]*%[-A-Za-z$._0-9]+\([^\n]*\bi64\s+(?:%[-A-Za-z$._0-9]+|-?\d+)"
 )
 RAW_OPCODE_COMPARE_PATTERN = re.compile(
     r"(?:%[-A-Za-z$._0-9]*obf\.vm\.opcode\.match[-A-Za-z$._0-9]*\s*=\s*)?"
@@ -65,6 +68,12 @@ class VmFunctionSummary:
     opcode_map: dict[str, int]
 
 
+@dataclass(frozen=True)
+class FunctionSignature:
+    return_type: str
+    arg_types: tuple[str, ...]
+
+
 def parse_functions(ir_text: str) -> dict[str, str]:
     functions: dict[str, str] = {}
     lines = ir_text.splitlines()
@@ -102,6 +111,114 @@ def parse_functions(ir_text: str) -> dict[str, str]:
         line_index += 1
 
     return functions
+
+
+def split_top_level_csv(text: str) -> list[str]:
+    items: list[str] = []
+    start = 0
+    depth = 0
+    pairs = {"(": ")", "[": "]", "{": "}", "<": ">"}
+    closing = set(pairs.values())
+    for index, char in enumerate(text):
+        if char in pairs:
+            depth += 1
+        elif char in closing and depth > 0:
+            depth -= 1
+        elif char == "," and depth == 0:
+            items.append(text[start:index].strip())
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def parse_type_token(text: str) -> str:
+    stripped = text.strip()
+    if not stripped or stripped == "...":
+        return ""
+    if stripped.startswith("{"):
+        end = stripped.find("}")
+        return stripped[: end + 1] if end != -1 else stripped
+    if stripped.startswith("["):
+        end = stripped.find("]")
+        return stripped[: end + 1] if end != -1 else stripped
+    if stripped.startswith("<"):
+        end = stripped.find(">")
+        return stripped[: end + 1] if end != -1 else stripped
+    return stripped.split()[0]
+
+
+def parse_return_type(prefix: str) -> str:
+    tokens = prefix.strip().split()
+    return tokens[-1] if tokens else ""
+
+
+def parse_function_headers(ir_text: str) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    lines = ir_text.splitlines()
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index]
+        if not line.startswith("define "):
+            line_index += 1
+            continue
+
+        header_lines = [line]
+        while not header_lines[-1].rstrip().endswith("{"):
+            line_index += 1
+            if line_index >= len(lines):
+                raise AssertionError("unterminated function header")
+            header_lines.append(lines[line_index])
+
+        header_text = " ".join(part.strip() for part in header_lines)
+        name_match = re.search(r"@(?P<name>[^\(]+)\(", header_text)
+        if name_match is None:
+            raise AssertionError(f"unable to parse function name from header: {header_text}")
+        headers[name_match.group("name")] = header_text
+        line_index += 1
+
+    return headers
+
+
+def parse_function_signature(header: str) -> FunctionSignature:
+    name_match = re.search(r"@(?P<name>[^\(]+)\(", header)
+    if name_match is None:
+        return FunctionSignature("", ())
+    prefix = header[len("define ") : name_match.start()].strip()
+    args_start = name_match.end() - 1
+    args_end = header.rfind(")")
+    if args_start < 0 or args_end < args_start:
+        return FunctionSignature(parse_return_type(prefix), ())
+    args_text = header[args_start + 1 : args_end]
+    arg_types = tuple(
+        arg_type
+        for arg_type in (parse_type_token(arg) for arg in split_top_level_csv(args_text))
+        if arg_type
+    )
+    return FunctionSignature(parse_return_type(prefix), arg_types)
+
+
+def find_signature_impl_matches(
+    function_name: str,
+    function_headers: dict[str, str],
+    implementation_names: set[str],
+) -> list[str]:
+    wrapper_header = function_headers.get(function_name, "")
+    if not wrapper_header:
+        return []
+    wrapper_signature = parse_function_signature(wrapper_header)
+    matches: list[str] = []
+    for implementation_name in implementation_names:
+        impl_header = function_headers.get(implementation_name, "")
+        if not impl_header:
+            continue
+        impl_signature = parse_function_signature(impl_header)
+        if impl_signature.return_type != wrapper_signature.return_type:
+            continue
+        if impl_signature.arg_types == wrapper_signature.arg_types + ("i64",):
+            matches.append(implementation_name)
+    return sorted(matches)
 
 
 def parse_blocks(function_body: str) -> dict[str, str]:
@@ -164,11 +281,34 @@ def stable_split_encoding(body: str) -> int:
     return int(digest[:8], 16)
 
 
-def find_wrapper_implementations(function_bodies: dict[str, str]) -> dict[str, str]:
+def has_indirect_hidden_token_call(function_body: str) -> bool:
+    return bool(INDIRECT_HIDDEN_TOKEN_CALL_PATTERN.search(function_body))
+
+
+def find_wrapper_implementations(
+    function_bodies: dict[str, str], function_headers: dict[str, str]
+) -> dict[str, str]:
     wrappers: dict[str, str] = {}
     implementation_names = {
         name for name, body in function_bodies.items() if is_vm_implementation_body(body)
     }
+    entry_thunk_to_impl: dict[str, str] = {}
+    for function_name, body in function_bodies.items():
+        if function_name in implementation_names:
+            continue
+        thunk_call_match = WRAPPER_CALL_PATTERN.search(body)
+        if thunk_call_match is None:
+            continue
+        thunk_impl_name = thunk_call_match.group("impl")
+        thunk_impl_body = function_bodies.get(thunk_impl_name, "")
+        if is_vm_implementation_body(thunk_impl_body):
+            entry_thunk_to_impl[function_name] = thunk_impl_name
+
+    entry_thunk_names = set(entry_thunk_to_impl)
+    entry_thunks_by_impl: dict[str, list[str]] = {}
+    for thunk_name, implementation_name in entry_thunk_to_impl.items():
+        entry_thunks_by_impl.setdefault(implementation_name, []).append(thunk_name)
+
     for function_name, body in function_bodies.items():
         if is_vm_implementation_body(body):
             continue
@@ -176,16 +316,29 @@ def find_wrapper_implementations(function_bodies: dict[str, str]) -> dict[str, s
         implementation_name = ""
         if match is not None:
             implementation_name = match.group("impl")
+            if implementation_name in entry_thunk_to_impl:
+                implementation_name = entry_thunk_to_impl[implementation_name]
         if not implementation_name:
             refs = sorted(
                 {
                     pointer_match.group("name")
                     for pointer_match in FUNCTION_PTR_REF_PATTERN.finditer(body)
                     if pointer_match.group("name") in implementation_names
+                    or pointer_match.group("name") in entry_thunk_names
                 }
             )
             if len(refs) == 1:
                 implementation_name = refs[0]
+                if implementation_name in entry_thunk_to_impl:
+                    implementation_name = entry_thunk_to_impl[implementation_name]
+        if not implementation_name and has_indirect_hidden_token_call(body):
+            signature_matches = find_signature_impl_matches(
+                function_name, function_headers, implementation_names
+            )
+            if len(signature_matches) == 1:
+                signature_impl = signature_matches[0]
+                if entry_thunks_by_impl.get(signature_impl):
+                    implementation_name = signature_impl
         if not implementation_name:
             continue
         implementation_body = function_bodies.get(implementation_name)
@@ -429,8 +582,9 @@ def extract_vm_summary(
     baseline_ir_text: str,
 ) -> list[VmFunctionSummary]:
     function_bodies = parse_functions(obfuscated_ir_text)
+    function_headers = parse_function_headers(obfuscated_ir_text)
     baseline_function_bodies = parse_functions(baseline_ir_text)
-    wrapper_to_impl = find_wrapper_implementations(function_bodies)
+    wrapper_to_impl = find_wrapper_implementations(function_bodies, function_headers)
 
     summaries: list[VmFunctionSummary] = []
     for wrapper_name, implementation_name in wrapper_to_impl.items():
