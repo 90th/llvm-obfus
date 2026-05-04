@@ -1,0 +1,11 @@
+seed: 26026
+default_level: none
+targets:
+  - match: floor_alpha
+    level: vm
+  - match: floor_beta
+    level: vm
+  - match: floor_gamma
+    level: vm
+  - match: floor_delta
+    level: vm

@@ -69,4 +69,5 @@ entry:
 ; CHECK: ret i32
 ; CHECK-DAG: "vm.entry.thunk.shape.decoy_indirect"
 ; CHECK-DAG: "vm.entry.thunk.shape.indirect"
-; CHECK-DAG: "vm.entry.thunk.shape.{{(direct|neutral|split)}}"
+; CHECK-NOT: "vm.entry.thunk.shape.direct"
+; CHECK-NOT: "vm.entry.thunk.shape.neutral"

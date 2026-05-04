@@ -335,7 +335,7 @@ def parse_yaml_scalar(text: str) -> str:
     return value
 
 
-def load_strong_vm_wrapper_policy(benchmark: str) -> StrongVmWrapperPolicy:
+def load_vm_wrapper_policy(benchmark: str, level: str) -> StrongVmWrapperPolicy:
     if benchmark == "selftest":
         return StrongVmWrapperPolicy((), "unknown")
 
@@ -351,7 +351,7 @@ def load_strong_vm_wrapper_policy(benchmark: str) -> StrongVmWrapperPolicy:
     wrapper_names: list[str] = []
     in_target_list = False
     current_name = ""
-    saw_default_strong_vm = False
+    saw_default_level = False
     has_unsupported_match = False
 
     for raw_line in config_text.splitlines():
@@ -364,7 +364,7 @@ def load_strong_vm_wrapper_policy(benchmark: str) -> StrongVmWrapperPolicy:
             in_target_list = stripped[:-1] in {"overrides", "targets"} if stripped.endswith(":") else False
             current_name = ""
             if stripped.startswith("default_level:"):
-                saw_default_strong_vm = parse_yaml_scalar(stripped.split(":", 1)[1]) == "strong_vm"
+                saw_default_level = parse_yaml_scalar(stripped.split(":", 1)[1]) == level
             continue
 
         if not in_target_list:
@@ -381,16 +381,20 @@ def load_strong_vm_wrapper_policy(benchmark: str) -> StrongVmWrapperPolicy:
             continue
 
         if item.startswith("level:"):
-            if parse_yaml_scalar(item.split(":", 1)[1]) == "strong_vm" and current_name:
+            if parse_yaml_scalar(item.split(":", 1)[1]) == level and current_name:
                 wrapper_names.append(current_name)
             current_name = ""
 
     unique_names = tuple(sorted(dict.fromkeys(wrapper_names)))
-    if saw_default_strong_vm or has_unsupported_match:
+    if saw_default_level or has_unsupported_match:
         return StrongVmWrapperPolicy(unique_names, "unknown")
     if unique_names:
         return StrongVmWrapperPolicy(unique_names, "explicit")
     return StrongVmWrapperPolicy((), "absent")
+
+
+def load_strong_vm_wrapper_policy(benchmark: str) -> StrongVmWrapperPolicy:
+    return load_vm_wrapper_policy(benchmark, "strong_vm")
 
 
 def stable_hash_json(value: Any) -> str:
@@ -1076,7 +1080,19 @@ def summarize_entry_thunk(
     implementation_pointer_refs = entry_thunk_impl_pointer_refs(function, implementation_names)
     implementation_calls = direct_implementation_calls or implementation_pointer_refs
     shape = entry_thunk_shape(function)
+    block_count = len(parse_blocks(function.body))
+    body_line_count = len([line for line in function.body.splitlines() if line.strip()])
+    tiny_direct_shim = (
+        shape in WEAK_ENTRY_THUNK_SHAPES
+        and bool(direct_implementation_calls)
+        and block_count <= 1
+        and body_line_count <= 6
+        and "inttoptr" not in function.body
+        and " br " not in function.body
+    )
     return {
+        "basic_block_count": block_count,
+        "body_line_count": body_line_count,
         "direct_implementation_call_count": len(direct_implementation_calls),
         "direct_implementation_calls": direct_implementation_calls,
         "function": function.name,
@@ -1089,7 +1105,48 @@ def summarize_entry_thunk(
         "mapped_implementation": implementation_calls[0] if implementation_calls else "",
         "shape": shape,
         "split_target_call_count": int(shape == "decoy_split"),
+        "tiny_direct_shim": tiny_direct_shim,
     }
+
+
+def compute_vm_router_floor_confidence(
+    wrappers: list[dict[str, Any]],
+    router_to_direct_shim_count: int,
+    tiny_direct_vm_shim_count: int,
+) -> str:
+    if not wrappers:
+        return "unknown"
+
+    unresolved_wrappers = [
+        wrapper
+        for wrapper in wrappers
+        if wrapper["mapped_implementation"]
+        and (
+            not wrapper["mapped_entry_thunk"]
+            or wrapper["mapped_entry_thunk_shape"] in {"", "unknown"}
+        )
+    ]
+    if router_to_direct_shim_count:
+        return "weak"
+    if unresolved_wrappers:
+        return "unknown"
+    if tiny_direct_vm_shim_count:
+        return "partial"
+    return "clean"
+
+
+def compute_direct_shim_recovery_confidence(
+    entry_thunk_summaries: list[dict[str, Any]],
+    router_to_direct_shim_count: int,
+    tiny_direct_vm_shim_count: int,
+) -> str:
+    if not entry_thunk_summaries:
+        return "unknown"
+    if router_to_direct_shim_count:
+        return "weak"
+    if tiny_direct_vm_shim_count:
+        return "partial"
+    return "clean"
 
 
 def count_shared_suffix_correlations(symbols_by_role: dict[str, list[str]]) -> int:
@@ -1617,6 +1674,37 @@ def build_findings(
             }
         )
 
+    if metrics.get("router_to_direct_shim_count", 0):
+        findings.append(
+            {
+                "check": "vm_router_floor",
+                "detail": (
+                    f"{metrics['router_to_direct_shim_count']} routed wrapper(s) still resolve "
+                    "to tiny direct vm shims"
+                ),
+                "severity": "warn",
+            }
+        )
+    elif metrics.get("tiny_direct_vm_shim_count", 0):
+        findings.append(
+            {
+                "check": "vm_router_floor",
+                "detail": (
+                    f"{metrics['tiny_direct_vm_shim_count']} tiny direct vm shim(s) remain, "
+                    "but none are referenced from identified routed wrappers"
+                ),
+                "severity": "info",
+            }
+        )
+    elif metrics.get("wrapper_count", 0):
+        findings.append(
+            {
+                "check": "vm_router_floor",
+                "detail": "identified routed vm wrappers avoid tiny direct entry-thunk shims",
+                "severity": "info",
+            }
+        )
+
     leaked_roles = sorted(role for role, count in symbol_counts.items() if count)
     if leaked_roles:
         findings.append(
@@ -1808,6 +1896,9 @@ def analyze_ir(
     entry_thunk_shape_by_name = {
         summary["function"]: summary["shape"] for summary in entry_thunk_summaries
     }
+    entry_thunk_summary_by_name = {
+        summary["function"]: summary for summary in entry_thunk_summaries
+    }
     entry_thunks_by_impl: dict[str, list[str]] = defaultdict(list)
     for summary in entry_thunk_summaries:
         if summary["mapped_implementation"]:
@@ -1836,8 +1927,15 @@ def analyze_ir(
         for function in sorted(functions.values(), key=lambda item: item.name)
         if is_wrapper_candidate(function, implementation_functions)
     ]
+    normal_vm_policy = load_vm_wrapper_policy(benchmark, "vm")
     strong_vm_policy = load_strong_vm_wrapper_policy(benchmark)
     wrappers_by_name = {wrapper["function"]: wrapper for wrapper in wrappers}
+    normal_vm_wrappers = [
+        wrappers_by_name[name] for name in normal_vm_policy.wrapper_names if name in wrappers_by_name
+    ]
+    normal_vm_missing_wrappers = [
+        name for name in normal_vm_policy.wrapper_names if name not in wrappers_by_name
+    ]
     strong_vm_wrappers = [
         wrappers_by_name[name] for name in strong_vm_policy.wrapper_names if name in wrappers_by_name
     ]
@@ -1853,6 +1951,30 @@ def analyze_ir(
         wrapper
         for wrapper in strong_vm_entry_thunk_wrappers
         if wrapper["mapped_entry_thunk_shape"] in WEAK_ENTRY_THUNK_SHAPES
+    ]
+    normal_vm_entry_thunk_wrappers = [
+        wrapper
+        for wrapper in normal_vm_wrappers
+        if wrapper["mapped_entry_thunk"] and wrapper["mapped_entry_thunk_shape"] not in {"", "unknown"}
+    ]
+    normal_vm_weak_entry_thunk_wrappers = [
+        wrapper
+        for wrapper in normal_vm_entry_thunk_wrappers
+        if wrapper["mapped_entry_thunk_shape"] in WEAK_ENTRY_THUNK_SHAPES
+    ]
+    direct_vm_shim_summaries = [
+        summary
+        for summary in entry_thunk_summaries
+        if summary["shape"] in WEAK_ENTRY_THUNK_SHAPES and summary["direct_implementation_call_count"]
+    ]
+    tiny_direct_vm_shim_summaries = [
+        summary for summary in direct_vm_shim_summaries if summary["tiny_direct_shim"]
+    ]
+    router_to_direct_shim_wrappers = [
+        wrapper
+        for wrapper in wrappers
+        if wrapper["mapped_entry_thunk"]
+        and entry_thunk_summary_by_name.get(wrapper["mapped_entry_thunk"], {}).get("tiny_direct_shim")
     ]
     strong_vm_router_floor_confidence = "unknown"
     if strong_vm_policy.confidence == "absent":
@@ -1870,6 +1992,16 @@ def analyze_ir(
             strong_vm_router_floor_confidence = "violated"
         else:
             strong_vm_router_floor_confidence = "passed"
+    vm_router_floor_confidence = compute_vm_router_floor_confidence(
+        wrappers,
+        len(router_to_direct_shim_wrappers),
+        len(tiny_direct_vm_shim_summaries),
+    )
+    direct_shim_recovery_confidence = compute_direct_shim_recovery_confidence(
+        entry_thunk_summaries,
+        len(router_to_direct_shim_wrappers),
+        len(tiny_direct_vm_shim_summaries),
+    )
     callsites = [
         summarize_callsite_rewrite(
             function,
@@ -2044,6 +2176,8 @@ def analyze_ir(
         ),
         "entry_thunk_count": len(entry_thunk_functions),
         "entry_thunk_shape_counts": entry_thunk_shape_counts,
+        "direct_vm_shim_count": len(direct_vm_shim_summaries),
+        "tiny_direct_vm_shim_count": len(tiny_direct_vm_shim_summaries),
         "entropy_accessor_count": entropy_fingerprint["entropy_accessor_count"],
         "entropy_accessor_variant_count": entropy_fingerprint["entropy_accessor_variant_count"],
         "entropy_accessor_shape_counts": entropy_fingerprint["entropy_accessor_shape_counts"],
@@ -2081,6 +2215,7 @@ def analyze_ir(
         "router_direct_target_count": sum(
             1 for summary in entry_thunk_summaries if summary["direct_implementation_call_count"]
         ),
+        "router_to_direct_shim_count": len(router_to_direct_shim_wrappers),
         "router_indirect_target_count": sum(
             1 for summary in entry_thunk_summaries if summary["indirect_target_call_count"]
         ),
@@ -2160,7 +2295,12 @@ def analyze_ir(
         "strong_vm_missing_wrapper_count": len(strong_vm_missing_wrappers),
         "strong_vm_entry_thunk_count": len(strong_vm_entry_thunk_wrappers),
         "strong_vm_weak_entry_thunk_count": len(strong_vm_weak_entry_thunk_wrappers),
+        "strong_vm_weak_router_count": len(strong_vm_weak_entry_thunk_wrappers),
         "strong_vm_router_floor_violations": len(strong_vm_weak_entry_thunk_wrappers),
+        "normal_vm_policy_confidence": normal_vm_policy.confidence,
+        "normal_vm_expected_wrapper_count": len(normal_vm_policy.wrapper_names),
+        "normal_vm_missing_wrapper_count": len(normal_vm_missing_wrappers),
+        "normal_vm_weak_router_count": len(normal_vm_weak_entry_thunk_wrappers),
         "max_refs_to_single_vm_data": max_refs_to_single_vm_data,
     }
     opcode_recovery_confidence = "none"
@@ -2275,12 +2415,14 @@ def analyze_ir(
         "router_mapping_confidence": router_mapping_confidence,
         "score_breakdown": score_breakdown,
         "route_family_counts": dict(sorted(route_family_counts.items())),
+        "direct_shim_recovery_confidence": direct_shim_recovery_confidence,
         "strong_vm_router_floor_confidence": strong_vm_router_floor_confidence,
         "symbols_by_role": symbols_by_role,
         "split_opcode_immediates": split_opcode_immediates,
         "trap_oracle_confidence": trap_oracle_confidence,
         "transformed_opcode_constants": transformed_opcode_constants,
         "vm_data_refs": bytecode_data_refs,
+        "vm_router_floor_confidence": vm_router_floor_confidence,
         "vm_functions": vm_function_summaries,
         "wrapper_mapping_confidence": wrapper_mapping_confidence,
         "wrapper_to_implementation": wrapper_to_implementation,
@@ -2489,8 +2631,14 @@ def print_report(payload: dict[str, Any], verbose: bool) -> None:
             f"trap_oracle={result.get('trap_oracle_confidence', 'none')} "
             f"indirect_thunked={metrics.get('indirect_thunked_wrapper_mapping_count', 0)} "
             f"decoy_thunked={metrics.get('decoy_thunked_wrapper_mapping_count', 0)} "
+            f"direct_vm_shims={metrics.get('direct_vm_shim_count', 0)} "
+            f"tiny_direct_vm_shims={metrics.get('tiny_direct_vm_shim_count', 0)} "
+            f"router_to_direct_shim={metrics.get('router_to_direct_shim_count', 0)} "
+            f"normal_vm_weak={metrics.get('normal_vm_weak_router_count', 0)} "
             f"strong_vm_floor={result.get('strong_vm_router_floor_confidence', 'unknown')} "
-            f"strong_vm_weak={metrics.get('strong_vm_weak_entry_thunk_count', 0)}"
+            f"strong_vm_weak={metrics.get('strong_vm_weak_router_count', 0)} "
+            f"vm_router_floor={result.get('vm_router_floor_confidence', 'unknown')} "
+            f"direct_shim_conf={result.get('direct_shim_recovery_confidence', 'unknown')}"
         )
         if verbose:
             for finding in result["findings"]:
