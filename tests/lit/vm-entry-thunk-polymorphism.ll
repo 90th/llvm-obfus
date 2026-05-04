@@ -67,5 +67,6 @@ entry:
 ; CHECK: define internal i32 @__obf_vm_e_{{[A-Za-z0-9_]+}}(
 ; CHECK: obf.vm.entry.thunk:
 ; CHECK: ret i32
-; CHECK-DAG: "vm.entry.thunk.shape.decoy"
-; CHECK-DAG: "vm.entry.thunk.shape.split"
+; CHECK-DAG: "vm.entry.thunk.shape.decoy_indirect"
+; CHECK-DAG: "vm.entry.thunk.shape.indirect"
+; CHECK-DAG: "vm.entry.thunk.shape.{{(direct|neutral|split)}}"

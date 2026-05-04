@@ -76,7 +76,7 @@ HIDDEN_TOKEN_CALL_PATTERN = re.compile(
     r"\b(?:tail\s+|musttail\s+|notail\s+)?(?:call|invoke)\b[^@\n]*@(?P<impl>[A-Za-z$._0-9-]+)\s*\([^\n]*,\s*i64\s+%[-A-Za-z$._0-9]+"
 )
 FUNCTION_PTR_REF_PATTERN = re.compile(
-    r"ptrtoint\s+\(ptr\s+@(?P<name>[A-Za-z$._0-9-]+)\s+to\s+i\d+\)"
+    r"ptrtoint\s+(?:\(\s*)?ptr\s+@(?P<name>[A-Za-z$._0-9-]+)\s+to\s+i\d+\s*\)?"
 )
 INDIRECT_HIDDEN_TOKEN_CALL_PATTERN = re.compile(
     r"\bcall\b[^\n]*%[-A-Za-z$._0-9]+\([^\n]*\bi64\s+(?:%[-A-Za-z$._0-9]+|-?\d+)"
@@ -194,8 +194,10 @@ ENTRY_THUNK_SHAPE_MARKERS = {
     "direct": "vm.entry.thunk.shape.direct",
     "neutral": "vm.entry.thunk.shape.neutral",
     "split": "vm.entry.thunk.shape.split",
-    # pr29: router opacity shapes
+    # pr29.5: router opacity shapes
     "indirect": "vm.entry.thunk.shape.indirect",
+    "decoy_indirect": "vm.entry.thunk.shape.decoy_indirect",
+    "decoy_split": "vm.entry.thunk.shape.decoy_split",
     "decoy": "vm.entry.thunk.shape.decoy",
 }
 
@@ -963,7 +965,7 @@ def entry_thunk_shape(function: FunctionIR) -> str:
     return "unknown"
 
 
-def entry_thunk_impl_calls(function: FunctionIR, implementation_names: set[str]) -> list[str]:
+def entry_thunk_direct_impl_calls(function: FunctionIR, implementation_names: set[str]) -> list[str]:
     return sorted(
         {
             match.group("impl")
@@ -973,11 +975,22 @@ def entry_thunk_impl_calls(function: FunctionIR, implementation_names: set[str])
     )
 
 
+def entry_thunk_impl_pointer_refs(function: FunctionIR, implementation_names: set[str]) -> list[str]:
+    return extract_function_pointer_refs(function, implementation_names)
+
+
+def entry_thunk_impl_calls(function: FunctionIR, implementation_names: set[str]) -> list[str]:
+    direct_calls = entry_thunk_direct_impl_calls(function, implementation_names)
+    if direct_calls:
+        return direct_calls
+    return entry_thunk_impl_pointer_refs(function, implementation_names)
+
+
 def thunk_mapping_reason(shape: str) -> str:
     # pr29 indirect/decoy shapes get distinct mapping reasons
     if shape == "indirect":
         return "indirect_thunked"
-    if shape == "decoy":
+    if shape in {"decoy", "decoy_indirect", "decoy_split"}:
         return "decoy_thunked"
     return "thunked" if shape == "direct" else "polymorphic_thunked"
 
@@ -985,13 +998,23 @@ def thunk_mapping_reason(shape: str) -> str:
 def summarize_entry_thunk(
     function: FunctionIR, implementation_names: set[str]
 ) -> dict[str, Any]:
-    implementation_calls = entry_thunk_impl_calls(function, implementation_names)
+    direct_implementation_calls = entry_thunk_direct_impl_calls(function, implementation_names)
+    implementation_pointer_refs = entry_thunk_impl_pointer_refs(function, implementation_names)
+    implementation_calls = direct_implementation_calls or implementation_pointer_refs
+    shape = entry_thunk_shape(function)
     return {
+        "direct_implementation_call_count": len(direct_implementation_calls),
+        "direct_implementation_calls": direct_implementation_calls,
         "function": function.name,
+        "implementation_pointer_refs": implementation_pointer_refs,
         "implementation_calls": implementation_calls,
+        "indirect_target_call_count": int(
+            bool(implementation_pointer_refs) and has_indirect_hidden_token_call(function)
+        ),
         "line_range": [function.start_line, function.end_line],
         "mapped_implementation": implementation_calls[0] if implementation_calls else "",
-        "shape": entry_thunk_shape(function),
+        "shape": shape,
+        "split_target_call_count": int(shape == "decoy_split"),
     }
 
 
@@ -1887,7 +1910,8 @@ def analyze_ir(
         "thunked_callsite_mapping_count": sum(
             1
             for callsite in callsites
-            if callsite["mapping_reason"] in ("thunked", "polymorphic_thunked")
+            if callsite["mapping_reason"]
+            in ("thunked", "polymorphic_thunked", "indirect_thunked", "decoy_thunked")
         ),
         # pr29 router opacity: indirect-ptr thunks and decoy-guarded thunks
         "indirect_thunked_wrapper_mapping_count": sum(
@@ -1895,6 +1919,30 @@ def analyze_ir(
         ),
         "decoy_thunked_wrapper_mapping_count": sum(
             1 for w in wrappers if w["mapping_reason"] == "decoy_thunked"
+        ),
+        "router_direct_target_count": sum(
+            1 for summary in entry_thunk_summaries if summary["direct_implementation_call_count"]
+        ),
+        "router_indirect_target_count": sum(
+            1 for summary in entry_thunk_summaries if summary["indirect_target_call_count"]
+        ),
+        "router_decoy_target_count": sum(
+            1 for summary in entry_thunk_summaries if summary["shape"].startswith("decoy")
+        ),
+        "decoy_guarded_direct_call_count": sum(
+            summary["direct_implementation_call_count"]
+            for summary in entry_thunk_summaries
+            if summary["shape"].startswith("decoy")
+        ),
+        "decoy_guarded_indirect_call_count": sum(
+            summary["indirect_target_call_count"]
+            for summary in entry_thunk_summaries
+            if summary["shape"].startswith("decoy")
+        ),
+        "decoy_guarded_split_call_count": sum(
+            summary["split_target_call_count"]
+            for summary in entry_thunk_summaries
+            if summary["shape"].startswith("decoy")
         ),
         "unmapped_wrapper_count": sum(1 for w in wrappers if not w["mapped_implementation"]),
         "opcode_compare_count": sum(
@@ -1986,24 +2034,45 @@ def analyze_ir(
     decoy_thunked_count = metrics["decoy_thunked_wrapper_mapping_count"]
     mapped_count = metrics["mapped_wrapper_count"]
     thunk_family_count = thunked_count + polymorphic_count + indirect_thunked_count + decoy_thunked_count
+    opaque_thunked_count = polymorphic_count + indirect_thunked_count + decoy_thunked_count
     if direct_count and thunk_family_count:
         wrapper_mapping_confidence = "partial_thunked"
     elif direct_count:
         wrapper_mapping_confidence = "direct"
-    elif polymorphic_count:
+    elif thunked_count and not opaque_thunked_count:
+        wrapper_mapping_confidence = "thunked"
+    elif thunk_family_count:
         wrapper_mapping_confidence = (
             "polymorphic_thunked"
             if thunk_family_count == mapped_count
             else "partial_thunked"
         )
-    elif thunked_count:
-        wrapper_mapping_confidence = "thunked"
     elif tag_correlated_count:
         wrapper_mapping_confidence = "tag_correlated"
     elif indirect_count:
         wrapper_mapping_confidence = "indirect"
     else:
         wrapper_mapping_confidence = "none"
+    decoy_direct_count = metrics["decoy_guarded_direct_call_count"]
+    decoy_indirect_count = metrics["decoy_guarded_indirect_call_count"]
+    decoy_split_count = metrics["decoy_guarded_split_call_count"]
+    router_mapping_confidence = "none"
+    if decoy_direct_count and (decoy_indirect_count or decoy_split_count):
+        router_mapping_confidence = "mixed"
+    elif decoy_direct_count:
+        router_mapping_confidence = "direct_with_decoys"
+    elif decoy_split_count and decoy_indirect_count:
+        router_mapping_confidence = "mixed"
+    elif decoy_split_count:
+        router_mapping_confidence = "split_with_decoys"
+    elif decoy_indirect_count:
+        router_mapping_confidence = "indirect_with_decoys"
+    elif metrics["router_direct_target_count"] and metrics["router_indirect_target_count"]:
+        router_mapping_confidence = "mixed"
+    elif metrics["router_indirect_target_count"]:
+        router_mapping_confidence = "indirect"
+    elif metrics["router_direct_target_count"]:
+        router_mapping_confidence = "direct"
     trap_oracle_confidence = "none"
     if metrics["trap_oracle_direct_count"]:
         trap_oracle_confidence = "direct"
@@ -2038,6 +2107,7 @@ def analyze_ir(
         "present": True,
         "recovery_score": sum(score_breakdown.values()),
         "repeated_helper_shapes": helper_shape_groups,
+        "router_mapping_confidence": router_mapping_confidence,
         "score_breakdown": score_breakdown,
         "route_family_counts": dict(sorted(route_family_counts.items())),
         "symbols_by_role": symbols_by_role,
@@ -2068,6 +2138,7 @@ def missing_result(benchmark: str, ir_path_display: str, strict: bool) -> dict[s
         "marker_counts": {},
         "metrics": {},
         "handler_mapping_confidence": "none",
+        "router_mapping_confidence": "none",
         "opcode_recovery_confidence": "none",
         "predicate_locality_confidence": "none",
         "physical_opcodes": [],
@@ -2104,6 +2175,7 @@ def parse_error_result(
         "ir_path": ir_path_display,
         "marker_counts": {},
         "metrics": {},
+        "router_mapping_confidence": "none",
         "opcode_recovery_confidence": "none",
         "physical_opcodes": [],
         "present": True,

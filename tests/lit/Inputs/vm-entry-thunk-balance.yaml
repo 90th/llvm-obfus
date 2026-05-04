@@ -1,0 +1,7 @@
+seed: 1
+default_level: none
+targets:
+  - match: alpha
+    level: vm
+  - match: beta
+    level: vm

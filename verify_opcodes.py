@@ -56,7 +56,7 @@ ASSIGNED_CALL_PATTERN = re.compile(
 )
 DIRECT_CALL_PATTERN = re.compile(r"(?:(?:tail|musttail|notail)\s+)?(?:call|invoke)\b")
 FUNCTION_PTR_REF_PATTERN = re.compile(
-    r"ptrtoint\s+\(ptr\s+@(?P<name>[A-Za-z$._0-9-]+)\s+to\s+i\d+\)"
+    r"ptrtoint\s+(?:\(\s*)?ptr\s+@(?P<name>[A-Za-z$._0-9-]+)\s+to\s+i\d+\s*\)?"
 )
 
 
@@ -285,6 +285,35 @@ def has_indirect_hidden_token_call(function_body: str) -> bool:
     return bool(INDIRECT_HIDDEN_TOKEN_CALL_PATTERN.search(function_body))
 
 
+def find_function_pointer_refs(function_body: str, candidate_names: set[str]) -> list[str]:
+    return sorted(
+        {
+            pointer_match.group("name")
+            for pointer_match in FUNCTION_PTR_REF_PATTERN.finditer(function_body)
+            if pointer_match.group("name") in candidate_names
+        }
+    )
+
+
+def resolve_entry_thunk_implementation(
+    function_body: str,
+    function_bodies: dict[str, str],
+    implementation_names: set[str],
+) -> str:
+    thunk_call_match = WRAPPER_CALL_PATTERN.search(function_body)
+    if thunk_call_match is not None:
+        thunk_impl_name = thunk_call_match.group("impl")
+        thunk_impl_body = function_bodies.get(thunk_impl_name, "")
+        if is_vm_implementation_body(thunk_impl_body):
+            return thunk_impl_name
+
+    pointer_refs = find_function_pointer_refs(function_body, implementation_names)
+    if len(pointer_refs) == 1 and has_indirect_hidden_token_call(function_body):
+        return pointer_refs[0]
+
+    return ""
+
+
 def find_wrapper_implementations(
     function_bodies: dict[str, str], function_headers: dict[str, str]
 ) -> dict[str, str]:
@@ -296,12 +325,8 @@ def find_wrapper_implementations(
     for function_name, body in function_bodies.items():
         if function_name in implementation_names:
             continue
-        thunk_call_match = WRAPPER_CALL_PATTERN.search(body)
-        if thunk_call_match is None:
-            continue
-        thunk_impl_name = thunk_call_match.group("impl")
-        thunk_impl_body = function_bodies.get(thunk_impl_name, "")
-        if is_vm_implementation_body(thunk_impl_body):
+        thunk_impl_name = resolve_entry_thunk_implementation(body, function_bodies, implementation_names)
+        if thunk_impl_name:
             entry_thunk_to_impl[function_name] = thunk_impl_name
 
     entry_thunk_names = set(entry_thunk_to_impl)
@@ -320,12 +345,8 @@ def find_wrapper_implementations(
                 implementation_name = entry_thunk_to_impl[implementation_name]
         if not implementation_name:
             refs = sorted(
-                {
-                    pointer_match.group("name")
-                    for pointer_match in FUNCTION_PTR_REF_PATTERN.finditer(body)
-                    if pointer_match.group("name") in implementation_names
-                    or pointer_match.group("name") in entry_thunk_names
-                }
+                set(find_function_pointer_refs(body, implementation_names))
+                | set(find_function_pointer_refs(body, entry_thunk_names))
             )
             if len(refs) == 1:
                 implementation_name = refs[0]
@@ -345,14 +366,13 @@ def find_wrapper_implementations(
         if implementation_body is None:
             continue
         if not is_vm_implementation_body(implementation_body):
-            # possibly an entry thunk — check for a direct impl call in its body
-            thunk_call_match = WRAPPER_CALL_PATTERN.search(implementation_body)
-            if thunk_call_match:
-                thunk_impl_name = thunk_call_match.group("impl")
-                thunk_impl_body = function_bodies.get(thunk_impl_name, "")
-                if is_vm_implementation_body(thunk_impl_body):
-                    implementation_name = thunk_impl_name
-                    implementation_body = thunk_impl_body
+            # possibly an entry thunk — resolve either a direct or indirect impl call in its body
+            thunk_impl_name = resolve_entry_thunk_implementation(
+                implementation_body, function_bodies, implementation_names
+            )
+            if thunk_impl_name:
+                implementation_name = thunk_impl_name
+                implementation_body = function_bodies.get(thunk_impl_name, "")
         if not is_vm_implementation_body(implementation_body):
             continue
         wrappers[function_name] = implementation_name

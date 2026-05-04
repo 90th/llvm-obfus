@@ -25,6 +25,7 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
+#include <algorithm>
 #include <optional>
 #include <string>
 
@@ -152,6 +153,120 @@ vm_entry_thunk_shape select_vm_entry_thunk_shape(llvm::StringRef source_name,
   return static_cast<vm_entry_thunk_shape>(state % 5U);
 }
 
+bool is_high_hardening_vm_entry_thunk_shape(vm_entry_thunk_shape shape) {
+  return shape == vm_entry_thunk_shape::indirect_ptr_forward ||
+         shape == vm_entry_thunk_shape::decoy_guarded_forward;
+}
+
+llvm::StringRef get_vm_entry_thunk_balance_scope_name(const llvm::Module& module) {
+  if (!module.getSourceFileName().empty()) { return module.getSourceFileName(); }
+  if (!module.getName().empty()) { return module.getName(); }
+  return "<anonymous-module>";
+}
+
+std::uint64_t compute_vm_entry_thunk_balance_rank(const virtualized_function_binding& binding,
+                                                  std::uint64_t scope_seed,
+                                                  std::uint64_t salt) {
+  llvm::Function* interface_function = binding.interface_function;
+  if (interface_function == nullptr) { return mix_generated_name_seed(scope_seed, salt); }
+
+  std::uint64_t rank = mix_generated_name_seed(scope_seed, salt);
+  rank = mix_generated_name_seed(rank, stable_hash_string(interface_function->getName()));
+  if (binding.state != nullptr) {
+    rank = mix_generated_name_seed(rank, binding.state->report.decision.seed);
+  }
+  return rank;
+}
+
+void rebalance_vm_entry_thunk_shapes(llvm::Module& module,
+                                     llvm::ArrayRef<virtualized_function_binding*> bindings,
+                                     llvm::SmallVectorImpl<vm_entry_thunk_shape>& shapes) {
+  if (bindings.size() != shapes.size() || bindings.size() < 2) { return; }
+
+  const std::uint64_t scope_seed = stable_hash_string(get_vm_entry_thunk_balance_scope_name(module));
+
+  const auto count_shape = [&](vm_entry_thunk_shape shape) {
+    return static_cast<std::size_t>(llvm::count(shapes, shape));
+  };
+  const auto has_shape = [&](vm_entry_thunk_shape shape) { return count_shape(shape) != 0; };
+  const auto has_high_hardening = [&]() {
+    return llvm::any_of(shapes, [](vm_entry_thunk_shape shape) {
+      return is_high_hardening_vm_entry_thunk_shape(shape);
+    });
+  };
+  const auto assign_shape = [&](vm_entry_thunk_shape target_shape,
+                                std::uint64_t salt,
+                                auto&& eligible) {
+    llvm::SmallVector<std::size_t, 8> order;
+    order.reserve(bindings.size());
+    for (std::size_t index = 0; index < bindings.size(); ++index) { order.push_back(index); }
+
+    std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+      const std::uint64_t lhs_rank =
+          compute_vm_entry_thunk_balance_rank(*bindings[lhs], scope_seed, salt);
+      const std::uint64_t rhs_rank =
+          compute_vm_entry_thunk_balance_rank(*bindings[rhs], scope_seed, salt);
+      if (lhs_rank != rhs_rank) { return lhs_rank < rhs_rank; }
+
+      llvm::Function* lhs_function = bindings[lhs]->interface_function;
+      llvm::Function* rhs_function = bindings[rhs]->interface_function;
+      const llvm::StringRef lhs_name = lhs_function == nullptr ? llvm::StringRef{}
+                                                               : lhs_function->getName();
+      const llvm::StringRef rhs_name = rhs_function == nullptr ? llvm::StringRef{}
+                                                               : rhs_function->getName();
+      return lhs_name < rhs_name;
+    });
+
+    for (std::size_t index : order) {
+      if (!eligible(shapes[index])) { continue; }
+      shapes[index] = target_shape;
+      return true;
+    }
+
+    return false;
+  };
+
+  if (!has_high_hardening()) {
+    const bool prefer_decoy = (mix_generated_name_seed(scope_seed, bindings.size()) & 1ULL) != 0;
+    const vm_entry_thunk_shape primary_shape = prefer_decoy
+                                                   ? vm_entry_thunk_shape::decoy_guarded_forward
+                                                   : vm_entry_thunk_shape::indirect_ptr_forward;
+    assign_shape(primary_shape, 0x3fb7b4401ULL, [](vm_entry_thunk_shape shape) {
+      return !is_high_hardening_vm_entry_thunk_shape(shape);
+    });
+  }
+
+  if (bindings.size() < 3) { return; }
+
+  if (!has_shape(vm_entry_thunk_shape::indirect_ptr_forward)) {
+    const bool assigned = assign_shape(
+        vm_entry_thunk_shape::indirect_ptr_forward,
+        0x5a2d96e31ULL,
+        [](vm_entry_thunk_shape shape) { return !is_high_hardening_vm_entry_thunk_shape(shape); });
+    if (!assigned && count_shape(vm_entry_thunk_shape::decoy_guarded_forward) > 1) {
+      assign_shape(vm_entry_thunk_shape::indirect_ptr_forward,
+                   0x9d1163b51ULL,
+                   [](vm_entry_thunk_shape shape) {
+                     return shape == vm_entry_thunk_shape::decoy_guarded_forward;
+                   });
+    }
+  }
+
+  if (!has_shape(vm_entry_thunk_shape::decoy_guarded_forward)) {
+    const bool assigned = assign_shape(
+        vm_entry_thunk_shape::decoy_guarded_forward,
+        0x77e6f3ac9ULL,
+        [](vm_entry_thunk_shape shape) { return !is_high_hardening_vm_entry_thunk_shape(shape); });
+    if (!assigned && count_shape(vm_entry_thunk_shape::indirect_ptr_forward) > 1) {
+      assign_shape(vm_entry_thunk_shape::decoy_guarded_forward,
+                   0xc215e8c41ULL,
+                   [](vm_entry_thunk_shape shape) {
+                     return shape == vm_entry_thunk_shape::indirect_ptr_forward;
+                   });
+    }
+  }
+}
+
 llvm::StringRef vm_entry_thunk_shape_marker(vm_entry_thunk_shape shape) {
   switch (shape) {
     case vm_entry_thunk_shape::direct_forward:
@@ -163,7 +278,7 @@ llvm::StringRef vm_entry_thunk_shape_marker(vm_entry_thunk_shape shape) {
     case vm_entry_thunk_shape::indirect_ptr_forward:
       return "vm.entry.thunk.shape.indirect";
     case vm_entry_thunk_shape::decoy_guarded_forward:
-      return "vm.entry.thunk.shape.decoy";
+      return "vm.entry.thunk.shape.decoy_indirect";
   }
 
   llvm_unreachable("unknown vm entry thunk shape");
@@ -576,6 +691,51 @@ llvm::CallInst* emit_vm_entry_thunk_call(llvm::IRBuilder<>& builder,
   return inner_call;
 }
 
+llvm::CallInst* emit_vm_entry_thunk_indirect_call(llvm::IRBuilder<>& builder,
+                                                  llvm::Function& interface_function,
+                                                  llvm::Function& implementation_function,
+                                                  llvm::StringRef thunk_name,
+                                                  llvm::ArrayRef<llvm::Value*> forward_args,
+                                                  llvm::StringRef name_prefix,
+                                                  std::uint64_t salt) {
+  auto* ptr_int_type = get_vm_pointer_int_type(interface_function);
+  if (ptr_int_type == nullptr) {
+    return emit_vm_entry_thunk_call(
+        builder, interface_function, implementation_function, forward_args);
+  }
+
+  const std::uint64_t iptr_seed =
+      mix_vm_handshake_seed(stable_hash_string(thunk_name), salt);
+  llvm::Module* module = interface_function.getParent();
+  if (module == nullptr) {
+    return emit_vm_entry_thunk_call(
+        builder, interface_function, implementation_function, forward_args);
+  }
+  const mba::builder_context iptr_context{
+      .entropy_anchor = mba::get_or_create_entropy_anchor(*module),
+      .seed_base = iptr_seed,
+      .depth = 2,
+  };
+
+  const std::string raw_name = (name_prefix + ".raw").str();
+  const std::string opaque_name = name_prefix.str();
+  const std::string ptr_name = (name_prefix + ".ptr").str();
+  const std::string call_name = (name_prefix + ".call").str();
+  auto* impl_raw = builder.CreatePtrToInt(&implementation_function, ptr_int_type, raw_name);
+  auto* impl_opaque = mba::entangle_value(
+      builder, impl_raw, iptr_context, iptr_seed ^ 0x3e9c710fULL, opaque_name);
+  auto* impl_ptr = builder.CreateIntToPtr(
+      impl_opaque, implementation_function.getType(), ptr_name);
+  const bool returns_void = implementation_function.getReturnType()->isVoidTy();
+  auto* indirect_call = builder.CreateCall(implementation_function.getFunctionType(),
+                                           impl_ptr,
+                                           forward_args,
+                                           returns_void ? "" : call_name);
+  indirect_call->setCallingConv(interface_function.getCallingConv());
+  indirect_call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
+  return indirect_call;
+}
+
 void emit_vm_entry_thunk_call_and_return(llvm::IRBuilder<>& builder,
                                          llvm::Function& interface_function,
                                          llvm::Function& implementation_function,
@@ -638,35 +798,14 @@ llvm::Function* create_vm_entry_thunk(llvm::Function& interface_function,
   if (shape == vm_entry_thunk_shape::indirect_ptr_forward) {
     // materialize the impl address through an entropy-entangled expression so the call target
     // is not a direct named reference — ghidra must trace the mba chain to identify the impl
-    auto* ptr_int_type = get_vm_pointer_int_type(interface_function);
-    if (ptr_int_type == nullptr) {
-      // fallback: plain direct call if pointer type is unavailable
-      emit_vm_entry_thunk_call_and_return(
-          builder, interface_function, implementation_function, forward_args);
-      return thunk;
-    }
-    const std::uint64_t iptr_seed =
-        mix_vm_handshake_seed(stable_hash_string(thunk_name), 0x7a1be84d20cULL);
-    const mba::builder_context iptr_context{
-        .entropy_anchor = mba::get_or_create_entropy_anchor(*module),
-        .seed_base = iptr_seed,
-        .depth = 2,
-    };
-    auto* impl_raw = builder.CreatePtrToInt(
-        &implementation_function, ptr_int_type, "obf.vm.entry.thunk.iptr.raw");
-    auto* impl_opaque = mba::entangle_value(
-        builder, impl_raw, iptr_context, iptr_seed ^ 0x3e9c710fULL, "obf.vm.entry.thunk.iptr");
-    auto* impl_ptr = builder.CreateIntToPtr(
-        impl_opaque, implementation_function.getType(), "obf.vm.entry.thunk.impl.ptr");
-    const bool returns_void_iptr = implementation_function.getReturnType()->isVoidTy();
-    auto* indirect_call = builder.CreateCall(
-        implementation_function.getFunctionType(),
-        impl_ptr,
-        forward_args,
-        returns_void_iptr ? "" : "obf.vm.entry.thunk.indirect.call");
-    indirect_call->setCallingConv(interface_function.getCallingConv());
-    indirect_call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
-    if (returns_void_iptr) {
+    llvm::CallInst* indirect_call = emit_vm_entry_thunk_indirect_call(builder,
+                                                                      interface_function,
+                                                                      implementation_function,
+                                                                      thunk_name,
+                                                                      forward_args,
+                                                                      "obf.vm.entry.thunk.iptr",
+                                                                      0x7a1be84d20cULL);
+    if (implementation_function.getReturnType()->isVoidTy()) {
       builder.CreateRetVoid();
     } else {
       builder.CreateRet(indirect_call);
@@ -706,8 +845,13 @@ llvm::Function* create_vm_entry_thunk(llvm::Function& interface_function,
     llvm::IRBuilder<> decoy_route_builder(decoy_route);
     decoy_route_builder.CreateBr(decoy_call);
     llvm::IRBuilder<> decoy_call_builder(decoy_call);
-    llvm::CallInst* decoy_inner = emit_vm_entry_thunk_call(
-        decoy_call_builder, interface_function, implementation_function, forward_args);
+    llvm::CallInst* decoy_inner = emit_vm_entry_thunk_indirect_call(decoy_call_builder,
+                                                                    interface_function,
+                                                                    implementation_function,
+                                                                    thunk_name,
+                                                                    forward_args,
+                                                                    "obf.vm.entry.thunk.decoy.iptr",
+                                                                    decoy_seed ^ 0x58ULL);
     decoy_call_builder.CreateBr(decoy_ret);
     llvm::IRBuilder<> decoy_ret_builder(decoy_ret);
     if (implementation_function.getReturnType()->isVoidTy()) {
@@ -1168,23 +1312,15 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
                                                                   source_name,
                                                                   seed ^ 0xca5eULL,
                                                                   "__obf_vm_seedcase_");
-  const std::string entry_thunk_name =
+    binding.entry_thunk_function_name =
       make_vm_entry_thunk_name(*module, preserve_generated_names, source_name, seed);
-  const vm_entry_thunk_shape entry_thunk_shape = select_vm_entry_thunk_shape(source_name, seed);
 
   llvm::Function* implementation_function =
       clone_vm_implementation(*interface_function, implementation_name);
   if (implementation_function == nullptr) { return binding; }
 
-  llvm::Function* entry_thunk_function =
-      create_vm_entry_thunk(
-          *interface_function, *implementation_function, entry_thunk_name, entry_thunk_shape);
-  if (entry_thunk_function == nullptr) { return binding; }
-
   binding.interface_function = interface_function;
   binding.implementation_function = implementation_function;
-  binding.entry_thunk_function = entry_thunk_function;
-  binding.entry_thunk_function_name = entry_thunk_name;
   binding.state = &state;
   binding.wrapper_token = derive_vm_wrapper_token(interface_function->getName());
 
@@ -2006,6 +2142,7 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
                const obfuscation_config& config,
                const protection_level* only_level) {
   virtualized_function_map virtualized_functions;
+  llvm::SmallVector<virtualized_function_binding*, 8> successful_bindings;
   llvm::StringSet<> skip_functions;
   std::uint64_t regional_helper_ordinal = 0;
 
@@ -2035,9 +2172,10 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
       binding.state = target_candidate.state;
 
       vm::virtualization_options vm_options{.mba_depth = config.mba.depth,
-                                            .hidden_token_handshake = true,
-                                            .prefer_island_helpers = true,
-                                            .symbol_tag = binding.vm_symbol_tag};
+                    .hidden_token_handshake = true,
+                    .prefer_island_helpers = true,
+                    .valid_hidden_tokens = {},
+                    .symbol_tag = binding.vm_symbol_tag};
       vm_options.valid_hidden_tokens.push_back(binding.wrapper_token);
       for (const virtualized_call_site& site : binding.call_sites) {
         vm_options.valid_hidden_tokens.push_back(site.hidden_token);
@@ -2047,6 +2185,47 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
           vm::run_virtualization(*binding.implementation_function, vm_options);
       if (result.virtualized) {
         binding.implementation_function->setDSOLocal(true);
+        virtualized_function_binding& stored_binding =
+            virtualized_functions[target_function->getName()] = std::move(binding);
+        successful_bindings.push_back(&stored_binding);
+        skip_functions.insert(target_function->getName());
+      }
+    }
+  }
+
+  if (!successful_bindings.empty()) {
+    llvm::Module* module = successful_bindings.front()->interface_function == nullptr
+                               ? nullptr
+                               : successful_bindings.front()->interface_function->getParent();
+    if (module != nullptr) {
+      llvm::SmallVector<vm_entry_thunk_shape, 8> entry_thunk_shapes;
+      entry_thunk_shapes.reserve(successful_bindings.size());
+      for (virtualized_function_binding* binding : successful_bindings) {
+        if (binding == nullptr || binding->interface_function == nullptr || binding->state == nullptr) {
+          entry_thunk_shapes.push_back(vm_entry_thunk_shape::direct_forward);
+          continue;
+        }
+
+        entry_thunk_shapes.push_back(select_vm_entry_thunk_shape(
+            binding->interface_function->getName(), binding->state->report.decision.seed));
+      }
+
+      rebalance_vm_entry_thunk_shapes(*module, successful_bindings, entry_thunk_shapes);
+
+      for (std::size_t index = 0; index < successful_bindings.size(); ++index) {
+        virtualized_function_binding& binding = *successful_bindings[index];
+        llvm::Function* entry_thunk_function =
+            create_vm_entry_thunk(*binding.interface_function,
+                                  *binding.implementation_function,
+                                  binding.entry_thunk_function_name,
+                                  entry_thunk_shapes[index]);
+        if (entry_thunk_function == nullptr) {
+          virtualized_functions.erase(binding.interface_function->getName());
+          continue;
+        }
+
+        binding.entry_thunk_function = entry_thunk_function;
+
         const vm_resolver_shape resolver_shape =
             select_vm_resolver_shape(binding.state->report.decision.policy.level);
         const vm_seed_resolver_shape seed_resolver_shape =
@@ -2061,8 +2240,6 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                      resolver_shape,
                                      seed_resolver_shape,
                                      config.mba.depth);
-        virtualized_functions[target_function->getName()] = std::move(binding);
-        skip_functions.insert(target_function->getName());
       }
     }
   }
