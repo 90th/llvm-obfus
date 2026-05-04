@@ -28,7 +28,10 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 DEFAULT_BENCHMARKS = ("license_demo", "config_demo", "vm_workflow_demo")
-STRONG_VM_EXPECTED_WRAPPERS = {"config_demo": ("fold_value",)}
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+BENCHMARK_CONFIG_DIR = REPO_ROOT / "benchmarks" / "config"
+EXACT_FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+WEAK_ENTRY_THUNK_SHAPES = frozenset({"direct", "neutral"})
 
 FUNCTION_NAME_PATTERN = re.compile(r"@(?P<name>\"[^\"]+\"|[^\s(]+)\s*\(")
 ATTRIBUTE_GROUP_PATTERN = re.compile(
@@ -313,10 +316,81 @@ class FunctionSignature:
     arg_types: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class StrongVmWrapperPolicy:
+    wrapper_names: tuple[str, ...]
+    confidence: str
+
+
 def parse_csv(value: str | None) -> list[str]:
     if value is None or value.strip() == "":
         return list(DEFAULT_BENCHMARKS)
     return sorted(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
+
+
+def parse_yaml_scalar(text: str) -> str:
+    value = text.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    return value
+
+
+def load_strong_vm_wrapper_policy(benchmark: str) -> StrongVmWrapperPolicy:
+    if benchmark == "selftest":
+        return StrongVmWrapperPolicy((), "unknown")
+
+    config_path = BENCHMARK_CONFIG_DIR / f"{benchmark}.yaml"
+    if not config_path.is_file():
+        return StrongVmWrapperPolicy((), "unknown")
+
+    try:
+        config_text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return StrongVmWrapperPolicy((), "unknown")
+
+    wrapper_names: list[str] = []
+    in_target_list = False
+    current_name = ""
+    saw_default_strong_vm = False
+    has_unsupported_match = False
+
+    for raw_line in config_text.splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if not line.startswith(" "):
+            in_target_list = stripped[:-1] in {"overrides", "targets"} if stripped.endswith(":") else False
+            current_name = ""
+            if stripped.startswith("default_level:"):
+                saw_default_strong_vm = parse_yaml_scalar(stripped.split(":", 1)[1]) == "strong_vm"
+            continue
+
+        if not in_target_list:
+            continue
+
+        item = stripped[2:].strip() if stripped.startswith("- ") else stripped
+        if item.startswith("name:") or item.startswith("match:"):
+            candidate = parse_yaml_scalar(item.split(":", 1)[1])
+            if EXACT_FUNCTION_NAME_PATTERN.fullmatch(candidate):
+                current_name = candidate
+            else:
+                has_unsupported_match = True
+                current_name = ""
+            continue
+
+        if item.startswith("level:"):
+            if parse_yaml_scalar(item.split(":", 1)[1]) == "strong_vm" and current_name:
+                wrapper_names.append(current_name)
+            current_name = ""
+
+    unique_names = tuple(sorted(dict.fromkeys(wrapper_names)))
+    if saw_default_strong_vm or has_unsupported_match:
+        return StrongVmWrapperPolicy(unique_names, "unknown")
+    if unique_names:
+        return StrongVmWrapperPolicy(unique_names, "explicit")
+    return StrongVmWrapperPolicy((), "absent")
 
 
 def stable_hash_json(value: Any) -> str:
@@ -1131,6 +1205,7 @@ def summarize_wrapper(
     )
     mapped_impl = ""
     mapped_entry_thunk = ""
+    mapped_entry_thunk_shape = ""
     mapping_reason = "unmapped"
     if direct_impl_calls:
         mapped_impl = direct_impl_calls[0]
@@ -1145,9 +1220,8 @@ def summarize_wrapper(
             if thunk_impl in implementation_names:
                 mapped_impl = thunk_impl
                 mapped_entry_thunk = thunk_ref
-                mapping_reason = thunk_mapping_reason(
-                    entry_thunk_shape_by_name.get(thunk_ref, "unknown")
-                )
+                mapped_entry_thunk_shape = entry_thunk_shape_by_name.get(thunk_ref, "unknown")
+                mapping_reason = thunk_mapping_reason(mapped_entry_thunk_shape)
                 break
     if not mapped_impl:
         for tag in tags:
@@ -1162,9 +1236,8 @@ def summarize_wrapper(
         if candidate_thunks and has_indirect_hidden_token_call(function):
             mapped_impl = signature_impl
             mapped_entry_thunk = candidate_thunks[0]
-            mapping_reason = thunk_mapping_reason(
-                entry_thunk_shape_by_name.get(mapped_entry_thunk, "unknown")
-            )
+            mapped_entry_thunk_shape = entry_thunk_shape_by_name.get(mapped_entry_thunk, "unknown")
+            mapping_reason = thunk_mapping_reason(mapped_entry_thunk_shape)
         else:
             mapped_impl = signature_impl
             mapping_reason = "indirect"
@@ -1186,6 +1259,7 @@ def summarize_wrapper(
         "key_refs": key_refs,
         "line_range": [function.start_line, function.end_line],
         "mapped_entry_thunk": mapped_entry_thunk,
+        "mapped_entry_thunk_shape": mapped_entry_thunk_shape,
         "mapped_implementation": mapped_impl,
         "mapping_reason": mapping_reason,
         "resolver_shape": resolver_shape,
@@ -1409,11 +1483,12 @@ def summarize_entropy_fingerprint(
 
 def build_findings(
     benchmark: str,
+    strong_vm_policy: StrongVmWrapperPolicy,
     wrappers: list[dict[str, Any]],
     callsites: list[dict[str, Any]],
     vm_function_summaries: list[dict[str, Any]],
     symbol_counts: dict[str, int],
-    metrics: dict[str, int],
+    metrics: dict[str, Any],
     strict: bool,
 ) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
@@ -1589,7 +1664,7 @@ def build_findings(
             }
         )
 
-    expected_wrappers = STRONG_VM_EXPECTED_WRAPPERS.get(benchmark, ())
+    expected_wrappers = strong_vm_policy.wrapper_names
     wrappers_by_name = {wrapper["function"]: wrapper for wrapper in wrappers}
     for expected_wrapper in expected_wrappers:
         wrapper = wrappers_by_name.get(expected_wrapper)
@@ -1615,6 +1690,55 @@ def build_findings(
                 {
                     "check": "strong_vm_local_decode",
                     "detail": f"expected strong_vm wrapper {expected_wrapper} uses local target decode without a cached target global",
+                    "severity": "info",
+                }
+            )
+
+    if strong_vm_policy.confidence == "unknown":
+        findings.append(
+            {
+                "check": "strong_vm_router_floor",
+                "detail": "strong_vm router floor confidence is unknown because benchmark policy could not be identified precisely",
+                "severity": "warn" if strict else "info",
+            }
+        )
+    elif expected_wrappers:
+        weak_router_wrappers = sorted(
+            wrapper_name
+            for wrapper_name in expected_wrappers
+            if wrappers_by_name.get(wrapper_name, {}).get("mapped_entry_thunk_shape")
+            in WEAK_ENTRY_THUNK_SHAPES
+        )
+        unresolved_wrappers = sorted(
+            wrapper_name
+            for wrapper_name in expected_wrappers
+            if not wrappers_by_name.get(wrapper_name)
+            or not wrappers_by_name[wrapper_name].get("mapped_entry_thunk")
+            or wrappers_by_name[wrapper_name].get("mapped_entry_thunk_shape") in {"", "unknown"}
+        )
+        if weak_router_wrappers:
+            findings.append(
+                {
+                    "check": "strong_vm_router_floor",
+                    "detail": "strong_vm wrappers still use weak direct/neutral entry thunks: "
+                    + ",".join(weak_router_wrappers),
+                    "severity": "warn",
+                }
+            )
+        elif unresolved_wrappers:
+            findings.append(
+                {
+                    "check": "strong_vm_router_floor",
+                    "detail": "strong_vm router floor could not be confirmed for wrappers: "
+                    + ",".join(unresolved_wrappers),
+                    "severity": "warn" if strict else "info",
+                }
+            )
+        else:
+            findings.append(
+                {
+                    "check": "strong_vm_router_floor",
+                    "detail": f"all {len(expected_wrappers)} identified strong_vm wrapper(s) avoid direct/neutral entry thunks",
                     "severity": "info",
                 }
             )
@@ -1712,6 +1836,40 @@ def analyze_ir(
         for function in sorted(functions.values(), key=lambda item: item.name)
         if is_wrapper_candidate(function, implementation_functions)
     ]
+    strong_vm_policy = load_strong_vm_wrapper_policy(benchmark)
+    wrappers_by_name = {wrapper["function"]: wrapper for wrapper in wrappers}
+    strong_vm_wrappers = [
+        wrappers_by_name[name] for name in strong_vm_policy.wrapper_names if name in wrappers_by_name
+    ]
+    strong_vm_missing_wrappers = [
+        name for name in strong_vm_policy.wrapper_names if name not in wrappers_by_name
+    ]
+    strong_vm_entry_thunk_wrappers = [
+        wrapper
+        for wrapper in strong_vm_wrappers
+        if wrapper["mapped_entry_thunk"] and wrapper["mapped_entry_thunk_shape"] not in {"", "unknown"}
+    ]
+    strong_vm_weak_entry_thunk_wrappers = [
+        wrapper
+        for wrapper in strong_vm_entry_thunk_wrappers
+        if wrapper["mapped_entry_thunk_shape"] in WEAK_ENTRY_THUNK_SHAPES
+    ]
+    strong_vm_router_floor_confidence = "unknown"
+    if strong_vm_policy.confidence == "absent":
+        strong_vm_router_floor_confidence = "not_present"
+    elif strong_vm_policy.confidence == "explicit":
+        unresolved_strong_vm_wrappers = [
+            wrapper
+            for wrapper in strong_vm_wrappers
+            if not wrapper["mapped_entry_thunk"]
+            or wrapper["mapped_entry_thunk_shape"] in {"", "unknown"}
+        ]
+        if strong_vm_missing_wrappers or unresolved_strong_vm_wrappers:
+            strong_vm_router_floor_confidence = "unknown"
+        elif strong_vm_weak_entry_thunk_wrappers:
+            strong_vm_router_floor_confidence = "violated"
+        else:
+            strong_vm_router_floor_confidence = "passed"
     callsites = [
         summarize_callsite_rewrite(
             function,
@@ -1997,6 +2155,12 @@ def analyze_ir(
         "vm_function_count": len(vm_function_summaries),
         "vm_marker_count": sum(nonzero_marker_counts.values()),
         "wrapper_count": len(wrappers),
+        "strong_vm_policy_confidence": strong_vm_policy.confidence,
+        "strong_vm_expected_wrapper_count": len(strong_vm_policy.wrapper_names),
+        "strong_vm_missing_wrapper_count": len(strong_vm_missing_wrappers),
+        "strong_vm_entry_thunk_count": len(strong_vm_entry_thunk_wrappers),
+        "strong_vm_weak_entry_thunk_count": len(strong_vm_weak_entry_thunk_wrappers),
+        "strong_vm_router_floor_violations": len(strong_vm_weak_entry_thunk_wrappers),
         "max_refs_to_single_vm_data": max_refs_to_single_vm_data,
     }
     opcode_recovery_confidence = "none"
@@ -2081,6 +2245,7 @@ def analyze_ir(
     score_breakdown = score_from_counts(metrics)
     findings = build_findings(
         benchmark,
+        strong_vm_policy,
         wrappers,
         callsites,
         vm_function_summaries,
@@ -2110,6 +2275,7 @@ def analyze_ir(
         "router_mapping_confidence": router_mapping_confidence,
         "score_breakdown": score_breakdown,
         "route_family_counts": dict(sorted(route_family_counts.items())),
+        "strong_vm_router_floor_confidence": strong_vm_router_floor_confidence,
         "symbols_by_role": symbols_by_role,
         "split_opcode_immediates": split_opcode_immediates,
         "trap_oracle_confidence": trap_oracle_confidence,
@@ -2322,7 +2488,9 @@ def print_report(payload: dict[str, Any], verbose: bool) -> None:
             f"tag_wrappers={metrics.get('tag_correlated_wrapper_mapping_count', 0)} "
             f"trap_oracle={result.get('trap_oracle_confidence', 'none')} "
             f"indirect_thunked={metrics.get('indirect_thunked_wrapper_mapping_count', 0)} "
-            f"decoy_thunked={metrics.get('decoy_thunked_wrapper_mapping_count', 0)}"
+            f"decoy_thunked={metrics.get('decoy_thunked_wrapper_mapping_count', 0)} "
+            f"strong_vm_floor={result.get('strong_vm_router_floor_confidence', 'unknown')} "
+            f"strong_vm_weak={metrics.get('strong_vm_weak_entry_thunk_count', 0)}"
         )
         if verbose:
             for finding in result["findings"]:

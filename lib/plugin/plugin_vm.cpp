@@ -153,6 +153,50 @@ vm_entry_thunk_shape select_vm_entry_thunk_shape(llvm::StringRef source_name,
   return static_cast<vm_entry_thunk_shape>(state % 5U);
 }
 
+bool is_weak_vm_entry_thunk_shape(vm_entry_thunk_shape shape) {
+  return shape == vm_entry_thunk_shape::direct_forward ||
+         shape == vm_entry_thunk_shape::neutral_forward;
+}
+
+bool is_strong_vm_entry_thunk_shape(vm_entry_thunk_shape shape) {
+  return shape == vm_entry_thunk_shape::split_forward ||
+         shape == vm_entry_thunk_shape::indirect_ptr_forward ||
+         shape == vm_entry_thunk_shape::decoy_guarded_forward;
+}
+
+bool binding_requires_strong_vm_entry_thunk(const virtualized_function_binding& binding) {
+  return binding.state != nullptr &&
+         binding.state->report.decision.policy.level == protection_level::strong_vm;
+}
+
+vm_entry_thunk_shape select_strong_vm_entry_thunk_floor_shape(llvm::StringRef source_name,
+                                                              std::uint64_t seed) {
+  std::uint64_t state = mix_generated_name_seed(seed, 0x30f10f5f00dULL);
+  state = mix_generated_name_seed(state, stable_hash_string(source_name));
+
+  switch (state % 3U) {
+    case 0:
+      return vm_entry_thunk_shape::split_forward;
+    case 1:
+      return vm_entry_thunk_shape::indirect_ptr_forward;
+    case 2:
+    default:
+      return vm_entry_thunk_shape::decoy_guarded_forward;
+  }
+}
+
+vm_entry_thunk_shape upgrade_vm_entry_thunk_shape_for_policy(llvm::StringRef source_name,
+                                                             std::uint64_t seed,
+                                                             protection_level level,
+                                                             vm_entry_thunk_shape shape) {
+  if (level != protection_level::strong_vm || is_strong_vm_entry_thunk_shape(shape) ||
+      !is_weak_vm_entry_thunk_shape(shape)) {
+    return shape;
+  }
+
+  return select_strong_vm_entry_thunk_floor_shape(source_name, seed);
+}
+
 bool is_high_hardening_vm_entry_thunk_shape(vm_entry_thunk_shape shape) {
   return shape == vm_entry_thunk_shape::indirect_ptr_forward ||
          shape == vm_entry_thunk_shape::decoy_guarded_forward;
@@ -183,7 +227,33 @@ void rebalance_vm_entry_thunk_shapes(llvm::Module& module,
                                      llvm::SmallVectorImpl<vm_entry_thunk_shape>& shapes) {
   if (bindings.size() != shapes.size() || bindings.size() < 2) { return; }
 
+  for (std::size_t index = 0; index < bindings.size(); ++index) {
+    const virtualized_function_binding* binding = bindings[index];
+    if (binding == nullptr || binding->interface_function == nullptr || binding->state == nullptr) {
+      continue;
+    }
+
+    shapes[index] = upgrade_vm_entry_thunk_shape_for_policy(
+        binding->interface_function->getName(),
+        binding->state->report.decision.seed,
+        binding->state->report.decision.policy.level,
+        shapes[index]);
+  }
+
   const std::uint64_t scope_seed = stable_hash_string(get_vm_entry_thunk_balance_scope_name(module));
+
+  const auto candidate_priority = [&](std::size_t index) {
+    const virtualized_function_binding* binding = bindings[index];
+    const bool requires_strong_floor =
+        binding != nullptr && binding_requires_strong_vm_entry_thunk(*binding);
+    const vm_entry_thunk_shape shape = shapes[index];
+
+    if (!requires_strong_floor && is_weak_vm_entry_thunk_shape(shape)) { return 0; }
+    if (!requires_strong_floor && !is_high_hardening_vm_entry_thunk_shape(shape)) { return 1; }
+    if (requires_strong_floor && is_weak_vm_entry_thunk_shape(shape)) { return 2; }
+    if (requires_strong_floor && !is_high_hardening_vm_entry_thunk_shape(shape)) { return 3; }
+    return 4;
+  };
 
   const auto count_shape = [&](vm_entry_thunk_shape shape) {
     return static_cast<std::size_t>(llvm::count(shapes, shape));
@@ -202,6 +272,10 @@ void rebalance_vm_entry_thunk_shapes(llvm::Module& module,
     for (std::size_t index = 0; index < bindings.size(); ++index) { order.push_back(index); }
 
     std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+      const int lhs_priority = candidate_priority(lhs);
+      const int rhs_priority = candidate_priority(rhs);
+      if (lhs_priority != rhs_priority) { return lhs_priority < rhs_priority; }
+
       const std::uint64_t lhs_rank =
           compute_vm_entry_thunk_balance_rank(*bindings[lhs], scope_seed, salt);
       const std::uint64_t rhs_rank =
@@ -2206,8 +2280,14 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
           continue;
         }
 
-        entry_thunk_shapes.push_back(select_vm_entry_thunk_shape(
-            binding->interface_function->getName(), binding->state->report.decision.seed));
+        const llvm::StringRef source_name = binding->interface_function->getName();
+        const std::uint64_t seed = binding->state->report.decision.seed;
+        const vm_entry_thunk_shape selected_shape = select_vm_entry_thunk_shape(source_name, seed);
+        entry_thunk_shapes.push_back(upgrade_vm_entry_thunk_shape_for_policy(
+            source_name,
+            seed,
+            binding->state->report.decision.policy.level,
+            selected_shape));
       }
 
       rebalance_vm_entry_thunk_shapes(*module, successful_bindings, entry_thunk_shapes);
