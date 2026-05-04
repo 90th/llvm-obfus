@@ -1,0 +1,11 @@
+seed: 1
+default_level: none
+targets:
+  - match: router_a
+    level: vm
+  - match: router_b
+    level: vm
+  - match: router_c
+    level: vm
+  - match: router_d
+    level: vm

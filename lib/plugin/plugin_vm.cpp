@@ -18,6 +18,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Transforms/Utils/CodeExtractor.h"
@@ -138,13 +139,17 @@ enum class vm_entry_thunk_shape {
   direct_forward,
   neutral_forward,
   split_forward,
+  // calls impl through an entropy-entangled pointer — no direct named call visible to the analyzer
+  indirect_ptr_forward,
+  // like split_forward but with an opaque-false cold decoy branch to trap
+  decoy_guarded_forward,
 };
 
 vm_entry_thunk_shape select_vm_entry_thunk_shape(llvm::StringRef source_name,
                                                  std::uint64_t seed) {
   std::uint64_t state = mix_generated_name_seed(seed, 0xe17e7f00dULL);
   state = mix_generated_name_seed(state, stable_hash_string(source_name));
-  return static_cast<vm_entry_thunk_shape>(state % 3U);
+  return static_cast<vm_entry_thunk_shape>(state % 5U);
 }
 
 llvm::StringRef vm_entry_thunk_shape_marker(vm_entry_thunk_shape shape) {
@@ -155,6 +160,10 @@ llvm::StringRef vm_entry_thunk_shape_marker(vm_entry_thunk_shape shape) {
       return "vm.entry.thunk.shape.neutral";
     case vm_entry_thunk_shape::split_forward:
       return "vm.entry.thunk.shape.split";
+    case vm_entry_thunk_shape::indirect_ptr_forward:
+      return "vm.entry.thunk.shape.indirect";
+    case vm_entry_thunk_shape::decoy_guarded_forward:
+      return "vm.entry.thunk.shape.decoy";
   }
 
   llvm_unreachable("unknown vm entry thunk shape");
@@ -624,6 +633,89 @@ llvm::Function* create_vm_entry_thunk(llvm::Function& interface_function,
     forward_args.back() = builder.CreateXor(forward_args.back(),
                                             llvm::ConstantInt::get(token_type, 0),
                                             "obf.vm.entry.thunk.neutral");
+  }
+
+  if (shape == vm_entry_thunk_shape::indirect_ptr_forward) {
+    // materialize the impl address through an entropy-entangled expression so the call target
+    // is not a direct named reference — ghidra must trace the mba chain to identify the impl
+    auto* ptr_int_type = get_vm_pointer_int_type(interface_function);
+    if (ptr_int_type == nullptr) {
+      // fallback: plain direct call if pointer type is unavailable
+      emit_vm_entry_thunk_call_and_return(
+          builder, interface_function, implementation_function, forward_args);
+      return thunk;
+    }
+    const std::uint64_t iptr_seed =
+        mix_vm_handshake_seed(stable_hash_string(thunk_name), 0x7a1be84d20cULL);
+    const mba::builder_context iptr_context{
+        .entropy_anchor = mba::get_or_create_entropy_anchor(*module),
+        .seed_base = iptr_seed,
+        .depth = 2,
+    };
+    auto* impl_raw = builder.CreatePtrToInt(
+        &implementation_function, ptr_int_type, "obf.vm.entry.thunk.iptr.raw");
+    auto* impl_opaque = mba::entangle_value(
+        builder, impl_raw, iptr_context, iptr_seed ^ 0x3e9c710fULL, "obf.vm.entry.thunk.iptr");
+    auto* impl_ptr = builder.CreateIntToPtr(
+        impl_opaque, implementation_function.getType(), "obf.vm.entry.thunk.impl.ptr");
+    const bool returns_void_iptr = implementation_function.getReturnType()->isVoidTy();
+    auto* indirect_call = builder.CreateCall(
+        implementation_function.getFunctionType(),
+        impl_ptr,
+        forward_args,
+        returns_void_iptr ? "" : "obf.vm.entry.thunk.indirect.call");
+    indirect_call->setCallingConv(interface_function.getCallingConv());
+    indirect_call->setAttributes(build_vm_safe_callsite_attributes(implementation_function));
+    if (returns_void_iptr) {
+      builder.CreateRetVoid();
+    } else {
+      builder.CreateRet(indirect_call);
+    }
+    return thunk;
+  }
+
+  if (shape == vm_entry_thunk_shape::decoy_guarded_forward) {
+    // add an opaque-false branch to a cold trap block — the decoy never executes
+    // but forces ghidra to consider an alternate callgraph edge to the trap
+    const std::uint64_t decoy_seed =
+        mix_vm_handshake_seed(stable_hash_string(thunk_name), 0xd3c0a77f41bULL);
+    llvm::BasicBlock* decoy = llvm::BasicBlock::Create(
+        module->getContext(), "obf.vm.entry.thunk.decoy", thunk);
+    llvm::BasicBlock* decoy_route = llvm::BasicBlock::Create(
+        module->getContext(), "obf.vm.entry.thunk.route", thunk);
+    llvm::BasicBlock* decoy_call = llvm::BasicBlock::Create(
+        module->getContext(), "obf.vm.entry.thunk.call", thunk);
+    llvm::BasicBlock* decoy_ret = llvm::BasicBlock::Create(
+        module->getContext(), "obf.vm.entry.thunk.ret", thunk);
+    auto* opaque_true = mba::build_entropy_true_predicate(
+        builder,
+        *thunk,
+        /*mba_depth=*/2,
+        decoy_seed,
+        decoy_seed ^ 0x11ULL,
+        decoy_seed ^ 0x22ULL,
+        "obf.vm.thunk.decoy.ctx.a",
+        "obf.vm.thunk.decoy.ctx.b",
+        "obf.vm.thunk.decoy.true");
+    auto* opaque_false = builder.CreateNot(opaque_true, "obf.vm.entry.thunk.decoy.cond");
+    builder.CreateCondBr(opaque_false, decoy, decoy_route);
+    llvm::IRBuilder<> decoy_builder(decoy);
+    decoy_builder.CreateCall(
+        llvm::Intrinsic::getOrInsertDeclaration(module, llvm::Intrinsic::trap));
+    decoy_builder.CreateUnreachable();
+    llvm::IRBuilder<> decoy_route_builder(decoy_route);
+    decoy_route_builder.CreateBr(decoy_call);
+    llvm::IRBuilder<> decoy_call_builder(decoy_call);
+    llvm::CallInst* decoy_inner = emit_vm_entry_thunk_call(
+        decoy_call_builder, interface_function, implementation_function, forward_args);
+    decoy_call_builder.CreateBr(decoy_ret);
+    llvm::IRBuilder<> decoy_ret_builder(decoy_ret);
+    if (implementation_function.getReturnType()->isVoidTy()) {
+      decoy_ret_builder.CreateRetVoid();
+    } else {
+      decoy_ret_builder.CreateRet(decoy_inner);
+    }
+    return thunk;
   }
 
   if (shape != vm_entry_thunk_shape::split_forward) {

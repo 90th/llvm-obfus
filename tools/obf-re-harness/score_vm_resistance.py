@@ -194,6 +194,9 @@ ENTRY_THUNK_SHAPE_MARKERS = {
     "direct": "vm.entry.thunk.shape.direct",
     "neutral": "vm.entry.thunk.shape.neutral",
     "split": "vm.entry.thunk.shape.split",
+    # pr29: router opacity shapes
+    "indirect": "vm.entry.thunk.shape.indirect",
+    "decoy": "vm.entry.thunk.shape.decoy",
 }
 
 SELF_TEST_IR = r'''
@@ -971,6 +974,11 @@ def entry_thunk_impl_calls(function: FunctionIR, implementation_names: set[str])
 
 
 def thunk_mapping_reason(shape: str) -> str:
+    # pr29 indirect/decoy shapes get distinct mapping reasons
+    if shape == "indirect":
+        return "indirect_thunked"
+    if shape == "decoy":
+        return "decoy_thunked"
     return "thunked" if shape == "direct" else "polymorphic_thunked"
 
 
@@ -1248,7 +1256,10 @@ def score_from_counts(metrics: dict[str, Any]) -> dict[str, int]:
         + min(metrics["tag_correlated_wrapper_mapping_count"] * 10, 30)
         + min(metrics["thunked_wrapper_mapping_count"] * 7, 21)
         + min(metrics["polymorphic_thunked_wrapper_mapping_count"] * 5, 15)
-        + min(metrics["indirect_wrapper_mapping_count"] * 4, 12),
+        + min(metrics["indirect_wrapper_mapping_count"] * 4, 12)
+        # pr29 indirect-ptr and decoy-guarded thunks are harder to map — lower penalty
+        + min(metrics["indirect_thunked_wrapper_mapping_count"] * 3, 9)
+        + min(metrics["decoy_thunked_wrapper_mapping_count"] * 3, 9),
         "entry_thunks": min(metrics["entry_thunk_count"] * 2, 8),
         "raw_opcode_compares": min(metrics["raw_direct_opcode_compare_count"] * 3, 48),
         "physical_opcodes": min(metrics["physical_opcode_count"] * 2, 36),
@@ -1878,6 +1889,13 @@ def analyze_ir(
             for callsite in callsites
             if callsite["mapping_reason"] in ("thunked", "polymorphic_thunked")
         ),
+        # pr29 router opacity: indirect-ptr thunks and decoy-guarded thunks
+        "indirect_thunked_wrapper_mapping_count": sum(
+            1 for w in wrappers if w["mapping_reason"] == "indirect_thunked"
+        ),
+        "decoy_thunked_wrapper_mapping_count": sum(
+            1 for w in wrappers if w["mapping_reason"] == "decoy_thunked"
+        ),
         "unmapped_wrapper_count": sum(1 for w in wrappers if not w["mapped_implementation"]),
         "opcode_compare_count": sum(
             summary["opcode_compare_count"] for summary in vm_function_summaries
@@ -1963,8 +1981,11 @@ def analyze_ir(
     polymorphic_count = metrics["polymorphic_thunked_wrapper_mapping_count"]
     tag_correlated_count = metrics["tag_correlated_wrapper_mapping_count"]
     indirect_count = metrics["indirect_wrapper_mapping_count"]
+    # pr29 router opacity: indirect-ptr and decoy-guarded thunk families
+    indirect_thunked_count = metrics["indirect_thunked_wrapper_mapping_count"]
+    decoy_thunked_count = metrics["decoy_thunked_wrapper_mapping_count"]
     mapped_count = metrics["mapped_wrapper_count"]
-    thunk_family_count = thunked_count + polymorphic_count
+    thunk_family_count = thunked_count + polymorphic_count + indirect_thunked_count + decoy_thunked_count
     if direct_count and thunk_family_count:
         wrapper_mapping_confidence = "partial_thunked"
     elif direct_count:
@@ -2227,7 +2248,9 @@ def print_report(payload: dict[str, Any], verbose: bool) -> None:
             f"thunked_wrappers={metrics.get('thunked_wrapper_mapping_count', 0)} "
             f"poly_wrappers={metrics.get('polymorphic_thunked_wrapper_mapping_count', 0)} "
             f"tag_wrappers={metrics.get('tag_correlated_wrapper_mapping_count', 0)} "
-            f"trap_oracle={result.get('trap_oracle_confidence', 'none')}"
+            f"trap_oracle={result.get('trap_oracle_confidence', 'none')} "
+            f"indirect_thunked={metrics.get('indirect_thunked_wrapper_mapping_count', 0)} "
+            f"decoy_thunked={metrics.get('decoy_thunked_wrapper_mapping_count', 0)}"
         )
         if verbose:
             for finding in result["findings"]:

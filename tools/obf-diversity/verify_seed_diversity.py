@@ -171,6 +171,9 @@ MARKER_GROUPS = {
         "direct": r"vm\.entry\.thunk\.shape\.direct",
         "neutral": r"vm\.entry\.thunk\.shape\.neutral",
         "split": r"vm\.entry\.thunk\.shape\.split",
+        # pr29 router opacity shapes
+        "indirect": r"vm\.entry\.thunk\.shape\.indirect",
+        "decoy": r"vm\.entry\.thunk\.shape\.decoy",
         "definition": r"obf\.vm\.entry\.thunk",
     },
     "mba_shapes": {

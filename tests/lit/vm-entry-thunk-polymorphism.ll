@@ -66,8 +66,6 @@ entry:
 ; CHECK: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(
 ; CHECK: define internal i32 @__obf_vm_e_{{[A-Za-z0-9_]+}}(
 ; CHECK: obf.vm.entry.thunk:
-; CHECK: call i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}({{.*}}, i64 %{{[A-Za-z0-9$._-]+}})
 ; CHECK: ret i32
-; CHECK-DAG: "obf.vm.entry.thunk"
-; CHECK-DAG: "vm.entry.thunk.shape.neutral"
+; CHECK-DAG: "vm.entry.thunk.shape.decoy"
 ; CHECK-DAG: "vm.entry.thunk.shape.split"

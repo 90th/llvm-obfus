@@ -16,7 +16,7 @@
 ; CHECK: call i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}({{.*}}, i64 %{{[A-Za-z0-9$._-]+}})
 ; CHECK: ret i32
 ; CHECK: "obf.vm.entry.thunk"
-; CHECK: "vm.entry.thunk.shape.{{(direct|neutral|split)}}"
+; CHECK: "vm.entry.thunk.shape.{{(direct|neutral|split|indirect|decoy)}}"
 
 define i32 @thunk_target(i32 %x) {
 entry:
