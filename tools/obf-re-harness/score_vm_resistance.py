@@ -115,6 +115,9 @@ SYMBOL_PATTERNS = {
 }
 
 MARKER_PATTERNS = {
+    "body.layout.family": r"vm\.body\.layout\.family",
+    "body.layout.logical": r"vm\.body\.layout\.logical",
+    "body.layout.permuted": r"vm\.body\.layout\.permuted",
     "branch.direct": r"vm\.branch\.shape\.direct",
     "branch.invert": r"vm\.branch\.shape\.invert",
     "branch.neutral": r"vm\.branch\.shape\.neutral",
@@ -191,6 +194,10 @@ MARKER_PATTERNS = {
     "return.split": r"vm\.return\.shape\.split",
     "anchor.scattered": r"vm\.bytecode\.anchor\.scattered",
     "anchor.decoys": r"vm\.bytecode\.anchor\.decoys",
+    "trap.shape.direct": r"vm\.trap\.shape\.direct",
+    "trap.shape.gated": r"vm\.trap\.shape\.gated",
+    "trap.shape.slot": r"vm\.trap\.shape\.slot",
+    "trap.shape.twohop": r"vm\.trap\.shape\.twohop",
 }
 
 ENTRY_THUNK_SHAPE_MARKERS = {
@@ -893,6 +900,22 @@ def count_instruction_proxy(function: FunctionIR) -> int:
     return count
 
 
+def canonicalize_vm_block_label(label: str) -> str:
+    return re.sub(r"\d+", "#", label)
+
+
+def ordered_vm_block_layout(blocks: dict[str, BlockIR]) -> list[str]:
+    return [canonicalize_vm_block_label(label) for label in blocks]
+
+
+def marker_variants(marker_counts: dict[str, int], prefix: str) -> list[str]:
+    return sorted(
+        name.removeprefix(prefix + ".")
+        for name, count in marker_counts.items()
+        if count and name.startswith(prefix + ".")
+    )
+
+
 def limited(values: list[str], limit: int = 64) -> list[str]:
     return values[:limit]
 
@@ -900,6 +923,7 @@ def limited(values: list[str], limit: int = 64) -> list[str]:
 def summarize_vm_function(function: FunctionIR) -> dict[str, Any]:
     role = classify_vm_function(function)
     blocks = parse_blocks(function.body)
+    block_layout = ordered_vm_block_layout(blocks)
     opcode_headers = extract_opcode_headers(function)
     raw_opcode_headers = [
         header for header in opcode_headers if header["compare_kind"] == "raw_i8"
@@ -954,9 +978,14 @@ def summarize_vm_function(function: FunctionIR) -> dict[str, Any]:
         header["route_target"] for header in opcode_headers if header["route_target"]
     )
     route_family_counts = Counter(header["handler_mapping"] for header in opcode_headers)
+    layout_shapes = marker_variants(nonzero_markers, "body.layout")
+    trap_shapes = marker_variants(nonzero_markers, "trap.shape")
     return {
         "alloca_count": len(re.findall(r"\balloca\b", function.body)),
         "basic_block_count": len(blocks),
+        "block_layout": block_layout,
+        "block_layout_hash": stable_hash_json(block_layout) if block_layout else "",
+        "body_line_count": len([line for line in function.body.splitlines() if line.strip()]),
         "bytecode_refs": bytecode_refs,
         "call_count": len(re.findall(r"\bcall\b", function.body)),
         "dispatcher_blocks": dispatcher_blocks,
@@ -978,6 +1007,7 @@ def summarize_vm_function(function: FunctionIR) -> dict[str, Any]:
         "instruction_proxy_count": count_instruction_proxy(function),
         "kind": role,
         "line_range": [function.start_line, function.end_line],
+        "layout_shapes": layout_shapes,
         "load_count": len(re.findall(r"\bload\b", function.body)),
         "marker_counts": nonzero_markers,
         "opcode_compare_blocks": opcode_headers,
@@ -1009,6 +1039,7 @@ def summarize_vm_function(function: FunctionIR) -> dict[str, Any]:
         "transformed_opcode_compare_count": len(transformed_opcode_headers),
         "transformed_opcode_constants": transformed_opcode_constants,
         "trap_count": len(re.findall(r"@llvm\.trap", function.body)),
+        "trap_shapes": trap_shapes,
         "trap_oracle_direct_count": sum(
             1 for header in opcode_headers if header["trap_oracle"] == "direct"
         ),
@@ -1439,13 +1470,17 @@ def build_helper_shape_groups(vm_function_summaries: list[dict[str, Any]]) -> li
         fingerprint = {
             "alloca_count": summary["alloca_count"],
             "basic_block_count": summary["basic_block_count"],
+            "block_layout_hash": summary["block_layout_hash"],
+            "body_line_count": summary["body_line_count"],
             "dispatcher_block_count": summary["dispatcher_block_count"],
             "handler_block_candidate_count": summary["handler_block_candidate_count"],
             "indirectbr_count": summary["indirectbr_count"],
+            "layout_shapes": summary["layout_shapes"],
             "kind": summary["kind"],
             "opcode_compare_count": summary["opcode_compare_count"],
             "physical_opcode_count": len(summary["physical_opcodes"]),
             "split_opcode_header_count": summary["split_opcode_header_count"],
+            "trap_shapes": summary["trap_shapes"],
             "transformed_opcode_constant_count": len(summary["transformed_opcode_constants"]),
             "switch_count": summary["switch_count"],
             "trap_count": summary["trap_count"],
@@ -1467,6 +1502,83 @@ def build_helper_shape_groups(vm_function_summaries: list[dict[str, Any]]) -> li
             }
         )
     return groups
+
+
+def summarize_vm_body_structure(vm_function_summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    if not vm_function_summaries:
+        return {
+            "vm_body_count": 0,
+            "vm_body_helper_island_count": 0,
+            "vm_body_large_count": 0,
+            "vm_body_layout_fingerprint_confidence": "unknown",
+            "vm_body_layout_shape_count": 0,
+            "vm_body_layout_shape_counts": {},
+            "vm_body_max_size": 0,
+            "vm_body_repeated_layout_count": 0,
+            "vm_body_small_helper_count": 0,
+            "vm_body_structural_recovery_confidence": "unknown",
+            "vm_body_trap_count": 0,
+            "vm_body_trap_shape_count": 0,
+            "vm_body_trap_shape_counts": {},
+        }
+
+    helper_summaries = [
+        summary for summary in vm_function_summaries if summary["kind"] in {"helper", "subhelper"}
+    ]
+    trap_shape_counts = Counter(
+        shape for summary in vm_function_summaries for shape in summary["trap_shapes"]
+    )
+    layout_shape_counts = Counter(
+        shape for summary in vm_function_summaries for shape in summary["layout_shapes"]
+    )
+    layout_hash_counts = Counter(
+        summary["block_layout_hash"]
+        for summary in vm_function_summaries
+        if summary["block_layout_hash"]
+    )
+    repeated_layout_count = sum(1 for count in layout_hash_counts.values() if count > 1)
+    large_body_count = sum(
+        1
+        for summary in vm_function_summaries
+        if summary["instruction_proxy_count"] >= 96 or summary["basic_block_count"] >= 14
+    )
+    small_helper_count = sum(
+        1 for summary in helper_summaries if summary["instruction_proxy_count"] <= 64
+    )
+    dominant_trap_shape_count = max(trap_shape_counts.values(), default=0)
+    dominant_layout_shape_count = max(layout_shape_counts.values(), default=0)
+
+    if repeated_layout_count >= 2 or dominant_layout_shape_count >= max(2, len(vm_function_summaries) - 1):
+        layout_fingerprint_confidence = "high"
+    elif repeated_layout_count or trap_shape_counts or layout_shape_counts:
+        layout_fingerprint_confidence = "medium"
+    else:
+        layout_fingerprint_confidence = "low"
+
+    if large_body_count or repeated_layout_count or dominant_trap_shape_count >= max(2, len(vm_function_summaries) - 1):
+        structural_recovery_confidence = "high"
+    elif helper_summaries or trap_shape_counts or layout_shape_counts:
+        structural_recovery_confidence = "medium"
+    else:
+        structural_recovery_confidence = "low"
+
+    return {
+        "vm_body_count": len(vm_function_summaries),
+        "vm_body_helper_island_count": len(helper_summaries),
+        "vm_body_large_count": large_body_count,
+        "vm_body_layout_fingerprint_confidence": layout_fingerprint_confidence,
+        "vm_body_layout_shape_count": len(layout_shape_counts),
+        "vm_body_layout_shape_counts": dict(sorted(layout_shape_counts.items())),
+        "vm_body_max_size": max(
+            summary["instruction_proxy_count"] for summary in vm_function_summaries
+        ),
+        "vm_body_repeated_layout_count": repeated_layout_count,
+        "vm_body_small_helper_count": small_helper_count,
+        "vm_body_structural_recovery_confidence": structural_recovery_confidence,
+        "vm_body_trap_count": sum(summary["trap_count"] for summary in vm_function_summaries),
+        "vm_body_trap_shape_count": len(trap_shape_counts),
+        "vm_body_trap_shape_counts": dict(sorted(trap_shape_counts.items())),
+    }
 
 
 def classify_entropy_thunk_shape(function_body: str) -> str:
@@ -2028,6 +2140,7 @@ def analyze_ir(
     marker_counts = count_markers(ir_text)
     nonzero_marker_counts = {key: value for key, value in marker_counts.items() if value}
     helper_shape_groups = build_helper_shape_groups(vm_function_summaries)
+    vm_body_summary = summarize_vm_body_structure(vm_function_summaries)
     entropy_fingerprint = summarize_entropy_fingerprint(functions, marker_counts)
     global_definitions = sorted(set(GLOBAL_DEFINITION_PATTERN.findall(ir_text)))
     physical_opcodes = sorted(
@@ -2123,6 +2236,7 @@ def analyze_ir(
         for _ in range(count)
     )
     metrics = {
+        **vm_body_summary,
         "bytecode_anchor_count": bytecode_anchor_count,
         "bytecode_real_anchor_count": bytecode_real_anchor_count,
         "bytecode_decoy_count": bytecode_decoy_count,
@@ -2260,6 +2374,7 @@ def analyze_ir(
         "raw_direct_opcode_compare_count": sum(
             summary["raw_direct_opcode_compare_count"] for summary in vm_function_summaries
         ),
+        "vm_body_repeated_helper_shape_count": len(helper_shape_groups),
         "repeated_helper_shape_count": len(helper_shape_groups),
         "split_opcode_compare_count": sum(
             summary["split_opcode_compare_count"] for summary in vm_function_summaries

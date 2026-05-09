@@ -63,7 +63,7 @@ entry:
 ; VM: call i32 @__obf_vm_h_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
 ; VM-LABEL: define internal i32 @__obf_vm_h_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
 ; VM: %vm.island.subroute = load i32, ptr %vm.island.state.dispatch
-; VM: switch i32 %vm.island.subroute
+; VM: switch i32 %{{.*vm\.island\.subroute|.*vm\.choreo\.dispatch\..*}}
 ; VM: call i32 @__obf_vm_hs_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
 ; VM-LABEL: define internal i32 @__obf_vm_hs_{{[A-Za-z0-9_]+}}(ptr %vm.island.subhelper.state)
 ; VM: %vm.island.subroute.dispatch = load i32, ptr %vm.island.state.dispatch

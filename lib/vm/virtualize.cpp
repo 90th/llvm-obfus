@@ -429,6 +429,258 @@ std::uint32_t opcode_family(opcode op) {
   }
 }
 
+enum class vm_body_layout_shape {
+  logical = 0,
+  permuted = 1,
+  family = 2,
+};
+
+enum class vm_status_trap_shape {
+  direct = 0,
+  twohop = 1,
+  slot = 2,
+};
+
+enum class vm_terminal_trap_shape {
+  direct = 0,
+  twohop = 1,
+  gated = 2,
+};
+
+template <typename Shape>
+Shape select_vm_body_shape_variant(const llvm::Function& function,
+                                   std::uint64_t bytecode_seed,
+                                   std::uint64_t detail,
+                                   std::uint64_t salt,
+                                   std::uint32_t variant_count) {
+  const std::uint64_t shape_seed = mix_seed(
+      bytecode_seed ^ stable_hash_string(function.getName()), salt ^ detail ^ (detail << 7));
+  return static_cast<Shape>(shape_seed % variant_count);
+}
+
+vm_body_layout_shape select_vm_body_layout_shape(const llvm::Function& function,
+                                                 std::uint64_t bytecode_seed,
+                                                 std::uint64_t detail,
+                                                 std::size_t instruction_count) {
+  if (instruction_count < 2) { return vm_body_layout_shape::logical; }
+  if (instruction_count < 4) {
+    return static_cast<vm_body_layout_shape>(
+        1U + (mix_seed(bytecode_seed, 0x521500ULL ^ detail) % 2ULL));
+  }
+  return select_vm_body_shape_variant<vm_body_layout_shape>(
+      function, bytecode_seed, detail, 0x521500ULL, 3U);
+}
+
+vm_status_trap_shape select_vm_status_trap_shape(const llvm::Function& function,
+                                                 std::uint64_t bytecode_seed,
+                                                 std::uint64_t detail) {
+  return select_vm_body_shape_variant<vm_status_trap_shape>(
+      function, bytecode_seed, detail, 0x521700ULL, 3U);
+}
+
+vm_terminal_trap_shape select_vm_terminal_trap_shape(const llvm::Function& function,
+                                                     std::uint64_t bytecode_seed,
+                                                     std::uint64_t detail) {
+  return select_vm_body_shape_variant<vm_terminal_trap_shape>(
+      function, bytecode_seed, detail, 0x521800ULL, 3U);
+}
+
+llvm::StringRef vm_body_layout_shape_marker(vm_body_layout_shape shape) {
+  switch (shape) {
+    case vm_body_layout_shape::logical:
+      return "vm.body.layout.logical";
+    case vm_body_layout_shape::permuted:
+      return "vm.body.layout.permuted";
+    case vm_body_layout_shape::family:
+      return "vm.body.layout.family";
+  }
+  llvm_unreachable("unsupported vm body layout shape");
+}
+
+llvm::StringRef vm_status_trap_shape_marker(vm_status_trap_shape shape) {
+  switch (shape) {
+    case vm_status_trap_shape::direct:
+      return "vm.trap.shape.direct";
+    case vm_status_trap_shape::twohop:
+      return "vm.trap.shape.twohop";
+    case vm_status_trap_shape::slot:
+      return "vm.trap.shape.slot";
+  }
+  llvm_unreachable("unsupported vm status trap shape");
+}
+
+llvm::StringRef vm_terminal_trap_shape_marker(vm_terminal_trap_shape shape) {
+  switch (shape) {
+    case vm_terminal_trap_shape::direct:
+      return "vm.trap.shape.direct";
+    case vm_terminal_trap_shape::twohop:
+      return "vm.trap.shape.twohop";
+    case vm_terminal_trap_shape::gated:
+      return "vm.trap.shape.gated";
+  }
+  llvm_unreachable("unsupported vm terminal trap shape");
+}
+
+void note_vm_function_marker(llvm::Function& function, llvm::StringRef marker) {
+  if (!function.hasFnAttribute(marker)) { function.addFnAttr(marker); }
+}
+
+llvm::SmallVector<std::size_t, 32>
+build_vm_instruction_emission_order(const bytecode_program& program,
+                                    llvm::ArrayRef<std::size_t> instruction_indices,
+                                    std::uint64_t bytecode_seed,
+                                    vm_body_layout_shape shape,
+                                    std::uint64_t salt) {
+  llvm::SmallVector<std::size_t, 32> order(instruction_indices.begin(), instruction_indices.end());
+  if (order.size() < 2 || shape == vm_body_layout_shape::logical) { return order; }
+
+  std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+    if (shape == vm_body_layout_shape::family) {
+      const std::uint64_t lhs_family =
+          mix_seed(bytecode_seed, salt ^ (0x51573000ULL + opcode_family(program.instructions[lhs].op)));
+      const std::uint64_t rhs_family =
+          mix_seed(bytecode_seed, salt ^ (0x51573000ULL + opcode_family(program.instructions[rhs].op)));
+      if (lhs_family != rhs_family) { return lhs_family < rhs_family; }
+    }
+
+    const std::uint64_t lhs_key = mix_seed(bytecode_seed, salt ^ (0x51573100ULL + lhs));
+    const std::uint64_t rhs_key = mix_seed(bytecode_seed, salt ^ (0x51573100ULL + rhs));
+    return lhs_key == rhs_key ? lhs < rhs : lhs_key < rhs_key;
+  });
+  return order;
+}
+
+llvm::SmallVector<std::uint32_t, 8>
+build_vm_index_emission_order(std::uint32_t count,
+                              std::uint64_t bytecode_seed,
+                              vm_body_layout_shape shape,
+                              std::uint64_t salt) {
+  llvm::SmallVector<std::uint32_t, 8> order;
+  order.reserve(count);
+  for (std::uint32_t index = 0; index < count; ++index) { order.push_back(index); }
+  if (order.size() < 2 || shape == vm_body_layout_shape::logical) { return order; }
+
+  std::stable_sort(order.begin(), order.end(), [&](std::uint32_t lhs, std::uint32_t rhs) {
+    if (shape == vm_body_layout_shape::family) {
+      const std::uint64_t lhs_group = mix_seed(bytecode_seed, salt ^ (0x51573200ULL + (lhs & 1U)));
+      const std::uint64_t rhs_group = mix_seed(bytecode_seed, salt ^ (0x51573200ULL + (rhs & 1U)));
+      if (lhs_group != rhs_group) { return lhs_group < rhs_group; }
+    }
+
+    const std::uint64_t lhs_key = mix_seed(bytecode_seed, salt ^ (0x51573300ULL + lhs));
+    const std::uint64_t rhs_key = mix_seed(bytecode_seed, salt ^ (0x51573300ULL + rhs));
+    return lhs_key == rhs_key ? lhs < rhs : lhs_key < rhs_key;
+  });
+  return order;
+}
+
+void emit_vm_status_trap(llvm::Function& function,
+                         llvm::BasicBlock* trap_block,
+                         std::uint64_t bytecode_seed,
+                         std::uint32_t choreography_detail,
+                         std::uint64_t choreography_salt,
+                         vm_status_trap_shape shape) {
+  note_vm_function_marker(function, vm_status_trap_shape_marker(shape));
+
+  auto build_status = [&](llvm::IRBuilder<>& builder) {
+    return apply_vm_island_status_choreography(builder,
+                                               function,
+                                               bytecode_seed,
+                                               builder.getInt32(vm_island_trap_status),
+                                               choreography_detail,
+                                               choreography_salt);
+  };
+
+  switch (shape) {
+    case vm_status_trap_shape::direct: {
+      llvm::IRBuilder<> trap_builder(trap_block);
+      trap_builder.CreateRet(build_status(trap_builder));
+      return;
+    }
+    case vm_status_trap_shape::twohop: {
+      llvm::BasicBlock* trap_body = llvm::BasicBlock::Create(
+          function.getContext(), trap_block->getName().str() + ".body", &function);
+      llvm::IRBuilder<> trap_builder(trap_block);
+      trap_builder.CreateBr(trap_body);
+      llvm::IRBuilder<> body_builder(trap_body);
+      body_builder.CreateRet(build_status(body_builder));
+      return;
+    }
+    case vm_status_trap_shape::slot: {
+      llvm::IRBuilder<> trap_builder(trap_block);
+      auto* trap_status_slot =
+          trap_builder.CreateAlloca(trap_builder.getInt32Ty(), nullptr, "vm.trap.status.slot");
+      trap_builder.CreateStore(build_status(trap_builder), trap_status_slot);
+      trap_builder.CreateRet(trap_builder.CreateLoad(
+          trap_builder.getInt32Ty(), trap_status_slot, "vm.trap.status.ret"));
+      return;
+    }
+  }
+
+  llvm_unreachable("unsupported vm status trap shape");
+}
+
+void emit_vm_terminal_trap(llvm::Function& function,
+                           llvm::BasicBlock* trap_block,
+                           const mba::builder_context& mba_context,
+                           std::uint64_t salt,
+                           vm_terminal_trap_shape shape) {
+  note_vm_function_marker(function, vm_terminal_trap_shape_marker(shape));
+
+  llvm::FunctionCallee trap =
+      llvm::Intrinsic::getOrInsertDeclaration(function.getParent(), llvm::Intrinsic::trap);
+  switch (shape) {
+    case vm_terminal_trap_shape::direct: {
+      llvm::IRBuilder<> trap_builder(trap_block);
+      trap_builder.CreateCall(trap);
+      trap_builder.CreateUnreachable();
+      return;
+    }
+    case vm_terminal_trap_shape::twohop: {
+      llvm::BasicBlock* trap_body = llvm::BasicBlock::Create(
+          function.getContext(), trap_block->getName().str() + ".body", &function);
+      llvm::IRBuilder<> trap_builder(trap_block);
+      trap_builder.CreateBr(trap_body);
+      llvm::IRBuilder<> body_builder(trap_body);
+      body_builder.CreateCall(trap);
+      body_builder.CreateUnreachable();
+      return;
+    }
+    case vm_terminal_trap_shape::gated: {
+      llvm::BasicBlock* trap_body = llvm::BasicBlock::Create(
+          function.getContext(), trap_block->getName().str() + ".body", &function);
+      llvm::BasicBlock* trap_tail = llvm::BasicBlock::Create(
+          function.getContext(), trap_block->getName().str() + ".tail", &function);
+      llvm::IRBuilder<> trap_builder(trap_block);
+      llvm::Value* gate_lhs = mba::create_opaque_integer(trap_builder,
+                                                         trap_builder.getInt64Ty(),
+                                                         mba_context,
+                                                         llvm::APInt(64, 1),
+                                                         salt ^ 0x11ULL,
+                                                         "vm.trap.gate.lhs");
+      llvm::Value* gate_rhs = mba::create_opaque_integer(trap_builder,
+                                                         trap_builder.getInt64Ty(),
+                                                         mba_context,
+                                                         llvm::APInt(64, 1),
+                                                         salt ^ 0x22ULL,
+                                                         "vm.trap.gate.rhs");
+      llvm::Value* trap_gate =
+          trap_builder.CreateICmpEQ(gate_lhs, gate_rhs, "vm.trap.gate");
+      trap_builder.CreateCondBr(trap_gate, trap_body, trap_tail);
+
+      llvm::IRBuilder<> tail_builder(trap_tail);
+      tail_builder.CreateBr(trap_body);
+
+      llvm::IRBuilder<> body_builder(trap_body);
+      body_builder.CreateCall(trap);
+      body_builder.CreateUnreachable();
+      return;
+    }
+  }
+
+  llvm_unreachable("unsupported vm terminal trap shape");
+}
+
 struct subisland_plan {
   std::vector<std::uint32_t> subhelper_for_instruction;
   llvm::SmallVector<llvm::SmallVector<std::size_t, 16>, 8> instructions;
@@ -828,6 +1080,19 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
                                        bool subhelper) {
   llvm::LLVMContext& context = dispatcher.getContext();
   llvm::Module* module = dispatcher.getParent();
+                      const std::uint64_t body_detail =
+                        (static_cast<std::uint64_t>(island_index) << 32) | static_cast<std::uint64_t>(subhelper_index);
+                      const vm_body_layout_shape body_layout_shape =
+                        select_vm_body_layout_shape(dispatcher, bytecode_seed, body_detail, owned_instructions.size());
+                      const vm_status_trap_shape trap_shape =
+                        select_vm_status_trap_shape(dispatcher, bytecode_seed, body_detail);
+                      note_vm_function_marker(dispatcher, vm_body_layout_shape_marker(body_layout_shape));
+                      const llvm::SmallVector<std::size_t, 32> emission_order =
+                        build_vm_instruction_emission_order(program,
+                                          owned_instructions,
+                                          bytecode_seed,
+                                          body_layout_shape,
+                                          0x521050ULL ^ body_detail);
   const std::string route_prefix = subhelper ? "vm.island.subhelper." : "vm.island.";
   const std::string entry_name = route_prefix + "entry." + std::to_string(island_index) + "." +
                                  std::to_string(subhelper_index);
@@ -878,7 +1143,7 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
       entry_builder.getInt32Ty(), nullptr, "obf.vm.pred.slot");
 
   llvm::SmallVector<llvm::BasicBlock*, 64> instruction_blocks(program.instructions.size(), nullptr);
-  for (std::size_t instruction_index : owned_instructions) {
+  for (std::size_t instruction_index : emission_order) {
     instruction_blocks[instruction_index] = llvm::BasicBlock::Create(
         context,
         route_prefix + std::to_string(island_index) + "." + std::to_string(subhelper_index) + "." +
@@ -970,7 +1235,7 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
       .dispatch_site_counter = dispatch_site_counter,
   };
 
-  for (std::size_t instruction_index : owned_instructions) {
+  for (std::size_t instruction_index : emission_order) {
     const micro_instruction& instruction = program.instructions[instruction_index];
     llvm::IRBuilder<> header_builder(instruction_blocks[instruction_index]);
     const bytecode_layout& layout = serialized.layouts[instruction_index];
@@ -1037,15 +1302,13 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
   llvm::IRBuilder<> failure_builder(failure_block);
   failure_builder.CreateBr(trap_block);
 
-  llvm::IRBuilder<> trap_builder(trap_block);
-  trap_builder.CreateRet(apply_vm_island_status_choreography(
-      trap_builder,
-      dispatcher,
-      bytecode_seed,
-      trap_builder.getInt32(vm_island_trap_status),
-      island_index,
-      0x521100ULL + static_cast<std::uint64_t>(island_index) * 0x100ULL +
-          static_cast<std::uint64_t>(subhelper_index)));
+    emit_vm_status_trap(dispatcher,
+              trap_block,
+              bytecode_seed,
+              island_index,
+              0x521100ULL + static_cast<std::uint64_t>(island_index) * 0x100ULL +
+                static_cast<std::uint64_t>(subhelper_index),
+              trap_shape);
 }
 
 void emit_split_state_island_router(llvm::Function& helper,
@@ -1057,6 +1320,8 @@ void emit_split_state_island_router(llvm::Function& helper,
                                     llvm::ArrayRef<llvm::Function*> subhelpers,
                                     std::uint32_t island_index) {
   llvm::LLVMContext& context = helper.getContext();
+  const vm_status_trap_shape trap_shape =
+      select_vm_status_trap_shape(helper, bytecode_seed, 0x521210ULL + island_index);
   llvm::BasicBlock* entry_block = llvm::BasicBlock::Create(
       context, "vm.island.subroute.entry." + std::to_string(island_index), &helper);
   llvm::BasicBlock* trap_block = llvm::BasicBlock::Create(
@@ -1111,14 +1376,8 @@ void emit_split_state_island_router(llvm::Function& helper,
   llvm::IRBuilder<> failure_builder(failure_block);
   failure_builder.CreateBr(trap_block);
 
-  llvm::IRBuilder<> trap_builder(trap_block);
-  trap_builder.CreateRet(
-      apply_vm_island_status_choreography(trap_builder,
-                                          helper,
-                                          bytecode_seed,
-                                          trap_builder.getInt32(vm_island_trap_status),
-                                          island_index,
-                                          0x521400ULL + island_index));
+    emit_vm_status_trap(
+      helper, trap_block, bytecode_seed, island_index, 0x521400ULL + island_index, trap_shape);
 }
 
 void emit_state_island_helper(llvm::Function& helper,
@@ -1177,9 +1436,15 @@ void emit_state_island_helper(llvm::Function& helper,
       llvm::FunctionType::get(llvm::Type::getInt32Ty(context), {state_pointer_type}, false);
   llvm::SmallVector<llvm::Function*, 8> subhelpers;
   subhelpers.resize(split_plan.instructions.size(), nullptr);
+    const vm_body_layout_shape subhelper_layout_shape = select_vm_body_layout_shape(
+      helper, bytecode_seed, 0x521240ULL + island_index, split_plan.instructions.size());
+    const llvm::SmallVector<std::uint32_t, 8> subhelper_emission_order =
+      build_vm_index_emission_order(split_plan.instructions.size(),
+                    bytecode_seed,
+                    subhelper_layout_shape,
+                    0x521250ULL + island_index);
 
-  for (std::uint32_t subhelper_index = 0; subhelper_index < split_plan.instructions.size();
-       ++subhelper_index) {
+    for (std::uint32_t subhelper_index : subhelper_emission_order) {
     llvm::Function* subhelper = llvm::Function::Create(
         helper_type,
         llvm::GlobalValue::InternalLinkage,
@@ -1211,8 +1476,7 @@ void emit_state_island_helper(llvm::Function& helper,
                                  subhelpers,
                                  island_index);
 
-  for (std::uint32_t subhelper_index = 0; subhelper_index < split_plan.instructions.size();
-       ++subhelper_index) {
+  for (std::uint32_t subhelper_index : subhelper_emission_order) {
     llvm::GlobalVariable* subhelper_bytecode =
         clone_bytecode_global_for_subhelper(bytecode_global, subhelper_index);
     emit_state_instruction_dispatcher(*subhelpers[subhelper_index],
@@ -1388,12 +1652,22 @@ void rewrite_function_body_state_islands(llvm::Function& function,
     ++argument_index;
   }
 
-  llvm::SmallVector<llvm::Function*, 8> helpers;
-  helpers.reserve(island_count);
+    const vm_body_layout_shape root_layout_shape =
+      select_vm_body_layout_shape(function, bytecode_seed, 0x521600ULL, island_count);
+    const vm_terminal_trap_shape trap_shape =
+      select_vm_terminal_trap_shape(function, bytecode_seed, 0x521610ULL + island_count);
+    note_vm_function_marker(function, vm_body_layout_shape_marker(root_layout_shape));
+    llvm::SmallVector<llvm::Function*, 8> helpers;
+    helpers.resize(island_count, nullptr);
   auto* state_pointer_type = llvm::PointerType::get(context, 0);
   auto* helper_type =
       llvm::FunctionType::get(entry_builder.getInt32Ty(), {state_pointer_type}, false);
-  for (std::uint32_t island_index = 0; island_index < island_count; ++island_index) {
+    const llvm::SmallVector<std::uint32_t, 8> helper_emission_order =
+      build_vm_index_emission_order(island_count,
+                    bytecode_seed,
+                    root_layout_shape,
+                    0x521620ULL + island_count);
+    for (std::uint32_t island_index : helper_emission_order) {
     llvm::Function* helper =
         llvm::Function::Create(helper_type,
                                llvm::GlobalValue::InternalLinkage,
@@ -1410,7 +1684,7 @@ void rewrite_function_body_state_islands(llvm::Function& function,
     helper->addFnAttr("vm.island.next_island");
     helper->addFnAttr("vm.island.state");
     helper->addFnAttr("vm.island.table.shard");
-    helpers.push_back(helper);
+    helpers[island_index] = helper;
   }
 
   entry_builder.CreateBr(route_block);
@@ -1430,7 +1704,7 @@ void rewrite_function_body_state_islands(llvm::Function& function,
   auto* island_switch =
       island_route_builder.CreateSwitch(current_island, failure_block, helpers.size());
 
-  for (std::uint32_t island_index = 0; island_index < helpers.size(); ++island_index) {
+  for (std::uint32_t island_index : helper_emission_order) {
     auto* call_block = llvm::BasicBlock::Create(
         context, "vm.island.call." + std::to_string(island_index), &function);
     island_switch->addCase(island_route_builder.getInt32(island_index), call_block);
@@ -1454,13 +1728,9 @@ void rewrite_function_body_state_islands(llvm::Function& function,
   llvm::IRBuilder<> failure_builder(failure_block);
   failure_builder.CreateBr(trap_block);
 
-  llvm::IRBuilder<> trap_builder(trap_block);
-  llvm::FunctionCallee trap =
-      llvm::Intrinsic::getOrInsertDeclaration(module, llvm::Intrinsic::trap);
-  trap_builder.CreateCall(trap);
-  trap_builder.CreateUnreachable();
+  emit_vm_terminal_trap(function, trap_block, mba_context, 0x521630ULL + island_count, trap_shape);
 
-  for (std::uint32_t island_index = 0; island_index < helpers.size(); ++island_index) {
+  for (std::uint32_t island_index : helper_emission_order) {
     emit_state_island_helper(*helpers[island_index],
                              program,
                              options,
@@ -1537,13 +1807,26 @@ void rewrite_function_body(llvm::Function& function,
   auto* trap_block = llvm::BasicBlock::Create(context, "trap.obf.vm", &function);
   auto* failure_block = llvm::BasicBlock::Create(context, "obf.vm.fail.shared", &function);
 
-  llvm::SmallVector<llvm::BasicBlock*, 32> instruction_blocks;
-  instruction_blocks.reserve(program.instructions.size());
-  for (std::size_t instruction_index = 0; instruction_index < program.instructions.size();
+    const vm_body_layout_shape body_layout_shape =
+      select_vm_body_layout_shape(function, bytecode_seed, 0x521900ULL, program.instructions.size());
+    const vm_terminal_trap_shape trap_shape =
+      select_vm_terminal_trap_shape(function, bytecode_seed, 0x521910ULL + program.instructions.size());
+    note_vm_function_marker(function, vm_body_layout_shape_marker(body_layout_shape));
+    llvm::SmallVector<std::size_t, 32> instruction_indices;
+    instruction_indices.reserve(program.instructions.size());
+    for (std::size_t instruction_index = 0; instruction_index < program.instructions.size();
        ++instruction_index) {
-    instruction_blocks.push_back(
-        llvm::BasicBlock::Create(context, "vm." + std::to_string(instruction_index), &function));
-  }
+    instruction_indices.push_back(instruction_index);
+    }
+    const llvm::SmallVector<std::size_t, 32> instruction_emission_order =
+      build_vm_instruction_emission_order(
+        program, instruction_indices, bytecode_seed, body_layout_shape, 0x521920ULL);
+
+    llvm::SmallVector<llvm::BasicBlock*, 32> instruction_blocks(program.instructions.size(), nullptr);
+    for (std::size_t instruction_index : instruction_emission_order) {
+    instruction_blocks[instruction_index] =
+      llvm::BasicBlock::Create(context, "vm." + std::to_string(instruction_index), &function);
+    }
 
   llvm::IRBuilder<> entry_builder(entry_block);
   slot_storage slot_allocas;
@@ -1738,8 +2021,7 @@ void rewrite_function_body(llvm::Function& function,
                   0x3000);
   }
 
-  for (std::size_t instruction_index = 0; instruction_index < program.instructions.size();
-       ++instruction_index) {
+  for (std::size_t instruction_index : instruction_emission_order) {
     const micro_instruction& instruction = program.instructions[instruction_index];
     llvm::IRBuilder<> header_builder(instruction_blocks[instruction_index]);
     const bytecode_layout& layout = serialized.layouts[instruction_index];
@@ -1804,11 +2086,11 @@ void rewrite_function_body(llvm::Function& function,
   llvm::IRBuilder<> failure_builder(failure_block);
   failure_builder.CreateBr(trap_block);
 
-  llvm::IRBuilder<> trap_builder(trap_block);
-  llvm::FunctionCallee trap =
-      llvm::Intrinsic::getOrInsertDeclaration(function.getParent(), llvm::Intrinsic::trap);
-  trap_builder.CreateCall(trap);
-  trap_builder.CreateUnreachable();
+  emit_vm_terminal_trap(function,
+                        trap_block,
+                        mba_context,
+                        0x521930ULL + program.instructions.size(),
+                        trap_shape);
 }
 
 }  // namespace

@@ -132,6 +132,17 @@ MARKER_GROUPS = {
         "split": r"vm\.choreo\.dispatch\.split",
         "select": r"vm\.choreo\.dispatch\.select",
     },
+    "vm_body_layouts": {
+        "logical": r"vm\.body\.layout\.logical",
+        "permuted": r"vm\.body\.layout\.permuted",
+        "family": r"vm\.body\.layout\.family",
+    },
+    "vm_trap_shapes": {
+        "direct": r"vm\.trap\.shape\.direct",
+        "twohop": r"vm\.trap\.shape\.twohop",
+        "slot": r"vm\.trap\.shape\.slot",
+        "gated": r"vm\.trap\.shape\.gated",
+    },
     "vm_islands": {
         "topology": r"vm\.island\.topology\.helper_shards",
         "count": r"vm\.island\.count\.\d+",
@@ -301,6 +312,10 @@ def parse_blocks(function_body: str) -> dict[str, str]:
     if current_label is not None:
         blocks[current_label] = "\n".join(current_body) + ("\n" if current_body else "")
     return blocks
+
+
+def canonicalize_vm_block_label(label: str) -> str:
+    return re.sub(r"\d+", "#", label)
 
 
 def is_failure_block(label: str, body: str, trap_labels: set[str]) -> bool:
@@ -525,6 +540,34 @@ def vm_island_structure(functions: dict[str, str], marker_text: str) -> dict[str
     }
 
 
+def vm_body_layout_structure(functions: dict[str, str]) -> dict[str, Any]:
+    layout_entries: list[dict[str, Any]] = []
+    for name, body in sorted(functions.items()):
+        if not is_vm_like_function(name, body):
+            continue
+        if name.startswith("__obf_vm_hs_") or "vm.island.subhelper" in body:
+            kind = "subhelper"
+        elif name.startswith("__obf_vm_h_") or "vm.island.helper" in body:
+            kind = "helper"
+        elif name.startswith("__obf_vm_i_"):
+            kind = "implementation"
+        else:
+            kind = "vm_like"
+        layout_entries.append(
+            {
+                "kind": kind,
+                "layout": [
+                    canonicalize_vm_block_label(label) for label in parse_blocks(body)
+                ],
+            }
+        )
+
+    return {
+        "body_count": len(layout_entries),
+        "layout_hash": hash_json(layout_entries) if layout_entries else "",
+    }
+
+
 def vm_data_anchor_structure(functions: dict[str, str], ir_text: str) -> dict[str, Any]:
     vm_like_bodies = {
         name: body for name, body in functions.items() if is_vm_like_function(name, body)
@@ -642,6 +685,8 @@ def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
         for name, pattern in SYMBOL_PATTERNS.items()
     }
     island_structure = vm_island_structure(functions, marker_text)
+    body_layout_functions = marker_functions if marker_functions else functions
+    body_layout_structure = vm_body_layout_structure(body_layout_functions)
     data_anchor_structure = vm_data_anchor_structure(functions, ir_text)
     entropy_structure = entropy_accessor_structure(functions)
 
@@ -658,6 +703,8 @@ def fingerprint_ir(ir_text: str, marker_text: str) -> dict[str, Any]:
         "vm_island_hash": hash_json(island_structure)
         if island_structure["island_marker_count"] or island_structure["helper_count"]
         else "",
+        "vm_body_layout_structure": body_layout_structure,
+        "vm_body_layout_hash": body_layout_structure["layout_hash"],
         "vm_data_anchor_structure": data_anchor_structure,
         "vm_data_anchor_hash": hash_json(data_anchor_structure)
         if data_anchor_structure["vm_data_ref_count"] or data_anchor_structure["bytecode_global_count"]
@@ -703,8 +750,14 @@ def dimension_value(fingerprint: dict[str, Any], dimension: str) -> Any:
         return fingerprint["table_choreography"]
     if dimension == "dispatch_choreography":
         return fingerprint["dispatch_choreography"]
+    if dimension == "vm_body_layouts":
+        return fingerprint["vm_body_layouts"]
+    if dimension == "vm_trap_shapes":
+        return fingerprint["vm_trap_shapes"]
     if dimension == "vm_islands":
         return fingerprint["vm_island_hash"]
+    if dimension == "vm_body_layout":
+        return fingerprint["vm_body_layout_hash"]
     if dimension == "vm_data_anchors":
         return fingerprint["vm_data_anchor_hash"]
     if dimension == "pointer_materialization":
@@ -815,7 +868,10 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
         "slot_choreography",
         "table_choreography",
         "dispatch_choreography",
+        "vm_body_layouts",
+        "vm_trap_shapes",
         "vm_islands",
+        "vm_body_layout",
         "vm_data_anchors",
         "pointer_materialization",
         "entropy_thunks",
@@ -853,7 +909,10 @@ def compare_benchmark(seeds: list[str], fingerprints: dict[str, dict[str, Any]])
                 "slot_choreography",
                 "table_choreography",
                 "dispatch_choreography",
+                "vm_body_layouts",
+                "vm_trap_shapes",
                 "vm_islands",
+                "vm_body_layout",
                 "vm_data_anchors",
                 "vm_structure",
             )

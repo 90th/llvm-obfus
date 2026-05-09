@@ -1,0 +1,9 @@
+seed: 313131
+default_level: none
+targets:
+  - match: body_layout_target
+    level: strong_vm
+mba:
+  depth: 0
+security:
+  fail_on_public_obf_symbol: true

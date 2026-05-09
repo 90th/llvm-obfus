@@ -71,7 +71,7 @@ entry:
 ; CHECK: %obf.vm.pred.slot = alloca i32
 ; CHECK: %obf.vm.token.state.match = icmp eq i64 %obf.hidden_token,
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
-; CHECK: {{^vm\.0:}}
+; CHECK: {{^vm\.[0-9]+:}}
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_
 ; CHECK: %obf.vm.integrity.byte.ptr = getelementptr inbounds
 ; CHECK: %obf.vm.integrity.byte.window = load i32, ptr %obf.vm.integrity.byte.ptr, align 1
@@ -122,7 +122,7 @@ entry:
 ; INST-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)
 ; INST: %obf.vm.state = alloca i64
 ; INST: %obf.vm.pred.slot = alloca i32
-; INST: {{^vm\.0:}}
+; INST: {{^vm\.[0-9]+:}}
 ; INST: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
 ; INST-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
 ; INST-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
