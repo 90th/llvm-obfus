@@ -64,6 +64,8 @@ struct mba_config {
 struct lifter_destruction_config {
   bool enabled = false;
   std::uint32_t max_sites_per_function = 1;
+  bool target_vm_dispatchers = true;
+  bool target_flattened_headers = true;
 };
 
 struct security_gate_config {

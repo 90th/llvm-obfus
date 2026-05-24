@@ -14,6 +14,8 @@ struct lifter_destruction_options {
   bool enabled = false;
   std::size_t max_sites_per_function = 1;
   std::uint32_t mba_depth = 1;
+  bool target_vm_dispatchers = true;
+  bool target_flattened_headers = true;
 };
 
 struct lifter_destruction_result {

@@ -380,6 +380,8 @@ lifter_destruction_options build_lifter_destruction_options(const obfuscation_co
   options.enabled = config.lifter_destruction.enabled;
   options.max_sites_per_function = config.lifter_destruction.max_sites_per_function;
   options.mba_depth = config.mba.depth;
+  options.target_vm_dispatchers = config.lifter_destruction.target_vm_dispatchers;
+  options.target_flattened_headers = config.lifter_destruction.target_flattened_headers;
 
   if (decision.policy.level == protection_level::light) {
     options.max_sites_per_function = std::min<std::size_t>(options.max_sites_per_function, 1);

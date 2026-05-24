@@ -230,10 +230,10 @@ class lifter_destruction_pass : public llvm::PassInfoMixin<lifter_destruction_pa
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
     return run_stateful_stage(module,
-                              [](llvm::Module&,
+                              [](llvm::Module& current_module,
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config) {
-                                return apply_lifter_destruction_stage(states, config);
+                                return apply_lifter_destruction_stage(current_module, states, config);
                               });
   }
 };
@@ -309,8 +309,10 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     changed |= apply_instruction_substitution_to_functions(strong_vm_virtualized, config);
     changed |= apply_bogus_control_flow_to_functions(strong_vm_virtualized, config);
 
-    // Final cleanup sequence: remove CFG placeholders, enforce invariants, then strip markers.
+    // Final late-stage sequence: remove CFG placeholders, inject machine-code traps,
+    // enforce invariants, then strip markers.
     changed |= apply_cfg_state_cleanup_stage(module);
+    changed |= apply_lifter_destruction_stage(module, post_vm_states, config);
     changed |= enforce_security_gates(module, states, post_vm_virtualized, config);
     changed |= apply_artifact_cleanup_stage(module, config);
 

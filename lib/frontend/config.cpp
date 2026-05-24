@@ -105,6 +105,8 @@ struct MappingTraits<obf::lifter_destruction_config> {
   static void mapping(IO& io, obf::lifter_destruction_config& config) {
     io.mapOptional("enabled", config.enabled, false);
     io.mapOptional("max_sites_per_function", config.max_sites_per_function, std::uint32_t{1});
+    io.mapOptional("target_vm_dispatchers", config.target_vm_dispatchers, true);
+    io.mapOptional("target_flattened_headers", config.target_flattened_headers, true);
   }
 };
 
@@ -203,7 +205,10 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 2;
       config.mba.depth = 1;
-      config.lifter_destruction = {.enabled = false, .max_sites_per_function = 1};
+      config.lifter_destruction.enabled = false;
+      config.lifter_destruction.max_sites_per_function = 1;
+      config.lifter_destruction.target_vm_dispatchers = true;
+      config.lifter_destruction.target_flattened_headers = true;
       config.security.fail_on_public_obf_symbol = false;
       break;
     case config_profile::standard:
@@ -215,7 +220,10 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 4;
       config.mba.depth = 1;
-      config.lifter_destruction = {.enabled = false, .max_sites_per_function = 1};
+      config.lifter_destruction.enabled = false;
+      config.lifter_destruction.max_sites_per_function = 1;
+      config.lifter_destruction.target_vm_dispatchers = true;
+      config.lifter_destruction.target_flattened_headers = true;
       config.security.fail_on_public_obf_symbol = true;
       break;
     case config_profile::guarded:
@@ -227,7 +235,10 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 8;
       config.mba.depth = 2;
-      config.lifter_destruction = {.enabled = false, .max_sites_per_function = 1};
+      config.lifter_destruction.enabled = false;
+      config.lifter_destruction.max_sites_per_function = 1;
+      config.lifter_destruction.target_vm_dispatchers = true;
+      config.lifter_destruction.target_flattened_headers = true;
       config.security.fail_on_public_obf_symbol = true;
       break;
     case config_profile::fortress:
@@ -239,7 +250,10 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 16;
       config.mba.depth = 3;
-      config.lifter_destruction = {.enabled = false, .max_sites_per_function = 1};
+      config.lifter_destruction.enabled = false;
+      config.lifter_destruction.max_sites_per_function = 1;
+      config.lifter_destruction.target_vm_dispatchers = true;
+      config.lifter_destruction.target_flattened_headers = true;
       config.security.fail_on_public_obf_symbol = true;
       break;
     case config_profile::lab:
@@ -251,7 +265,10 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 32;
       config.mba.depth = 4;
-      config.lifter_destruction = {.enabled = false, .max_sites_per_function = 1};
+      config.lifter_destruction.enabled = false;
+      config.lifter_destruction.max_sites_per_function = 1;
+      config.lifter_destruction.target_vm_dispatchers = true;
+      config.lifter_destruction.target_flattened_headers = true;
       config.security.fail_on_public_obf_symbol = true;
       break;
   }
@@ -381,6 +398,10 @@ std::string summarize_config(const obfuscation_config& config) {
          << (config.lifter_destruction.enabled ? "true" : "false") << '\n';
   stream << "lifter_destruction.max_sites_per_function: "
          << config.lifter_destruction.max_sites_per_function << '\n';
+  stream << "lifter_destruction.target_vm_dispatchers: "
+         << (config.lifter_destruction.target_vm_dispatchers ? "true" : "false") << '\n';
+  stream << "lifter_destruction.target_flattened_headers: "
+         << (config.lifter_destruction.target_flattened_headers ? "true" : "false") << '\n';
   stream << "security.strong_vm_invariants: always_enforced\n";
   stream << "security.fail_on_public_obf_symbol: "
          << (config.security.fail_on_public_obf_symbol ? "true" : "false") << '\n';
