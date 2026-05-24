@@ -1,0 +1,11 @@
+seed: 4242
+default_level: none
+targets:
+  - match: auto_mix
+    level: strong
+  - match: use_table
+    level: strong
+constant_encoding:
+  mode: auto
+  max_constants_per_function: 8
+  min_bit_width: 8

@@ -446,10 +446,13 @@ bool apply_artifact_cleanup_stage(llvm::Module& module, const obfuscation_config
   return RunArtifactCleanup(module, build_artifact_cleanup_options(config));
 }
 
-bool apply_constant_encoding_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
+bool apply_constant_encoding_stage(llvm::Module& module,
+                                   const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                    const obfuscation_config& config,
                                    const llvm::StringSet<>* skip_functions) {
   bool changed = false;
+
+  bool uses_module_planner = false;
 
   for (const function_pipeline_state& state : states) {
     if (should_skip_function(state, skip_functions) ||
@@ -460,9 +463,42 @@ bool apply_constant_encoding_stage(const llvm::SmallVectorImpl<function_pipeline
 
     const constant_encoding_options options =
         build_constant_encoding_options(config, state.report.decision);
-    changed |=
-        run_constant_encoding(*state.function, options, state.report.decision.seed).encoded_count >
-        0;
+    if (options.mode == constant_protection_mode::keyed_pool ||
+        options.mode == constant_protection_mode::auto_mode ||
+        options.mode == constant_protection_mode::all) {
+      uses_module_planner = true;
+      continue;
+    }
+
+    changed |= run_constant_encoding(*state.function, options, state.report.decision.seed)
+                   .encoded_count > 0;
+  }
+
+  if (uses_module_planner) {
+    constant_encoding_options module_options;
+    module_options.mode = config.constant_encoding.mode;
+    module_options.max_constants_per_function = config.constant_encoding.max_constants_per_function;
+    module_options.min_bit_width = config.constant_encoding.min_bit_width;
+    module_options.mba_depth = config.mba.depth;
+    changed |= run_constant_encoding(
+                   module,
+                   [&](llvm::StringRef function_name) -> std::optional<std::uint64_t> {
+                     for (const function_pipeline_state& state : states) {
+                       if (state.function == nullptr || state.function->isDeclaration() ||
+                           should_skip_function(state, skip_functions) ||
+                           !state.report.decision.policy.allow_constant_encoding ||
+                           state.report.decision.policy.level == protection_level::strong_vm ||
+                           state.function->getName() != function_name) {
+                         continue;
+                       }
+
+                       return state.report.decision.seed;
+                     }
+                     return std::nullopt;
+                   },
+                   module_options,
+                   config.seed)
+                   .encoded_count > 0;
   }
 
   return changed;
