@@ -37,6 +37,17 @@ struct ScalarEnumerationTraits<obf::config_profile> {
 };
 
 template <>
+struct ScalarEnumerationTraits<obf::constant_protection_mode> {
+  static void enumeration(IO& io, obf::constant_protection_mode& mode) {
+    io.enumCase(mode, "off", obf::constant_protection_mode::off);
+    io.enumCase(mode, "mba_inline", obf::constant_protection_mode::mba_inline);
+    io.enumCase(mode, "keyed_pool", obf::constant_protection_mode::keyed_pool);
+    io.enumCase(mode, "auto", obf::constant_protection_mode::auto_mode);
+    io.enumCase(mode, "all", obf::constant_protection_mode::all);
+  }
+};
+
+template <>
 struct MappingTraits<obf::target_rule> {
   static void mapping(IO& io, obf::target_rule& rule) {
     io.mapRequired("match", rule.match);
@@ -75,6 +86,7 @@ struct MappingTraits<obf::string_encoding_config> {
 template <>
 struct MappingTraits<obf::constant_encoding_config> {
   static void mapping(IO& io, obf::constant_encoding_config& config) {
+    io.mapOptional("mode", config.mode, obf::constant_protection_mode::mba_inline);
     io.mapOptional(
         "max_constants_per_function", config.max_constants_per_function, std::uint32_t{4});
     io.mapOptional("min_bit_width", config.min_bit_width, std::uint32_t{8});
@@ -267,6 +279,22 @@ llvm::StringRef to_string(config_profile profile) {
   llvm_unreachable("unknown config profile");
 }
 
+llvm::StringRef to_string(constant_protection_mode mode) {
+  switch (mode) {
+    case constant_protection_mode::off:
+      return "off";
+    case constant_protection_mode::mba_inline:
+      return "mba_inline";
+    case constant_protection_mode::keyed_pool:
+      return "keyed_pool";
+    case constant_protection_mode::auto_mode:
+      return "auto";
+    case constant_protection_mode::all:
+      return "all";
+  }
+  llvm_unreachable("unknown constant protection mode");
+}
+
 llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path) {
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer_or_error =
       llvm::MemoryBuffer::getFile(path);
@@ -328,6 +356,7 @@ std::string summarize_config(const obfuscation_config& config) {
          << (config.string_encoding.authenticated_mode ? "true" : "false") << '\n';
   stream << "constant_encoding.max_constants_per_function: "
          << config.constant_encoding.max_constants_per_function << '\n';
+  stream << "constant_encoding.mode: " << to_string(config.constant_encoding.mode) << '\n';
   stream << "constant_encoding.min_bit_width: " << config.constant_encoding.min_bit_width << '\n';
   stream << "mba.depth: " << config.mba.depth << '\n';
   stream << "security.strong_vm_invariants: always_enforced\n";

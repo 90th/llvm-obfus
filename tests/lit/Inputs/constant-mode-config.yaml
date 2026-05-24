@@ -1,0 +1,5 @@
+default_level: light
+constant_encoding:
+  mode: all
+  max_constants_per_function: 7
+  min_bit_width: 16

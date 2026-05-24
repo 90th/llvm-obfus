@@ -39,3 +39,6 @@ else:
 config.substitutions.append(
     ("%obf_plugin", "@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@")
 )
+config.substitutions.append(
+    ("%obf_driver", "@CMAKE_CURRENT_BINARY_DIR@/obf-driver@CMAKE_EXECUTABLE_SUFFIX@")
+)

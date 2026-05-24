@@ -30,6 +30,14 @@ enum class config_profile {
   lab,
 };
 
+enum class constant_protection_mode {
+  off,
+  mba_inline,
+  keyed_pool,
+  auto_mode,
+  all,
+};
+
 struct block_split_config {
   std::uint32_t max_splits_per_function = 1;
   std::uint32_t min_instructions_per_block = 2;
@@ -44,6 +52,7 @@ struct string_encoding_config {
 };
 
 struct constant_encoding_config {
+  constant_protection_mode mode = constant_protection_mode::mba_inline;
   std::uint32_t max_constants_per_function = 4;
   std::uint32_t min_bit_width = 8;
 };
@@ -73,5 +82,6 @@ struct obfuscation_config {
 llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path);
 std::string summarize_config(const obfuscation_config& config);
 llvm::StringRef to_string(config_profile profile);
+llvm::StringRef to_string(constant_protection_mode mode);
 
 }  // namespace obf

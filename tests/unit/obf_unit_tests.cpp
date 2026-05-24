@@ -151,6 +151,36 @@ void TestAuthenticatedStringConfig() {
   std::filesystem::remove(path, ec);
 }
 
+void TestConstantProtectionModeConfig() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "obf_constant_mode_config.yaml";
+  {
+    std::ofstream out(path);
+    out << "default_level: light\n";
+    out << "constant_encoding:\n";
+    out << "  mode: keyed_pool\n";
+    out << "  max_constants_per_function: 9\n";
+  }
+
+  llvm::Expected<obf::obfuscation_config> loaded = obf::load_config_from_file(path.string());
+  ExpectTrue(static_cast<bool>(loaded), "constant protection mode config should load successfully");
+  if (loaded) {
+    ExpectTrue(loaded->constant_encoding.mode == obf::constant_protection_mode::keyed_pool,
+               "constant protection mode should parse from yaml");
+    ExpectTrue(loaded->constant_encoding.max_constants_per_function == 9,
+               "max_constants_per_function should respect yaml override");
+    ExpectTrue(loaded->constant_encoding.min_bit_width == 8,
+               "min_bit_width should keep its default value");
+
+    const std::string summary = obf::summarize_config(*loaded);
+    ExpectTrue(summary.find("constant_encoding.mode: keyed_pool") != std::string::npos,
+               "config summary should report constant protection mode");
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 void TestAuthEncodingBlake2sKnownAnswers() {
   const std::array<std::uint8_t, 0> empty_input{};
   const std::array<std::uint8_t, 3> abc = {'a', 'b', 'c'};
@@ -345,6 +375,7 @@ int main() {
   TestPolicySelection();
   TestConfigLoader();
   TestAuthenticatedStringConfig();
+  TestConstantProtectionModeConfig();
   TestPolicyPrecedenceAndFloors();
   TestConfigEdgeCases();
   TestSeedStability();

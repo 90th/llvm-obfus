@@ -1,5 +1,7 @@
 #pragma once
 
+#include "obf/frontend/config.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -11,6 +13,7 @@ class Function;
 namespace obf {
 
 struct constant_encoding_options {
+  constant_protection_mode mode = constant_protection_mode::mba_inline;
   std::size_t max_constants_per_function = 4;
   unsigned min_bit_width = 8;
   std::uint32_t mba_depth = 1;

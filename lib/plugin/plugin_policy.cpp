@@ -333,6 +333,7 @@ string_encoding_options build_string_encoding_options(const obfuscation_config& 
 constant_encoding_options build_constant_encoding_options(const obfuscation_config& config,
                                                           const policy_decision& decision) {
   constant_encoding_options options;
+  options.mode = config.constant_encoding.mode;
   options.max_constants_per_function = config.constant_encoding.max_constants_per_function;
   options.min_bit_width = config.constant_encoding.min_bit_width;
 
