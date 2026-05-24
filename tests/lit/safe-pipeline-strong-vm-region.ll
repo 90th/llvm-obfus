@@ -93,7 +93,7 @@ entry:
   ret i32 %ret
 }
 
-; VM-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; VM-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; VM-DAG: @__obf_vm_ptrconst_{{[0-9A-F]+}} = private unnamed_addr constant ptr @__obf_vm_bc_i_{{[A-Za-z0-9_]+}}
 ; VM-DAG: @__obf_vm_s_{{[A-Za-z0-9_]+}} = private global i{{[0-9]+}} 0
 ; VM-LABEL: define i32 @strong_vm_region(ptr %out, i32 %x)
@@ -112,9 +112,9 @@ entry:
 ; VM-LABEL: define internal void @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, ptr %v.ce.ce.out, i64 %obf.hidden_token) #{{[0-9]+}} {
 ; VM: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_{{[0-9A-F]+}}
 ; VM: indirectbr ptr
-; SAFE-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; SAFE-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; SAFE-LABEL: define i32 @strong_vm_region(ptr
-; SAFE: load i64, ptr @__obf_entropy_anchor
+; SAFE: load i64, ptr @rt_core_ea
 ; SAFE-LABEL: define i32 @strong_vm_two_regions(ptr
 ; SAFE: call void @{{_[0-9a-f]+}}(i32 %{{[^,]+}}, ptr %{{[^)]+}})
 ; SAFE: call void @{{_[0-9a-f]+}}(i32 %{{[^,]+}}, i32 %{{[^,]+}}, ptr %{{[^)]+}})

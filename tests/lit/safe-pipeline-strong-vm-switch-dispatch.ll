@@ -42,7 +42,7 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-DAG: @[[VMTARGETSEED:_[0-9a-f]+]] = private global i64 0
 ; CHECK-DAG: @[[VMKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-NOT: blockaddress(

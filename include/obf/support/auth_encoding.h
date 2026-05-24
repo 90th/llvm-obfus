@@ -8,6 +8,8 @@
 #include <span>
 #include <string_view>
 
+#include "obf/support/runtime_abi_generated.h"
+
 namespace obf::auth {
 
 inline constexpr std::size_t kBlake2sBlockBytes = 64;
@@ -80,9 +82,9 @@ inline constexpr std::array<std::uint8_t, 10> kDomainStringTag = {
     's', 't', 'r', 'i', 'n', 'g', '_', 't', 'a', 'g'};
 inline constexpr std::array<std::uint8_t, 14> kDomainConstantPoolTag = {
     'c', 'o', 'n', 's', 't', '_', 'p', 'o', 'o', 'l', '_', 't', 'a', 'g'};
-inline constexpr std::string_view kRuntimeStringDecodeSymbolV1 = "obf_string_auth_decode_v1";
+inline constexpr std::string_view kRuntimeStringDecodeSymbolV1 = OBF_RT_STRING_AUTH_DECODE_STR;
 inline constexpr std::string_view kRuntimeConstantPoolDecodeSymbolV1 =
-    "obf_constant_pool_decode_v1";
+    OBF_RT_CONSTANT_POOL_DECODE_STR;
 inline constexpr std::uint32_t kStringStateDecoded = 1U;
 inline constexpr std::uint32_t kConstantPoolStateDecoded = 1U;
 

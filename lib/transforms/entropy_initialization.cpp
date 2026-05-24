@@ -1,5 +1,6 @@
 #include "obf/transforms/entropy_initialization.h"
 
+#include "obf/support/runtime_abi_generated.h"
 #include "obf/support/stable_hash.h"
 
 #include "llvm/ADT/StringRef.h"
@@ -16,7 +17,7 @@
 namespace obf {
 namespace {
 
-constexpr char kEntropyAnchorName[] = "__obf_entropy_anchor";
+constexpr char kEntropyAnchorName[] = OBF_RT_ENTROPY_ANCHOR_STR;
 
 std::uint64_t mix_entropy_seed(std::uint64_t seed, std::uint64_t salt) {
   seed ^= salt + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
@@ -29,7 +30,7 @@ std::uint64_t GetSecureRandomWord() {
     const std::error_code error = llvm::getRandomBytes(&word, sizeof(word));
     if (error) {
       llvm::report_fatal_error(
-          llvm::Twine("failed to source secure randomness for __obf_entropy_anchor: ") +
+          llvm::Twine("failed to source secure randomness for ") + kEntropyAnchorName + ": " +
           error.message());
     }
   } while (word == 0);

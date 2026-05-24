@@ -3,7 +3,7 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/vm-entropy-accessor-polymorphism.yaml -passes=obf-vm -S %s -o %t.fixed
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/vm-entropy-accessor-polymorphism.yaml -passes=obf-vm -S %s -o %t.fixed2
 ; RUN: %python -c "import pathlib,sys; sys.exit(0 if pathlib.Path(sys.argv[1]).read_text()==pathlib.Path(sys.argv[2]).read_text() else 1)" %t.fixed %t.fixed2
-; RUN: %python -c "import pathlib,sys; text=pathlib.Path(sys.argv[1]).read_text(); required=['@__obf_load_entropy_pair()', '@__obf_load_entropy_pair_v1()', '@__obf_load_entropy_pair_v2()', '@__obf_load_entropy_pair_v3()', '@__obf_load_entropy_pair_v4()']; sys.exit(0 if all(item in text for item in required) else 1)" %t.fixed
+; RUN: %python -c "import pathlib,sys; text=pathlib.Path(sys.argv[1]).read_text(); required=['@rt_core_ep0()', '@rt_core_ep1()', '@rt_core_ep2()', '@rt_core_ep3()', '@rt_core_ep4()']; sys.exit(0 if all(item in text for item in required) else 1)" %t.fixed
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/vm-entropy-accessor-polymorphism.yaml --obf-seed=28029 -passes=obf-vm -S %s -o %t.alt
 ; RUN: %python -c "import pathlib,sys; sys.exit(0 if pathlib.Path(sys.argv[1]).read_text()!=pathlib.Path(sys.argv[2]).read_text() else 1)" %t.fixed %t.alt
 ; RUN: %lli %t.fixed
@@ -59,10 +59,10 @@ entry:
   ret i32 %ret
 }
 
-; IR-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; IR-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; IR-COUNT-5: %obf.entropy.cache.init{{[0-9]*}} = call { i64, i64 } @__obf_entropy_thunk_
 ; IR-LABEL: define internal { i64, i64 } @__obf_entropy_thunk_
-; IR: call { i64, i64 } @__obf_load_entropy_pair{{(_v[1-4])?}}()
+; IR: call { i64, i64 } @rt_core_ep{{[0-4]}}()
 ; IR: ret { i64, i64 }
 ; IR-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
 ; IR-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32

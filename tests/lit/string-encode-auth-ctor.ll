@@ -30,4 +30,4 @@ entry:
 ; IR: @__obf_string_desc__secret = internal constant
 ; IR: @llvm.global_ctors = appending global
 ; IR: define internal void @__obf_decode__secret() {
-; IR: call ptr @obf_string_auth_decode_v1(ptr @__obf_string_desc__secret, i64 7)
+; IR: call ptr @rt_core_sd1(ptr @__obf_string_desc__secret, i64 7)

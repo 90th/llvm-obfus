@@ -154,7 +154,7 @@ entry:
 ; CHECK-DAG: @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}} = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @__obf_vm_s_{{[A-Za-z0-9_]+}} = private global i{{[0-9]+}} 0
 ; CHECK-DAG: @__obf_vm_s_{{[A-Za-z0-9_]+}} = private global i{{[0-9]+}} 0
-; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-NOT: @__obf_vm_retkey_float_mix
 ; CHECK-NOT: @__obf_vm_retkey_vector_mix
 ; CHECK-LABEL: define i32 @branch_phi(i32 %x)

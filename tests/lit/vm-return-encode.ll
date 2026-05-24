@@ -44,7 +44,7 @@ entry:
 
 ; --- Global declarations ---
 ; Retkey globals for all three integer-returning functions.
-; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-DAG: @[[PTR32:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @__obf_vm_bc_i_{{[A-Za-z0-9_]+}}
 ; CHECK-DAG: @[[PTRI1:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @__obf_vm_bc_i_{{[A-Za-z0-9_]+}}
 ; CHECK-DAG: @[[PTR64:__obf_vm_ptrconst_[0-9A-F]+]] = private unnamed_addr constant ptr @__obf_vm_bc_i_{{[A-Za-z0-9_]+}}

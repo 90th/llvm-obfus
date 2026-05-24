@@ -54,16 +54,16 @@ entry:
 ; IR: %obf.entropy.cache = alloca { i64, i64 }, align 8
 ; IR: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
 ; IR-NOT: = call { i64, i64 } @__obf_entropy_thunk_
-; IR-NOT: call { i64, i64 } @__obf_load_entropy_pair()
+; IR-NOT: call { i64, i64 } @rt_core_ep0()
 ; IR: ret i32
 ; IR-LABEL: define i32 @entropy_thunk_b(i32 %x)
 ; IR: %obf.entropy.cache = alloca { i64, i64 }, align 8
 ; IR: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
 ; IR-NOT: = call { i64, i64 } @__obf_entropy_thunk_
-; IR-NOT: call { i64, i64 } @__obf_load_entropy_pair()
+; IR-NOT: call { i64, i64 } @rt_core_ep0()
 ; IR: ret i32
 ; IR-LABEL: define internal { i64, i64 } @__obf_entropy_thunk_
-; IR: call { i64, i64 } @__obf_load_entropy_pair{{(_v[1-4])?}}()
+; IR: call { i64, i64 } @rt_core_ep{{[0-4]}}()
 
 ; SHAPES-DAG: entropy.thunk.select
 ; SHAPES-DAG: entropy.thunk.addsub

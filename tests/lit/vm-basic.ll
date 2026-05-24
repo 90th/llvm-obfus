@@ -18,7 +18,7 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-DAG: @[[VMBC:__obf_vm_bc_i_[A-Za-z0-9_]+]] = private unnamed_addr constant [{{[0-9]+}} x i8] c"
 ; CHECK-DAG: @[[RETKEY:__obf_vm_retkey_i_[A-Za-z0-9_]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @[[TARGET:__obf_vm_t_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
@@ -98,7 +98,7 @@ entry:
 ; CHECK-LABEL: define private i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %obf.target.key, i{{[0-9]+}} %obf.share.base)
 ; CHECK-LABEL: define private void @__obf_vm_seed_ctor()
 
-; INST-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; INST-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; INST-LABEL: define i32 @fold_value(i32 %value)
 ; INST: %fold_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}

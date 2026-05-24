@@ -27,5 +27,5 @@ entry:
 ; TABLE: %slot = getelementptr inbounds [3 x i32], ptr %obf.const.pool.base, i64 0, i64 %wide
 ; TABLE: %value = load i32, ptr %slot, align 4
 ; TABLE-LABEL: define internal ptr @__obf_const_pool_decode_
-; TABLE: call ptr @obf_constant_pool_decode_v1
+; TABLE: call ptr @rt_core_cpd1
 ; TABLE-NOT: %obf.const.mask =

@@ -2,8 +2,7 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-properties.yaml -passes=obf-vm -S %s -o - | %FileCheck %s --check-prefix=VM
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-properties.yaml -passes=obf-control-flatten -S %s -o - | %FileCheck %s --check-prefix=FLAT
 
-@__obf_entropy_anchor = global i64 0, align 8
-@__obf_entropy_anchor_ref = global ptr @__obf_entropy_anchor, align 8
+@rt_core_ea = global i64 0, align 8
 
 define i32 @alpha_add(i32 %x) {
 entry:
@@ -35,7 +34,7 @@ done:
   ret i32 %r
 }
 
-; ENTROPY: @__obf_entropy_anchor = global i64 {{-?[1-9][0-9]*}}, align 8
+; ENTROPY: @rt_core_ea = global i64 {{-?[1-9][0-9]*}}, align 8
 
 ; VM-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; VM: %obf.vm.pred.slot = alloca i32

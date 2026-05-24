@@ -24,5 +24,5 @@ entry:
 ; CHECK: %obf.const.pool.base = call ptr @__obf_const_pool_decode_
 ; CHECK: %obf.const.pool.load = load i32, ptr %obf.const.pool.ptr
 ; CHECK-LABEL: define internal ptr @__obf_const_pool_decode_
-; CHECK: call ptr @obf_constant_pool_decode_v1
+; CHECK: call ptr @rt_core_cpd1
 ; CHECK-NOT: %obf.const.mask =

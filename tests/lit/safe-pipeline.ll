@@ -36,7 +36,7 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-DAG: @[[VMBC:_[0-9a-f]+]] = private unnamed_addr constant [{{[0-9]+}} x i8] c"
 ; CHECK-DAG: @[[VMRETKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
 ; CHECK-DAG: @[[VMPTRCONST:_[0-9a-f]+]] = private unnamed_addr constant ptr @[[VMBC]]

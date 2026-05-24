@@ -35,7 +35,7 @@ entry:
 ; IR: %obf.str.destination = load ptr, ptr %obf.str.destination.addr
 ; IR: br label %merge
 ; IR: slow_path:
-; IR: call ptr @obf_string_auth_decode_v1(ptr %desc, i64 %trusted_length)
+; IR: call ptr @rt_core_sd1(ptr %desc, i64 %trusted_length)
 ; IR: br label %merge
 ; IR: merge:
 ; IR: %obf.str.result = phi ptr [ %obf.str.destination, %fast_path ],

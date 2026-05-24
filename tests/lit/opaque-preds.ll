@@ -22,9 +22,9 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @check
-; CHECK: %obf.opaque.entropy = load i64, ptr @__obf_entropy_anchor
+; CHECK: %obf.opaque.entropy = load i64, ptr @rt_core_ea
 ; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] = {{(add|sub|xor) i64}}
 ; CHECK: [[EXPRB:%obf\.opaque\.expr\.b[^ ]*]] = {{(add|sub|xor) i64}}
 ; CHECK: %obf.opaque.true = icmp eq i64 [[EXPRA]], [[EXPRB]]

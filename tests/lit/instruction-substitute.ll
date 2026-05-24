@@ -17,7 +17,7 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @value
 ; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
 ; CHECK: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_

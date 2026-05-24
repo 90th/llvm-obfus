@@ -1,5 +1,6 @@
 #include "obf/transforms/mba.h"
 
+#include "obf/support/runtime_abi_generated.h"
 #include "obf/support/stable_hash.h"
 
 #include "llvm/IR/Constants.h"
@@ -245,15 +246,15 @@ llvm::Value* build_entropy_thunk_xor_neutral(llvm::IRBuilder<>& builder,
 llvm::StringRef get_entropy_accessor_name(entropy_accessor_variant variant) {
   switch (variant) {
     case entropy_accessor_variant::direct:
-      return "__obf_load_entropy_pair";
+      return OBF_RT_LOAD_ENTROPY_PAIR_STR;
     case entropy_accessor_variant::stack_roundtrip:
-      return "__obf_load_entropy_pair_v1";
+      return OBF_RT_LOAD_ENTROPY_PAIR_V1_STR;
     case entropy_accessor_variant::split_recombine:
-      return "__obf_load_entropy_pair_v2";
+      return OBF_RT_LOAD_ENTROPY_PAIR_V2_STR;
     case entropy_accessor_variant::xor_neutral:
-      return "__obf_load_entropy_pair_v3";
+      return OBF_RT_LOAD_ENTROPY_PAIR_V3_STR;
     case entropy_accessor_variant::add_sub_neutral:
-      return "__obf_load_entropy_pair_v4";
+      return OBF_RT_LOAD_ENTROPY_PAIR_V4_STR;
   }
 
   llvm_unreachable("unknown entropy accessor variant");
@@ -395,7 +396,9 @@ llvm::AllocaInst* get_or_create_function_entropy_pair_cache(llvm::Function& func
                                                             std::uint64_t salt) {
   auto* pair_type = llvm::dyn_cast<llvm::StructType>(accessor.getReturnType());
   if (pair_type == nullptr) {
-    llvm::report_fatal_error("__obf_load_entropy_pair return type is not a struct");
+    const std::string message = std::string(OBF_RT_LOAD_ENTROPY_PAIR_STR) +
+                                " return type is not a struct";
+    llvm::report_fatal_error(llvm::StringRef(message));
   }
 
   llvm::BasicBlock& entry_block = function.getEntryBlock();
@@ -829,7 +832,7 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
 }  // namespace
 
 llvm::GlobalVariable* get_or_create_entropy_anchor(llvm::Module& module) {
-  if (llvm::GlobalVariable* existing = module.getNamedGlobal("__obf_entropy_anchor")) {
+  if (llvm::GlobalVariable* existing = module.getNamedGlobal(OBF_RT_ENTROPY_ANCHOR_STR)) {
     return existing;
   }
 
@@ -838,7 +841,7 @@ llvm::GlobalVariable* get_or_create_entropy_anchor(llvm::Module& module) {
                                           /*isConstant=*/false,
                                           llvm::GlobalValue::ExternalLinkage,
                                           /*Initializer=*/nullptr,
-                                          "__obf_entropy_anchor");
+                                          OBF_RT_ENTROPY_ANCHOR_STR);
   anchor->setExternallyInitialized(true);
   anchor->setAlignment(llvm::Align(8));
   return anchor;

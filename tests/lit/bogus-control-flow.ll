@@ -25,15 +25,15 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
+; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @branchy
-; CHECK: %obf.opaque.entropy = load i64, ptr @__obf_entropy_anchor
+; CHECK: %obf.opaque.entropy = load i64, ptr @rt_core_ea
 ; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] = {{(add|or|sub|xor) i64}}
 ; CHECK: [[EXPRB:%obf\.opaque\.expr\.b[^ ]*]] = {{(add|or|sub|xor) i64}}
 ; CHECK: %obf.opaque.true = icmp eq i64 [[EXPRA]], [[EXPRB]]
 ; CHECK: br i1 %obf.opaque.true, label %merge, label %obf.bogus
 ; CHECK: obf.bogus:
-; CHECK: %obf.bogus.seed = load i64, ptr @__obf_entropy_anchor
+; CHECK: %obf.bogus.seed = load i64, ptr @rt_core_ea
 ; CHECK: br label %obf.bogus.loop
 ; CHECK: obf.bogus.loop:
 ; CHECK: %obf.bogus.iter = phi i32

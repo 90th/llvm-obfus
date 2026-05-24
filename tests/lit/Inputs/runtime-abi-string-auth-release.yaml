@@ -1,0 +1,11 @@
+seed: 9001
+default_level: none
+string_encoding:
+  authenticated_mode: true
+  prefer_lazy_decode: true
+  allow_ctor_fallback: true
+targets:
+  - match: main
+    level: light
+security:
+  strip_release_markers: true
