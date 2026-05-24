@@ -28,4 +28,4 @@ entry:
 ; CHECK: %obf.entropy.indirect = extractvalue { i64, i64 } %obf.entropy.pair, 1
 ; CHECK: %obf.mba.add.left = add i32 %obf.mba.add.or,
 ; CHECK: %sum = add i32 %obf.mba.add.left, %obf.mba.add.right
-; CHECK: %mix = or i32 %obf.mba.xor.left.mask, %obf.mba.xor.right.mask
+; CHECK: %mix = add i32 %obf.mba.xor.left.mask, %obf.mba.xor.right.mask

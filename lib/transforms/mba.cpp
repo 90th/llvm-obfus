@@ -458,9 +458,25 @@ llvm::Value* build_opaque_zero_xor_pair(llvm::IRBuilder<>& builder,
                                         llvm::Value* entropy_a,
                                         llvm::Value* entropy_b,
                                         llvm::Constant* mask) {
-  llvm::Value* lhs = builder.CreateXor(entropy_a, mask, "obf.mba.zero.xor_pair.lhs");
-  llvm::Value* rhs = builder.CreateXor(entropy_b, mask, "obf.mba.zero.xor_pair.rhs");
+  llvm::Value* delta = builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.xor_pair.delta");
+  llvm::Value* stable_delta =
+      builder.CreateFreeze(delta, "obf.mba.zero.xor_pair.delta.stable");
+  llvm::Value* lhs = builder.CreateXor(delta, mask, "obf.mba.zero.xor_pair.lhs");
+  llvm::Value* rhs = builder.CreateXor(stable_delta, mask, "obf.mba.zero.xor_pair.rhs");
   return builder.CreateXor(lhs, rhs, "obf.mba.zero.xor_pair");
+}
+
+llvm::Value* build_opaque_zero_sub_pair(llvm::IRBuilder<>& builder,
+                                        llvm::Value* entropy_a,
+                                        llvm::Value* entropy_b,
+                                        llvm::Constant* mask) {
+  llvm::Value* delta = builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.sub_pair.delta");
+  llvm::Value* stable_delta =
+      builder.CreateFreeze(delta, "obf.mba.zero.sub_pair.delta.stable");
+  llvm::Value* masked = builder.CreateXor(delta, mask, "obf.mba.zero.sub_pair.masked");
+  llvm::Value* unmasked =
+      builder.CreateXor(masked, mask, "obf.mba.zero.sub_pair.unmasked");
+  return builder.CreateSub(unmasked, stable_delta, "obf.mba.zero.sub_pair");
 }
 
 llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
@@ -470,28 +486,37 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
                                          llvm::Type* target_type,
                                          llvm::Constant* mask,
                                          std::uint64_t salt) {
+  // Every family must reduce to semantic zero on its own. That keeps opaque
+  // predicates and constant masks correct even if future entropy accessors stop
+  // returning identical pair components.
   switch (shape) {
     case opaque_zero_shape::xor_pair:
       return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
     case opaque_zero_shape::add_sub_pair: {
-      llvm::Value* lhs = builder.CreateAdd(entropy_a, mask, "obf.mba.zero.add_sub_pair.lhs");
-      llvm::Value* rhs = builder.CreateAdd(entropy_b, mask, "obf.mba.zero.add_sub_pair.rhs");
+      llvm::Value* delta =
+          builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.add_sub_pair.delta");
+      llvm::Value* stable_delta =
+          builder.CreateFreeze(delta, "obf.mba.zero.add_sub_pair.delta.stable");
+      llvm::Value* lhs = builder.CreateAdd(delta, mask, "obf.mba.zero.add_sub_pair.lhs");
+      llvm::Value* rhs =
+          builder.CreateAdd(stable_delta, mask, "obf.mba.zero.add_sub_pair.rhs");
       return builder.CreateSub(lhs, rhs, "obf.mba.zero.add_sub_pair");
     }
-    case opaque_zero_shape::sub_pair: {
-      llvm::Value* lhs = builder.CreateXor(entropy_a, mask, "obf.mba.zero.sub_pair.lhs");
-      llvm::Value* rhs = builder.CreateXor(entropy_b, mask, "obf.mba.zero.sub_pair.rhs");
-      return builder.CreateSub(lhs, rhs, "obf.mba.zero.sub_pair");
-    }
+    case opaque_zero_shape::sub_pair:
+      return build_opaque_zero_sub_pair(builder, entropy_a, entropy_b, mask);
     case opaque_zero_shape::rotate_xor_pair: {
       if (!target_type->isIntegerTy()) {
         return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
       }
 
+      llvm::Value* delta =
+          builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.rotate_xor_pair.delta");
+      llvm::Value* stable_delta =
+          builder.CreateFreeze(delta, "obf.mba.zero.rotate_xor_pair.delta.stable");
       llvm::Value* lhs_seed =
-          builder.CreateXor(entropy_a, mask, "obf.mba.zero.rotate_xor_pair.lhs.seed");
+          builder.CreateXor(delta, mask, "obf.mba.zero.rotate_xor_pair.lhs.seed");
       llvm::Value* rhs_seed =
-          builder.CreateXor(entropy_b, mask, "obf.mba.zero.rotate_xor_pair.rhs.seed");
+          builder.CreateXor(stable_delta, mask, "obf.mba.zero.rotate_xor_pair.rhs.seed");
       const unsigned bit_width = target_type->getIntegerBitWidth();
       if (bit_width <= 1) {
         return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
@@ -512,8 +537,15 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
           builder.CreateICmpEQ(entropy_a, entropy_b, "obf.mba.zero.cmp_select_pair.eq");
       llvm::Value* delta =
           builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.cmp_select_pair.delta");
+      llvm::Value* stable_delta =
+          builder.CreateFreeze(delta, "obf.mba.zero.cmp_select_pair.delta.stable");
+      llvm::Value* zero_alt =
+          builder.CreateSub(delta, stable_delta, "obf.mba.zero.cmp_select_pair.zero.alt");
       return builder.CreateSelect(
-          equal, llvm::Constant::getNullValue(target_type), delta, "obf.mba.zero.cmp_select_pair");
+          equal,
+          llvm::Constant::getNullValue(target_type),
+          zero_alt,
+          "obf.mba.zero.cmp_select_pair");
     }
   }
 
@@ -784,8 +816,14 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
       mask_with_zero_xor(builder, lhs_only, context, salt + 0xa3, "obf.mba.xor.left.mask");
   llvm::Value* masked_rhs =
       mask_with_zero_add(builder, rhs_only, context, salt + 0xb1, "obf.mba.xor.right.mask");
-  // OR has no MBA equivalent — stays as a plain CreateOr at all depths.
-  return builder.CreateOr(masked_lhs, masked_rhs, name.empty() ? "obf.mba.xor" : name);
+  // i keep the disjoint-bit path recursive so xor never collapses back to a plain or.
+  return create_add_impl(builder,
+                         masked_lhs,
+                         masked_rhs,
+                         context,
+                         mix_seed(salt, 0xf2ULL * remaining_depth),
+                         name,
+                         remaining_depth - 1);
 }
 
 }  // namespace
@@ -880,15 +918,19 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
   llvm::GlobalVariable* anchor = get_or_create_entropy_anchor(*module);
   llvm::Value* entropy = builder.CreateLoad(builder.getInt64Ty(), anchor, "obf.opaque.entropy");
 
+  builder_context seed_context =
+      get_or_create_builder_context(function, "opaque.seed", salt_base ^ 0x5f3759dfULL);
   builder_context context_a =
       get_or_create_builder_context(function, context_a_name, salt_base ^ context_a_salt);
   builder_context context_b =
       get_or_create_builder_context(function, context_b_name, salt_base ^ context_b_salt);
+  seed_context.depth = mba_depth;
   context_a.depth = mba_depth;
   context_b.depth = mba_depth;
 
-  llvm::Value* seed_a =
-      entangle_value(builder, entropy, context_a, salt_base + 0x11ULL, "obf.opaque.seed.a");
+  // i anchor both sides to the same seed so this predicate stays true even as the wrappers drift.
+  llvm::Value* seed =
+      entangle_value(builder, entropy, seed_context, salt_base + 0x11ULL, "obf.opaque.seed");
   llvm::Value* zero_a = create_opaque_integer(builder,
                                               builder.getInt64Ty(),
                                               context_a,
@@ -896,10 +938,7 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
                                               salt_base + 0x21ULL,
                                               "obf.opaque.zero.a");
   llvm::Value* expr_a =
-      create_add(builder, seed_a, zero_a, context_a, salt_base + 0x31ULL, "obf.opaque.expr.a");
-
-  llvm::Value* seed_b =
-      entangle_value(builder, entropy, context_b, salt_base + 0x41ULL, "obf.opaque.seed.b");
+      create_add(builder, seed, zero_a, context_a, salt_base + 0x31ULL, "obf.opaque.expr.a");
   llvm::Value* zero_b = create_opaque_integer(builder,
                                               builder.getInt64Ty(),
                                               context_b,
@@ -907,7 +946,7 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
                                               salt_base + 0x51ULL,
                                               "obf.opaque.zero.b");
   llvm::Value* expr_b =
-      create_xor(builder, seed_b, zero_b, context_b, salt_base + 0x61ULL, "obf.opaque.expr.b");
+      create_xor(builder, seed, zero_b, context_b, salt_base + 0x61ULL, "obf.opaque.expr.b");
 
   return builder.CreateICmpEQ(expr_a, expr_b, result_name);
 }

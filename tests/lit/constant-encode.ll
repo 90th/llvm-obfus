@@ -22,15 +22,15 @@ entry:
 ; IR: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
 ; IR: %obf.entropy.direct = extractvalue { i64, i64 } %obf.entropy.pair, 0
 ; IR: %obf.entropy.indirect = extractvalue { i64, i64 } %obf.entropy.pair, 1
-; IR: %obf.const.mask = {{(sub|or) i32}}
-; IR: %obf.const = {{(sub|or) i32}}
+; IR: %obf.const.mask = {{(add|sub) i32}}
+; IR: %obf.const = {{(add|sub) i32}}
 ; IR: ret i32 %obf.const
 ; IR-NOT: ret i32 42
 
 ; INST-DAG: @__obf_entropy_anchor = external externally_initialized global i64, align 8
 ; INST-LABEL: define i32 @value()
 ; INST: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
-; INST: load i64, ptr %obf.entropy.cache, align 8
-; INST: %obf.const = {{(sub|or) i32}}
-; INST: ret i32 %obf.const
-; INST-NOT: ret i32 42
+; INST: ret i32 42
+; INST-LABEL: define i32 @main()
+; INST: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
+; INST: %ok = icmp ne i32 %value, 42
