@@ -40,6 +40,7 @@ struct string_encoding_config {
   std::uint32_t max_strings_per_module = 64;
   bool prefer_lazy_decode = true;
   bool allow_ctor_fallback = true;
+  bool authenticated_mode = false;
 };
 
 struct constant_encoding_config {

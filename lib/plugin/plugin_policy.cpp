@@ -323,6 +323,7 @@ string_encoding_options build_string_encoding_options(const obfuscation_config& 
           .ctor_priority = 0,
           .prefer_lazy_decode = config.string_encoding.prefer_lazy_decode,
           .allow_ctor_fallback = config.string_encoding.allow_ctor_fallback,
+          .authenticated_mode = config.string_encoding.authenticated_mode,
           .strong_vm_allow_global_plaintext = false,
           .strong_vm_allow_lazy_decode = false,
           .strong_vm_allow_ctor_fallback = false,

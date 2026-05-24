@@ -1,3 +1,4 @@
+#include "obf/support/auth_encoding.h"
 #include "obf/frontend/config.h"
 #include "obf/policy/policy_engine.h"
 #include "obf/support/generated_names.h"
@@ -10,14 +11,28 @@
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Error.h"
 
+#include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <string>
 
 namespace {
 
 int g_failures = 0;
+
+std::string BytesToHex(std::span<const std::uint8_t> bytes) {
+  static constexpr char kHexDigits[] = "0123456789abcdef";
+  std::string hex;
+  hex.resize(bytes.size() * 2);
+  for (std::size_t index = 0; index < bytes.size(); ++index) {
+    hex[index * 2] = kHexDigits[(bytes[index] >> 4) & 0xfU];
+    hex[index * 2 + 1] = kHexDigits[bytes[index] & 0xfU];
+  }
+  return hex;
+}
 
 void ExpectTrue(bool condition, const std::string& message) {
   if (condition) { return; }
@@ -104,6 +119,124 @@ void TestConfigLoader() {
 
   std::error_code ec;
   std::filesystem::remove(path, ec);
+}
+
+void TestAuthenticatedStringConfig() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "obf_auth_string_config.yaml";
+  {
+    std::ofstream out(path);
+    out << "default_level: light\n";
+    out << "string_encoding:\n";
+    out << "  authenticated_mode: true\n";
+    out << "  prefer_lazy_decode: false\n";
+  }
+
+  llvm::Expected<obf::obfuscation_config> loaded = obf::load_config_from_file(path.string());
+  ExpectTrue(static_cast<bool>(loaded), "authenticated string config should load successfully");
+  if (loaded) {
+    ExpectTrue(loaded->string_encoding.authenticated_mode,
+               "authenticated_mode should parse from yaml");
+    ExpectTrue(!loaded->string_encoding.prefer_lazy_decode,
+               "prefer_lazy_decode should respect yaml override");
+    ExpectTrue(loaded->string_encoding.allow_ctor_fallback,
+               "allow_ctor_fallback should keep its default value");
+
+    const std::string summary = obf::summarize_config(*loaded);
+    ExpectTrue(summary.find("string_encoding.authenticated_mode: true") != std::string::npos,
+               "config summary should report authenticated string mode");
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+void TestAuthEncodingBlake2sKnownAnswers() {
+  const std::array<std::uint8_t, 0> empty_input{};
+  const std::array<std::uint8_t, 3> abc = {'a', 'b', 'c'};
+  std::array<std::uint8_t, obf::auth::kBuildKeyBytes> key{};
+  for (std::size_t index = 0; index < key.size(); ++index) {
+    key[index] = static_cast<std::uint8_t>(index);
+  }
+
+  ExpectTrue(BytesToHex(obf::auth::Blake2s(empty_input)) ==
+                 "69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9",
+             "blake2s empty digest should match the known answer");
+  ExpectTrue(BytesToHex(obf::auth::Blake2s(abc)) ==
+                 "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982",
+             "blake2s abc digest should match the known answer");
+  ExpectTrue(BytesToHex(obf::auth::Blake2s(abc, key)) ==
+                 "a281f725754969a702f6fe36fc591b7def866e4b70173ece402fc01c064d6b65",
+             "keyed blake2s abc digest should match the known answer");
+}
+
+void TestAuthEncodingBlake2sFailClosed() {
+  const std::array<std::uint8_t, 33> oversized_key = {};
+  const obf::auth::Blake2sDigest digest = obf::auth::Blake2s(oversized_key, oversized_key);
+  ExpectTrue(digest == obf::auth::Blake2sDigest{},
+             "blake2s wrapper should fail closed on invalid keyed input");
+}
+
+void TestAuthEncodingDerivationAndTagging() {
+  const obf::auth::BuildKey build_key = obf::auth::DeriveBuildKey(0x123456789abcdef0ULL);
+  const obf::auth::BuildKey same_build_key = obf::auth::DeriveBuildKey(0x123456789abcdef0ULL);
+  const obf::auth::BuildKey other_build_key = obf::auth::DeriveBuildKey(0x123456789abcdef1ULL);
+  ExpectTrue(build_key == same_build_key, "build key derivation should be deterministic");
+  ExpectTrue(build_key != other_build_key, "build key derivation should separate seeds");
+
+  const obf::auth::Blake2sDigest function_key =
+      obf::auth::DeriveFunctionKey(build_key, 0x111ULL, 0x222ULL);
+  const obf::auth::Blake2sDigest other_function_key =
+      obf::auth::DeriveFunctionKey(build_key, 0x111ULL, 0x223ULL);
+  const obf::auth::Blake2sDigest site_key =
+      obf::auth::DeriveSiteKey(function_key, obf::auth::kDomainString, 0x333ULL);
+  const obf::auth::Blake2sDigest other_site_key =
+      obf::auth::DeriveSiteKey(function_key, obf::auth::kDomainString, 0x334ULL);
+  const obf::auth::Blake2sDigest enc_key =
+      obf::auth::DeriveLabeledKey(site_key, obf::auth::kDomainEnc);
+  const obf::auth::Blake2sDigest mac_key =
+      obf::auth::DeriveLabeledKey(site_key, obf::auth::kDomainMac);
+
+  ExpectTrue(function_key != other_function_key,
+             "function key derivation should separate function identifiers");
+  ExpectTrue(site_key != other_site_key, "site key derivation should separate site identifiers");
+  ExpectTrue(enc_key != mac_key, "enc and mac labels should derive different keys");
+
+  const obf::auth::StringNonce nonce = obf::auth::DeriveStringNonce(site_key);
+  const std::array<std::uint8_t, 7> plaintext = {'s', 'e', 'c', 'r', 'e', 't', 0};
+  std::array<std::uint8_t, 7> ciphertext{};
+  std::array<std::uint8_t, 7> roundtrip{};
+  obf::auth::XorStringPayload(ciphertext, plaintext, enc_key, nonce);
+  obf::auth::XorStringPayload(roundtrip, ciphertext, enc_key, nonce);
+  ExpectTrue(roundtrip == plaintext, "string payload xor should round-trip with the same key");
+
+  obf::auth::StringAuthMetadata metadata;
+  metadata.length = plaintext.size();
+  metadata.module_id = 0x111ULL;
+  metadata.function_id = 0x222ULL;
+  metadata.site_id = 0x333ULL;
+  metadata.nonce = nonce;
+
+  const obf::auth::StringTag tag = obf::auth::ComputeStringTag(mac_key, metadata, ciphertext);
+  std::array<std::uint8_t, 7> tampered = ciphertext;
+  tampered[0] ^= 0x40U;
+  const obf::auth::StringTag tampered_tag =
+      obf::auth::ComputeStringTag(mac_key, metadata, tampered);
+  ExpectTrue(tag != tampered_tag, "string tag should change when ciphertext changes");
+}
+
+void TestAuthEncodingConstantTimeEqual() {
+  const obf::auth::StringTag lhs = obf::auth::MakeTag(0x1234ULL, 0x5678ULL);
+  const obf::auth::StringTag same = lhs;
+  const obf::auth::StringTag different = obf::auth::MakeTag(0x1234ULL, 0x5679ULL);
+  const std::array<std::uint8_t, 15> shorter = {};
+
+  ExpectTrue(obf::auth::ConstantTimeEqual(lhs, same),
+             "constant time equal should accept matching inputs");
+  ExpectTrue(!obf::auth::ConstantTimeEqual(lhs, different),
+             "constant time equal should reject mismatched bytes");
+  ExpectTrue(!obf::auth::ConstantTimeEqual(lhs, shorter),
+             "constant time equal should reject mismatched lengths");
 }
 
 void TestPolicyPrecedenceAndFloors() {
@@ -211,9 +344,14 @@ int main() {
   TestGeneratedNames();
   TestPolicySelection();
   TestConfigLoader();
+  TestAuthenticatedStringConfig();
   TestPolicyPrecedenceAndFloors();
   TestConfigEdgeCases();
   TestSeedStability();
+  TestAuthEncodingBlake2sKnownAnswers();
+  TestAuthEncodingBlake2sFailClosed();
+  TestAuthEncodingDerivationAndTagging();
+  TestAuthEncodingConstantTimeEqual();
 
   if (g_failures == 0) {
     std::cout << "[ok] obf_unit_tests passed" << '\n';

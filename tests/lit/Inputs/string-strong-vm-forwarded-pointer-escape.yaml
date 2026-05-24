@@ -1,0 +1,8 @@
+seed: 6063
+default_level: none
+targets:
+  - match: return_forwarded_pointer
+    level: strong_vm
+string_encoding:
+  prefer_lazy_decode: true
+  allow_ctor_fallback: true

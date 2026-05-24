@@ -137,6 +137,7 @@ target_link_libraries(obf-unit-tests PRIVATE obf_core ${OBF_LLVM_LIBS})
 set(OBF_ENTROPY_ANCHOR_LL "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.ll")
 set(OBF_ENTROPY_ANCHOR_RANDOMIZED_LL "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.randomized.ll")
 set(OBF_ENTROPY_ANCHOR_OBJ "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.o")
+set(OBF_STRING_AUTH_RUNTIME_OBJ "${CMAKE_CURRENT_BINARY_DIR}/obf_string_auth_runtime.o")
 add_custom_command(
   OUTPUT "${OBF_ENTROPY_ANCHOR_OBJ}"
   COMMAND "${OBF_CLANG}" -std=c17 -O0 -S -emit-llvm "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_LL}"
@@ -144,7 +145,13 @@ add_custom_command(
   COMMAND "${OBF_CLANG}" -c -fPIC "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}" -o "${OBF_ENTROPY_ANCHOR_OBJ}"
   DEPENDS obf_plugin "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" "${OBF_BENCHMARK_SEED_STAMP}"
   VERBATIM)
+add_custom_command(
+  OUTPUT "${OBF_STRING_AUTH_RUNTIME_OBJ}"
+  COMMAND "${OBF_CLANG}" -std=c17 -O2 -c -fPIC "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c" -o "${OBF_STRING_AUTH_RUNTIME_OBJ}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c"
+  VERBATIM)
 add_custom_target(obf-entropy-anchor-runtime ALL DEPENDS "${OBF_ENTROPY_ANCHOR_OBJ}")
+add_custom_target(obf-string-auth-runtime ALL DEPENDS "${OBF_STRING_AUTH_RUNTIME_OBJ}")
 
 enable_testing()
 
@@ -206,9 +213,9 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
 
   add_custom_command(
     OUTPUT "${obfuscated_bin}"
-    COMMAND "${compiler}" "${final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
+    COMMAND "${compiler}" "${final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" "${OBF_STRING_AUTH_RUNTIME_OBJ}" -O0 -o "${obfuscated_bin}"
     COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
-    DEPENDS "${final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
+    DEPENDS "${final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" "${OBF_STRING_AUTH_RUNTIME_OBJ}"
     VERBATIM)
 
   add_custom_target("${target_name}_bench" DEPENDS "${baseline_bin}" "${obfuscated_bin}")
@@ -270,9 +277,9 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
 
   add_custom_command(
     OUTPUT "${obfuscated_bin}"
-    COMMAND "${compiler}" "${linked_final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" -O0 -o "${obfuscated_bin}"
+    COMMAND "${compiler}" "${linked_final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" "${OBF_STRING_AUTH_RUNTIME_OBJ}" -O0 -o "${obfuscated_bin}"
     COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
-    DEPENDS "${linked_final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}"
+    DEPENDS "${linked_final_obfuscated_ll}" "${OBF_ENTROPY_ANCHOR_OBJ}" "${OBF_STRING_AUTH_RUNTIME_OBJ}"
     VERBATIM)
 
   add_custom_target("${target_name}_bench" DEPENDS "${baseline_bin}" "${obfuscated_bin}")

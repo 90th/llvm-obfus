@@ -1,0 +1,15 @@
+seed: 9001
+default_level: none
+debug_preserve_generated_names: true
+overrides:
+  - name: get_plain
+    level: none
+  - name: leak_secret
+    level: none
+string_encoding:
+  authenticated_mode: true
+  prefer_lazy_decode: false
+  allow_ctor_fallback: true
+targets:
+  - match: main
+    level: light

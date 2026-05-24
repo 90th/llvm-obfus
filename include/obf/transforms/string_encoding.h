@@ -34,16 +34,19 @@ enum class string_strategy_kind {
 enum class string_helper_shape {
   none,
   ctor_unrolled_v0,
+  ctor_auth_runtime_v1,
   lazy_flag_unrolled_v0,
   lazy_flag_reverse_v1,
   lazy_counter_chunked_v2,
   lazy_cached_pointer_v3,
+  lazy_auth_runtime_v1,
 };
 
 enum class string_key_schedule_kind {
   seeded_byte_xor_v0,
   mixed_runtime_byte_xor_v1,
   cfg_path_byte_xor_v2,
+  blake2s_keyed_auth_v3,
 };
 
 struct string_encoding_options {
@@ -52,6 +55,7 @@ struct string_encoding_options {
   unsigned ctor_priority = 0;
   bool prefer_lazy_decode = true;
   bool allow_ctor_fallback = true;
+  bool authenticated_mode = false;
   bool strong_vm_allow_global_plaintext = false;
   bool strong_vm_allow_lazy_decode = false;
   bool strong_vm_allow_ctor_fallback = false;

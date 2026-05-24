@@ -68,6 +68,7 @@ struct MappingTraits<obf::string_encoding_config> {
     io.mapOptional("max_strings_per_module", config.max_strings_per_module, std::uint32_t{64});
     io.mapOptional("prefer_lazy_decode", config.prefer_lazy_decode, true);
     io.mapOptional("allow_ctor_fallback", config.allow_ctor_fallback, true);
+    io.mapOptional("authenticated_mode", config.authenticated_mode, false);
   }
 };
 
@@ -174,7 +175,8 @@ obfuscation_config defaults_for_profile(config_profile profile) {
       config.string_encoding = {.min_string_length = 3,
                                 .max_strings_per_module = 32,
                                 .prefer_lazy_decode = true,
-                                .allow_ctor_fallback = true};
+                                .allow_ctor_fallback = true,
+                                .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 2;
       config.mba.depth = 1;
       config.security.fail_on_public_obf_symbol = false;
@@ -184,7 +186,8 @@ obfuscation_config defaults_for_profile(config_profile profile) {
       config.string_encoding = {.min_string_length = 2,
                                 .max_strings_per_module = 128,
                                 .prefer_lazy_decode = true,
-                                .allow_ctor_fallback = true};
+                                .allow_ctor_fallback = true,
+                                .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 4;
       config.mba.depth = 1;
       config.security.fail_on_public_obf_symbol = true;
@@ -194,7 +197,8 @@ obfuscation_config defaults_for_profile(config_profile profile) {
       config.string_encoding = {.min_string_length = 2,
                                 .max_strings_per_module = 256,
                                 .prefer_lazy_decode = true,
-                                .allow_ctor_fallback = false};
+                                .allow_ctor_fallback = false,
+                                .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 8;
       config.mba.depth = 2;
       config.security.fail_on_public_obf_symbol = true;
@@ -204,7 +208,8 @@ obfuscation_config defaults_for_profile(config_profile profile) {
       config.string_encoding = {.min_string_length = 1,
                                 .max_strings_per_module = 512,
                                 .prefer_lazy_decode = false,
-                                .allow_ctor_fallback = false};
+                                .allow_ctor_fallback = false,
+                                .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 16;
       config.mba.depth = 3;
       config.security.fail_on_public_obf_symbol = true;
@@ -214,7 +219,8 @@ obfuscation_config defaults_for_profile(config_profile profile) {
       config.string_encoding = {.min_string_length = 1,
                                 .max_strings_per_module = 1024,
                                 .prefer_lazy_decode = false,
-                                .allow_ctor_fallback = false};
+                                .allow_ctor_fallback = false,
+                                .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 32;
       config.mba.depth = 4;
       config.security.fail_on_public_obf_symbol = true;
@@ -318,6 +324,8 @@ std::string summarize_config(const obfuscation_config& config) {
          << (config.string_encoding.prefer_lazy_decode ? "true" : "false") << '\n';
   stream << "string_encoding.allow_ctor_fallback: "
          << (config.string_encoding.allow_ctor_fallback ? "true" : "false") << '\n';
+  stream << "string_encoding.authenticated_mode: "
+         << (config.string_encoding.authenticated_mode ? "true" : "false") << '\n';
   stream << "constant_encoding.max_constants_per_function: "
          << config.constant_encoding.max_constants_per_function << '\n';
   stream << "constant_encoding.min_bit_width: " << config.constant_encoding.min_bit_width << '\n';

@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+
+import pathlib
+import re
+import sys
+
+
+def main() -> int:
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit(
+            "usage: tamper_string_auth_ir.py <ir-path> <descriptor-symbol> [version|length]"
+        )
+
+    path = pathlib.Path(sys.argv[1])
+    symbol = sys.argv[2]
+    mode = sys.argv[3] if len(sys.argv) == 4 else "version"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith(f"@{symbol} = "):
+            continue
+
+        if mode == "version":
+            replaced = re.sub(r"i32 1, i32 1,", "i32 2, i32 1,", line, count=1)
+        elif mode == "length":
+            replaced = re.sub(
+                r"i64 (\d+),",
+                lambda match: f"i64 {int(match.group(1)) + 1},",
+                line,
+                count=1,
+            )
+        else:
+            raise SystemExit(f"unsupported tamper mode: {mode}")
+
+        if replaced == line:
+            raise SystemExit(f"failed to tamper descriptor line for {symbol} using {mode}")
+        lines[index] = replaced
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return 0
+
+    raise SystemExit(f"descriptor {symbol} not found in {path}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
