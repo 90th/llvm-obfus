@@ -53,6 +53,22 @@ option(OBF_BENCHMARK_CLEAN_IR
 set(OBF_BENCHMARK_CLEANUP_PASSES "dse" CACHE STRING
   "Cleanup passes used when OBF_BENCHMARK_CLEAN_IR is enabled")
 
+set(OBF_RUNTIME_ABI_PREFIX "rt_core_" CACHE STRING
+  "Build-global runtime ABI prefix used for exported runtime symbols")
+
+if(NOT OBF_RUNTIME_ABI_PREFIX MATCHES "^[A-Za-z_][A-Za-z0-9_]*_$")
+  message(FATAL_ERROR
+    "OBF_RUNTIME_ABI_PREFIX must be a valid C identifier prefix ending with '_'"
+  )
+endif()
+
+string(TOLOWER "${OBF_RUNTIME_ABI_PREFIX}" OBF_RUNTIME_ABI_PREFIX_LOWER)
+if(OBF_RUNTIME_ABI_PREFIX_LOWER MATCHES "obf")
+  message(FATAL_ERROR
+    "OBF_RUNTIME_ABI_PREFIX must not contain 'obf'"
+  )
+endif()
+
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS
   "Benchmark obfuscation seed (${OBF_BENCHMARK_SEED_SOURCE}): ${OBF_EFFECTIVE_BENCHMARK_SEED}")
@@ -69,6 +85,12 @@ separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS_LIST})
+
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/include/obf/support")
+configure_file(
+  include/obf/support/runtime_abi_generated.h.in
+  "${CMAKE_CURRENT_BINARY_DIR}/include/obf/support/runtime_abi_generated.h"
+  @ONLY)
 
 llvm_map_components_to_libnames(OBF_LLVM_LIBS
   Analysis
@@ -106,7 +128,8 @@ add_library(obf_core
   lib/vm/virtualize.cpp
 )
 llvm_update_compile_flags(obf_core)
-target_include_directories(obf_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(obf_core PUBLIC ${PROJECT_SOURCE_DIR}/include
+                                          ${CMAKE_CURRENT_BINARY_DIR}/include)
 target_link_libraries(obf_core PRIVATE ${OBF_LLVM_LIBS})
 
 add_llvm_pass_plugin(obf_plugin
@@ -117,21 +140,24 @@ add_llvm_pass_plugin(obf_plugin
   lib/plugin/obfuscator_plugin.cpp
 )
 llvm_update_compile_flags(obf_plugin)
-target_include_directories(obf_plugin PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(obf_plugin PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                              ${CMAKE_CURRENT_BINARY_DIR}/include)
 target_link_libraries(obf_plugin PRIVATE obf_core ${OBF_LLVM_LIBS})
 
 add_executable(obf-driver
   tools/obf-driver/main.cpp
 )
 llvm_update_compile_flags(obf-driver)
-target_include_directories(obf-driver PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(obf-driver PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                              ${CMAKE_CURRENT_BINARY_DIR}/include)
 target_link_libraries(obf-driver PRIVATE obf_core ${OBF_LLVM_LIBS})
 
 add_executable(obf-unit-tests
   tests/unit/obf_unit_tests.cpp
 )
 llvm_update_compile_flags(obf-unit-tests)
-target_include_directories(obf-unit-tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(obf-unit-tests PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                                  ${CMAKE_CURRENT_BINARY_DIR}/include)
 target_link_libraries(obf-unit-tests PRIVATE obf_core ${OBF_LLVM_LIBS})
 
 set(OBF_ENTROPY_ANCHOR_LL "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.ll")
@@ -140,15 +166,15 @@ set(OBF_ENTROPY_ANCHOR_OBJ "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.o")
 set(OBF_STRING_AUTH_RUNTIME_OBJ "${CMAKE_CURRENT_BINARY_DIR}/obf_string_auth_runtime.o")
 add_custom_command(
   OUTPUT "${OBF_ENTROPY_ANCHOR_OBJ}"
-  COMMAND "${OBF_CLANG}" -std=c17 -O0 -S -emit-llvm "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_LL}"
+  COMMAND "${OBF_CLANG}" -std=c17 -O0 -I${CMAKE_CURRENT_BINARY_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include -S -emit-llvm "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_LL}"
   COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}" -passes=obf-entropy-init -S "${OBF_ENTROPY_ANCHOR_LL}" -o "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}"
-  COMMAND "${OBF_CLANG}" -c -fPIC "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}" -o "${OBF_ENTROPY_ANCHOR_OBJ}"
-  DEPENDS obf_plugin "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" "${OBF_BENCHMARK_SEED_STAMP}"
+  COMMAND "${OBF_CLANG}" -c -fPIC -I${CMAKE_CURRENT_BINARY_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}" -o "${OBF_ENTROPY_ANCHOR_OBJ}"
+  DEPENDS obf_plugin "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" "${CMAKE_CURRENT_BINARY_DIR}/include/obf/support/runtime_abi_generated.h" "${OBF_BENCHMARK_SEED_STAMP}"
   VERBATIM)
 add_custom_command(
   OUTPUT "${OBF_STRING_AUTH_RUNTIME_OBJ}"
-  COMMAND "${OBF_CLANG}" -std=c17 -O2 -c -fPIC "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c" -o "${OBF_STRING_AUTH_RUNTIME_OBJ}"
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c"
+  COMMAND "${OBF_CLANG}" -std=c17 -O2 -I${CMAKE_CURRENT_BINARY_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include -c -fPIC "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c" -o "${OBF_STRING_AUTH_RUNTIME_OBJ}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c" "${CMAKE_CURRENT_BINARY_DIR}/include/obf/support/runtime_abi_generated.h"
   VERBATIM)
 add_custom_target(obf-entropy-anchor-runtime ALL DEPENDS "${OBF_ENTROPY_ANCHOR_OBJ}")
 add_custom_target(obf-string-auth-runtime ALL DEPENDS "${OBF_STRING_AUTH_RUNTIME_OBJ}")

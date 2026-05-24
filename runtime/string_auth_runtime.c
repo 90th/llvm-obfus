@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "obf/support/runtime_abi_generated.h"
+
 struct ObfBlake2sState {
   uint32_t h[8];
   uint32_t t[2];
@@ -357,7 +359,7 @@ static void ObfTrap(void) {
 }
 
 __attribute__((visibility("hidden")))
-uint8_t *obf_string_auth_decode_v1(const struct ObfStringRuntimeDescriptorV1 *descriptor,
+uint8_t *OBF_RT_STRING_AUTH_DECODE(const struct ObfStringRuntimeDescriptorV1 *descriptor,
                                    uint64_t trusted_length) {
   uint8_t function_key[32];
   uint8_t site_key[32];
@@ -425,7 +427,7 @@ uint8_t *obf_string_auth_decode_v1(const struct ObfStringRuntimeDescriptorV1 *de
 }
 
 __attribute__((visibility("hidden")))
-uint8_t *obf_constant_pool_decode_v1(const struct ObfConstantPoolRuntimeDescriptorV1 *descriptor,
+uint8_t *OBF_RT_CONSTANT_POOL_DECODE(const struct ObfConstantPoolRuntimeDescriptorV1 *descriptor,
                                      uint64_t trusted_length) {
   uint8_t function_key[32];
   uint8_t pool_key[32];

@@ -1,5 +1,7 @@
 #include <stdint.h>
 
+#include "obf/support/runtime_abi_generated.h"
+
 #if defined(_MSC_VER)
 #include <intrin.h>
 #pragma section(".CRT$XCU", read)
@@ -16,8 +18,8 @@
 #include <time.h>
 #endif
 
-uint64_t __obf_entropy_anchor = 0;
-uint64_t * __obf_entropy_anchor_ref = &__obf_entropy_anchor;
+uint64_t OBF_RT_ENTROPY_ANCHOR = 0;
+static uint64_t * const kEntropyAnchorRef = &OBF_RT_ENTROPY_ANCHOR;
 
 struct ObfEntropyPair {
   uint64_t direct;
@@ -34,11 +36,11 @@ __declspec(noinline)
 #else
 __attribute__((noinline))
 #endif
-struct ObfEntropyPair __obf_load_entropy_pair(void) {
-  const uint64_t direct = __obf_entropy_anchor;
-  uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
+struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR(void) {
+  const uint64_t direct = OBF_RT_ENTROPY_ANCHOR;
+  uint64_t * const ref_ptr = kEntropyAnchorRef;
   *ref_ptr = direct;
-  const uint64_t indirect = __obf_entropy_anchor;
+  const uint64_t indirect = OBF_RT_ENTROPY_ANCHOR;
   return BuildEntropyPair(direct, indirect);
 }
 
@@ -47,9 +49,9 @@ __declspec(noinline)
 #else
 __attribute__((noinline))
 #endif
-struct ObfEntropyPair __obf_load_entropy_pair_v1(void) {
-  const uint64_t direct = __obf_entropy_anchor;
-  uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
+struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V1(void) {
+  const uint64_t direct = OBF_RT_ENTROPY_ANCHOR;
+  uint64_t * const ref_ptr = kEntropyAnchorRef;
   volatile uint64_t scratch_direct = direct;
   volatile uint64_t scratch_indirect = 0;
   *ref_ptr = scratch_direct;
@@ -62,9 +64,9 @@ __declspec(noinline)
 #else
 __attribute__((noinline))
 #endif
-struct ObfEntropyPair __obf_load_entropy_pair_v2(void) {
-  const uint64_t base = __obf_entropy_anchor;
-  uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
+struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V2(void) {
+  const uint64_t base = OBF_RT_ENTROPY_ANCHOR;
+  uint64_t * const ref_ptr = kEntropyAnchorRef;
   const uint64_t low = base & 0xffffffffULL;
   const uint64_t high = (base >> 32) & 0xffffffffULL;
   const uint64_t direct = low | (high << 32);
@@ -81,9 +83,9 @@ __declspec(noinline)
 #else
 __attribute__((noinline))
 #endif
-struct ObfEntropyPair __obf_load_entropy_pair_v3(void) {
-  const uint64_t base = __obf_entropy_anchor;
-  uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
+struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V3(void) {
+  const uint64_t base = OBF_RT_ENTROPY_ANCHOR;
+  uint64_t * const ref_ptr = kEntropyAnchorRef;
   volatile uint64_t key = 0x9e3779b97f4a7c15ULL;
   const uint64_t direct_masked = base ^ key;
   const uint64_t direct = direct_masked ^ key;
@@ -98,9 +100,9 @@ __declspec(noinline)
 #else
 __attribute__((noinline))
 #endif
-struct ObfEntropyPair __obf_load_entropy_pair_v4(void) {
-  const uint64_t base = __obf_entropy_anchor;
-  uint64_t * const ref_ptr = __obf_entropy_anchor_ref;
+struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V4(void) {
+  const uint64_t base = OBF_RT_ENTROPY_ANCHOR;
+  uint64_t * const ref_ptr = kEntropyAnchorRef;
   volatile uint64_t bias = 0x6a09e667f3bcc909ULL;
   const uint64_t direct_biased = base + bias;
   const uint64_t direct = direct_biased - bias;
@@ -179,7 +181,7 @@ static uint64_t ReadHardwareEntropy(void) {
 }
 
 static void InitializeObfEntropyAnchor(void) {
-  __obf_entropy_anchor ^= ReadHardwareEntropy();
+  OBF_RT_ENTROPY_ANCHOR ^= ReadHardwareEntropy();
 }
 
 #if defined(_MSC_VER)
