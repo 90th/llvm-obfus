@@ -37,3 +37,15 @@ Artifacts are written under `build/benchmarks/<name>/`:
 The binary artifacts are stripped in place after linking so baseline versus obfuscated RE comparisons are not trivially biased by symbol names.
 
 The effective benchmark seed is printed during CMake configure. When `OBF_BENCHMARK_SEED` is empty, CMake generates a non-zero decimal seed for that build tree.
+
+Measure authenticated string decode overhead with:
+
+```sh
+python tools/obf-bench/measure_string_auth_overhead.py --build-dir build
+```
+
+The runner writes temporary IR, configs, and binaries under `build/string-auth-bench/` and reports:
+
+- lazy first-decode cost
+- lazy steady-state helper cost
+- ctor startup wall-time impact

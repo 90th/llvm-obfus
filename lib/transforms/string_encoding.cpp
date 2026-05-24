@@ -1358,6 +1358,7 @@ llvm::Function* create_authenticated_lazy_helper(llvm::Module& module, llvm::Str
   if (llvm::Function* existing = module.getFunction(name)) { return existing; }
 
   llvm::LLVMContext& context = module.getContext();
+  llvm::StructType* descriptor_type = get_authenticated_descriptor_type(context);
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type* i32_type = llvm::Type::getInt32Ty(context);
   llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
@@ -1377,15 +1378,34 @@ llvm::Function* create_authenticated_lazy_helper(llvm::Module& module, llvm::Str
   trusted_length->setName("trusted_length");
 
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", helper);
+  llvm::BasicBlock* fast_path = llvm::BasicBlock::Create(context, "fast_path", helper);
+  llvm::BasicBlock* slow_path = llvm::BasicBlock::Create(context, "slow_path", helper);
+  llvm::BasicBlock* merge = llvm::BasicBlock::Create(context, "merge", helper);
+
   llvm::IRBuilder<> builder(entry);
-  llvm::Value* state_delta =
-      builder.CreateXor(cfg_state, expected_state, "obf.str.state.delta");
-  llvm::Value* mismatch =
-      builder.CreateICmpNE(state_delta, llvm::ConstantInt::get(i32_type, 0), "obf.str.state.mismatch");
-  llvm::Value* runtime_desc = builder.CreatePointerCast(descriptor, ptr_type);
+  llvm::Value* state_ptr_addr =
+      builder.CreateStructGEP(descriptor_type, descriptor, 3, "obf.str.state.addr");
+  llvm::Value* state_ptr = builder.CreateLoad(ptr_type, state_ptr_addr, "obf.str.state.ptr");
+  llvm::Value* state = builder.CreateLoad(i32_type, state_ptr, "obf.str.state");
+  llvm::Value* is_decoded = builder.CreateICmpEQ(
+      state, llvm::ConstantInt::get(i32_type, auth::kStringStateDecoded), "obf.str.is_decoded");
+  builder.CreateCondBr(is_decoded, fast_path, slow_path);
+
+  builder.SetInsertPoint(fast_path);
+  llvm::Value* destination_addr =
+      builder.CreateStructGEP(descriptor_type, descriptor, 0, "obf.str.destination.addr");
+  llvm::Value* destination = builder.CreateLoad(ptr_type, destination_addr, "obf.str.destination");
+  builder.CreateBr(merge);
+
+  builder.SetInsertPoint(slow_path);
   llvm::Value* decoded =
-      builder.CreateCall(get_authenticated_runtime_decoder(module), {runtime_desc, trusted_length});
-  llvm::Value* result = builder.CreateSelect(mismatch, decoded, decoded);
+      builder.CreateCall(get_authenticated_runtime_decoder(module), {descriptor, trusted_length});
+  builder.CreateBr(merge);
+
+  builder.SetInsertPoint(merge);
+  llvm::PHINode* result = builder.CreatePHI(ptr_type, 2, "obf.str.result");
+  result->addIncoming(destination, fast_path);
+  result->addIncoming(decoded, slow_path);
   builder.CreateRet(result);
   return helper;
 }
