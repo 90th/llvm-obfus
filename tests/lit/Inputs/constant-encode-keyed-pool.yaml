@@ -1,0 +1,11 @@
+seed: 4242
+default_level: none
+targets:
+  - match: repeated
+    level: strong
+  - match: table_user
+    level: strong
+constant_encoding:
+  mode: keyed_pool
+  max_constants_per_function: 8
+  min_bit_width: 8
