@@ -68,6 +68,10 @@ bool apply_opaque_predicate_stage(const llvm::SmallVectorImpl<function_pipeline_
                                   const obfuscation_config& config,
                                   const llvm::StringSet<>* skip_functions = nullptr);
 
+bool apply_lifter_destruction_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                                    const obfuscation_config& config,
+                                    const llvm::StringSet<>* skip_functions = nullptr);
+
 llvm::StringSet<>
 apply_control_flattening_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                const obfuscation_config& config,

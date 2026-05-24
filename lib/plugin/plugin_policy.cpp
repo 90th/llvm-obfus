@@ -374,6 +374,20 @@ build_instruction_substitution_options(const obfuscation_config& config,
   return options;
 }
 
+lifter_destruction_options build_lifter_destruction_options(const obfuscation_config& config,
+                                                            const policy_decision& decision) {
+  lifter_destruction_options options;
+  options.enabled = config.lifter_destruction.enabled;
+  options.max_sites_per_function = config.lifter_destruction.max_sites_per_function;
+  options.mba_depth = config.mba.depth;
+
+  if (decision.policy.level == protection_level::light) {
+    options.max_sites_per_function = std::min<std::size_t>(options.max_sites_per_function, 1);
+  }
+
+  return options;
+}
+
 opaque_gep_options build_opaque_gep_options(const obfuscation_config& config,
                                             const policy_decision&) {
   opaque_gep_options options;

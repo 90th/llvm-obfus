@@ -101,6 +101,14 @@ struct MappingTraits<obf::mba_config> {
 };
 
 template <>
+struct MappingTraits<obf::lifter_destruction_config> {
+  static void mapping(IO& io, obf::lifter_destruction_config& config) {
+    io.mapOptional("enabled", config.enabled, false);
+    io.mapOptional("max_sites_per_function", config.max_sites_per_function, std::uint32_t{1});
+  }
+};
+
+template <>
 struct MappingTraits<obf::security_gate_config> {
   static void mapping(IO& io, obf::security_gate_config& config) {
     io.mapOptional("fail_on_public_obf_symbol", config.fail_on_public_obf_symbol, false);
@@ -120,6 +128,7 @@ struct MappingTraits<obf::obfuscation_config> {
     io.mapOptional("string_encoding", config.string_encoding);
     io.mapOptional("constant_encoding", config.constant_encoding);
     io.mapOptional("mba", config.mba);
+    io.mapOptional("lifter_destruction", config.lifter_destruction);
     io.mapOptional("security", config.security);
     io.mapOptional("debug_preserve_generated_names", config.debug_preserve_generated_names, false);
   }
@@ -140,6 +149,7 @@ struct config_parse_presence {
   bool string_encoding = false;
   bool constant_encoding = false;
   bool mba = false;
+  bool lifter_destruction = false;
   bool security = false;
   bool debug_preserve_generated_names = false;
 };
@@ -170,6 +180,7 @@ config_parse_presence collect_presence(llvm::StringRef text) {
           .string_encoding = has_top_level_key(text, "string_encoding"),
           .constant_encoding = has_top_level_key(text, "constant_encoding"),
           .mba = has_top_level_key(text, "mba"),
+          .lifter_destruction = has_top_level_key(text, "lifter_destruction"),
           .security = has_top_level_key(text, "security"),
           .debug_preserve_generated_names =
               has_top_level_key(text, "debug_preserve_generated_names")};
@@ -192,6 +203,7 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 2;
       config.mba.depth = 1;
+      config.lifter_destruction = {.enabled = false, .max_sites_per_function = 1};
       config.security.fail_on_public_obf_symbol = false;
       break;
     case config_profile::standard:
@@ -203,6 +215,7 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 4;
       config.mba.depth = 1;
+      config.lifter_destruction = {.enabled = false, .max_sites_per_function = 1};
       config.security.fail_on_public_obf_symbol = true;
       break;
     case config_profile::guarded:
@@ -214,6 +227,7 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 8;
       config.mba.depth = 2;
+      config.lifter_destruction = {.enabled = false, .max_sites_per_function = 1};
       config.security.fail_on_public_obf_symbol = true;
       break;
     case config_profile::fortress:
@@ -225,6 +239,7 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 16;
       config.mba.depth = 3;
+      config.lifter_destruction = {.enabled = false, .max_sites_per_function = 1};
       config.security.fail_on_public_obf_symbol = true;
       break;
     case config_profile::lab:
@@ -236,6 +251,7 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 32;
       config.mba.depth = 4;
+      config.lifter_destruction = {.enabled = false, .max_sites_per_function = 1};
       config.security.fail_on_public_obf_symbol = true;
       break;
   }
@@ -255,6 +271,7 @@ obfuscation_config apply_profile_defaults(const obfuscation_config& raw_config,
   if (presence.string_encoding) { config.string_encoding = raw_config.string_encoding; }
   if (presence.constant_encoding) { config.constant_encoding = raw_config.constant_encoding; }
   if (presence.mba) { config.mba = raw_config.mba; }
+  if (presence.lifter_destruction) { config.lifter_destruction = raw_config.lifter_destruction; }
   if (presence.security) { config.security = raw_config.security; }
   if (presence.debug_preserve_generated_names) {
     config.debug_preserve_generated_names = raw_config.debug_preserve_generated_names;
@@ -360,6 +377,10 @@ std::string summarize_config(const obfuscation_config& config) {
   stream << "constant_encoding.mode: " << to_string(config.constant_encoding.mode) << '\n';
   stream << "constant_encoding.min_bit_width: " << config.constant_encoding.min_bit_width << '\n';
   stream << "mba.depth: " << config.mba.depth << '\n';
+  stream << "lifter_destruction.enabled: "
+         << (config.lifter_destruction.enabled ? "true" : "false") << '\n';
+  stream << "lifter_destruction.max_sites_per_function: "
+         << config.lifter_destruction.max_sites_per_function << '\n';
   stream << "security.strong_vm_invariants: always_enforced\n";
   stream << "security.fail_on_public_obf_symbol: "
          << (config.security.fail_on_public_obf_symbol ? "true" : "false") << '\n';

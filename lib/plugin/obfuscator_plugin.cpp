@@ -10,6 +10,7 @@
 #include "obf/transforms/control_flattening.h"
 #include "obf/transforms/function_outlining.h"
 #include "obf/transforms/instruction_substitution.h"
+#include "obf/transforms/lifter_destruction.h"
 #include "obf/transforms/opaque_gep.h"
 #include "obf/transforms/opaque_predicates.h"
 #include "obf/transforms/string_encoding.h"
@@ -225,6 +226,18 @@ class opaque_predicate_pass : public llvm::PassInfoMixin<opaque_predicate_pass> 
   }
 };
 
+class lifter_destruction_pass : public llvm::PassInfoMixin<lifter_destruction_pass> {
+ public:
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+    return run_stateful_stage(module,
+                              [](llvm::Module&,
+                                 const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                                 const obfuscation_config& config) {
+                                return apply_lifter_destruction_stage(states, config);
+                              });
+  }
+};
+
 class bogus_control_flow_pass : public llvm::PassInfoMixin<bogus_control_flow_pass> {
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
@@ -380,6 +393,11 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
 
                   if (name == "obf-opaque-preds") {
                     module_pm.addPass(obf::opaque_predicate_pass());
+                    return true;
+                  }
+
+                  if (name == "obf-lifter-destruction") {
+                    module_pm.addPass(obf::lifter_destruction_pass());
                     return true;
                   }
 
