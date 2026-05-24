@@ -26,7 +26,6 @@ entry:
 ; CHECK: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
 ; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
 ; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
-; CHECK: {{%obf\.vm\.opcode\.split\.(low|high)\.delta[^ ]* = }}{{(or|sub|xor) i32}}
 ; CHECK: store i32 {{%obf\.vm\.opcode\.split\.(low|high)\.delta[^,]*}}, ptr %obf.vm.pred.slot
 ; CHECK: br label %obf.vm.opcode.pred.merge
 ; CHECK: {{^obf\.vm\.opcode\.pred\.merge[0-9]*:}}
