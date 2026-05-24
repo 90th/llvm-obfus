@@ -197,6 +197,14 @@ bool is_local_constant_forwarding_global(const llvm::GlobalVariable& global) {
 
 bool is_local_forwarding_alias(const llvm::GlobalAlias& alias) { return alias.hasLocalLinkage(); }
 
+bool is_generated_vm_forwarding_global(const llvm::GlobalVariable& global) {
+  return global.getName().starts_with("__obf_vm_ptrconst_");
+}
+
+bool is_generated_vm_owner(const llvm::Function& function) {
+  return function.getName().starts_with("__obf_vm_");
+}
+
 bool operand_references_value(const llvm::Value* operand, const llvm::Value& value);
 
 bool is_direct_string_pointer_forward(const llvm::Value& value,
@@ -617,6 +625,22 @@ bool is_high_security_level(protection_level level) {
   return level == protection_level::strong || level == protection_level::strong_vm;
 }
 
+bool has_generated_vm_forwarding_use(const llvm::GlobalVariable& global) {
+  for (const llvm::User* user : global.users()) {
+    const auto* forwarding_global = llvm::dyn_cast<llvm::GlobalVariable>(user);
+    if (forwarding_global == nullptr) { continue; }
+    if (!is_generated_vm_forwarding_global(*forwarding_global)) { continue; }
+    if (is_local_constant_forwarding_global(*forwarding_global)) { return true; }
+  }
+  return false;
+}
+
+bool has_generated_vm_owner(const classified_string_candidate& candidate) {
+  return llvm::any_of(candidate.strong_vm_functions, [](const llvm::Function* function) {
+    return function != nullptr && is_generated_vm_owner(*function);
+  });
+}
+
 void sort_function_vector(llvm::SmallVectorImpl<const llvm::Function*>& functions) {
   std::sort(
       functions.begin(), functions.end(), [](const llvm::Function* lhs, const llvm::Function* rhs) {
@@ -804,6 +828,10 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
   }
 
   const bool is_strong_vm_candidate = candidate.has_strong_vm_use;
+  const bool use_authenticated_vm_forwarded_pointer_fallback =
+      is_strong_vm_candidate && candidate.summary.has_forwarded_pointer_load &&
+      ((candidate.global != nullptr && has_generated_vm_forwarding_use(*candidate.global)) ||
+       has_generated_vm_owner(candidate));
   if (!authenticated_mode && is_strong_vm_candidate &&
       should_inline_stack_decode(*candidate.global, candidate.summary)) {
     select_inline_stack_decode();
@@ -837,6 +865,7 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
 
   if (candidate.summary.has_forwarded_pointer_load) {
     if (is_strong_vm_candidate &&
+        !use_authenticated_vm_forwarded_pointer_fallback &&
         (!options.allow_ctor_fallback || !options.strong_vm_allow_global_plaintext ||
          !options.strong_vm_allow_ctor_fallback)) {
       skip_strong_vm_global_plaintext("strong_vm_no_global_plaintext: forwarded pointer table use");
@@ -846,10 +875,14 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     plan.result.applied = true;
     plan.result.mode = string_encoding_mode::global_ctor;
     plan.result.strategy_kind = string_strategy_kind::helper_global_ctor;
-    plan.result.helper_shape = authenticated_mode ? string_helper_shape::ctor_auth_runtime_v1
-                                                  : string_helper_shape::ctor_unrolled_v0;
+    plan.result.helper_shape =
+        (authenticated_mode || use_authenticated_vm_forwarded_pointer_fallback)
+            ? string_helper_shape::ctor_auth_runtime_v1
+            : string_helper_shape::ctor_unrolled_v0;
     plan.result.key_schedule = select_key_schedule(plan.result.helper_shape);
-    plan.result.detail = "ctor fallback due to forwarded pointer table use";
+    plan.result.detail = use_authenticated_vm_forwarded_pointer_fallback
+                             ? "authenticated ctor fallback due to vm forwarded pointer table use"
+                             : "ctor fallback due to forwarded pointer table use";
     plan.result.fallback_reason = "forwarded_pointer_table_use";
     return plan;
   }

@@ -1,7 +1,7 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=PASS --implicit-check-not='@__obf_vm_target_strong_ok' --implicit-check-not='@__obf_vm_seedcase_strong_ok' --implicit-check-not='@__obf_vm_seed_resolve'
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-off.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=OFF
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-unvirtualized.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=UNVIRT
-; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-string.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=STRING
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-string.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=STRING
 
 @.secret = private unnamed_addr constant [6 x i8] c"hello\00"
 @.table = private unnamed_addr constant [1 x ptr] [ptr @.secret]
@@ -49,5 +49,8 @@ entry:
 ; UNVIRT: policy_source=config_rule
 ; UNVIRT: reason=
 
-; STRING: LLVM ERROR: strong_vm invariant violation: string .secret would remain plaintext
-; STRING: owner=__obf_vm_i_{{[A-Za-z0-9_]+}}
+; STRING-NOT: LLVM ERROR: strong_vm invariant violation: string .secret would remain plaintext
+; STRING: private unnamed_addr global [6 x i8] zeroinitializer
+; STRING: private unnamed_addr constant [1 x ptr] [ptr
+; STRING: define internal void @{{.*}}() {
+; STRING: call ptr @rt_core_sd1(
