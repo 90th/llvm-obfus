@@ -1,21 +1,17 @@
 #include "obf/transforms/lifter_destruction.h"
 
 #include "obf/support/stable_hash.h"
-#include "obf/transforms/mba.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Attributes.h"
-#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
-#include "llvm/IR/InstrTypes.h"
-#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/Support/CodeGen.h"
 #include "llvm/TargetParser/Triple.h"
 
 #include <algorithm>
@@ -24,13 +20,6 @@
 namespace obf {
 
 namespace {
-
-constexpr const char* kTrapAsm =
-    "cmpq $0, $1; "
-    "jne 1f; "
-    ".byte 0x0f; "
-    "1:; "
-    ".byte 0x1f, 0x44, 0x00, 0x00";
 
 constexpr llvm::StringLiteral kVmHubAttrs[] = {"vm.dispatch.shape.switch",
                                                "vm.handler.route.trampoline",
@@ -46,6 +35,10 @@ struct candidate_site {
 bool is_supported_architecture(const llvm::Module& module) {
   const llvm::Triple triple(module.getTargetTriple());
   return triple.isX86() && triple.getArch() == llvm::Triple::x86_64;
+}
+
+bool supports_elf_eh_spoofing(const llvm::Module& module) {
+  return llvm::Triple(module.getTargetTriple()).isOSBinFormatELF();
 }
 
 bool block_has_label_prefix(const llvm::BasicBlock& block, llvm::StringRef prefix) {
@@ -74,6 +67,25 @@ bool has_exception_pad_instruction(const llvm::BasicBlock& block) {
       return true;
     }
   }
+  return false;
+}
+
+bool function_has_existing_exception_handling(const llvm::Function& function) {
+  if (function.hasPersonalityFn()) { return true; }
+
+  for (const llvm::BasicBlock& block : function) {
+    if (block.isEHPad()) { return true; }
+
+    for (const llvm::Instruction& instruction : block) {
+      if (llvm::isa<llvm::InvokeInst>(instruction) || llvm::isa<llvm::LandingPadInst>(instruction) ||
+          llvm::isa<llvm::CatchSwitchInst>(instruction) || llvm::isa<llvm::CatchPadInst>(instruction) ||
+          llvm::isa<llvm::CleanupPadInst>(instruction) || llvm::isa<llvm::CatchReturnInst>(instruction) ||
+          llvm::isa<llvm::CleanupReturnInst>(instruction) || llvm::isa<llvm::ResumeInst>(instruction)) {
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 
@@ -170,6 +182,90 @@ lifter_destruction_result analyze_impl(const llvm::Function& function,
           .detail = std::to_string(count) + " lifter destruction site(s) available"};
 }
 
+std::string build_label_name(llvm::StringRef prefix, llvm::StringRef suffix) {
+  std::string name;
+  name.reserve(prefix.size() + suffix.size());
+  name += prefix;
+  name += suffix;
+  return name;
+}
+
+std::string build_site_label_prefix(const llvm::Function& function,
+                                    const candidate_site& site,
+                                    std::uint64_t seed,
+                                    std::size_t ordinal) {
+  const llvm::StringRef block_name = site.block != nullptr && site.block->hasName()
+                                         ? site.block->getName()
+                                         : llvm::StringRef("bb");
+  std::uint64_t unique_id = mix_seed(seed, site.rank);
+  unique_id = mix_seed(unique_id, stable_hash_string(block_name));
+  unique_id = mix_seed(unique_id, static_cast<std::uint64_t>(ordinal + 1));
+  return ".Lobf_ld_" + llvm::utohexstr(stable_hash_string(function.getName(), unique_id));
+}
+
+std::string build_trampoline_asm(const llvm::Function& function,
+                                 const candidate_site& site,
+                                 std::uint64_t seed,
+                                 std::size_t ordinal,
+                                 bool emit_elf_eh_spoofing) {
+  const std::string prefix = build_site_label_prefix(function, site, seed, ordinal);
+  const std::string site_begin = build_label_name(prefix, "_site_begin");
+  const std::string retaddr = build_label_name(prefix, "_retaddr");
+  const std::string poison = build_label_name(prefix, "_poison");
+  const std::string poison_mid = build_label_name(prefix, "_poison_mid");
+  const std::string resume = build_label_name(prefix, "_resume");
+
+  std::string assembly;
+  assembly.reserve(768);
+  assembly += site_begin;
+  assembly += ":; ";
+  assembly += "call ";
+  assembly += retaddr;
+  assembly += "; ";
+  assembly += retaddr;
+  assembly += ":; popq %rax; movl $$(";
+  assembly += resume;
+  assembly += '-';
+  assembly += retaddr;
+  assembly += "), %ecx; addq %rcx, %rax; jmpq *%rax; ";
+  assembly += poison;
+  assembly += ":; .byte 0x0f, 0x85; ";
+  assembly += poison_mid;
+  assembly += ":; .byte 0xff, 0xe0, 0x0f, 0x0b; ";
+  assembly += resume;
+  assembly += ':';
+
+  if (!emit_elf_eh_spoofing) { return assembly; }
+
+  const std::string lsda = build_label_name(prefix, "_lsda");
+  const std::string callsite_begin = build_label_name(prefix, "_cst_begin");
+  const std::string callsite_end = build_label_name(prefix, "_cst_end");
+  assembly += "; .cfi_lsda 0x1b, ";
+  assembly += lsda;
+  assembly += "; .pushsection .gcc_except_table,\"a\",@progbits; ";
+  assembly += lsda;
+  assembly += ":; .byte 0x1b; .long ";
+  assembly += site_begin;
+  assembly += "-.; .byte 0xff; .byte 0x01; .uleb128 ";
+  assembly += callsite_end;
+  assembly += '-';
+  assembly += callsite_begin;
+  assembly += "; ";
+  assembly += callsite_begin;
+  assembly += ":; .uleb128 0; .uleb128 ";
+  assembly += resume;
+  assembly += '-';
+  assembly += site_begin;
+  assembly += "; .uleb128 ";
+  assembly += poison_mid;
+  assembly += '-';
+  assembly += site_begin;
+  assembly += "; .uleb128 0; ";
+  assembly += callsite_end;
+  assembly += ":; .popsection";
+  return assembly;
+}
+
 llvm::Instruction* find_insertion_point(llvm::BasicBlock& block) {
   for (llvm::Instruction& instruction : block) {
     if (!llvm::isa<llvm::PHINode>(instruction)) {
@@ -195,49 +291,35 @@ lifter_destruction_result run_lifter_destruction(llvm::Function& function,
   llvm::Module* module = function.getParent();
   if (module == nullptr) { return {.insertion_count = 0, .detail = "missing parent module"}; }
 
-  llvm::LLVMContext& context = function.getContext();
-  llvm::IntegerType* i64 = llvm::Type::getInt64Ty(context);
-  llvm::FunctionType* asm_type = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {i64, i64}, false);
-  llvm::InlineAsm* trap = llvm::InlineAsm::get(
-      asm_type, kTrapAsm, "r,r,~{cc},~{memory}", true, false, llvm::InlineAsm::AD_ATT);
+  const bool allow_elf_eh_spoofing =
+      supports_elf_eh_spoofing(*module) && !function_has_existing_exception_handling(function);
 
   const llvm::SmallVector<candidate_site, 8> sites = collect_candidate_sites(function, options, seed);
   std::size_t inserted = 0;
-  for (const candidate_site& site : sites) {
+  bool emitted_eh_spoofing = false;
+  for (std::size_t site_index = 0; site_index < sites.size(); ++site_index) {
+    const candidate_site& site = sites[site_index];
     if (inserted >= options.max_sites_per_function || site.block == nullptr) { continue; }
 
     llvm::Instruction* insertion_point = find_insertion_point(*site.block);
     if (insertion_point == nullptr) { continue; }
 
-    llvm::IRBuilder<> builder(insertion_point);
-    llvm::Value* true_predicate = mba::build_entropy_true_predicate(builder,
-                                                                    function,
-                                                                    options.mba_depth,
-                                                                    seed ^ site.rank,
-                                                                    0x18d3f5a7ULL,
-                                                                    0x7b2c491eULL,
-                                                                    "obf.lifter.a",
-                                                                    "obf.lifter.b",
-                                                                    "obf.lifter.true");
-    if (true_predicate == nullptr) { continue; }
+    const bool emit_elf_eh_spoofing = allow_elf_eh_spoofing && !emitted_eh_spoofing;
+    if (emit_elf_eh_spoofing && !function.hasUWTable()) {
+      function.setUWTableKind(llvm::UWTableKind::Default);
+    }
 
-    llvm::Value* lhs = builder.CreateZExt(true_predicate, i64, "obf.lifter.cmp.lhs");
-    mba::builder_context rhs_context =
-        mba::get_or_create_builder_context(function, "lifter.rhs", seed ^ (site.rank + 0x41));
-    rhs_context.depth = options.mba_depth;
-    llvm::Value* rhs_zero = mba::create_opaque_integer(builder,
-                                                       i64,
-                                                       rhs_context,
-                                                       llvm::APInt(64, 0),
-                                                       seed ^ (site.rank + 0x91),
-                                                       "obf.lifter.cmp.zero");
-    llvm::Value* rhs = mba::create_add(builder,
-                                       lhs,
-                                       rhs_zero,
-                                       rhs_context,
-                                       seed ^ (site.rank + 0xd1),
-                                       "obf.lifter.cmp.rhs");
-    builder.CreateCall(trap, {lhs, rhs});
+    llvm::FunctionType* asm_type =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(function.getContext()), false);
+    llvm::InlineAsm* trap = llvm::InlineAsm::get(
+        asm_type,
+        build_trampoline_asm(function, site, seed, site_index, emit_elf_eh_spoofing),
+        "~{rax},~{rcx},~{cc},~{memory}",
+        true,
+        false,
+        llvm::InlineAsm::AD_ATT);
+    llvm::CallInst::Create(trap, {}, "", insertion_point->getIterator());
+    emitted_eh_spoofing |= emit_elf_eh_spoofing;
     ++inserted;
   }
 

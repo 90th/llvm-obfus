@@ -1,4 +1,5 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/safe-pipeline-lifter-destruction.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/safe-pipeline-lifter-destruction.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=IR
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/safe-pipeline-lifter-destruction.yaml -passes=obf-safe-pipeline -S %s -o - | %llc -mtriple=x86_64-unknown-linux-gnu -o - | %FileCheck %s --check-prefix=ASM
 
 target triple = "x86_64-unknown-linux-gnu"
 
@@ -17,8 +18,19 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
-; CHECK-DAG: call void asm sideeffect "cmpq $0, $1; jne 1f; .byte 0x0f; 1:; .byte 0x1f, 0x44, 0x00, 0x00", "r,r,~{cc},~{memory}"
-; CHECK-LABEL: define i32 @main()
-; CHECK: call i32 %{{[^ ]+}}(i32 0, i64 %{{[^)]+}})
-; CHECK: define internal i32 @{{[^ ]+}}(i32
+; IR-DAG: @rt_core_ea = external externally_initialized global i64, align 8
+; IR-DAG: call void asm sideeffect ".Lobf_ld_
+; IR-DAG: .cfi_lsda 0x1b, .Lobf_ld_
+; IR-DAG: .pushsection .gcc_except_table,
+; IR-DAG: .byte 0x0f, 0x85;
+; IR-DAG: .byte 0xff, 0xe0, 0x0f, 0x0b;
+; IR-LABEL: define i32 @main()
+; IR: call i32 %{{[^ ]+}}(i32 0, i64 %{{[^)]+}})
+; IR: define internal i32 @{{[^ ]+}}(i32
+
+; ASM: .cfi_lsda 27, .Lobf_ld_
+; ASM: .section	.gcc_except_table,"a",@progbits
+; ASM: .uleb128 .Lobf_ld_
+; ASM: _poison_mid-.Lobf_ld_
+; ASM: callq	.Lobf_ld_
+; ASM: jmpq	*%rax
