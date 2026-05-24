@@ -1,0 +1,4 @@
+seed: 9191
+default_level: none
+security:
+  strip_release_markers: true

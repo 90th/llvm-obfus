@@ -301,6 +301,7 @@ build_pipeline_state(llvm::Module& module, const obfuscation_config& config) {
 artifact_cleanup_options build_artifact_cleanup_options(const obfuscation_config& config) {
   artifact_cleanup_options options;
   options.seed = config.seed;
+  options.strip_release_markers = config.security.strip_release_markers;
   return options;
 }
 

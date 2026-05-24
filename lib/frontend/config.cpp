@@ -104,6 +104,7 @@ template <>
 struct MappingTraits<obf::security_gate_config> {
   static void mapping(IO& io, obf::security_gate_config& config) {
     io.mapOptional("fail_on_public_obf_symbol", config.fail_on_public_obf_symbol, false);
+    io.mapOptional("strip_release_markers", config.strip_release_markers, false);
   }
 };
 
@@ -362,6 +363,8 @@ std::string summarize_config(const obfuscation_config& config) {
   stream << "security.strong_vm_invariants: always_enforced\n";
   stream << "security.fail_on_public_obf_symbol: "
          << (config.security.fail_on_public_obf_symbol ? "true" : "false") << '\n';
+  stream << "security.strip_release_markers: "
+         << (config.security.strip_release_markers ? "true" : "false") << '\n';
   stream << "debug_preserve_generated_names: "
          << (config.debug_preserve_generated_names ? "true" : "false") << '\n';
 

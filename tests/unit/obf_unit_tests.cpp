@@ -151,6 +151,33 @@ void TestAuthenticatedStringConfig() {
   std::filesystem::remove(path, ec);
 }
 
+void TestReleaseMarkerConfig() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "obf_release_marker_config.yaml";
+  {
+    std::ofstream out(path);
+    out << "default_level: none\n";
+    out << "security:\n";
+    out << "  strip_release_markers: true\n";
+  }
+
+  llvm::Expected<obf::obfuscation_config> loaded = obf::load_config_from_file(path.string());
+  ExpectTrue(static_cast<bool>(loaded), "release marker config should load successfully");
+  if (loaded) {
+    ExpectTrue(loaded->security.strip_release_markers,
+               "strip_release_markers should parse from yaml");
+    ExpectTrue(!loaded->security.fail_on_public_obf_symbol,
+               "strip_release_markers should not change the public symbol gate default");
+
+    const std::string summary = obf::summarize_config(*loaded);
+    ExpectTrue(summary.find("security.strip_release_markers: true") != std::string::npos,
+               "config summary should report release marker stripping");
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 void TestConstantProtectionModeConfig() {
   const std::filesystem::path path =
       std::filesystem::temp_directory_path() / "obf_constant_mode_config.yaml";
@@ -375,6 +402,7 @@ int main() {
   TestPolicySelection();
   TestConfigLoader();
   TestAuthenticatedStringConfig();
+  TestReleaseMarkerConfig();
   TestConstantProtectionModeConfig();
   TestPolicyPrecedenceAndFloors();
   TestConfigEdgeCases();

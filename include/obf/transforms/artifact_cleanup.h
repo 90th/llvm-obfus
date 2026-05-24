@@ -10,6 +10,7 @@ namespace obf {
 
 struct artifact_cleanup_options {
   std::uint64_t seed = 0;
+  bool strip_release_markers = false;
 };
 
 bool RunArtifactCleanup(llvm::Module& module, const artifact_cleanup_options& options = {});
