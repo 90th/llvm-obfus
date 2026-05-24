@@ -1,6 +1,7 @@
 #include "obf/transforms/artifact_cleanup.h"
 
 #include "obf/support/stable_hash.h"
+#include "obf/transforms/cfg_state_placeholders.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -236,6 +237,22 @@ bool IsPublicReleaseMarkerSymbol(const llvm::GlobalValue& value) {
   llvm::report_fatal_error(llvm::StringRef(message));
 }
 
+[[noreturn]] void ReportCfgPlaceholderFailure(llvm::StringRef name) {
+  std::string message = "release marker stripping failure: cfg placeholder ";
+  message += name.str();
+  message += " survived final cleanup";
+  llvm::report_fatal_error(llvm::StringRef(message));
+}
+
+void EnforceCfgPlaceholderAbsence(llvm::Module& module) {
+  for (llvm::Function& function : module) {
+    if (function.getName() == kCfgStatePlaceholderName ||
+        function.getName() == kExpectedCfgStatePlaceholderName) {
+      ReportCfgPlaceholderFailure(function.getName());
+    }
+  }
+}
+
 void EnforcePublicReleaseMarkerGate(llvm::Module& module) {
   llvm::SmallVector<std::tuple<std::string, std::string>, 8> offenders;
 
@@ -268,6 +285,7 @@ bool RunArtifactCleanup(llvm::Module& module, const artifact_cleanup_options& op
   bool changed = llvm::StripDebugInfo(module);
 
   if (options.strip_release_markers) {
+    EnforceCfgPlaceholderAbsence(module);
     EnforcePublicReleaseMarkerGate(module);
     changed |= StripReleaseMarkerFunctionAttributes(module);
     changed |= StripGlobalAnnotations(module);

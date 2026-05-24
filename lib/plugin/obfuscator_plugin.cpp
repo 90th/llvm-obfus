@@ -280,7 +280,6 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     const llvm::StringSet<> flattened_functions =
         apply_control_flattening_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= !flattened_functions.empty();
-    changed |= apply_cfg_state_cleanup_stage(module);
     changed |= apply_function_outlining_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_bogus_control_flow_stage(post_vm_states, config, &all_vm_virtualized);
 
@@ -296,6 +295,9 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     changed |= apply_function_outlining_to_functions(strong_vm_virtualized, config);
     changed |= apply_instruction_substitution_to_functions(strong_vm_virtualized, config);
     changed |= apply_bogus_control_flow_to_functions(strong_vm_virtualized, config);
+
+    // Final cleanup sequence: remove CFG placeholders, enforce invariants, then strip markers.
+    changed |= apply_cfg_state_cleanup_stage(module);
     changed |= enforce_security_gates(module, states, post_vm_virtualized, config);
     changed |= apply_artifact_cleanup_stage(module, config);
 
