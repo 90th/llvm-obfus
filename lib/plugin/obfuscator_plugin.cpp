@@ -156,10 +156,10 @@ class constant_encoding_pass : public llvm::PassInfoMixin<constant_encoding_pass
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
     return run_stateful_stage(module,
-                              [](llvm::Module&,
+                              [](llvm::Module& current_module,
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
-                                 const obfuscation_config& config) {
-                                return apply_constant_encoding_stage(states, config);
+                                  const obfuscation_config& config) {
+                                return apply_constant_encoding_stage(current_module, states, config);
                               });
   }
 };
@@ -273,7 +273,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     for (const auto& entry : strong_vm_names) { all_vm_virtualized.insert(entry.getKey()); }
     include_vm_parent_functions(all_vm_virtualized, strong_vm_virtualized);
 
-    changed |= apply_constant_encoding_stage(post_vm_states, config, &all_vm_virtualized);
+    changed |= apply_constant_encoding_stage(module, post_vm_states, config, &all_vm_virtualized);
     changed |= apply_opaque_gep_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_instruction_substitution_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_opaque_predicate_stage(post_vm_states, config, &all_vm_virtualized);

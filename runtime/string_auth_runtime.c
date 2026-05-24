@@ -27,12 +27,29 @@ struct ObfStringRuntimeDescriptorV1 {
   uint8_t tag[16];
 };
 
+struct ObfConstantPoolRuntimeDescriptorV1 {
+  uint8_t *destination;
+  const uint8_t *ciphertext;
+  const uint8_t *build_key;
+  uint32_t *state;
+  uint64_t length;
+  uint64_t module_id;
+  uint64_t pool_id;
+  uint32_t version;
+  uint32_t flags;
+  uint8_t nonce[16];
+  uint8_t tag[16];
+};
+
 enum {
   kObfBlake2sBlockBytes = 64,
   kObfBlake2sOutBytes = 32,
   kObfStringDescriptorVersionV1 = 1,
   kObfStringAuthFlagTrapOnFailure = 1u,
   kObfStringStateDecoded = 1u,
+  kObfConstantPoolDescriptorVersionV1 = 1,
+  kObfConstantPoolAuthFlagTrapOnFailure = 1u,
+  kObfConstantPoolStateDecoded = 1u,
 };
 
 static const uint32_t kObfBlake2sIv[8] = {
@@ -61,10 +78,13 @@ static const uint8_t kObfBlake2sSigma[10][16] = {
 
 static const uint8_t kObfDomainFunction[2] = {'f', 'n'};
 static const uint8_t kObfDomainString[6] = {'s', 't', 'r', 'i', 'n', 'g'};
+static const uint8_t kObfDomainConstant[5] = {'c', 'o', 'n', 's', 't'};
 static const uint8_t kObfDomainEnc[3] = {'e', 'n', 'c'};
 static const uint8_t kObfDomainMac[3] = {'m', 'a', 'c'};
 static const uint8_t kObfDomainStream[6] = {'s', 't', 'r', 'e', 'a', 'm'};
 static const uint8_t kObfDomainStringTag[10] = {'s', 't', 'r', 'i', 'n', 'g', '_', 't', 'a', 'g'};
+static const uint8_t kObfDomainConstantPoolTag[14] = {
+    'c', 'o', 'n', 's', 't', '_', 'p', 'o', 'o', 'l', '_', 't', 'a', 'g'};
 
 static uint32_t ObfLoad32(const uint8_t *input) {
   return (uint32_t)input[0] | ((uint32_t)input[1] << 8) | ((uint32_t)input[2] << 16) |
@@ -297,6 +317,27 @@ static void ObfComputeStringTag(uint8_t output[16],
   memcpy(output, digest, 16);
 }
 
+static void ObfComputeConstantPoolTag(uint8_t output[16],
+                                      const uint8_t *mac_key,
+                                      const struct ObfConstantPoolRuntimeDescriptorV1 *descriptor,
+                                      size_t ciphertext_size) {
+  struct ObfBlake2sState state;
+  uint8_t digest[32];
+  ObfBlake2sInit(&state, 32, mac_key, 32);
+  ObfBlake2sUpdateDomain(&state,
+                         kObfDomainConstantPoolTag,
+                         (uint32_t)sizeof(kObfDomainConstantPoolTag));
+  ObfBlake2sUpdateU32(&state, descriptor->version);
+  ObfBlake2sUpdateU32(&state, descriptor->flags);
+  ObfBlake2sUpdateU64(&state, descriptor->length);
+  ObfBlake2sUpdateU64(&state, descriptor->module_id);
+  ObfBlake2sUpdateU64(&state, descriptor->pool_id);
+  ObfBlake2sUpdate(&state, descriptor->nonce, sizeof(descriptor->nonce));
+  ObfBlake2sUpdate(&state, descriptor->ciphertext, ciphertext_size);
+  ObfBlake2sFinal(&state, digest);
+  memcpy(output, digest, 16);
+}
+
 static int ObfConstantTimeEqual(const uint8_t *lhs, const uint8_t *rhs, size_t size) {
   uint8_t diff = 0;
   size_t index;
@@ -380,5 +421,74 @@ uint8_t *obf_string_auth_decode_v1(const struct ObfStringRuntimeDescriptorV1 *de
   }
 
   *descriptor->state = kObfStringStateDecoded;
+  return descriptor->destination;
+}
+
+__attribute__((visibility("hidden")))
+uint8_t *obf_constant_pool_decode_v1(const struct ObfConstantPoolRuntimeDescriptorV1 *descriptor,
+                                     uint64_t trusted_length) {
+  uint8_t function_key[32];
+  uint8_t pool_key[32];
+  uint8_t enc_key[32];
+  uint8_t mac_key[32];
+  uint8_t tag[16];
+  size_t length;
+  uint64_t offset = 0;
+  uint64_t counter = 0;
+
+  if (descriptor == NULL || descriptor->destination == NULL || descriptor->ciphertext == NULL ||
+      descriptor->build_key == NULL || descriptor->state == NULL) {
+    ObfTrap();
+  }
+
+  if (descriptor->version != kObfConstantPoolDescriptorVersionV1) {
+    ObfTrap();
+  }
+
+  if (descriptor->flags != kObfConstantPoolAuthFlagTrapOnFailure) {
+    ObfTrap();
+  }
+
+  if (descriptor->length != trusted_length || trusted_length > (uint64_t)SIZE_MAX) {
+    ObfTrap();
+  }
+  length = (size_t)trusted_length;
+
+  if (*descriptor->state == kObfConstantPoolStateDecoded) {
+    return descriptor->destination;
+  }
+
+  if (*descriptor->state != 0u) {
+    ObfTrap();
+  }
+
+  ObfDeriveFunctionKey(function_key, descriptor->build_key, descriptor->module_id, 0u);
+  ObfDeriveSiteKey(pool_key,
+                   function_key,
+                   kObfDomainConstant,
+                   (uint32_t)sizeof(kObfDomainConstant),
+                   descriptor->pool_id);
+  ObfDeriveLabeledKey(enc_key, pool_key, kObfDomainEnc, (uint32_t)sizeof(kObfDomainEnc));
+  ObfDeriveLabeledKey(mac_key, pool_key, kObfDomainMac, (uint32_t)sizeof(kObfDomainMac));
+  ObfComputeConstantPoolTag(tag, mac_key, descriptor, length);
+  if (!ObfConstantTimeEqual(tag, descriptor->tag, sizeof(tag))) {
+    ObfTrap();
+  }
+
+  while (offset < trusted_length) {
+    uint8_t block[32];
+    size_t index;
+    size_t block_size;
+    ObfMakeKeystreamBlock(block, enc_key, descriptor->nonce, counter++);
+    block_size = (size_t)(((trusted_length - offset) < sizeof(block)) ? (trusted_length - offset)
+                                                                       : sizeof(block));
+    for (index = 0; index < block_size; ++index) {
+      descriptor->destination[offset + index] =
+          (uint8_t)(descriptor->ciphertext[offset + index] ^ block[index]);
+    }
+    offset += block_size;
+  }
+
+  *descriptor->state = kObfConstantPoolStateDecoded;
   return descriptor->destination;
 }

@@ -17,6 +17,8 @@ inline constexpr std::size_t kStringNonceBytes = 16;
 inline constexpr std::size_t kStringTagBytes = 16;
 inline constexpr std::uint32_t kStringDescriptorVersionV1 = 1;
 inline constexpr std::uint32_t kStringAuthFlagTrapOnFailure = 1U;
+inline constexpr std::uint32_t kConstantPoolDescriptorVersionV1 = 1;
+inline constexpr std::uint32_t kConstantPoolAuthFlagTrapOnFailure = 1U;
 
 using Blake2sDigest = std::array<std::uint8_t, kBlake2sOutBytes>;
 using BuildKey = std::array<std::uint8_t, kBuildKeyBytes>;
@@ -69,14 +71,20 @@ inline constexpr std::array<std::array<std::uint8_t, 16>, 10> kBlake2sSigma = {{
 inline constexpr std::array<std::uint8_t, 2> kDomainFunction = {'f', 'n'};
 inline constexpr std::array<std::uint8_t, 5> kDomainBuild = {'b', 'u', 'i', 'l', 'd'};
 inline constexpr std::array<std::uint8_t, 6> kDomainString = {'s', 't', 'r', 'i', 'n', 'g'};
+inline constexpr std::array<std::uint8_t, 5> kDomainConstant = {'c', 'o', 'n', 's', 't'};
 inline constexpr std::array<std::uint8_t, 3> kDomainEnc = {'e', 'n', 'c'};
 inline constexpr std::array<std::uint8_t, 3> kDomainMac = {'m', 'a', 'c'};
 inline constexpr std::array<std::uint8_t, 5> kDomainNonce = {'n', 'o', 'n', 'c', 'e'};
 inline constexpr std::array<std::uint8_t, 6> kDomainStream = {'s', 't', 'r', 'e', 'a', 'm'};
 inline constexpr std::array<std::uint8_t, 10> kDomainStringTag = {
     's', 't', 'r', 'i', 'n', 'g', '_', 't', 'a', 'g'};
+inline constexpr std::array<std::uint8_t, 14> kDomainConstantPoolTag = {
+    'c', 'o', 'n', 's', 't', '_', 'p', 'o', 'o', 'l', '_', 't', 'a', 'g'};
 inline constexpr std::string_view kRuntimeStringDecodeSymbolV1 = "obf_string_auth_decode_v1";
+inline constexpr std::string_view kRuntimeConstantPoolDecodeSymbolV1 =
+    "obf_constant_pool_decode_v1";
 inline constexpr std::uint32_t kStringStateDecoded = 1U;
+inline constexpr std::uint32_t kConstantPoolStateDecoded = 1U;
 
 struct StringRuntimeDescriptorV1 {
   std::uint8_t* destination = nullptr;
@@ -89,6 +97,29 @@ struct StringRuntimeDescriptorV1 {
   std::uint64_t site_id = 0;
   std::uint32_t version = kStringDescriptorVersionV1;
   std::uint32_t flags = kStringAuthFlagTrapOnFailure;
+  StringNonce nonce{};
+  StringTag tag{};
+};
+
+struct ConstantPoolAuthMetadata {
+  std::uint32_t version = kConstantPoolDescriptorVersionV1;
+  std::uint32_t flags = kConstantPoolAuthFlagTrapOnFailure;
+  std::uint64_t length = 0;
+  std::uint64_t module_id = 0;
+  std::uint64_t pool_id = 0;
+  StringNonce nonce{};
+};
+
+struct ConstantPoolRuntimeDescriptorV1 {
+  std::uint8_t* destination = nullptr;
+  const std::uint8_t* ciphertext = nullptr;
+  const std::uint8_t* build_key = nullptr;
+  std::uint32_t* state = nullptr;
+  std::uint64_t length = 0;
+  std::uint64_t module_id = 0;
+  std::uint64_t pool_id = 0;
+  std::uint32_t version = kConstantPoolDescriptorVersionV1;
+  std::uint32_t flags = kConstantPoolAuthFlagTrapOnFailure;
   StringNonce nonce{};
   StringTag tag{};
 };
@@ -360,6 +391,26 @@ inline StringTag ComputeStringTag(std::span<const std::uint8_t> mac_key,
   Blake2sUpdateU64(state, metadata.module_id);
   Blake2sUpdateU64(state, metadata.function_id);
   Blake2sUpdateU64(state, metadata.site_id);
+  Blake2sUpdate(state, metadata.nonce);
+  Blake2sUpdate(state, ciphertext);
+  const Blake2sDigest digest = Blake2sFinal(state);
+
+  StringTag tag{};
+  std::memcpy(tag.data(), digest.data(), tag.size());
+  return tag;
+}
+
+inline StringTag ComputeConstantPoolTag(std::span<const std::uint8_t> mac_key,
+                                        const ConstantPoolAuthMetadata& metadata,
+                                        std::span<const std::uint8_t> ciphertext) {
+  Blake2sState state;
+  Blake2sInit(state, kBlake2sOutBytes, mac_key);
+  Blake2sUpdateDomain(state, kDomainConstantPoolTag);
+  Blake2sUpdateU32(state, metadata.version);
+  Blake2sUpdateU32(state, metadata.flags);
+  Blake2sUpdateU64(state, metadata.length);
+  Blake2sUpdateU64(state, metadata.module_id);
+  Blake2sUpdateU64(state, metadata.pool_id);
   Blake2sUpdate(state, metadata.nonce);
   Blake2sUpdate(state, ciphertext);
   const Blake2sDigest digest = Blake2sFinal(state);

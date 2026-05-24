@@ -46,7 +46,8 @@ bool apply_cfg_state_cleanup_stage(llvm::Module& module);
 
 bool apply_artifact_cleanup_stage(llvm::Module& module, const obfuscation_config& config);
 
-bool apply_constant_encoding_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
+bool apply_constant_encoding_stage(llvm::Module& module,
+                                   const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                    const obfuscation_config& config,
                                    const llvm::StringSet<>* skip_functions = nullptr);
 
