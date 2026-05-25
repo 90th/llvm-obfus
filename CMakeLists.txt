@@ -114,7 +114,6 @@ add_library(obf_core
   lib/transforms/entropy_initialization.cpp
   lib/transforms/function_outlining.cpp
   lib/transforms/instruction_substitution.cpp
-  lib/transforms/lifter_destruction.cpp
   lib/transforms/mba.cpp
   lib/transforms/opaque_gep.cpp
   lib/transforms/opaque_predicates.cpp

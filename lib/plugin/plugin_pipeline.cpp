@@ -1,6 +1,5 @@
 #include "obf/plugin/obfuscator_plugin_internal.h"
 
-#include "obf/support/stable_hash.h"
 #include "obf/transforms/entropy_initialization.h"
 #include "obf/vm/candidate_analysis.h"
 
@@ -640,52 +639,6 @@ bool apply_opaque_predicate_stage(const llvm::SmallVectorImpl<function_pipeline_
     const opaque_predicate_options options =
         build_opaque_predicate_options(config, state.report.decision);
     changed |= run_opaque_predicates(*state.function, options).insertion_count > 0;
-  }
-
-  return changed;
-}
-
-bool apply_lifter_destruction_stage(llvm::Module& module,
-                                    const llvm::SmallVectorImpl<function_pipeline_state>& states,
-                                    const obfuscation_config& config,
-                                    const llvm::StringSet<>* skip_functions) {
-  bool changed = false;
-  llvm::StringSet<> visited;
-
-  for (const function_pipeline_state& state : states) {
-    if (should_skip_function(state, skip_functions) ||
-        (!state.report.decision.policy.allow_flattening && !state.report.decision.policy.allow_vm)) {
-      continue;
-    }
-
-    const lifter_destruction_options options =
-        build_lifter_destruction_options(config, state.report.decision);
-    visited.insert(state.function->getName());
-    changed |= run_lifter_destruction(*state.function, options, state.report.decision.seed)
-                   .insertion_count > 0;
-  }
-
-  for (llvm::Function& function : module) {
-    if (function.isDeclaration() || visited.contains(function.getName()) ||
-        (skip_functions != nullptr && skip_functions->contains(function.getName()))) {
-      continue;
-    }
-
-    if (!function.hasFnAttribute("vm.dispatch.shape.switch") &&
-        !function.hasFnAttribute("vm.handler.route.trampoline") &&
-        !function.hasFnAttribute("vm.island.helper") && !function.hasFnAttribute("vm.island.subroute")) {
-      continue;
-    }
-
-    lifter_destruction_options options;
-    options.enabled = config.lifter_destruction.enabled;
-    options.max_sites_per_function = config.lifter_destruction.max_sites_per_function;
-    options.mba_depth = config.mba.depth;
-    options.target_vm_dispatchers = config.lifter_destruction.target_vm_dispatchers;
-    options.target_flattened_headers = config.lifter_destruction.target_flattened_headers;
-    changed |= run_lifter_destruction(
-                   function, options, stable_hash_string(function.getName(), config.seed))
-                   .insertion_count > 0;
   }
 
   return changed;

@@ -208,34 +208,6 @@ void TestConstantProtectionModeConfig() {
   std::filesystem::remove(path, ec);
 }
 
-void TestLifterDestructionConfig() {
-  const std::filesystem::path path =
-      std::filesystem::temp_directory_path() / "obf_lifter_destruction_config.yaml";
-  {
-    std::ofstream out(path);
-    out << "default_level: strong\n";
-    out << "lifter_destruction:\n";
-    out << "  enabled: true\n";
-    out << "  max_sites_per_function: 3\n";
-  }
-
-  llvm::Expected<obf::obfuscation_config> loaded = obf::load_config_from_file(path.string());
-  ExpectTrue(static_cast<bool>(loaded), "lifter destruction config should load successfully");
-  if (loaded) {
-    ExpectTrue(loaded->lifter_destruction.enabled,
-               "lifter destruction enable flag should parse from yaml");
-    ExpectTrue(loaded->lifter_destruction.max_sites_per_function == 3,
-               "max_sites_per_function should respect yaml override");
-
-    const std::string summary = obf::summarize_config(*loaded);
-    ExpectTrue(summary.find("lifter_destruction.enabled: true") != std::string::npos,
-               "config summary should report lifter destruction enablement");
-  }
-
-  std::error_code ec;
-  std::filesystem::remove(path, ec);
-}
-
 void TestAuthEncodingBlake2sKnownAnswers() {
   const std::array<std::uint8_t, 0> empty_input{};
   const std::array<std::uint8_t, 3> abc = {'a', 'b', 'c'};
@@ -432,7 +404,6 @@ int main() {
   TestAuthenticatedStringConfig();
   TestReleaseMarkerConfig();
   TestConstantProtectionModeConfig();
-  TestLifterDestructionConfig();
   TestPolicyPrecedenceAndFloors();
   TestConfigEdgeCases();
   TestSeedStability();

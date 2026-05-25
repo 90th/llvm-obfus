@@ -14,7 +14,6 @@
 #include "obf/transforms/control_flattening.h"
 #include "obf/transforms/function_outlining.h"
 #include "obf/transforms/instruction_substitution.h"
-#include "obf/transforms/lifter_destruction.h"
 #include "obf/transforms/opaque_gep.h"
 #include "obf/transforms/opaque_predicates.h"
 #include "obf/transforms/string_encoding.h"
@@ -109,9 +108,6 @@ bogus_control_flow_options build_bogus_control_flow_options(const obfuscation_co
 
 opaque_predicate_options build_opaque_predicate_options(const obfuscation_config& config,
                                                         const policy_decision& decision);
-
-lifter_destruction_options build_lifter_destruction_options(const obfuscation_config& config,
-                                                            const policy_decision& decision);
 
 llvm::SmallVector<transform_report_entry, 64>
 build_transform_reports(llvm::Module& module,

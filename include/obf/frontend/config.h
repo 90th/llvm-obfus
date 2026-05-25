@@ -61,13 +61,6 @@ struct mba_config {
   std::uint32_t depth = 1;
 };
 
-struct lifter_destruction_config {
-  bool enabled = false;
-  std::uint32_t max_sites_per_function = 1;
-  bool target_vm_dispatchers = true;
-  bool target_flattened_headers = true;
-};
-
 struct security_gate_config {
   bool fail_on_public_obf_symbol = false;
   bool strip_release_markers = false;
@@ -83,7 +76,6 @@ struct obfuscation_config {
   string_encoding_config string_encoding;
   constant_encoding_config constant_encoding;
   mba_config mba;
-  lifter_destruction_config lifter_destruction;
   security_gate_config security;
   bool debug_preserve_generated_names = false;
 };

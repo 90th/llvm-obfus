@@ -10,7 +10,6 @@
 #include "obf/transforms/control_flattening.h"
 #include "obf/transforms/function_outlining.h"
 #include "obf/transforms/instruction_substitution.h"
-#include "obf/transforms/lifter_destruction.h"
 #include "obf/transforms/opaque_gep.h"
 #include "obf/transforms/opaque_predicates.h"
 #include "obf/transforms/string_encoding.h"
@@ -226,18 +225,6 @@ class opaque_predicate_pass : public llvm::PassInfoMixin<opaque_predicate_pass> 
   }
 };
 
-class lifter_destruction_pass : public llvm::PassInfoMixin<lifter_destruction_pass> {
- public:
-  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
-    return run_stateful_stage(module,
-                              [](llvm::Module& current_module,
-                                 const llvm::SmallVectorImpl<function_pipeline_state>& states,
-                                 const obfuscation_config& config) {
-                                return apply_lifter_destruction_stage(current_module, states, config);
-                              });
-  }
-};
-
 class bogus_control_flow_pass : public llvm::PassInfoMixin<bogus_control_flow_pass> {
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
@@ -309,10 +296,9 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     changed |= apply_instruction_substitution_to_functions(strong_vm_virtualized, config);
     changed |= apply_bogus_control_flow_to_functions(strong_vm_virtualized, config);
 
-    // Final late-stage sequence: remove CFG placeholders, inject machine-code traps,
-    // enforce invariants, then strip markers.
+    // Final late-stage sequence: remove CFG placeholders, enforce invariants,
+    // then strip markers.
     changed |= apply_cfg_state_cleanup_stage(module);
-    changed |= apply_lifter_destruction_stage(module, post_vm_states, config);
     changed |= enforce_security_gates(module, states, post_vm_virtualized, config);
     changed |= apply_artifact_cleanup_stage(module, config);
 
@@ -395,11 +381,6 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
 
                   if (name == "obf-opaque-preds") {
                     module_pm.addPass(obf::opaque_predicate_pass());
-                    return true;
-                  }
-
-                  if (name == "obf-lifter-destruction") {
-                    module_pm.addPass(obf::lifter_destruction_pass());
                     return true;
                   }
 
