@@ -14,3 +14,9 @@ string_encoding:
 constant_encoding:
   max_constants_per_function: 4
   min_bit_width: 8
+indirect_dispatch:
+  enabled: true
+  max_sites_per_function: 8
+  max_switch_targets: 12
+  target_vm_dispatchers: true
+  target_flattened_headers: true

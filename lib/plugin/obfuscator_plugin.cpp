@@ -310,9 +310,11 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     changed |= apply_instruction_substitution_to_functions(strong_vm_virtualized, config);
     changed |= apply_bogus_control_flow_to_functions(strong_vm_virtualized, config);
 
-    // Final late-stage sequence: remove CFG placeholders, enforce invariants,
-    // then strip markers.
+    // Final late-stage sequence: remove CFG placeholders, lower remaining
+    // dispatch hubs, enforce invariants, then strip markers.
     changed |= apply_cfg_state_cleanup_stage(module);
+    changed |= apply_indirect_dispatch_stage(post_vm_states, config, &all_vm_virtualized);
+    changed |= apply_indirect_dispatch_to_functions(post_vm_virtualized, config);
     changed |= enforce_security_gates(module, states, post_vm_virtualized, config);
     changed |= apply_artifact_cleanup_stage(module, config);
 

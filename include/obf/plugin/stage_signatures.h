@@ -103,6 +103,9 @@ apply_control_flattening_to_functions(const virtualized_function_map& virtualize
 bool apply_bogus_control_flow_to_functions(const virtualized_function_map& virtualized_functions,
                                            const obfuscation_config& config);
 
+bool apply_indirect_dispatch_to_functions(const virtualized_function_map& virtualized_functions,
+                                          const obfuscation_config& config);
+
 // VM rewriting and utilities
 bool rewrite_calls_to_virtualized_functions(llvm::Module& module,
                                             const virtualized_function_map& virtualized_functions,

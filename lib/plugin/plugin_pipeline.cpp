@@ -749,6 +749,29 @@ bool apply_bogus_control_flow_to_functions(const virtualized_function_map& virtu
   return changed;
 }
 
+bool apply_indirect_dispatch_to_functions(const virtualized_function_map& virtualized_functions,
+                                          const obfuscation_config& config) {
+  if (!config.indirect_dispatch.enabled) { return false; }
+
+  bool changed = false;
+
+  for (const auto& entry : virtualized_functions) {
+    llvm::Function* function = entry.second.implementation_function;
+    if (function == nullptr || function->isDeclaration()) { continue; }
+
+    if (entry.second.state == nullptr ||
+        !entry.second.state->report.decision.policy.allow_indirect_calls) {
+      continue;
+    }
+
+    const indirect_dispatch_options options =
+        build_indirect_dispatch_options(config, entry.second.state->report.decision);
+    changed |= run_indirect_dispatch(*function, options).site_count > 0;
+  }
+
+  return changed;
+}
+
 bool enforce_security_gates(llvm::Module& module,
                             const llvm::SmallVectorImpl<function_pipeline_state>& states,
                             const virtualized_function_map& virtualized_functions,
