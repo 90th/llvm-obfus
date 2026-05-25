@@ -14,6 +14,7 @@
 #include "obf/transforms/opaque_predicates.h"
 #include "obf/transforms/string_encoding.h"
 #include "obf/transforms/entropy_initialization.h"
+#include "obf/transforms/indirect_dispatch.h"
 
 // Note: apply_cfg_state_cleanup_stage() is defined in plugin_pipeline.cpp (no header needed)
 
@@ -131,7 +132,20 @@ class string_encoding_pass : public llvm::PassInfoMixin<string_encoding_pass> {
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config) {
                                 return apply_string_encoding_stage(current_module, states, config);
-                              });
+                               });
+  }
+};
+
+class indirect_dispatch_pass : public llvm::PassInfoMixin<indirect_dispatch_pass> {
+ public:
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+    return run_stateful_stage(
+        module,
+        [](llvm::Module&,
+           const llvm::SmallVectorImpl<function_pipeline_state>& states,
+           const obfuscation_config& config) {
+          return apply_indirect_dispatch_stage(states, config);
+        });
   }
 };
 
@@ -346,6 +360,11 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
 
                   if (name == "obf-string-encode") {
                     module_pm.addPass(obf::string_encoding_pass());
+                    return true;
+                  }
+
+                  if (name == "obf-indirect-dispatch") {
+                    module_pm.addPass(obf::indirect_dispatch_pass());
                     return true;
                   }
 

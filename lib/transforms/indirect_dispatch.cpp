@@ -1,0 +1,474 @@
+#include "obf/transforms/indirect_dispatch.h"
+
+#include "obf/support/stable_hash.h"
+
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/NoFolder.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+namespace obf {
+
+namespace {
+
+enum class dispatch_site_kind {
+  branch,
+  switch_dispatch,
+};
+
+struct dispatch_site {
+  dispatch_site_kind kind = dispatch_site_kind::branch;
+  llvm::Instruction* terminator = nullptr;
+  llvm::SmallVector<llvm::BasicBlock*, 8> unique_targets;
+  llvm::BasicBlock* default_target = nullptr;
+  std::uint64_t seed = 0;
+};
+
+struct site_collection {
+  llvm::SmallVector<dispatch_site, 8> sites;
+  std::string detail;
+};
+
+struct site_masking {
+  llvm::IntegerType* int_type = nullptr;
+  llvm::Type* pointer_type = nullptr;
+  llvm::ConstantInt* key_constant = nullptr;
+  llvm::ConstantInt* bias_constant = nullptr;
+  unsigned rotate_amount = 0;
+  llvm::DenseMap<llvm::BasicBlock*, llvm::Value*> encoded_tokens;
+};
+
+site_collection make_empty_site_collection(std::string detail) {
+  return {.sites = {}, .detail = std::move(detail)};
+}
+
+std::string make_site_name(std::size_t site_index, llvm::StringRef suffix) {
+  return "obf.idis.site" + std::to_string(site_index) + "." + suffix.str();
+}
+
+std::string make_result_detail(const indirect_dispatch_result& result, llvm::StringRef suffix) {
+  return std::to_string(result.site_count) + " site(s) rewritten (branches=" +
+         std::to_string(result.branch_site_count) + ", switches=" +
+         std::to_string(result.switch_site_count) + "); " + suffix.str();
+}
+
+llvm::BasicBlock& select_anchor_block(llvm::BasicBlock& source_block,
+                                      llvm::ArrayRef<llvm::BasicBlock*> unique_targets) {
+  if (&source_block != &source_block.getParent()->getEntryBlock()) { return source_block; }
+
+  for (llvm::BasicBlock* target : unique_targets) {
+    if (target != nullptr && target != &source_block) { return *target; }
+  }
+
+  return source_block;
+}
+
+bool is_legal_anchor_block(llvm::BasicBlock& source_block, llvm::BasicBlock& anchor_block) {
+  return &anchor_block != &source_block.getParent()->getEntryBlock() ||
+         &source_block != &source_block.getParent()->getEntryBlock();
+}
+
+void append_unique_target(llvm::SmallVectorImpl<llvm::BasicBlock*>& targets,
+                          llvm::BasicBlock* target) {
+  if (target == nullptr) { return; }
+
+  if (std::find(targets.begin(), targets.end(), target) == targets.end()) { targets.push_back(target); }
+}
+
+bool has_unsupported_function_shape(const llvm::Function& function, std::string& detail) {
+  if (function.hasPersonalityFn()) {
+    detail = "contains EH personality";
+    return true;
+  }
+
+  for (const llvm::BasicBlock& block : function) {
+    if (block.isEHPad()) {
+      detail = "contains EH pad";
+      return true;
+    }
+
+    const llvm::Instruction* terminator = block.getTerminator();
+    if (terminator == nullptr) {
+      detail = "contains unterminated block";
+      return true;
+    }
+
+    if (llvm::isa<llvm::InvokeInst>(terminator) || llvm::isa<llvm::CallBrInst>(terminator) ||
+        llvm::isa<llvm::IndirectBrInst>(terminator) || llvm::isa<llvm::CatchSwitchInst>(terminator) ||
+        llvm::isa<llvm::CatchReturnInst>(terminator) || llvm::isa<llvm::CleanupReturnInst>(terminator) ||
+        llvm::isa<llvm::ResumeInst>(terminator)) {
+      detail = "contains EH or indirect terminator";
+      return true;
+    }
+
+    for (const llvm::Instruction& instruction : block) {
+      const auto* call = llvm::dyn_cast<llvm::CallInst>(&instruction);
+      if (call != nullptr && call->isMustTailCall()) {
+        detail = "contains musttail call";
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+std::uint64_t derive_site_seed(const llvm::Function& function,
+                               const indirect_dispatch_options& options,
+                               std::size_t site_index) {
+  std::uint64_t seed = options.seed;
+  seed = mix_seed(seed, stable_hash_string(function.getName(), 0x696469735f6631ULL));
+  seed = mix_seed(seed, static_cast<std::uint64_t>(site_index + 1));
+  return seed;
+}
+
+site_collection collect_sites(const llvm::Function& function,
+                              const indirect_dispatch_options& options) {
+  if (!options.enabled) { return make_empty_site_collection("indirect_dispatch disabled"); }
+
+  if (function.isDeclaration()) { return make_empty_site_collection("declaration"); }
+
+  if (options.max_sites_per_function == 0) {
+    return make_empty_site_collection("max_sites_per_function is zero");
+  }
+
+  if (!options.target_flattened_headers && !options.target_vm_dispatchers) {
+    return make_empty_site_collection("all indirect dispatch targets disabled");
+  }
+
+  const llvm::Module* module = function.getParent();
+  if (module == nullptr) { return make_empty_site_collection("detached function"); }
+
+  const llvm::DataLayout& data_layout = module->getDataLayout();
+  const unsigned program_address_space = data_layout.getProgramAddressSpace();
+  if (data_layout.isNonIntegralAddressSpace(program_address_space)) {
+    return make_empty_site_collection("non-integral program address space");
+  }
+
+  std::string unsupported_detail;
+  if (has_unsupported_function_shape(function, unsupported_detail)) {
+    return make_empty_site_collection(std::move(unsupported_detail));
+  }
+
+  llvm::SmallVector<dispatch_site, 8> sites;
+  std::size_t next_site_index = 0;
+  for (const llvm::BasicBlock& block : function) {
+    if (sites.size() >= options.max_sites_per_function) { break; }
+
+    const llvm::Instruction* terminator = block.getTerminator();
+    if (terminator == nullptr) { continue; }
+
+    if (options.target_flattened_headers) {
+      const auto* branch = llvm::dyn_cast<llvm::BranchInst>(terminator);
+      if (branch != nullptr && branch->isConditional()) {
+        dispatch_site site;
+        site.kind = dispatch_site_kind::branch;
+        site.terminator = const_cast<llvm::Instruction*>(terminator);
+        append_unique_target(site.unique_targets, branch->getSuccessor(0));
+        append_unique_target(site.unique_targets, branch->getSuccessor(1));
+        site.seed = derive_site_seed(function, options, next_site_index++);
+        sites.push_back(std::move(site));
+        continue;
+      }
+    }
+
+    if (!options.target_vm_dispatchers) { continue; }
+
+    const auto* switch_inst = llvm::dyn_cast<llvm::SwitchInst>(terminator);
+    if (switch_inst == nullptr || switch_inst->getNumCases() == 0) { continue; }
+
+    if (switch_inst->getNumCases() + 1 > options.max_switch_targets) { continue; }
+
+    dispatch_site site;
+    site.kind = dispatch_site_kind::switch_dispatch;
+    site.terminator = const_cast<llvm::Instruction*>(terminator);
+    site.default_target = const_cast<llvm::BasicBlock*>(switch_inst->getDefaultDest());
+    append_unique_target(site.unique_targets, site.default_target);
+    for (const auto& case_handle : switch_inst->cases()) {
+      append_unique_target(site.unique_targets,
+                           const_cast<llvm::BasicBlock*>(case_handle.getCaseSuccessor()));
+    }
+    site.seed = derive_site_seed(function, options, next_site_index++);
+    sites.push_back(std::move(site));
+  }
+
+  if (sites.empty()) { return make_empty_site_collection("no supported branch or switch sites"); }
+
+  return {.sites = std::move(sites),
+          .detail = std::to_string(sites.size()) + " site(s) selected"};
+}
+
+template <typename BuilderT>
+llvm::Value* create_rotate_left(BuilderT& builder,
+                                llvm::Value* value,
+                                unsigned rotate_amount,
+                                llvm::StringRef name) {
+  auto* int_type = llvm::cast<llvm::IntegerType>(value->getType());
+  if (rotate_amount == 0 || rotate_amount % int_type->getBitWidth() == 0) { return value; }
+
+  llvm::Value* shl = builder.CreateShl(
+      value, llvm::ConstantInt::get(int_type, rotate_amount), (name + ".shl").str());
+  llvm::Value* lshr = builder.CreateLShr(value,
+                                         llvm::ConstantInt::get(int_type,
+                                                                int_type->getBitWidth() -
+                                                                    rotate_amount),
+                                         (name + ".lshr").str());
+  return builder.CreateOr(shl, lshr, name);
+}
+
+template <typename BuilderT>
+llvm::Value* create_rotate_right(BuilderT& builder,
+                                 llvm::Value* value,
+                                 unsigned rotate_amount,
+                                 llvm::StringRef name) {
+  auto* int_type = llvm::cast<llvm::IntegerType>(value->getType());
+  if (rotate_amount == 0 || rotate_amount % int_type->getBitWidth() == 0) { return value; }
+
+  llvm::Value* lshr = builder.CreateLShr(
+      value, llvm::ConstantInt::get(int_type, rotate_amount), (name + ".lshr").str());
+  llvm::Value* shl = builder.CreateShl(value,
+                                       llvm::ConstantInt::get(int_type,
+                                                              int_type->getBitWidth() -
+                                                                  rotate_amount),
+                                       (name + ".shl").str());
+  return builder.CreateOr(lshr, shl, name);
+}
+
+llvm::Instruction* get_entry_insertion_point(llvm::Function& function) {
+  for (llvm::Instruction& instruction : function.getEntryBlock()) {
+    if (llvm::isa<llvm::PHINode>(instruction) || llvm::isa<llvm::AllocaInst>(instruction) ||
+        instruction.isDebugOrPseudoInst()) {
+      continue;
+    }
+
+    return &instruction;
+  }
+
+  return function.getEntryBlock().getTerminator();
+}
+
+site_masking materialize_site_tokens(llvm::Function& function,
+                                     llvm::BasicBlock& anchor_block,
+                                     llvm::ArrayRef<llvm::BasicBlock*> unique_targets,
+                                     llvm::IRBuilder<llvm::NoFolder>& entry_builder,
+                                     std::uint64_t site_seed,
+                                     std::size_t site_index) {
+  const llvm::DataLayout& data_layout = function.getParent()->getDataLayout();
+  const unsigned program_address_space = data_layout.getProgramAddressSpace();
+  auto* int_type = llvm::cast<llvm::IntegerType>(
+      data_layout.getIntPtrType(function.getContext(), program_address_space));
+
+  const unsigned bit_width = int_type->getBitWidth();
+  const unsigned rotate_amount =
+      bit_width > 1
+          ? 1U + static_cast<unsigned>(mix_seed(site_seed, 0x726f745f7331ULL) % (bit_width - 1U))
+          : 0U;
+
+  llvm::ConstantInt* key_constant =
+      llvm::ConstantInt::get(int_type, mix_seed(site_seed, 0x6b65795f7331ULL));
+  llvm::ConstantInt* bias_constant =
+      llvm::ConstantInt::get(int_type, mix_seed(site_seed, 0x626961735f7331ULL));
+
+  site_masking masking;
+  masking.int_type = int_type;
+  masking.pointer_type = llvm::BlockAddress::get(&function, &anchor_block)->getType();
+  masking.key_constant = key_constant;
+  masking.bias_constant = bias_constant;
+  masking.rotate_amount = rotate_amount;
+
+  llvm::Constant* anchor_address = llvm::BlockAddress::get(&function, &anchor_block);
+  llvm::Constant* anchor_int = llvm::ConstantExpr::getPtrToInt(anchor_address, int_type);
+
+  for (std::size_t target_index = 0; target_index < unique_targets.size(); ++target_index) {
+    llvm::BasicBlock* target = unique_targets[target_index];
+    llvm::Constant* target_address = llvm::BlockAddress::get(&function, target);
+    llvm::Constant* target_int = llvm::ConstantExpr::getPtrToInt(target_address, int_type);
+    llvm::Constant* delta = llvm::ConstantExpr::getSub(target_int, anchor_int);
+
+    llvm::Value* xored = entry_builder.CreateXor(
+        delta,
+        key_constant,
+        make_site_name(site_index, "xor" + std::to_string(target_index)));
+    llvm::Value* rotated = create_rotate_left(entry_builder,
+                                              xored,
+                                              rotate_amount,
+                                              make_site_name(site_index,
+                                                             "rot" + std::to_string(target_index)));
+    llvm::Value* encoded = entry_builder.CreateAdd(
+        rotated,
+        bias_constant,
+        make_site_name(site_index, "tok" + std::to_string(target_index)));
+    masking.encoded_tokens[target] = encoded;
+  }
+
+  return masking;
+}
+
+llvm::Value* decode_selected_token(llvm::IRBuilder<llvm::NoFolder>& builder,
+                                   llvm::Function& function,
+                                   llvm::BasicBlock& anchor_block,
+                                   llvm::Value* selected_token,
+                                   const site_masking& masking) {
+  llvm::Value* unbiased = builder.CreateSub(selected_token,
+                                            masking.bias_constant,
+                                            "obf.idis.unbias");
+  llvm::Value* rotated =
+      create_rotate_right(builder, unbiased, masking.rotate_amount, "obf.idis.rot");
+  llvm::Value* delta = builder.CreateXor(rotated, masking.key_constant, "obf.idis.delta");
+  llvm::Value* anchor = builder.CreatePtrToInt(
+      llvm::BlockAddress::get(&function, &anchor_block), masking.int_type, "obf.idis.anchor");
+  llvm::Value* dest_int = builder.CreateAdd(anchor, delta, "obf.idis.addr");
+  return builder.CreateIntToPtr(dest_int, masking.pointer_type, "obf.idis.dest");
+}
+
+bool rewrite_branch_site(llvm::BranchInst& branch,
+                         llvm::IRBuilder<llvm::NoFolder>& entry_builder,
+                         std::uint64_t site_seed,
+                         std::size_t site_index) {
+  if (!branch.isConditional()) { return false; }
+
+  llvm::BasicBlock& source_block = *branch.getParent();
+  llvm::Function& function = *source_block.getParent();
+  llvm::SmallVector<llvm::BasicBlock*, 2> unique_targets;
+  append_unique_target(unique_targets, branch.getSuccessor(0));
+  append_unique_target(unique_targets, branch.getSuccessor(1));
+  llvm::BasicBlock& anchor_block = select_anchor_block(source_block, unique_targets);
+  if (!is_legal_anchor_block(source_block, anchor_block)) { return false; }
+
+  const site_masking masking = materialize_site_tokens(
+      function, anchor_block, unique_targets, entry_builder, site_seed, site_index);
+
+  llvm::IRBuilder<llvm::NoFolder> builder(function.getContext(), llvm::NoFolder());
+  builder.SetInsertPoint(&branch);
+
+  llvm::Value* frozen_condition = builder.CreateFreeze(branch.getCondition(), "obf.idis.cond");
+  llvm::Value* selected_token = builder.CreateSelect(
+      frozen_condition,
+      masking.encoded_tokens.lookup(branch.getSuccessor(0)),
+      masking.encoded_tokens.lookup(branch.getSuccessor(1)),
+      "obf.idis.sel");
+  llvm::Value* destination =
+      decode_selected_token(builder, function, anchor_block, selected_token, masking);
+
+  llvm::IndirectBrInst* indirect_branch = builder.CreateIndirectBr(destination, unique_targets.size());
+  for (llvm::BasicBlock* target : unique_targets) { indirect_branch->addDestination(target); }
+
+  branch.eraseFromParent();
+  return true;
+}
+
+bool rewrite_switch_site(llvm::SwitchInst& switch_inst,
+                         llvm::IRBuilder<llvm::NoFolder>& entry_builder,
+                         std::uint64_t site_seed,
+                         std::size_t site_index) {
+  llvm::BasicBlock& source_block = *switch_inst.getParent();
+  llvm::Function& function = *source_block.getParent();
+
+  llvm::SmallVector<llvm::BasicBlock*, 8> unique_targets;
+  append_unique_target(unique_targets, switch_inst.getDefaultDest());
+  for (const auto& case_handle : switch_inst.cases()) {
+    append_unique_target(unique_targets, case_handle.getCaseSuccessor());
+  }
+  llvm::BasicBlock& anchor_block = select_anchor_block(source_block, unique_targets);
+  if (!is_legal_anchor_block(source_block, anchor_block)) { return false; }
+
+  const site_masking masking = materialize_site_tokens(
+      function, anchor_block, unique_targets, entry_builder, site_seed, site_index);
+
+  llvm::IRBuilder<llvm::NoFolder> builder(function.getContext(), llvm::NoFolder());
+  builder.SetInsertPoint(&switch_inst);
+
+  llvm::Value* frozen_state = builder.CreateFreeze(switch_inst.getCondition(), "obf.idis.state");
+  llvm::Value* selected_token = masking.encoded_tokens.lookup(switch_inst.getDefaultDest());
+  std::size_t case_index = 0;
+  for (const auto& case_handle : switch_inst.cases()) {
+    llvm::Value* is_match = builder.CreateICmpEQ(
+        frozen_state, case_handle.getCaseValue(), "obf.idis.case" + std::to_string(case_index));
+    selected_token = builder.CreateSelect(is_match,
+                                          masking.encoded_tokens.lookup(case_handle.getCaseSuccessor()),
+                                          selected_token,
+                                          "obf.idis.sel" + std::to_string(case_index));
+    ++case_index;
+  }
+
+  llvm::Value* destination =
+      decode_selected_token(builder, function, anchor_block, selected_token, masking);
+
+  llvm::IndirectBrInst* indirect_branch = builder.CreateIndirectBr(destination, unique_targets.size());
+  for (llvm::BasicBlock* target : unique_targets) { indirect_branch->addDestination(target); }
+
+  switch_inst.eraseFromParent();
+  return true;
+}
+
+}  // namespace
+
+indirect_dispatch_result analyze_indirect_dispatch(const llvm::Function& function,
+                                                   const indirect_dispatch_options& options) {
+  const site_collection collection = collect_sites(function, options);
+  indirect_dispatch_result result;
+  result.detail = collection.detail;
+  for (const dispatch_site& site : collection.sites) {
+    ++result.site_count;
+    if (site.kind == dispatch_site_kind::branch) {
+      ++result.branch_site_count;
+    } else {
+      ++result.switch_site_count;
+    }
+  }
+  if (result.site_count == 0 && result.detail.empty()) {
+    result.detail = "no supported branch or switch sites";
+  }
+  return result;
+}
+
+indirect_dispatch_result run_indirect_dispatch(llvm::Function& function,
+                                               const indirect_dispatch_options& options) {
+  const site_collection collection = collect_sites(function, options);
+  indirect_dispatch_result result;
+  if (collection.sites.empty()) {
+    result.detail = collection.detail;
+    return result;
+  }
+
+  llvm::Instruction* entry_insertion_point = get_entry_insertion_point(function);
+  llvm::IRBuilder<llvm::NoFolder> entry_builder(function.getContext(), llvm::NoFolder());
+  entry_builder.SetInsertPoint(entry_insertion_point);
+
+  for (std::size_t site_index = 0; site_index < collection.sites.size(); ++site_index) {
+    const dispatch_site& site = collection.sites[site_index];
+    bool rewritten = false;
+    if (site.kind == dispatch_site_kind::branch) {
+      rewritten = rewrite_branch_site(
+          *llvm::cast<llvm::BranchInst>(site.terminator), entry_builder, site.seed, site_index);
+      if (rewritten) { ++result.branch_site_count; }
+    } else {
+      rewritten = rewrite_switch_site(
+          *llvm::cast<llvm::SwitchInst>(site.terminator), entry_builder, site.seed, site_index);
+      if (rewritten) { ++result.switch_site_count; }
+    }
+
+    if (rewritten) { ++result.site_count; }
+  }
+
+  if (result.site_count == 0) {
+    result.detail = collection.detail;
+    return result;
+  }
+
+  result.detail = make_result_detail(result, "anchor-delta indirect dispatch");
+  return result;
+}
+
+}  // namespace obf

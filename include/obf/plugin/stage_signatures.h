@@ -35,6 +35,10 @@ bool apply_block_split_stage(const llvm::SmallVectorImpl<function_pipeline_state
                              const obfuscation_config& config,
                              const llvm::StringSet<>* skip_functions = nullptr);
 
+bool apply_indirect_dispatch_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                                   const obfuscation_config& config,
+                                   const llvm::StringSet<>* skip_functions = nullptr);
+
 bool apply_string_encoding_stage(llvm::Module& module,
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config,

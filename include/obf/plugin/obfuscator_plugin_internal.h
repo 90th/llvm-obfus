@@ -13,6 +13,7 @@
 #include "obf/transforms/constant_encoding.h"
 #include "obf/transforms/control_flattening.h"
 #include "obf/transforms/function_outlining.h"
+#include "obf/transforms/indirect_dispatch.h"
 #include "obf/transforms/instruction_substitution.h"
 #include "obf/transforms/opaque_gep.h"
 #include "obf/transforms/opaque_predicates.h"
@@ -92,6 +93,9 @@ constant_encoding_options build_constant_encoding_options(const obfuscation_conf
 
 control_flattening_options build_control_flattening_options(const obfuscation_config& config,
                                                             const policy_decision& decision);
+
+indirect_dispatch_options build_indirect_dispatch_options(const obfuscation_config& config,
+                                                          const policy_decision& decision);
 
 instruction_substitution_options
 build_instruction_substitution_options(const obfuscation_config& config,

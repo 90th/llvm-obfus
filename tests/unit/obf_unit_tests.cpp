@@ -208,6 +208,45 @@ void TestConstantProtectionModeConfig() {
   std::filesystem::remove(path, ec);
 }
 
+void TestIndirectDispatchConfig() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "obf_indirect_dispatch_config.yaml";
+  {
+    std::ofstream out(path);
+    out << "default_level: strong\n";
+    out << "indirect_dispatch:\n";
+    out << "  enabled: true\n";
+    out << "  max_sites_per_function: 9\n";
+    out << "  max_switch_targets: 7\n";
+    out << "  target_vm_dispatchers: false\n";
+    out << "  target_flattened_headers: true\n";
+  }
+
+  llvm::Expected<obf::obfuscation_config> loaded = obf::load_config_from_file(path.string());
+  ExpectTrue(static_cast<bool>(loaded), "indirect dispatch config should load successfully");
+  if (loaded) {
+    ExpectTrue(loaded->indirect_dispatch.enabled,
+               "indirect_dispatch.enabled should parse from yaml");
+    ExpectTrue(loaded->indirect_dispatch.max_sites_per_function == 9,
+               "indirect_dispatch.max_sites_per_function should respect yaml override");
+    ExpectTrue(loaded->indirect_dispatch.max_switch_targets == 7,
+               "indirect_dispatch.max_switch_targets should respect yaml override");
+    ExpectTrue(!loaded->indirect_dispatch.target_vm_dispatchers,
+               "indirect_dispatch.target_vm_dispatchers should parse from yaml");
+    ExpectTrue(loaded->indirect_dispatch.target_flattened_headers,
+               "indirect_dispatch.target_flattened_headers should parse from yaml");
+
+    const std::string summary = obf::summarize_config(*loaded);
+    ExpectTrue(summary.find("indirect_dispatch.enabled: true") != std::string::npos,
+               "config summary should report indirect dispatch enablement");
+    ExpectTrue(summary.find("indirect_dispatch.max_switch_targets: 7") != std::string::npos,
+               "config summary should report indirect dispatch switch cap");
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 void TestAuthEncodingBlake2sKnownAnswers() {
   const std::array<std::uint8_t, 0> empty_input{};
   const std::array<std::uint8_t, 3> abc = {'a', 'b', 'c'};
@@ -404,6 +443,7 @@ int main() {
   TestAuthenticatedStringConfig();
   TestReleaseMarkerConfig();
   TestConstantProtectionModeConfig();
+  TestIndirectDispatchConfig();
   TestPolicyPrecedenceAndFloors();
   TestConfigEdgeCases();
   TestSeedStability();

@@ -360,6 +360,18 @@ control_flattening_options build_control_flattening_options(const obfuscation_co
   return options;
 }
 
+indirect_dispatch_options build_indirect_dispatch_options(const obfuscation_config& config,
+                                                          const policy_decision& decision) {
+  indirect_dispatch_options options;
+  options.enabled = config.indirect_dispatch.enabled;
+  options.max_sites_per_function = config.indirect_dispatch.max_sites_per_function;
+  options.max_switch_targets = config.indirect_dispatch.max_switch_targets;
+  options.target_vm_dispatchers = config.indirect_dispatch.target_vm_dispatchers;
+  options.target_flattened_headers = config.indirect_dispatch.target_flattened_headers;
+  options.seed = decision.seed;
+  return options;
+}
+
 instruction_substitution_options
 build_instruction_substitution_options(const obfuscation_config& config,
                                        const policy_decision& decision) {

@@ -101,6 +101,18 @@ struct MappingTraits<obf::mba_config> {
 };
 
 template <>
+struct MappingTraits<obf::indirect_dispatch_config> {
+  static void mapping(IO& io, obf::indirect_dispatch_config& config) {
+    io.mapOptional("enabled", config.enabled, false);
+    io.mapOptional(
+        "max_sites_per_function", config.max_sites_per_function, std::uint32_t{4});
+    io.mapOptional("max_switch_targets", config.max_switch_targets, std::uint32_t{8});
+    io.mapOptional("target_vm_dispatchers", config.target_vm_dispatchers, true);
+    io.mapOptional("target_flattened_headers", config.target_flattened_headers, true);
+  }
+};
+
+template <>
 struct MappingTraits<obf::security_gate_config> {
   static void mapping(IO& io, obf::security_gate_config& config) {
     io.mapOptional("fail_on_public_obf_symbol", config.fail_on_public_obf_symbol, false);
@@ -120,6 +132,7 @@ struct MappingTraits<obf::obfuscation_config> {
     io.mapOptional("string_encoding", config.string_encoding);
     io.mapOptional("constant_encoding", config.constant_encoding);
     io.mapOptional("mba", config.mba);
+    io.mapOptional("indirect_dispatch", config.indirect_dispatch);
     io.mapOptional("security", config.security);
     io.mapOptional("debug_preserve_generated_names", config.debug_preserve_generated_names, false);
   }
@@ -140,6 +153,7 @@ struct config_parse_presence {
   bool string_encoding = false;
   bool constant_encoding = false;
   bool mba = false;
+  bool indirect_dispatch = false;
   bool security = false;
   bool debug_preserve_generated_names = false;
 };
@@ -170,6 +184,7 @@ config_parse_presence collect_presence(llvm::StringRef text) {
           .string_encoding = has_top_level_key(text, "string_encoding"),
           .constant_encoding = has_top_level_key(text, "constant_encoding"),
           .mba = has_top_level_key(text, "mba"),
+          .indirect_dispatch = has_top_level_key(text, "indirect_dispatch"),
           .security = has_top_level_key(text, "security"),
           .debug_preserve_generated_names =
               has_top_level_key(text, "debug_preserve_generated_names")};
@@ -255,6 +270,7 @@ obfuscation_config apply_profile_defaults(const obfuscation_config& raw_config,
   if (presence.string_encoding) { config.string_encoding = raw_config.string_encoding; }
   if (presence.constant_encoding) { config.constant_encoding = raw_config.constant_encoding; }
   if (presence.mba) { config.mba = raw_config.mba; }
+  if (presence.indirect_dispatch) { config.indirect_dispatch = raw_config.indirect_dispatch; }
   if (presence.security) { config.security = raw_config.security; }
   if (presence.debug_preserve_generated_names) {
     config.debug_preserve_generated_names = raw_config.debug_preserve_generated_names;
@@ -360,6 +376,16 @@ std::string summarize_config(const obfuscation_config& config) {
   stream << "constant_encoding.mode: " << to_string(config.constant_encoding.mode) << '\n';
   stream << "constant_encoding.min_bit_width: " << config.constant_encoding.min_bit_width << '\n';
   stream << "mba.depth: " << config.mba.depth << '\n';
+  stream << "indirect_dispatch.enabled: "
+         << (config.indirect_dispatch.enabled ? "true" : "false") << '\n';
+  stream << "indirect_dispatch.max_sites_per_function: "
+         << config.indirect_dispatch.max_sites_per_function << '\n';
+  stream << "indirect_dispatch.max_switch_targets: "
+         << config.indirect_dispatch.max_switch_targets << '\n';
+  stream << "indirect_dispatch.target_vm_dispatchers: "
+         << (config.indirect_dispatch.target_vm_dispatchers ? "true" : "false") << '\n';
+  stream << "indirect_dispatch.target_flattened_headers: "
+         << (config.indirect_dispatch.target_flattened_headers ? "true" : "false") << '\n';
   stream << "security.strong_vm_invariants: always_enforced\n";
   stream << "security.fail_on_public_obf_symbol: "
          << (config.security.fail_on_public_obf_symbol ? "true" : "false") << '\n';

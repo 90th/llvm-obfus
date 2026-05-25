@@ -1,0 +1,7 @@
+default_level: strong
+indirect_dispatch:
+  enabled: true
+  max_sites_per_function: 8
+  max_switch_targets: 8
+  target_vm_dispatchers: true
+  target_flattened_headers: true

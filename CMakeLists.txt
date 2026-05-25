@@ -113,6 +113,7 @@ add_library(obf_core
   lib/transforms/artifact_cleanup.cpp
   lib/transforms/entropy_initialization.cpp
   lib/transforms/function_outlining.cpp
+  lib/transforms/indirect_dispatch.cpp
   lib/transforms/instruction_substitution.cpp
   lib/transforms/mba.cpp
   lib/transforms/opaque_gep.cpp

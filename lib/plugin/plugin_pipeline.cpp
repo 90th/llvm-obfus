@@ -398,6 +398,27 @@ bool apply_block_split_stage(const llvm::SmallVectorImpl<function_pipeline_state
   return changed;
 }
 
+bool apply_indirect_dispatch_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                                   const obfuscation_config& config,
+                                   const llvm::StringSet<>* skip_functions) {
+  if (!config.indirect_dispatch.enabled) { return false; }
+
+  bool changed = false;
+
+  for (const function_pipeline_state& state : states) {
+    if (should_skip_function(state, skip_functions) ||
+        !state.report.decision.policy.allow_indirect_calls) {
+      continue;
+    }
+
+    const indirect_dispatch_options options =
+        build_indirect_dispatch_options(config, state.report.decision);
+    changed |= run_indirect_dispatch(*state.function, options).site_count > 0;
+  }
+
+  return changed;
+}
+
 bool apply_string_encoding_stage(llvm::Module& module,
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config,
