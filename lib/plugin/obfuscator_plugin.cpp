@@ -24,13 +24,237 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace obf {
 
 namespace {
+
+llvm::cl::opt<std::string> AuditOutPath(
+    "obf-audit-out", llvm::cl::desc("Path to write obf-audit JSON output"),
+    llvm::cl::init(""));
+
+struct AuditRow {
+  const llvm::Function* function = nullptr;
+  protection_level final_level = protection_level::none;
+  llvm::StringRef source_of_truth;
+};
+
+struct AuditColumnWidths {
+  std::size_t function = 8;
+  std::size_t level = 11;
+  std::size_t source = 15;
+};
+
+llvm::StringRef ToStringRef(protection_level level) {
+  const std::string_view text = to_string(level);
+  return {text.data(), text.size()};
+}
+
+llvm::StringRef DescribeBaseSource(policy_source source) {
+  switch (source) {
+    case policy_source::default_policy:
+      return "yaml default policy";
+    case policy_source::automatic_analysis:
+      return "automatic analysis";
+    case policy_source::config_rule:
+      return "yaml target rule";
+    case policy_source::source_annotation:
+      return "source annotation (OBF_ANNOTATE)";
+    case policy_source::explicit_override:
+      return "yaml explicit override";
+  }
+
+  return "yaml default policy";
+}
+
+std::optional<llvm::StringRef> DescribeLevelDeterminingClause(llvm::StringRef clause) {
+  if (clause.starts_with("declaration forced none")) {
+    return llvm::StringRef("implicit (declaration forced none)");
+  }
+
+  if (clause.starts_with("risky features downgraded ")) {
+    return llvm::StringRef("automatic analysis (downgrade)");
+  }
+
+  if (clause.starts_with("address-taken forced ")) {
+    return llvm::StringRef("automatic analysis (address-taken)");
+  }
+
+  if (clause.starts_with("minimum security floor raised to ")) {
+    return llvm::StringRef("automatic analysis (minimum security floor)");
+  }
+
+  if (clause.starts_with("orchestrator promotion raised to ")) {
+    return llvm::StringRef("automatic analysis (orchestrator promotion)");
+  }
+
+  return std::nullopt;
+}
+
+llvm::StringRef ResolveSourceOfTruth(const policy_decision& decision) {
+  llvm::StringRef remaining = decision.detail;
+  while (!remaining.empty()) {
+    const std::size_t separator = remaining.rfind("; ");
+    const llvm::StringRef clause = separator == llvm::StringRef::npos
+                                       ? remaining
+                                       : remaining.drop_front(separator + 2);
+    if (const std::optional<llvm::StringRef> label = DescribeLevelDeterminingClause(clause)) {
+      return *label;
+    }
+
+    if (separator == llvm::StringRef::npos) { break; }
+    remaining = remaining.take_front(separator);
+  }
+
+  return DescribeBaseSource(decision.source);
+}
+
+std::string BuildFunctionDisplayName(llvm::StringRef function_name) {
+  std::string display_name;
+  display_name.reserve(function_name.size() + 2);
+  display_name.append(function_name.begin(), function_name.end());
+  display_name += "()";
+  return display_name;
+}
+
+std::size_t GetFunctionDisplayWidth(const llvm::Function& function) {
+  return function.getName().size() + 2;
+}
+
+void WritePadding(llvm::raw_ostream& stream, std::size_t padding) {
+  for (std::size_t index = 0; index < padding; ++index) { stream << ' '; }
+}
+
+void WritePaddedCell(llvm::raw_ostream& stream, llvm::StringRef text, std::size_t width) {
+  stream << text;
+  if (text.size() < width) { WritePadding(stream, width - text.size()); }
+}
+
+void WritePaddedFunctionCell(llvm::raw_ostream& stream,
+                             const llvm::Function& function,
+                             std::size_t width) {
+  stream << function.getName() << "()";
+  const std::size_t display_width = GetFunctionDisplayWidth(function);
+  if (display_width < width) { WritePadding(stream, width - display_width); }
+}
+
+AuditColumnWidths ComputeAuditColumnWidths(const llvm::SmallVectorImpl<AuditRow>& rows) {
+  AuditColumnWidths widths;
+  for (const AuditRow& row : rows) {
+    if (row.function == nullptr) { continue; }
+
+    widths.function = std::max(widths.function, GetFunctionDisplayWidth(*row.function));
+    widths.level = std::max(widths.level, ToStringRef(row.final_level).size());
+    widths.source = std::max(widths.source, row.source_of_truth.size());
+  }
+
+  return widths;
+}
+
+void PrintAuditSeparator(llvm::raw_ostream& stream, const AuditColumnWidths& widths) {
+  const std::size_t separator_width = widths.function + widths.level + widths.source + 6;
+  for (std::size_t index = 0; index < separator_width; ++index) { stream << '-'; }
+  stream << '\n';
+}
+
+void PrintAuditTable(const llvm::SmallVectorImpl<AuditRow>& rows) {
+  llvm::raw_ostream& stream = llvm::outs();
+  const AuditColumnWidths widths = ComputeAuditColumnWidths(rows);
+
+  stream << "[ llvm-obfus policy resolution ]\n";
+  WritePaddedCell(stream, "function", widths.function);
+  stream << " | ";
+  WritePaddedCell(stream, "final level", widths.level);
+  stream << " | ";
+  stream << "source of truth\n";
+  PrintAuditSeparator(stream, widths);
+
+  for (const AuditRow& row : rows) {
+    if (row.function == nullptr) { continue; }
+
+    WritePaddedFunctionCell(stream, *row.function, widths.function);
+    stream << " | ";
+    WritePaddedCell(stream, ToStringRef(row.final_level), widths.level);
+    stream << " | ";
+    stream << row.source_of_truth << '\n';
+  }
+}
+
+void WriteAuditJson(llvm::StringRef output_path,
+                    llvm::StringRef module_name,
+                    const llvm::SmallVectorImpl<AuditRow>& rows) {
+  llvm::json::Array functions_json;
+  for (const AuditRow& row : rows) {
+    if (row.function == nullptr) { continue; }
+
+    llvm::json::Object function_json;
+    function_json["function"] = BuildFunctionDisplayName(row.function->getName());
+    function_json["final_level"] = ToStringRef(row.final_level);
+    function_json["source_of_truth"] = row.source_of_truth;
+    functions_json.push_back(llvm::json::Value(std::move(function_json)));
+  }
+
+  llvm::json::Object root;
+  root["schema"] = "obf.audit.v1";
+  root["title"] = "llvm-obfus policy resolution";
+  root["module"] = module_name;
+  root["function_count"] = static_cast<std::int64_t>(functions_json.size());
+  root["functions"] = llvm::json::Value(std::move(functions_json));
+
+  std::error_code error_code;
+  llvm::raw_fd_ostream stream(output_path, error_code, llvm::sys::fs::OF_Text);
+  if (error_code) {
+    std::string message = "failed to open obf-audit JSON output '";
+    message += output_path.str();
+    message += "': ";
+    message += error_code.message();
+    llvm::report_fatal_error(llvm::StringRef(message));
+  }
+
+  stream << llvm::json::Value(std::move(root));
+  stream.close();
+  if (stream.has_error()) {
+    std::string message = "failed to write obf-audit JSON output '";
+    message += output_path.str();
+    message += "'";
+    llvm::report_fatal_error(llvm::StringRef(message));
+  }
+}
+
+class AuditResolver {
+ public:
+  explicit AuditResolver(llvm::Module& module)
+      : states_(build_pipeline_state(module, load_active_config())) {}
+
+  llvm::SmallVector<AuditRow, 32> Resolve() const {
+    llvm::SmallVector<AuditRow, 32> rows;
+    rows.reserve(states_.size());
+    for (const function_pipeline_state& state : states_) {
+      rows.push_back({.function = state.function,
+                      .final_level = state.report.decision.policy.level,
+                      .source_of_truth = ResolveSourceOfTruth(state.report.decision)});
+    }
+
+    return rows;
+  }
+
+ private:
+  llvm::SmallVector<function_pipeline_state, 32> states_;
+};
 
 // Boilerplate helpers for pass execution pattern:
 // - run_stateful_stage: For transforming passes that use function_pipeline_state
@@ -80,6 +304,19 @@ class feature_report_pass : public llvm::PassInfoMixin<feature_report_pass> {
         build_transform_reports(module, states, config);
 
     llvm::outs() << format_feature_report(module.getName(), entries, transforms) << '\n';
+    return llvm::PreservedAnalyses::all();
+  }
+};
+
+class ObfAuditPass : public llvm::PassInfoMixin<ObfAuditPass> {
+ public:
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+    const AuditResolver resolver(module);
+    const llvm::SmallVector<AuditRow, 32> rows = resolver.Resolve();
+
+    PrintAuditTable(rows);
+    if (!AuditOutPath.empty()) { WriteAuditJson(AuditOutPath, module.getName(), rows); }
+
     return llvm::PreservedAnalyses::all();
   }
 };
@@ -337,6 +574,11 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
                    llvm::ArrayRef<llvm::PassBuilder::PipelineElement>) {
                   if (name == "obf-feature-report") {
                     module_pm.addPass(obf::feature_report_pass());
+                    return true;
+                  }
+
+                  if (name == "obf-audit") {
+                    module_pm.addPass(obf::ObfAuditPass());
                     return true;
                   }
 
