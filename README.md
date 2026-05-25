@@ -1,155 +1,245 @@
 # llvm-obfus
 
-out-of-tree LLVM 21+ pass plugin for policy-driven IR obfuscation.
+`llvm-obfus` is an out-of-tree LLVM 21+ pass plugin for policy-driven IR obfuscation.
 
-## why?
+The project applies native LLVM IR transforms to selected functions. The main production entry point is `obf-safe-pipeline`, which composes virtualization, structural rewrites, string and constant protection, late indirect dispatch, and final artifact cleanup.
 
-the project applies obfuscation per function instead of as one blanket pipeline. you can inspect policy decisions with `obf-feature-report`, run individual passes directly, or use `obf-safe-pipeline` to drive the current pass sequence.
+The design goal is simple: make static recovery materially harder while staying inside normal LLVM semantics. The project does not rely on malformed objects, inline-asm traps, EH spoofing, or target-specific parser breaks.
 
-## what it has
+## Main Features
 
-- `obf_plugin` for LLVM's new pass manager
-- registered passes: `obf-feature-report`, `obf-entropy-init`, `obf-cfg-state-cleanup`, `obf-artifact-cleanup`, `obf-block-split`, `obf-split-scaffold`, `obf-string-encode`, `obf-vm`, `obf-constant-encode`, `obf-instruction-substitute`, `obf-opaque-gep`, `obf-function-outline`, `obf-control-flatten`, `obf-opaque-preds`, `obf-bogus-cf`, `obf-safe-pipeline`
-- YAML config with `profile`, `seed`, `default_level`, `overrides`, `targets`, `block_split`, `string_encoding`, `constant_encoding`, `mba`, `security`, and `debug_preserve_generated_names`
-- benchmark targets: `license_demo_bench`, `config_demo_bench`, `vm_workflow_demo_bench`, `wpo_demo_bench`
-- a runtime entropy object generated from `runtime/entropy_anchor.c`
+### Strong Virtualization And MBA Flattening
 
-## layout
+- Protection levels are `none`, `light`, `strong`, `vm`, and `strong_vm`.
+- `vm` and `strong_vm` lower selected functions into VM-backed execution paths.
+- `strong_vm` implementation bodies continue through later hardening stages, not just the public wrapper.
+- MBA rewriting is used both directly and as part of other transforms such as constant reconstruction.
 
-```text
-include/obf/       public headers
-lib/analysis/      function feature extraction
-lib/frontend/      yaml config loading and annotation collection
-lib/plugin/        pass registration and pipeline wiring
-lib/policy/        policy selection
-lib/report/        reporting
-lib/transforms/    IR transforms
-lib/vm/            VM lowering and dispatch pieces
-runtime/           entropy anchor and runtime support code
-tests/lit/         lit suite
-benchmarks/        corpus, configs, and benchmark targets
-tools/obf-driver/  driver scaffold
+### Cryptographic Indirect Dispatch
+
+- `indirect_dispatch` is a late pass in the safe pipeline.
+- It rewrites supported conditional branches and switch dispatch sites into keyed `blockaddress` plus arithmetic plus `indirectbr` sequences.
+- The implementation reconstructs targets from same-function deltas in SSA instead of emitting absolute dispatch tables in globals.
+- Unsupported shapes are skipped conservatively: EH personalities, EH pads, `invoke`, `callbr`, existing `indirectbr`, `catchswitch`, `catchreturn`, `cleanupreturn`, `resume`, `musttail`, and non-integral program address spaces.
+
+### Authenticated Runtime Strings
+
+- String encoding is configured under `string_encoding`.
+- `authenticated_mode` enables authenticated runtime decode.
+- The runtime support lives in `runtime/string_auth_runtime.c` and handles authenticated string and constant-pool recovery.
+- Lazy decode, eager decode, constructor fallback, and forwarded-pointer cases are handled in the transform.
+
+### Constant Pooling
+
+- Constant encoding modes are `off`, `mba_inline`, `keyed_pool`, `auto`, and `all`.
+- `mba_inline` reconstructs constants directly in IR.
+- `keyed_pool` moves constants into authenticated pools recovered at use sites.
+- `auto` chooses a strategy per use site.
+
+### Stealth ABI And Artifact Cleanup
+
+- Public runtime ABI names are generated at build time in `build/include/obf/support/runtime_abi_generated.h`.
+- The default public prefix is `rt_core_`.
+- Final cleanup strips marker attributes, removes annotation metadata, anonymizes local/internal obfuscation artifacts, and strips local SSA names.
+- Security gates can fail the build on leaked public `obf` symbols.
+
+## Architecture
+
+### Frontend
+
+- YAML loading and config parsing live in `lib/frontend/`.
+- Profiles are `fast`, `standard`, `guarded`, `fortress`, and `lab`.
+- Profile defaults are applied first; explicit top-level YAML sections override them; `--obf-seed` overrides the final seed after config loading.
+
+### Analysis And Policy
+
+- Per-function feature extraction lives in `lib/analysis/`.
+- Policy selection lives in `lib/policy/`.
+- The pipeline is function-selective rather than blanket-on for the whole module.
+
+### Transforms
+
+- Core transforms live in `lib/transforms/`.
+- VM lowering lives in `lib/vm/`.
+- Pass registration and safe-pipeline orchestration live in `lib/plugin/`.
+
+### Runtime
+
+- `runtime/entropy_anchor.c` provides the entropy anchor support object used by builds and tests.
+- `runtime/string_auth_runtime.c` provides authenticated decode support for strings and constant pools.
+
+## Safe Pipeline Order
+
+`obf-safe-pipeline` is the integrated pipeline used by the benchmarks and lit coverage. Its current high-level order is:
+
+1. entropy initialization
+2. VM lowering and call rewriting for `vm`
+3. VM lowering and call rewriting for `strong_vm`
+4. post-VM string encoding
+5. constant encoding
+6. opaque GEP
+7. instruction substitution
+8. opaque predicates
+9. control flattening
+10. function outlining
+11. bogus control flow
+12. block splitting
+13. additional hardening on `strong_vm` implementation functions
+14. CFG state cleanup
+15. indirect dispatch
+16. security gate enforcement
+17. artifact cleanup
+
+The late ordering matters. Indirect dispatch runs after the major structural passes so it can rewrite the final dispatch-heavy CFG shapes, including VM implementation functions.
+
+## Configuration
+
+Top-level sections currently supported by the loader:
+
+- `profile`
+- `seed`
+- `default_level`
+- `overrides`
+- `targets`
+- `block_split`
+- `string_encoding`
+- `constant_encoding`
+- `mba`
+- `indirect_dispatch`
+- `security`
+- `debug_preserve_generated_names`
+
+Minimal example:
+
+```yaml
+profile: fortress
+seed: 20260601
+default_level: none
+
+targets:
+  - match: "verify_*"
+    level: strong_vm
+  - match: "license_*"
+    level: strong_vm
+
+string_encoding:
+  authenticated_mode: true
+  prefer_lazy_decode: true
+  allow_ctor_fallback: false
+
+constant_encoding:
+  mode: auto
+  max_constants_per_function: 8
+  min_bit_width: 8
+
+mba:
+  depth: 3
+
+indirect_dispatch:
+  enabled: true
+  max_sites_per_function: 4
+  max_switch_targets: 8
+  target_vm_dispatchers: true
+  target_flattened_headers: true
+
+security:
+  fail_on_public_obf_symbol: true
+  strip_release_markers: true
 ```
 
-## building
+## Build
 
-- requires CMake `3.24+`, a C++23 compiler, LLVM `21+`, Python3, and `lit`
-- CMake also expects `opt`, `clang`, `clang++`, `llvm-link`, `llc`, and `llvm-strip` from that LLVM install
+Requirements:
+
+- CMake 3.24+
+- C++23 compiler
+- LLVM 21+
+- Python 3
+- `lit`
+- LLVM tools: `opt`, `clang`, `clang++`, `llvm-link`, `llc`, `llvm-strip`
+
+Configure and build:
 
 ```sh
 cmake -S . -B build -DLLVM_DIR="$(llvm-config --cmakedir)"
 cmake --build build
 ```
 
-build fixed-seed benchmark artifacts for reproducible checkpoint work with:
+Useful cache variables:
 
-```sh
-cmake -S . -B build-ghidra-check \
-  -DLLVM_DIR="$(llvm-config --cmakedir)" \
-  -DOBF_BENCHMARK_SEED=151616
-cmake --build build-ghidra-check --target obf-benchmarks -- -j1
-```
+- `OBF_BENCHMARK_SEED`
+- `OBF_RUNTIME_ABI_PREFIX`
+- `OBF_BENCHMARK_CLEAN_IR`
 
-## usage
+## Usage
+
+Feature report:
 
 ```sh
 opt -load-pass-plugin build/obf_plugin.so \
   --obf-config=config.yaml \
   -passes=obf-feature-report \
   -disable-output input.ll
+```
 
+Full safe pipeline:
+
+```sh
 opt -load-pass-plugin build/obf_plugin.so \
   --obf-config=config.yaml \
   -passes=obf-safe-pipeline \
   -S input.ll -o output.ll
+```
 
+Isolated indirect dispatch:
+
+```sh
 opt -load-pass-plugin build/obf_plugin.so \
   --obf-config=config.yaml \
-  --obf-seed=20240601 \
-  -passes=obf-vm \
-  -S input.ll -o output.ll
+  -passes=obf-indirect-dispatch \
+  -S input.ll -o indirect.ll
 ```
 
-## config
+`obf-driver` currently loads a config and prints a summary. It is not a full compile driver.
 
-the loader accepts `profile`, `seed`, `default_level`, `overrides`, `targets`, `block_split`, `string_encoding`, `constant_encoding`, `mba`, `security`, and `debug_preserve_generated_names`.
+## Verification
 
-protection levels are `none`, `light`, `strong`, `vm`, and `strong_vm`.
+Requested release sweep:
 
-profiles are optional. if `profile` is omitted, legacy defaults are used. new configs should usually start with `profile: standard` and then add `targets` or `overrides` for the functions that need protection.
+```sh
+cmake --build build --target obf-benchmarks obf-seed-diversity obf-unit-tests
+ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests"
+```
 
-profile defaults are applied before explicit YAML sections, and `--obf-seed` still overrides the top-level `seed` after config loading:
+Other useful targets:
+
+- `obf-benchmarks`
+- `obf-benchmarks-mir`
+- `obf-audit-benchmarks`
+- `obf-re-harness`
+- `obf-seed-diversity`
+
+Current benchmark corpus:
+
+- `license_demo`
+- `config_demo`
+- `vm_workflow_demo`
+- `wpo_demo`
+
+## Repository Layout
 
 ```text
-base defaults -> profile defaults -> explicit YAML sections -> --obf-seed
+include/obf/       public headers
+lib/analysis/      feature extraction
+lib/frontend/      config loading and annotations
+lib/plugin/        pass registration and pipeline wiring
+lib/policy/        function-level policy selection
+lib/report/        reporting
+lib/transforms/    IR transforms
+lib/vm/            VM lowering and dispatch
+runtime/           runtime support objects
+tests/lit/         lit coverage
+tests/unit/        unit tests
+benchmarks/        corpus, configs, and build targets
+tools/             helper tools and scripts
 ```
-
-section-level overrides win as a unit. for example, if `profile: fortress` and an `mba:` section are both present, the explicit `mba:` section is used while other absent sections still come from the fortress profile.
-
-available profiles:
-
-- `fast`: quick iteration, low overhead
-- `standard`: recommended default for normal use
-- `guarded`: stronger protection for sensitive paths while staying practical
-- `fortress`: strict high-value protection defaults
-- `lab`: experimental/high-diversity stress defaults
-
-profiles do not automatically promote every function to `strong_vm`. use `targets`, `overrides`, or annotations to choose which functions are protected. `strong_vm` invariants are always fail-closed regardless of profile and cannot be disabled by config.
-
-```yaml
-profile: standard
-seed: 20240601
-default_level: none
-
-overrides:
-  - name: classify_byte
-    level: vm
-  - name: route_score
-    level: vm
-
-block_split:
-  max_splits_per_function: 1
-  min_instructions_per_block: 2
-
-string_encoding:
-  min_string_length: 2
-  max_strings_per_module: 64
-  prefer_lazy_decode: true
-  allow_ctor_fallback: true
-
-constant_encoding:
-  max_constants_per_function: 4
-  min_bit_width: 8
-
-mba:
-  depth: 1
-```
-
-example high-value config:
-
-```yaml
-profile: fortress
-targets:
-  - match: "verify_*"
-    level: strong_vm
-  - match: "license_*"
-    level: strong_vm
-```
-
-example lab config for one function:
-
-```yaml
-profile: lab
-overrides:
-  - name: verify_license
-    level: strong_vm
-```
-
-## notes
-
-- `tools/obf-driver` currently loads a config and prints a summary; it is not a full compile driver
-- the build, tests, and benchmark flows use an extra object generated from `runtime/entropy_anchor.c`
-- tests are wired through `ctest`; direct `lit -sv build/tests` works too
-- `cmake --build build --target obf-benchmarks` writes benchmark artifacts under `build/benchmarks/`
-- set `OBF_BENCHMARK_SEED` at configure time to pin benchmark obfuscation; leave it empty to keep the generated per-configure seed behavior
-- `cmake --build build --target obf-benchmarks-mir` also emits MIR for the linked benchmark
