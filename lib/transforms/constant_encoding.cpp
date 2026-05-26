@@ -403,16 +403,6 @@ std::uint64_t derive_keyed_pool_module_id(const llvm::Module& module) {
   return module_id;
 }
 
-std::uint64_t derive_keyed_pool_id(const keyed_pool_plan& plan, std::uint64_t seed) {
-  std::uint64_t pool_id = mix_seed(seed, static_cast<std::uint64_t>(plan.entries.size() + 1));
-  for (const keyed_pool_entry& entry : plan.entries) {
-    pool_id = mix_seed(pool_id, static_cast<std::uint64_t>(entry.type->getBitWidth()));
-    pool_id = mix_seed(pool_id, entry.value.getLimitedValue());
-  }
-  if (pool_id == 0) { pool_id = 0x434f4e5354504f31ULL; }
-  return pool_id;
-}
-
 void append_apint_bytes(llvm::SmallVectorImpl<std::uint8_t>& bytes, const llvm::APInt& value) {
   const std::size_t storage_bytes = get_storage_bytes(value);
   bytes.resize(bytes.size() + storage_bytes);
@@ -422,36 +412,6 @@ void append_apint_bytes(llvm::SmallVectorImpl<std::uint8_t>& bytes, const llvm::
 llvm::Constant* create_byte_array_constant(llvm::LLVMContext& context,
                                            llvm::ArrayRef<std::uint8_t> bytes) {
   return llvm::ConstantDataArray::get(context, bytes);
-}
-
-keyed_pool_payload build_keyed_pool_payload(const keyed_pool_plan& plan,
-                                            std::uint64_t module_id,
-                                            std::uint64_t seed) {
-  keyed_pool_payload payload;
-  llvm::SmallVector<std::uint8_t, 64> plaintext;
-  plaintext.reserve(plan.byte_length);
-  for (const keyed_pool_entry& entry : plan.entries) {
-    append_apint_bytes(plaintext, entry.value);
-  }
-
-  const auth::BuildKey build_key = auth::DeriveBuildKey(seed);
-  const auth::Blake2sDigest function_key = auth::DeriveFunctionKey(build_key, module_id, 0);
-  const auth::Blake2sDigest pool_key =
-      auth::DeriveSiteKey(function_key, auth::kDomainConstant, plan.pool_id);
-  const auth::Blake2sDigest enc_key = auth::DeriveLabeledKey(pool_key, auth::kDomainEnc);
-  const auth::Blake2sDigest mac_key = auth::DeriveLabeledKey(pool_key, auth::kDomainMac);
-
-  payload.metadata.version = auth::kConstantPoolDescriptorVersionV1;
-  payload.metadata.flags = auth::kConstantPoolAuthFlagTrapOnFailure;
-  payload.metadata.length = plaintext.size();
-  payload.metadata.module_id = module_id;
-  payload.metadata.pool_id = plan.pool_id;
-  payload.metadata.nonce = auth::DeriveStringNonce(pool_key);
-
-  payload.ciphertext.resize(plaintext.size());
-  auth::XorStringPayload(payload.ciphertext, plaintext, enc_key, payload.metadata.nonce);
-  payload.tag = auth::ComputeConstantPoolTag(mac_key, payload.metadata, payload.ciphertext);
-  return payload;
 }
 
 llvm::StructType* get_keyed_pool_descriptor_type(llvm::LLVMContext& context) {
@@ -655,15 +615,6 @@ std::optional<std::size_t> find_entry_offset(const keyed_pool_plan& plan,
     if (entry.type == type && entry.value == value) { return entry.offset; }
   }
   return std::nullopt;
-}
-
-bool is_eligible_keyed_pool_constant(const llvm::Function& function,
-                                     const llvm::Instruction& instruction,
-                                     const llvm::ConstantInt& constant,
-                                     const constant_encoding_options& options,
-                                     std::optional<std::uint64_t> function_seed) {
-  return function_seed.has_value() && !function.isDeclaration() &&
-         is_supported_constant_operand(instruction, 0, constant, options);
 }
 
 std::uint64_t derive_keyed_pool_id_from_entries(llvm::ArrayRef<keyed_pool_entry> entries,

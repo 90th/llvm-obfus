@@ -205,8 +205,9 @@ site_collection collect_sites(const llvm::Function& function,
 
   if (sites.empty()) { return make_empty_site_collection("no supported branch or switch sites"); }
 
+  const auto site_count = sites.size();
   return {.sites = std::move(sites),
-          .detail = std::to_string(sites.size()) + " site(s) selected"};
+          .detail = std::to_string(site_count) + " site(s) selected"};
 }
 
 template <typename BuilderT>
