@@ -109,6 +109,34 @@ Top-level sections currently supported by the loader:
 - `security`
 - `debug_preserve_generated_names`
 
+`overrides` entries match exact function names; `targets` entries support glob-style wildcard patterns (e.g., `"verify_*"`).
+
+### Profile Defaults
+
+| Setting | `fast` | `standard` | `guarded` | `fortress` | `lab` |
+|---|---|---|---|---|---|
+| `mba.depth` | 1 | 1 | 2 | 3 | 4 |
+| `block_split.max_splits_per_function` | 1 | 1 | 2 | 4 | 8 |
+| `string_encoding.min_string_length` | 3 | 2 | 2 | 1 | 1 |
+| `string_encoding.max_strings_per_module` | 32 | 128 | 256 | 512 | 1024 |
+| `string_encoding.prefer_lazy_decode` | true | true | true | false | false |
+| `string_encoding.allow_ctor_fallback` | true | true | false | false | false |
+| `constant_encoding.max_constants_per_function` | 2 | 4 | 8 | 16 | 32 |
+| `security.fail_on_public_obf_symbol` | false | true | true | true | true |
+
+All profiles default to `authenticated_mode: false`, `min_instructions_per_block: 2` (`fortress` and `lab` use `1`), `min_bit_width: 8`, `default_level: none`, and `constant_encoding.mode: mba_inline`. Explicit top-level YAML keys override profile defaults.
+
+### Per-Function Annotations
+
+Protection levels can be set directly in source using LLVM's `annotate` attribute. The annotation value must be `"obf:<level>"` where `<level>` is one of `none`, `light`, `strong`, `vm`, or `strong_vm`.
+
+```c
+__attribute__((annotate("obf:strong_vm")))
+void sensitive_routine(void) { ... }
+```
+
+Annotations take precedence below explicit `overrides` entries but above `targets` rule matching. The automatic security floor applies independently and may raise the level further.
+
 Minimal example:
 
 ```yaml
