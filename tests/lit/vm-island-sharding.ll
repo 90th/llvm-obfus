@@ -44,9 +44,12 @@ entry:
 ; VM-LABEL: define i32 @shard_target(i32 %x, i32 %y)
 ; VM: call i32 %{{[^ ]+}}(i32 %x, i32 %y, i64 %{{[^)]+}})
 ; VM-DAG: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i32 %y, i64 %obf.hidden_token)
-; VM-DAG: define internal i32 @__obf_vm_h_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
-; VM-DAG: define internal i32 @__obf_vm_h_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
-; VM-DAG: define internal i32 @__obf_vm_h_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
+; VM-DAG: %obf.vm.decoy.root.true{{[0-9]*}} = icmp eq i64
+; VM-DAG: %obf.vm.decoy.helper.true{{[0-9]*}} = icmp eq i64
+; VM-DAG: %obf.vm.decoy.entropy{{[0-9]*}} = load i64, ptr @rt_core_ea
+; VM-DAG: store i64 %obf.vm.decoy.state{{[0-9]*}}, ptr %vm.island.decoy.state.bc
+; VM-DAG: store i32 %obf.vm.decoy.dispatch{{[0-9]*}}, ptr %vm.island.decoy.state.dispatch
+; VM-DAG: store i32 %obf.vm.decoy.island{{[0-9]*}}, ptr %vm.island.decoy.state.island
 ; VM-DAG: vm.island.topology.helper_shards
 ; VM-DAG: vm.island.count.3
 ; VM-DAG: "vm.island.entry"

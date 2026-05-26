@@ -67,7 +67,7 @@ entry:
 ; CHECK: entry.obf.vm:
 ; CHECK-NOT: %obf.vm.pc = alloca i32
 ; CHECK-NOT: dispatch.obf.vm:
-; CHECK: %obf.vm.state = alloca i64
+; CHECK: %obf.vm.state = alloca {
 ; CHECK: %obf.vm.pred.slot = alloca i32
 ; CHECK: %obf.vm.token.state.match = icmp eq i64 %obf.hidden_token,
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
@@ -76,7 +76,7 @@ entry:
 ; CHECK: %obf.vm.integrity.byte.ptr = getelementptr inbounds
 ; CHECK: %obf.vm.integrity.byte.window = load i32, ptr %obf.vm.integrity.byte.ptr, align 1
 ; CHECK: %obf.vm.integrity.byte = trunc i32 %obf.vm.integrity.byte.shr to i8
-; CHECK: %obf.vm.integrity.state = load i64, ptr %obf.vm.state
+; CHECK: %obf.vm.integrity.state = load i64, ptr %obf.vm.state.bc
 ; CHECK: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
 ; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
 ; CHECK-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
@@ -92,7 +92,7 @@ entry:
 ; CHECK: br label %vm.exec.{{[0-9]+}}
 ; CHECK: indirectbr ptr
 ; CHECK: {{^vm\.exec\.[0-9]+:}}
-; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
+; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state.bc
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @[[RETKEY]]
 ; CHECK: ret i32 %obf.vm.ret.encoded
 ; CHECK-LABEL: define private i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %obf.target.key, i{{[0-9]+}} %obf.share.base)
@@ -119,7 +119,7 @@ entry:
 ; INST: {{(%fold_value\.obf\.retkey\.bound = (add|sub) i64|%[0-9]+ = trunc i64 %fold_value\.obf\.retkey to i32)}}
 ; INST: {{(%fold_value\.obf\.retdec = (add|sub) i32|%[0-9]+ = xor i32 %fold_value\.obf\.callsite, %[0-9]+)}}
 ; INST-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)
-; INST: %obf.vm.state = alloca i64
+; INST: %obf.vm.state = alloca {
 ; INST: %obf.vm.pred.slot = alloca i32
 ; INST: {{^vm\.[0-9]+:}}
 ; INST: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8

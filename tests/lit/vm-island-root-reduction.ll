@@ -60,19 +60,22 @@ entry:
 ; VM: %vm.island.root.route{{[0-9]*}} = load i32, ptr %vm.island.state.island
 ; VM: switch i32 %vm.island.root.route{{[0-9]*}}
 ; VM-NOT: obf.vm.dispatch.index.bank
-; VM: call i32 @__obf_vm_h_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
-; VM-LABEL: define internal i32 @__obf_vm_h_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
-; VM: %vm.island.subroute = load i32, ptr %vm.island.state.dispatch
-; VM: switch i32 %{{.*vm\.island\.subroute|.*vm\.choreo\.dispatch\..*}}
-; VM: call i32 @__obf_vm_hs_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
-; VM-LABEL: define internal i32 @__obf_vm_hs_{{[A-Za-z0-9_]+}}(ptr %vm.island.subhelper.state)
-; VM: %vm.island.subroute.dispatch = load i32, ptr %vm.island.state.dispatch
-; VM: switch i32 %{{.*vm\.island\.subroute\.dispatch|.*vm\.choreo\.dispatch\..*}}
-; VM: vm.island.subhelper.decode
-; VM: obf.vm.bc
-; VM: store i32 {{[^,]+}}, ptr %vm.island.state.dispatch
-; VM: store i32 {{[0-9]+}}, ptr %vm.island.state.island
-; VM: ret i32 {{%.*|-?[0-9]+}}
+; VM-DAG: %obf.vm.decoy.root.true{{[0-9]*}} = icmp eq i64
+; VM-DAG: %obf.vm.decoy.helper.true{{[0-9]*}} = icmp eq i64
+; VM-DAG: %obf.vm.decoy.entropy{{[0-9]*}} = load i64, ptr @rt_core_ea
+; VM-DAG: store i64 %obf.vm.decoy.state{{[0-9]*}}, ptr %vm.island.decoy.state.bc
+; VM-DAG: store i32 %obf.vm.decoy.dispatch{{[0-9]*}}, ptr %vm.island.decoy.state.dispatch
+; VM-DAG: store i32 %obf.vm.decoy.island{{[0-9]*}}, ptr %vm.island.decoy.state.island
+; VM-DAG: %vm.island.subroute = load i32, ptr %vm.island.state.dispatch
+; VM-DAG: switch i32 %{{.*vm\.island\.subroute|.*vm\.choreo\.dispatch\..*}}
+; VM-DAG: call i32 @__obf_vm_hs_{{[A-Za-z0-9_]+}}(ptr %vm.island.state)
+; VM-DAG: %vm.island.subroute.dispatch = load i32, ptr %vm.island.state.dispatch
+; VM-DAG: switch i32 %{{.*vm\.island\.subroute\.dispatch|.*vm\.choreo\.dispatch\..*}}
+; VM-DAG: vm.island.subhelper.decode
+; VM-DAG: obf.vm.bc
+; VM-DAG: store i32 {{[^,]+}}, ptr %vm.island.state.dispatch
+; VM-DAG: store i32 {{[0-9]+}}, ptr %vm.island.state.island
+; VM-DAG: ret i32 {{%.*|-?[0-9]+}}
 ; VM-DAG: "vm.island.count.3"
 ; VM-DAG: "vm.island.helper.split"
 ; VM-DAG: "vm.island.helper.decode"

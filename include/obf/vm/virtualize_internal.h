@@ -85,6 +85,17 @@ struct instruction_rewrite_context {
   llvm::ArrayRef<std::uint32_t> current_slot_mapping;
 };
 
+struct VmDecoyRoutePlan {
+  std::uint32_t real_instruction = invalid_slot;
+  std::uint32_t decoy_instruction = invalid_slot;
+  std::uint32_t real_dispatch_index = invalid_slot;
+  std::uint32_t decoy_dispatch_index = invalid_slot;
+  std::uint32_t real_island = invalid_slot;
+  std::uint32_t decoy_island = invalid_slot;
+  std::uint32_t decoy_slot = invalid_slot;
+  std::uint64_t salt = 0;
+};
+
 // opcode_to_index moved to vm_types.h
 
 std::uint64_t derive_vm_bytecode_seed(const llvm::Function& function,
@@ -329,11 +340,26 @@ llvm::Value* apply_vm_island_status_choreography(llvm::IRBuilder<>& builder,
                                                  std::uint32_t detail,
                                                  std::uint64_t salt);
 llvm::Value* apply_vm_helper_dispatch_choreography(llvm::IRBuilder<>& builder,
-                                                   llvm::Function& function,
-                                                   std::uint64_t bytecode_seed,
-                                                   llvm::Value* dispatch_value,
-                                                   std::size_t dispatch_case_count,
-                                                   std::uint64_t salt);
+                                                    llvm::Function& function,
+                                                    std::uint64_t bytecode_seed,
+                                                    llvm::Value* dispatch_value,
+                                                    std::size_t dispatch_case_count,
+                                                    std::uint64_t salt);
+llvm::BasicBlock* EmitVmInlineDecoyBlock(llvm::Function& function,
+                                         rewrite_function_context& context,
+                                         llvm::BasicBlock* loop_header,
+                                         llvm::ArrayRef<std::uint32_t> source_slot_mapping,
+                                         llvm::ArrayRef<std::uint32_t> target_slot_mapping,
+                                         const VmDecoyRoutePlan& plan,
+                                         llvm::StringRef block_name);
+void EmitVmDecoyHelperBody(llvm::Function& helper,
+                           const bytecode_program& program,
+                           const vm_state_layout& state_layout,
+                           const std::vector<slot_cell_mapping>& slot_mappings,
+                           std::uint64_t opaque_seed_base,
+                           std::uint64_t bytecode_seed,
+                           std::uint32_t mba_depth,
+                           const VmDecoyRoutePlan& plan);
 
 inline void finish_value(llvm::IRBuilder<>& builder,
                          const instruction_rewrite_context& context,
