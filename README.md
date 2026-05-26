@@ -15,26 +15,39 @@ The design goal is simple: make static recovery materially harder while staying 
 - `strong_vm` implementation bodies continue through later hardening stages, not just the public wrapper.
 - MBA rewriting is used both directly and as part of other transforms such as constant reconstruction.
 
-### Cryptographic Indirect Dispatch
+### Seeded Indirect Dispatch
 
 - `indirect_dispatch` is a late pass in the safe pipeline.
-- It rewrites supported conditional branches and switch dispatch sites into keyed `blockaddress` plus arithmetic plus `indirectbr` sequences.
+- It rewrites supported conditional branches and switch dispatch sites into per-site masked `blockaddress` plus arithmetic plus `indirectbr` sequences.
+- Each dispatch site derives its masking material from the protected function seed and site index.
 - The implementation reconstructs targets from same-function deltas in SSA instead of emitting absolute dispatch tables in globals.
+- This pass does not use the authenticated BLAKE2s runtime used by strings and constant pools.
 - Unsupported shapes are skipped conservatively: EH personalities, EH pads, `invoke`, `callbr`, existing `indirectbr`, `catchswitch`, `catchreturn`, `cleanupreturn`, `resume`, `musttail`, and non-integral program address spaces.
 
-### Authenticated Runtime Strings
+### Keyed And Integrity-Checked Runtime Strings
 
 - String encoding is configured under `string_encoding`.
-- `authenticated_mode` enables authenticated runtime decode.
-- The runtime support lives in `runtime/string_auth_runtime.c` and handles authenticated string and constant-pool recovery.
+- `authenticated_mode` enables the keyed and integrity-checked runtime decode path.
+- The runtime support lives in `runtime/string_auth_runtime.c` and handles keyed string and constant-pool recovery.
 - Lazy decode, eager decode, constructor fallback, and forwarded-pointer cases are handled in the transform.
 
 ### Constant Pooling
 
 - Constant encoding modes are `off`, `mba_inline`, `keyed_pool`, `auto`, and `all`.
 - `mba_inline` reconstructs constants directly in IR.
-- `keyed_pool` moves constants into authenticated pools recovered at use sites.
+- `keyed_pool` moves constants into keyed, integrity-checked pools recovered at use sites.
 - `auto` chooses a strategy per use site.
+
+### Seed And Key Derivation
+
+- The top-level `seed` is the root build input. Function-selective passes such as `indirect_dispatch` derive per-function seeds from the module name, function name, and top-level seed; the keyed string and keyed-pool runtime currently uses the top-level seed directly.
+- `authenticated_mode` and `keyed_pool` use a domain-separated BLAKE2s schedule implemented in `include/obf/support/auth_encoding.h`.
+- The schedule is `build_key(seed)` -> `function_key(module_id, function_id)` -> per-site or per-pool key -> labeled `enc` and `mac` subkeys.
+- Authenticated strings derive distinct keys from descriptor metadata including `module_id`, a derived `function_id`, and `site_id`. Keyed constant pools derive distinct keys from `module_id` and `pool_id`.
+- Authentication uses a keyed BLAKE2s tag over descriptor metadata plus ciphertext, and encryption uses a BLAKE2s-derived XOR keystream with a derived nonce. It does not use AES, ChaCha20, HMAC, or SipHash.
+- The emitted artifacts store the 32-byte `build_key` in internal globals and reconstruct derived keys at runtime from descriptor metadata. This is an embedded-key, self-contained runtime: no hardware token, remote service, white-box key split, or entropy-anchor binding is involved.
+- Integrity verification is fail-closed: descriptor mismatches, tag mismatches, and length mismatches trap in the runtime instead of returning tampered plaintext.
+- `runtime/entropy_anchor.c` supports opaque arithmetic and MBA-style transforms; it is separate from the keyed string and constant-pool key schedule.
 
 ### Stealth ABI And Artifact Cleanup
 
@@ -66,7 +79,7 @@ The design goal is simple: make static recovery materially harder while staying 
 ### Runtime
 
 - `runtime/entropy_anchor.c` provides the entropy anchor support object used by builds and tests.
-- `runtime/string_auth_runtime.c` provides authenticated decode support for strings and constant pools.
+- `runtime/string_auth_runtime.c` provides keyed and integrity-checked decode support for strings and constant pools.
 
 ## Safe Pipeline Order
 
@@ -124,7 +137,7 @@ Top-level sections currently supported by the loader:
 | `constant_encoding.max_constants_per_function` | 2 | 4 | 8 | 16 | 32 |
 | `security.fail_on_public_obf_symbol` | false | true | true | true | true |
 
-All profiles default to `authenticated_mode: false`, `min_instructions_per_block: 2` (`fortress` and `lab` use `1`), `min_bit_width: 8`, `default_level: none`, and `constant_encoding.mode: mba_inline`. Explicit top-level YAML keys override profile defaults.
+All profiles default to `authenticated_mode: false`, `indirect_dispatch.enabled: false`, `min_instructions_per_block: 2` (`fortress` and `lab` use `1`), `min_bit_width: 8`, `default_level: none`, and `constant_encoding.mode: mba_inline`. Explicit top-level YAML keys override profile defaults.
 
 ### Per-Function Annotations
 
@@ -184,7 +197,8 @@ Requirements:
 - LLVM 21+
 - Python 3
 - `lit`
-- LLVM tools: `opt`, `clang`, `clang++`, `llvm-link`, `llc`, `llvm-strip`
+- LLVM tools: `opt`, `clang`, `clang++`, `llvm-link`, `llc`, `llvm-strip`, `llvm-nm`, `llvm-objdump`
+- Optional: `strings` for benchmark string audits
 
 Configure and build:
 
@@ -198,15 +212,30 @@ Useful cache variables:
 - `OBF_BENCHMARK_SEED`
 - `OBF_RUNTIME_ABI_PREFIX`
 - `OBF_BENCHMARK_CLEAN_IR`
+- `OBF_BENCHMARK_CLEANUP_PASSES`
 
 ## Usage
 
 Feature report:
 
+- `obf-feature-report` is read-only and emits `obf.feature_report.v3` JSON with per-function policy decisions and per-transform strategy details.
+
 ```sh
 opt -load-pass-plugin build/obf_plugin.so \
   --obf-config=config.yaml \
   -passes=obf-feature-report \
+  -disable-output input.ll
+```
+
+Policy audit:
+
+- `obf-audit` prints a policy-resolution table and can also write `obf.audit.v1` JSON with `--obf-audit-out`.
+
+```sh
+opt -load-pass-plugin build/obf_plugin.so \
+  --obf-config=config.yaml \
+  --obf-audit-out=audit.json \
+  -passes=obf-audit \
   -disable-output input.ll
 ```
 
@@ -228,7 +257,53 @@ opt -load-pass-plugin build/obf_plugin.so \
   -S input.ll -o indirect.ll
 ```
 
+Other standalone passes:
+
+- Read-only/reporting: `obf-feature-report`, `obf-audit`.
+- Transform stages: `obf-entropy-init`, `obf-vm`, `obf-block-split`, `obf-string-encode`, `obf-constant-encode`, `obf-opaque-gep`, `obf-instruction-substitute`, `obf-control-flatten`, `obf-function-outline`, `obf-opaque-preds`, `obf-bogus-cf`, `obf-indirect-dispatch`, `obf-cfg-state-cleanup`, and `obf-artifact-cleanup`.
+
 `obf-driver` currently loads a config and prints a summary. It is not a full compile driver.
+
+## Benchmarks
+
+Benchmark targets build paired baseline and obfuscated artifacts under `build/benchmarks/<name>/`. The benchmark build passes `--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}` to `opt`, so `OBF_BENCHMARK_SEED` controls the effective benchmark seed for the whole build tree even when a sample benchmark config contains its own `seed:` entry.
+
+Build benchmark pairs:
+
+```sh
+cmake --build build --target obf-benchmarks
+```
+
+Per-benchmark artifacts:
+
+- `<name>.baseline.ll`
+- `<name>.obfuscated.ll`
+- `<name>.obfuscated.cleaned.ll` when `OBF_BENCHMARK_CLEAN_IR=ON`
+- `<name>.baseline`
+- `<name>.obfuscated`
+
+Benchmark and analysis targets:
+
+- `obf-benchmarks` builds stripped baseline and obfuscated pairs for the full corpus.
+- `obf-benchmarks-mir` emits MIR snapshots for linked benchmark targets such as `wpo_demo`.
+- `obf-audit-benchmarks` audits stripped obfuscated benchmark binaries for leaked symbols and, when `strings` is available, residual strings.
+- `obf-re-harness` scores how much VM structure is recoverable from obfuscated benchmark IR and writes `build/re-harness/vm_recovery.json`.
+- `obf-seed-diversity` verifies seed-driven IR diversity and writes `build/diversity/diversity.json`.
+
+Current benchmark corpus:
+
+- `license_demo`
+- `config_demo`
+- `vm_workflow_demo`
+- `wpo_demo`
+
+Measure keyed string decode overhead:
+
+```sh
+python tools/obf-bench/measure_string_auth_overhead.py --build-dir build
+```
+
+The helper writes temporary inputs under `build/string-auth-bench/` and reports lazy first-decode cost, lazy steady-state helper cost, and constructor startup impact.
 
 ## Verification
 
@@ -238,21 +313,6 @@ Requested release sweep:
 cmake --build build --target obf-benchmarks obf-seed-diversity obf-unit-tests
 ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests"
 ```
-
-Other useful targets:
-
-- `obf-benchmarks`
-- `obf-benchmarks-mir`
-- `obf-audit-benchmarks`
-- `obf-re-harness`
-- `obf-seed-diversity`
-
-Current benchmark corpus:
-
-- `license_demo`
-- `config_demo`
-- `vm_workflow_demo`
-- `wpo_demo`
 
 ## Repository Layout
 
