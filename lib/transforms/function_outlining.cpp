@@ -27,9 +27,14 @@ namespace obf {
 
 namespace {
 
+struct dispatch_route {
+  llvm::BranchInst* branch = nullptr;
+  llvm::BasicBlock* target = nullptr;
+};
+
 struct handler_info {
   llvm::BasicBlock* block = nullptr;
-  llvm::SmallVector<llvm::ConstantInt*, 2> states;
+  llvm::SmallVector<dispatch_route, 2> routes;
   std::uint64_t rank = 0;
 };
 
@@ -38,38 +43,83 @@ bool is_terminal_handler(const llvm::BasicBlock& block) {
   return llvm::isa<llvm::ReturnInst>(terminator) || llvm::isa<llvm::UnreachableInst>(terminator);
 }
 
-llvm::SwitchInst* find_flatten_dispatch(llvm::Function& function) {
-  for (llvm::BasicBlock& block : function) {
-    if (!block.getName().starts_with("obf.flat.dispatch")) { continue; }
+bool is_dispatch_match_branch(const llvm::BasicBlock& block, const llvm::BranchInst& branch) {
+  if (!block.getName().starts_with("obf.flat.dispatch") || !branch.isConditional()) { return false; }
 
-    if (auto* switch_inst = llvm::dyn_cast<llvm::SwitchInst>(block.getTerminator())) {
-      return switch_inst;
+  const auto* compare = llvm::dyn_cast<llvm::ICmpInst>(branch.getCondition());
+  return compare != nullptr && compare->getPredicate() == llvm::CmpInst::ICMP_EQ;
+}
+
+llvm::BasicBlock* find_flatten_default_target(llvm::Function& function) {
+  llvm::BasicBlock* default_target = nullptr;
+
+  for (llvm::BasicBlock& block : function) {
+    auto* branch = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator());
+    if (branch == nullptr || !is_dispatch_match_branch(block, *branch)) { continue; }
+
+    llvm::BasicBlock* fallback = branch->getSuccessor(1);
+    if (fallback == nullptr || fallback->getName().starts_with("obf.flat.dispatch.split")) {
+      continue;
     }
+
+    if (default_target == nullptr) {
+      default_target = fallback;
+      continue;
+    }
+
+    if (default_target != fallback) { return nullptr; }
   }
 
-  return nullptr;
+  return default_target;
+}
+
+bool is_outline_eligible_handler(const llvm::BasicBlock& block, llvm::BasicBlock* default_target) {
+  if (&block == default_target || is_terminal_handler(block) ||
+      block.getName().starts_with("obf.flat.edge") ||
+      block.getName().starts_with("obf.flat.decoy")) {
+    return false;
+  }
+
+  return true;
+}
+
+std::size_t count_cluster_routes(llvm::ArrayRef<handler_info> cluster_handlers) {
+  std::size_t route_count = 0;
+  for (const handler_info& handler : cluster_handlers) { route_count += handler.routes.size(); }
+
+  return route_count;
+}
+
+void restore_cluster_routes(llvm::ArrayRef<handler_info> cluster_handlers) {
+  for (const handler_info& handler : cluster_handlers) {
+    for (const dispatch_route& route : handler.routes) {
+      if (route.branch != nullptr && route.target != nullptr) {
+        route.branch->setSuccessor(0, route.target);
+      }
+    }
+  }
 }
 
 std::vector<handler_info> collect_handler_infos(llvm::Function& function, std::uint64_t seed) {
-  llvm::SwitchInst* dispatch = find_flatten_dispatch(function);
-  if (dispatch == nullptr) { return {}; }
+  llvm::BasicBlock* default_target = find_flatten_default_target(function);
+  if (default_target == nullptr) { return {}; }
 
   llvm::DenseMap<llvm::BasicBlock*, std::size_t> indices;
   std::vector<handler_info> handlers;
-  llvm::BasicBlock* entry_handler = dispatch->getDefaultDest();
 
-  for (auto case_handle : dispatch->cases()) {
-    llvm::BasicBlock* handler = case_handle.getCaseSuccessor();
-    if (handler == nullptr || handler == entry_handler || handler == dispatch->getParent() ||
-        is_terminal_handler(*handler) || handler->getName().starts_with("obf.flat.edge") ||
-        handler->getName().starts_with("obf.flat.decoy")) {
+  for (llvm::BasicBlock& block : function) {
+    auto* branch = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator());
+    if (branch == nullptr || !is_dispatch_match_branch(block, *branch)) { continue; }
+
+    llvm::BasicBlock* handler = branch->getSuccessor(0);
+    if (handler == nullptr || !is_outline_eligible_handler(*handler, default_target)) {
       continue;
     }
 
     const auto [iterator, inserted] = indices.try_emplace(handler, handlers.size());
-    if (inserted) { handlers.push_back({.block = handler}); }
+    if (inserted) { handlers.push_back({.block = handler, .routes = {}, .rank = 0}); }
 
-    handlers[iterator->second].states.push_back(case_handle.getCaseValue());
+    handlers[iterator->second].routes.push_back({.branch = branch, .target = handler});
   }
 
   for (handler_info& handler : handlers) {
@@ -144,7 +194,6 @@ void obfuscate_shard_calls(llvm::Function& parent,
 }
 
 bool try_extract_cluster(llvm::Function& function,
-                         llvm::SwitchInst& dispatch,
                          llvm::ArrayRef<handler_info> cluster_handlers,
                          const function_outlining_options& options,
                          llvm::CodeExtractorAnalysisCache& cache,
@@ -154,33 +203,60 @@ bool try_extract_cluster(llvm::Function& function,
                          llvm::SmallVectorImpl<llvm::Function*>& shards) {
   if (cluster_handlers.size() < options.min_cluster_size) { return false; }
 
+  const std::size_t route_count = count_cluster_routes(cluster_handlers);
+  if (route_count == 0) { return false; }
+
   llvm::LLVMContext& context = function.getContext();
   llvm::BasicBlock* cluster_entry = llvm::BasicBlock::Create(
       context, "obf.outline.entry", &function, cluster_handlers.front().block);
+  llvm::PHINode* route_selector =
+      llvm::PHINode::Create(llvm::Type::getInt32Ty(context), route_count, "obf.outline.route", cluster_entry);
   llvm::IRBuilder<> entry_builder(cluster_entry);
-  llvm::SwitchInst* cluster_switch = entry_builder.CreateSwitch(
-      dispatch.getCondition(), cluster_handlers.front().block, cluster_handlers.size());
+  llvm::SwitchInst* cluster_switch =
+      entry_builder.CreateSwitch(route_selector, cluster_handlers.front().block, route_count);
 
-  auto restore_dispatch_cases = [&]() {
-    for (auto case_handle : dispatch.cases()) {
-      for (const handler_info& handler : cluster_handlers) {
-        if (llvm::is_contained(handler.states, case_handle.getCaseValue())) {
-          case_handle.setSuccessor(handler.block);
-        }
+  llvm::SmallVector<llvm::BasicBlock*, 8> route_blocks;
+  route_blocks.reserve(route_count);
+  std::uint32_t route_index = 0;
+  for (const handler_info& handler : cluster_handlers) {
+    for (const dispatch_route& route : handler.routes) {
+      llvm::BasicBlock* route_block =
+          llvm::BasicBlock::Create(context, "obf.outline.route", &function, cluster_entry);
+      llvm::IRBuilder<> route_builder(route_block);
+      route_builder.CreateBr(cluster_entry);
+      route_selector->addIncoming(
+          llvm::ConstantInt::get(route_selector->getType(), route_index), route_block);
+      cluster_switch->addCase(entry_builder.getInt32(route_index), handler.block);
+      route.branch->setSuccessor(0, route_block);
+      route_blocks.push_back(route_block);
+      ++route_index;
+    }
+  }
+
+  auto discard_cluster = [&]() {
+    restore_cluster_routes(cluster_handlers);
+
+    for (llvm::BasicBlock* route_block : route_blocks) {
+      if (route_block == nullptr || route_block->getParent() == nullptr) { continue; }
+
+      auto* branch = llvm::dyn_cast<llvm::BranchInst>(route_block->getTerminator());
+      if (branch != nullptr) { branch->setSuccessor(0, cluster_handlers.front().block); }
+    }
+
+    if (cluster_entry->getParent() != nullptr) { cluster_entry->eraseFromParent(); }
+    for (llvm::BasicBlock* route_block : route_blocks) {
+      if (route_block != nullptr && route_block->getParent() != nullptr) {
+        route_block->eraseFromParent();
       }
     }
+
+    dom_tree.recalculate(function);
   };
 
   llvm::SmallVector<llvm::BasicBlock*, 8> region_blocks;
   region_blocks.push_back(cluster_entry);
   for (const handler_info& handler : cluster_handlers) {
     region_blocks.push_back(handler.block);
-    for (llvm::ConstantInt* state : handler.states) {
-      cluster_switch->addCase(state, handler.block);
-      for (auto case_handle : dispatch.cases()) {
-        if (case_handle.getCaseValue() == state) { case_handle.setSuccessor(cluster_entry); }
-      }
-    }
   }
 
   dom_tree.recalculate(function);
@@ -195,17 +271,13 @@ bool try_extract_cluster(llvm::Function& function,
                                 /*AllocationBlock=*/nullptr,
                                 build_shard_name(options.seed, cluster_index));
   if (!extractor.isEligible()) {
-    restore_dispatch_cases();
-    cluster_entry->eraseFromParent();
-    dom_tree.recalculate(function);
+    discard_cluster();
     return false;
   }
 
   llvm::Function* shard = extractor.extractCodeRegion(cache);
   if (shard == nullptr) {
-    restore_dispatch_cases();
-    if (cluster_entry->getParent() != nullptr) { cluster_entry->eraseFromParent(); }
-    dom_tree.recalculate(function);
+    discard_cluster();
     return false;
   }
 
@@ -248,11 +320,6 @@ function_outlining_result run_function_outlining(llvm::Function& function,
   const function_outlining_result analysis = analyze_impl(function, options);
   if (analysis.shard_count == 0) { return analysis; }
 
-  llvm::SwitchInst* dispatch = find_flatten_dispatch(function);
-  if (dispatch == nullptr) {
-    return {.shard_count = 0, .detail = "flattened dispatcher not found"};
-  }
-
   std::vector<handler_info> handlers = collect_handler_infos(function, options.seed);
   if (handlers.size() < options.min_cluster_size) {
     return {.shard_count = 0, .detail = "not enough flattened handlers to outline"};
@@ -278,7 +345,6 @@ function_outlining_result run_function_outlining(llvm::Function& function,
       if (index + cluster_size > handlers.size()) { continue; }
 
       extracted = try_extract_cluster(function,
-                                      *dispatch,
                                       llvm::ArrayRef(handlers).slice(index, cluster_size),
                                       options,
                                       cache,

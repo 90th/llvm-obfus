@@ -62,9 +62,11 @@ done:
 ; VM: br label %vm.exec.{{[0-9]+}}
 
 ; FLAT-LABEL: define i32 @flatten_me(i32 %x)
-; FLAT: switch i32 %obf.state
-; FLAT: label %obf.flat.decoy
-; FLAT: obf.flat.decoy:
-; FLAT: obf.flat.decoy.loop:
-; FLAT: obf.flat.decoy.trap:
-; FLAT: call void @llvm.trap()
+; FLAT-NOT: switch i32 %obf.state
+; FLAT-DAG: %obf.flat.dispatch.eq = icmp eq i32 %obf.state,
+; FLAT-DAG: %obf.flat.dispatch.ult = icmp ult i32 %obf.state,
+; FLAT-DAG: label %obf.flat.decoy{{[0-9]*}}
+; FLAT-DAG: obf.flat.decoy{{[0-9]*}}:
+; FLAT-DAG: obf.flat.decoy.loop{{[0-9]*}}:
+; FLAT-DAG: obf.flat.decoy.trap{{[0-9]*}}:
+; FLAT-DAG: call void @llvm.trap()

@@ -45,6 +45,23 @@ struct decoy_state {
   llvm::BasicBlock* entry = nullptr;
 };
 
+struct dispatch_case {
+  std::uint32_t state_id = 0;
+  llvm::BasicBlock* target = nullptr;
+};
+
+struct dispatch_tree_state {
+  std::size_t next_ordinal = 0;
+};
+
+struct dispatch_tree_context {
+  llvm::Function& function;
+  llvm::Value* state_value = nullptr;
+  llvm::BasicBlock* default_target = nullptr;
+  const mba::builder_context& mba_context;
+  dispatch_tree_state& tree_state;
+};
+
 std::mt19937 build_state_rng(const llvm::Function& function,
                              const control_flattening_options& options) {
   const std::uint64_t seed_base = options.seed == 0 ? 0x6d2534f1f6c7a29bULL : options.seed;
@@ -319,6 +336,159 @@ void bind_cfg_state_placeholders(llvm::ArrayRef<llvm::BasicBlock*> blocks,
   }
 }
 
+std::vector<dispatch_case> build_dispatch_cases(
+    llvm::ArrayRef<llvm::BasicBlock*> blocks,
+    const llvm::DenseMap<llvm::BasicBlock*, std::uint32_t>& state_ids,
+    llvm::ArrayRef<decoy_state> decoy_states) {
+  std::vector<dispatch_case> cases;
+  cases.reserve(blocks.size() + decoy_states.size());
+  for (llvm::BasicBlock* block : blocks) {
+    if (block == nullptr) { continue; }
+
+    cases.push_back({.state_id = state_ids.lookup(block), .target = block});
+  }
+
+  for (const decoy_state& decoy : decoy_states) {
+    if (decoy.entry == nullptr) { continue; }
+
+    cases.push_back({.state_id = decoy.id, .target = decoy.entry});
+  }
+
+  return cases;
+}
+
+void shuffle_dispatch_cases(std::vector<dispatch_case>& cases, std::mt19937& rng) {
+  std::shuffle(cases.begin(), cases.end(), rng);
+}
+
+std::string make_dispatch_block_name(llvm::StringRef role, std::size_t ordinal) {
+  return ("obf.flat.dispatch." + role + std::to_string(ordinal)).str();
+}
+
+std::uint64_t build_dispatch_tree_salt(const mba::builder_context& mba_context,
+                                       std::size_t depth,
+                                       std::size_t ordinal,
+                                       std::uint64_t family_salt) {
+  std::uint64_t salt = mix_seed(mba_context.seed_base, family_salt);
+  salt = mix_seed(salt, static_cast<std::uint64_t>(depth + 1));
+  salt = mix_seed(salt, static_cast<std::uint64_t>(ordinal + 1) * 0x9e3779b97f4a7c15ULL);
+  return salt;
+}
+
+llvm::Value* materialize_dispatch_state_constant(llvm::IRBuilder<>& builder,
+                                                 const mba::builder_context& mba_context,
+                                                 std::uint32_t state_id,
+                                                 std::uint64_t salt,
+                                                 llvm::StringRef name) {
+  return mba::create_opaque_integer(builder,
+                                    builder.getInt32Ty(),
+                                    mba_context,
+                                    llvm::APInt(32, static_cast<std::uint64_t>(state_id)),
+                                    salt,
+                                    name);
+}
+
+void emit_dispatch_subtree(llvm::BasicBlock& block,
+                           const dispatch_tree_context& context,
+                           std::vector<dispatch_case> cases,
+                           std::size_t depth);
+
+void emit_dispatch_leaf(llvm::BasicBlock& block,
+                        const dispatch_tree_context& context,
+                        const dispatch_case& single_case,
+                        std::size_t depth,
+                        std::size_t ordinal) {
+  llvm::IRBuilder<> builder(&block);
+  llvm::Value* compare_state = materialize_dispatch_state_constant(
+      builder,
+      context.mba_context,
+      single_case.state_id,
+      build_dispatch_tree_salt(context.mba_context, depth, ordinal, 0x1f4a7101ULL),
+      "obf.flat.dispatch.leaf.state");
+  llvm::Value* is_match =
+      builder.CreateICmpEQ(context.state_value, compare_state, "obf.flat.dispatch.eq");
+  builder.CreateCondBr(is_match, single_case.target, context.default_target);
+}
+
+void emit_dispatch_subtree(llvm::BasicBlock& block,
+                           const dispatch_tree_context& context,
+                           std::vector<dispatch_case> cases,
+                           std::size_t depth) {
+  if (cases.empty()) {
+    llvm::IRBuilder<> builder(&block);
+    builder.CreateBr(context.default_target);
+    return;
+  }
+
+  const std::size_t ordinal = context.tree_state.next_ordinal++;
+  if (cases.size() == 1) {
+    emit_dispatch_leaf(block, context, cases.front(), depth, ordinal);
+    return;
+  }
+
+  std::vector<dispatch_case> ordered_cases = cases;
+  std::sort(ordered_cases.begin(), ordered_cases.end(), [](const dispatch_case& lhs,
+                                                           const dispatch_case& rhs) {
+    if (lhs.state_id != rhs.state_id) { return lhs.state_id < rhs.state_id; }
+    return lhs.target < rhs.target;
+  });
+  const dispatch_case pivot = ordered_cases[ordered_cases.size() / 2];
+
+  std::vector<dispatch_case> left_cases;
+  std::vector<dispatch_case> right_cases;
+  left_cases.reserve(cases.size() / 2);
+  right_cases.reserve(cases.size() / 2);
+  for (const dispatch_case& entry : cases) {
+    if (entry.state_id < pivot.state_id) {
+      left_cases.push_back(entry);
+    } else if (entry.state_id > pivot.state_id) {
+      right_cases.push_back(entry);
+    }
+  }
+
+  llvm::BasicBlock* split_block = llvm::BasicBlock::Create(
+      context.function.getContext(), make_dispatch_block_name("split", ordinal), &context.function);
+  llvm::BasicBlock* left_entry = left_cases.empty()
+                                     ? nullptr
+                                     : llvm::BasicBlock::Create(context.function.getContext(),
+                                                               make_dispatch_block_name("left", ordinal),
+                                                               &context.function);
+  llvm::BasicBlock* right_entry = right_cases.empty()
+                                      ? nullptr
+                                      : llvm::BasicBlock::Create(context.function.getContext(),
+                                                                make_dispatch_block_name("right", ordinal),
+                                                                &context.function);
+
+  llvm::IRBuilder<> equality_builder(&block);
+  llvm::Value* equality_state = materialize_dispatch_state_constant(
+      equality_builder,
+      context.mba_context,
+      pivot.state_id,
+      build_dispatch_tree_salt(context.mba_context, depth, ordinal, 0x1f4a7201ULL),
+      "obf.flat.dispatch.node.eq.state");
+  llvm::Value* is_equal =
+      equality_builder.CreateICmpEQ(context.state_value, equality_state, "obf.flat.dispatch.eq");
+  equality_builder.CreateCondBr(is_equal, pivot.target, split_block);
+
+  llvm::IRBuilder<> split_builder(split_block);
+  llvm::Value* magnitude_state = materialize_dispatch_state_constant(
+      split_builder,
+      context.mba_context,
+      pivot.state_id,
+      build_dispatch_tree_salt(context.mba_context, depth, ordinal, 0x1f4a7301ULL),
+      "obf.flat.dispatch.node.ult.state");
+  llvm::Value* is_less = split_builder.CreateICmpULT(
+      context.state_value, magnitude_state, "obf.flat.dispatch.ult");
+  split_builder.CreateCondBr(is_less,
+                             left_entry != nullptr ? left_entry : context.default_target,
+                             right_entry != nullptr ? right_entry : context.default_target);
+
+  if (left_entry != nullptr) { emit_dispatch_subtree(*left_entry, context, left_cases, depth + 1); }
+  if (right_entry != nullptr) {
+    emit_dispatch_subtree(*right_entry, context, right_cases, depth + 1);
+  }
+}
+
 }  // namespace
 
 control_flattening_result analyze_control_flattening(const llvm::Function& function,
@@ -515,19 +685,18 @@ control_flattening_result run_control_flattening(llvm::Function& function,
 
   for (llvm::PHINode* phi : original_phis) { phi->eraseFromParent(); }
 
-  llvm::IRBuilder<> dispatch_builder(dispatch);
-  llvm::SwitchInst* switch_inst =
-      dispatch_builder.CreateSwitch(state_phi, blocks.front(), blocks.size() + decoy_states.size());
-  for (llvm::BasicBlock* block : blocks) {
-    switch_inst->addCase(
-        llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), state_ids.lookup(block)), block);
-  }
-  for (const decoy_state& decoy : decoy_states) {
-    if (decoy.entry == nullptr) { continue; }
-
-    switch_inst->addCase(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), decoy.id),
-                         decoy.entry);
-  }
+  std::vector<dispatch_case> dispatch_cases =
+      build_dispatch_cases(blocks, state_ids, decoy_states);
+  shuffle_dispatch_cases(dispatch_cases, state_rng);
+  dispatch_tree_state tree_state;
+  const dispatch_tree_context tree_context{
+      .function = function,
+      .state_value = state_phi,
+      .default_target = blocks.front(),
+      .mba_context = mba_context,
+      .tree_state = tree_state,
+  };
+  emit_dispatch_subtree(*dispatch, tree_context, dispatch_cases, 0);
 
   return {.flattened = true,
           .state_count = analysis.state_count + decoy_states.size(),
