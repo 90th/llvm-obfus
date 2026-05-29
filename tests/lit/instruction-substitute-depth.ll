@@ -4,27 +4,23 @@
 
 define i32 @value(i32 %x, i32 %y) {
 entry:
-  %sum = add i32 %x, %y
-  ret i32 %sum
+  %lhs = and i32 %x, %y
+  %rhs = or i32 %lhs, 3
+  ret i32 %rhs
 }
 
 define i32 @main() {
 entry:
   %value = call i32 @value(i32 10, i32 20)
-  %ok = icmp eq i32 %value, 30
+  %ok = icmp eq i32 %value, 3
   %ret = select i1 %ok, i32 0, i32 1
   ret i32 %ret
 }
 
-; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @value
-; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
-; CHECK: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
-; CHECK: %obf.mba.add.or = or i32 %x, %y
-; CHECK: %obf.mba.add.and = and i32 %x, %y
-; CHECK: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
-; CHECK: %obf.entropy.direct = extractvalue { i64, i64 } %obf.entropy.pair, 0
-; CHECK: %obf.entropy.indirect = extractvalue { i64, i64 } %obf.entropy.pair, 1
-; CHECK: %obf.mba.add.carry = add i32
-; CHECK: %obf.mba.add.xor.mask = add i32
-; CHECK: %sum = add i32
+; CHECK: %obf.and.notlhs = xor i32 %x, -1
+; CHECK: %obf.and.notrhs = xor i32 %y, -1
+; CHECK: %lhs = xor i32 %obf.and.or, -1
+; CHECK: %obf.or.notlhs = xor i32 %lhs, -1
+; CHECK: %obf.or.and = and i32 %obf.or.notlhs, -4
+; CHECK: %rhs = xor i32 %obf.or.and, -1

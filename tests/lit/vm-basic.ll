@@ -108,7 +108,8 @@ entry:
 ; INST: %fold_value.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.wrapper.decoded to ptr
 ; INST: call i32 %fold_value.obf.wrapper.indirect(i32 %value, i64 {{(%fold_value\.obf\.wrapper\.token|-?[0-9]+)}})
 ; INST: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
-; INST: %fold_value.obf.retdec = {{(add|sub) i32}}
+; INST: %fold_value.obf.retkey.cast =
+; INST: %obf.mba.xor.affine.or
 ; INST-LABEL: define i32 @main()
 ; INST: %fold_value.obf.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; INST: br i1
@@ -116,8 +117,8 @@ entry:
 ; INST: %fold_value.obf.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.decoded to ptr
 ; INST: call i32 %fold_value.obf.indirect(i32 0, i64 {{(%fold_value\.obf\.call\.token|-?[0-9]+)}})
 ; INST: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
-; INST: {{(%fold_value\.obf\.retkey\.bound = (add|sub) i64|%[0-9]+ = trunc i64 %fold_value\.obf\.retkey to i32)}}
-; INST: {{(%fold_value\.obf\.retdec = (add|sub) i32|%[0-9]+ = xor i32 %fold_value\.obf\.callsite, %[0-9]+)}}
+; INST: {{(%fold_value\.obf\.retkey\.bound = (add|sub|xor) i64|%[0-9]+ = trunc i64 %fold_value\.obf\.retkey to i32|%obf\.mba\.xor\.affine\.)}}
+; INST: {{(%fold_value\.obf\.retdec = (add|sub|xor) i32|%[0-9]+ = xor i32 %fold_value\.obf\.callsite, %[0-9]+)}}
 ; INST-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)
 ; INST: %obf.vm.state = alloca {
 ; INST: %obf.vm.pred.slot = alloca i32

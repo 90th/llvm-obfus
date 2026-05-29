@@ -373,8 +373,7 @@ indirect_dispatch_options build_indirect_dispatch_options(const obfuscation_conf
 }
 
 instruction_substitution_options
-build_instruction_substitution_options(const obfuscation_config& config,
-                                       const policy_decision& decision) {
+build_instruction_substitution_options(const obfuscation_config&, const policy_decision& decision) {
   instruction_substitution_options options;
   if (has_strong_classical(decision.policy.level)) {
     options.max_substitutions_per_function = 6;
@@ -382,7 +381,6 @@ build_instruction_substitution_options(const obfuscation_config& config,
     options.max_substitutions_per_function = 2;
   }
 
-  options.mba_depth = config.mba.depth;
   return options;
 }
 

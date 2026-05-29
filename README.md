@@ -13,7 +13,8 @@ The design goal is simple: make static recovery materially harder while staying 
 - Protection levels are `none`, `light`, `strong`, `vm`, and `strong_vm`.
 - `vm` and `strong_vm` lower selected functions into VM-backed execution paths.
 - `strong_vm` implementation bodies continue through later hardening stages, not just the public wrapper.
-- MBA rewriting is used both directly and as part of other transforms such as constant reconstruction.
+- MBA rewriting owns arithmetic identity diversification such as `add`, `sub`, and `xor`, both directly and as part of other transforms such as constant reconstruction.
+- `instruction_substitution` stays focused on distinct logical rewrites such as boolean identity transformations instead of duplicating MBA arithmetic forms.
 
 ### Seeded Indirect Dispatch
 
@@ -91,7 +92,7 @@ The design goal is simple: make static recovery materially harder while staying 
 4. post-VM string encoding
 5. constant encoding
 6. opaque GEP
-7. instruction substitution
+7. instruction substitution for logical and boolean rewrites
 8. opaque predicates
 9. control flattening
 10. function outlining

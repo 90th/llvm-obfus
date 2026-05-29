@@ -12,7 +12,6 @@ namespace obf {
 
 struct instruction_substitution_options {
   std::size_t max_substitutions_per_function = 4;
-  std::uint32_t mba_depth = 1;
 };
 
 struct instruction_substitution_result {

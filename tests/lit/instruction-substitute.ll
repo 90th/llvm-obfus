@@ -4,28 +4,23 @@
 
 define i32 @value(i32 %x, i32 %y) {
 entry:
-  %sum = add i32 %x, %y
-  %mix = xor i32 %sum, 123
-  ret i32 %mix
+  %lhs = and i32 %x, %y
+  %rhs = or i32 %lhs, 123
+  ret i32 %rhs
 }
 
 define i32 @main() {
 entry:
   %value = call i32 @value(i32 10, i32 20)
-  %ok = icmp eq i32 %value, 101
+  %ok = icmp eq i32 %value, 123
   %ret = select i1 %ok, i32 0, i32 1
   ret i32 %ret
 }
 
-; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @value
-; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
-; CHECK: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
-; CHECK: %obf.mba.add.or = or i32 %x, %y
-; CHECK: %obf.mba.add.and = and i32 %x, %y
-; CHECK: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
-; CHECK: %obf.entropy.direct = extractvalue { i64, i64 } %obf.entropy.pair, 0
-; CHECK: %obf.entropy.indirect = extractvalue { i64, i64 } %obf.entropy.pair, 1
-; CHECK: %obf.mba.add.left = add i32 %obf.mba.add.or,
-; CHECK: %sum = add i32 %obf.mba.add.left, %obf.mba.add.right
-; CHECK: %mix = add i32 %obf.mba.xor.left.mask, %obf.mba.xor.right.mask
+; CHECK: %obf.and.notlhs = xor i32 %x, -1
+; CHECK: %obf.and.notrhs = xor i32 %y, -1
+; CHECK: %lhs = xor i32 %obf.and.or, -1
+; CHECK: %obf.or.notlhs = xor i32 %lhs, -1
+; CHECK: %obf.or.and = and i32 %obf.or.notlhs, -124
+; CHECK: %rhs = xor i32 %obf.or.and, -1

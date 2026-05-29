@@ -22,10 +22,11 @@ entry:
 ; IR: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
 ; IR: %obf.entropy.direct = extractvalue { i64, i64 } %obf.entropy.pair, 0
 ; IR: %obf.entropy.indirect = extractvalue { i64, i64 } %obf.entropy.pair, 1
-; IR: %obf.const.mask = {{(add|sub) i32}}
-; IR: %obf.const = {{(add|sub) i32}}
-; IR: ret i32 %obf.const
+; IR: %obf.mba.xor.affine.or = or i32
+; IR: %obf.mba.xor.affine.mask = add i32
+; IR: %obf.const = add i32
 ; IR-NOT: ret i32 42
+; IR: ret i32 %obf.const
 
 ; INST-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; INST-LABEL: define i32 @value()

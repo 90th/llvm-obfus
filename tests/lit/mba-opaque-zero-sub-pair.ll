@@ -24,3 +24,5 @@ entry:
 ; CHECK: %obf.mba.zero.sub_pair.masked = xor i32
 ; CHECK: %obf.mba.zero.sub_pair.unmasked = xor i32
 ; CHECK: %obf.mba.zero.sub_pair = sub i32 %obf.mba.zero.sub_pair.unmasked, %obf.mba.zero.sub_pair.delta
+; CHECK: %obf.mba.zero.affine_cancel_pair.term = xor i32
+; CHECK: %obf.mba.xor.affine.or.mul = mul i32

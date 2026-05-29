@@ -30,5 +30,7 @@ entry:
 ; CHECK-DAG: obf.mba.zero.rotate_xor_pair
 ; CHECK-DAG: obf.mba.zero.add_sub_pair
 ; CHECK-DAG: obf.mba.zero.add_sub_pair.delta
+; CHECK-DAG: obf.mba.zero.affine_cancel_pair
+; CHECK-DAG: obf.mba.zero.affine_self_diff
 ; CHECK-DAG: obf.entangle.xor_zero.zero
 ; CHECK: ret i32
