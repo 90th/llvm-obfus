@@ -319,7 +319,7 @@ llvm::Value* build_dispatch_key(llvm::IRBuilder<>& builder,
   }
 
   const unsigned bit_width = context.ptr_int_type->getBitWidth();
-  const std::uint64_t affine_seed = mix_seed(context.bytecode_seed, salt ^ 0x7004ULL);
+  const std::uint64_t affine_seed = mix_seed(context.bytecode_seed, 0x7004ULL);
   const llvm::APInt affine_multiplier =
       make_vm_dispatch_affine_multiplier(bit_width, affine_seed ^ 0x410a11ceULL);
   const llvm::APInt affine_bias =

@@ -71,6 +71,9 @@ entry:
 ; CHECK: %obf.vm.pred.slot = alloca i32
 ; CHECK: %obf.vm.token.state.match = icmp eq i64 %obf.hidden_token,
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
+; CHECK-DAG: %obf.vm.dispatch.key.mix
+; CHECK-DAG: %obf.vm.dispatch.key.affine.mul
+; CHECK-DAG: %obf.vm.dispatch.key =
 ; CHECK: {{^vm\.[0-9]+:}}
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_
 ; CHECK: %obf.vm.integrity.byte.ptr = getelementptr inbounds

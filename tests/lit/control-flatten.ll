@@ -57,8 +57,14 @@ entry:
 ; CHECK-DAG: %obf.flat.dispatch.ult = icmp ult i32 %obf.state,
 ; CHECK-DAG: br i1 %obf.flat.dispatch.ult, label %obf.flat.dispatch.left0, label %obf.flat.dispatch.right0
 ; CHECK-DAG: %ptr = getelementptr inbounds i8, ptr %p, i64 %obf.flat.val
+; CHECK-DAG: %obf.opaque.pair = load
+; CHECK-DAG: %obf.opaque.entropy.mix = xor i64
+; CHECK-DAG: %obf.opaque.seed =
+; CHECK-DAG: %obf.opaque.seed.freeze = freeze i64
+; CHECK-DAG: %obf.opaque.expr.a =
+; CHECK-DAG: %obf.opaque.expr.b =
+; CHECK-DAG: %obf.flat.decoy.true = icmp eq i64 %obf.opaque.expr.a, %obf.opaque.expr.b
 ; CHECK-DAG: obf.flat.decoy{{[0-9]*}}:
 ; CHECK-DAG: obf.flat.decoy.loop{{[0-9]*}}:
-; CHECK-DAG: icmp eq i64 %obf.flat.decoy.expr.a{{[0-9]*}}, %obf.flat.decoy.expr.b{{[0-9]*}}
 ; CHECK-DAG: obf.flat.decoy.trap{{[0-9]*}}:
 ; CHECK-DAG: call void @llvm.trap()

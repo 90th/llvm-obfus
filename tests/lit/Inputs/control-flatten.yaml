@@ -3,3 +3,5 @@ default_level: none
 targets:
   - match: verify_like
     level: strong
+mba:
+  depth: 2
