@@ -1,4 +1,5 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/safe-pipeline-indirect-dispatch.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/safe-pipeline-indirect-dispatch.yaml -passes=obf-safe-pipeline -S %s -o - | %opt -passes=verify -disable-output
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/safe-pipeline-indirect-dispatch.yaml -passes=obf-safe-pipeline -S %s -o %t
 ; RUN: %lli %t
 
@@ -76,12 +77,13 @@ entry:
 ; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @flatten_header(i32
 ; CHECK: freeze i1
-; CHECK: blockaddress(@flatten_header, %{{[^)]+}})
-; CHECK: inttoptr i64
+; CHECK: = xor i64 ptrtoint (ptr blockaddress(@flatten_header, %{{[^)]+}}) to i64), %{{[^ ]+}}
+; CHECK: inttoptr i64 %{{[^ ]+}} to ptr
 ; CHECK: indirectbr ptr
 ; CHECK-LABEL: define i32 @vm_switch_dispatch(i32
 ; CHECK: call i32 %{{[^ ]+}}(i32 %{{[^,]+}}, i32 %{{[^,]+}}, i32 %{{[^,]+}}, i64 %{{[^)]+}})
 ; CHECK: define internal i32 @{{_[0-9a-f]+}}(i32
 ; CHECK: freeze i1
-; CHECK: blockaddress(@{{_[0-9a-f]+}}, %{{[^)]+}})
+; CHECK: = xor i64 ptrtoint (ptr blockaddress(@{{_[0-9a-f]+}}, %{{[^)]+}}) to i64), %{{[^ ]+}}
+; CHECK: inttoptr i64 %{{[^ ]+}} to ptr
 ; CHECK: indirectbr ptr

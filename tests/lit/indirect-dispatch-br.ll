@@ -36,9 +36,13 @@ entry:
 ; CHECK: %obf.idis.site0.tok1 = add i64 %obf.idis.site0.rot1, {{-?[0-9]+}}
 ; CHECK: %obf.idis.cond = freeze i1 %cmp
 ; CHECK: %obf.idis.sel = select i1 %obf.idis.cond, i64 %obf.idis.site0.tok0, i64 %obf.idis.site0.tok1
-; CHECK: %obf.idis.unbias = sub i64 %obf.idis.sel, {{-?[0-9]+}}
-; CHECK: %obf.idis.delta = xor i64 %obf.idis.rot, {{-?[0-9]+}}
-; CHECK: %obf.idis.anchor = ptrtoint ptr blockaddress(@branch_dispatch, %gt) to i64
+; CHECK: %obf.mba.sub
+; CHECK: %obf.idis.unbias =
+; CHECK: %obf.idis.rot = or i64 %obf.idis.rot.lshr, %obf.idis.rot.shl
+; CHECK: %obf.mba.xor
+; CHECK: %obf.idis.delta =
+; CHECK: %obf.mba.add
+; CHECK: ptrtoint (ptr blockaddress(@branch_dispatch, %gt) to i64)
 ; CHECK: %obf.idis.dest = inttoptr i64 %obf.idis.addr to ptr
 ; CHECK: indirectbr ptr %obf.idis.dest, [label %gt, label %le]
 ; CHECK-NOT: br i1 %cmp

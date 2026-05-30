@@ -368,6 +368,7 @@ indirect_dispatch_options build_indirect_dispatch_options(const obfuscation_conf
   options.max_switch_targets = config.indirect_dispatch.max_switch_targets;
   options.target_vm_dispatchers = config.indirect_dispatch.target_vm_dispatchers;
   options.target_flattened_headers = config.indirect_dispatch.target_flattened_headers;
+  options.mba_depth = config.mba.depth;
   options.seed = decision.seed;
   return options;
 }

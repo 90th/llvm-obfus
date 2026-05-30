@@ -50,9 +50,13 @@ entry:
 ; CHECK: %obf.idis.sel1 = select i1 %obf.idis.case1, i64 %obf.idis.site0.tok2, i64 %obf.idis.sel0
 ; CHECK: %obf.idis.case2 = icmp eq i32 %obf.idis.state, 9
 ; CHECK: %obf.idis.sel2 = select i1 %obf.idis.case2, i64 %obf.idis.site0.tok2, i64 %obf.idis.sel1
-; CHECK: %obf.idis.unbias = sub i64 %obf.idis.sel2, {{-?[0-9]+}}
-; CHECK: %obf.idis.delta = xor i64 %obf.idis.rot, {{-?[0-9]+}}
-; CHECK: %obf.idis.anchor = ptrtoint ptr blockaddress(@switch_dispatch, %default) to i64
+; CHECK: %obf.mba.sub
+; CHECK: %obf.idis.unbias =
+; CHECK: %obf.idis.rot = or i64 %obf.idis.rot.lshr, %obf.idis.rot.shl
+; CHECK: %obf.mba.xor
+; CHECK: %obf.idis.delta =
+; CHECK: %obf.mba.add
+; CHECK: ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64)
 ; CHECK: %obf.idis.dest = inttoptr i64 %obf.idis.addr to ptr
 ; CHECK: indirectbr ptr %obf.idis.dest, [label %default, label %zero, label %seven]
 ; CHECK-NOT: switch i32 %x

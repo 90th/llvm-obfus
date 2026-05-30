@@ -16,6 +16,7 @@ struct indirect_dispatch_options {
   std::size_t max_switch_targets = 8;
   bool target_vm_dispatchers = true;
   bool target_flattened_headers = true;
+  std::uint32_t mba_depth = 1;
   std::uint64_t seed = 0;
 };
 
