@@ -2295,7 +2295,8 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
       if (target_function == nullptr || target_candidate.state == nullptr) { continue; }
 
       const function_pipeline_state target_state{.function = target_function,
-                                                 .report = target_candidate.state->report};
+                                                 .report = target_candidate.state->report,
+                                                 .mba_counts = target_candidate.state->mba_counts};
       virtualized_function_binding binding =
           prepare_virtualized_function_binding(target_state, config);
       if (binding.implementation_function == nullptr) { continue; }

@@ -290,7 +290,9 @@ build_pipeline_state(llvm::Module& module, const obfuscation_config& config) {
     }
 
     report.decision = select_policy(module, report.features, config, report.annotation);
-    states.push_back({.function = &function, .report = std::move(report)});
+    states.push_back({.function = &function,
+                      .report = std::move(report),
+                      .mba_counts = {}});
   }
 
   apply_orchestrator_policy_promotions(states);

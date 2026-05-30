@@ -26,7 +26,21 @@ transform_report_entry make_transform_report(llvm::StringRef pass,
           .target_name = target_name.str(),
           .status = applied ? "applied" : "skipped",
           .detail = detail.str(),
-          .count = count};
+          .count = count,
+          .strategy_kind = {},
+          .helper_shape = {},
+          .key_schedule = {},
+          .inline_detail = {},
+          .fallback_reason = {},
+          .merge_group = -1,
+          .descriptor_index = -1,
+          .protected_use_count = 0,
+          .unprotected_use_count = 0,
+          .inline_eligible = false,
+          .has_strategy_payload = false,
+          .has_mba_shape_payload = false,
+          .mba_counts = {},
+          .use_kinds = {}};
 }
 
 }  // namespace

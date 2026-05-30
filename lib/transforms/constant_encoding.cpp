@@ -649,7 +649,7 @@ llvm::Value* build_integer_from_pool_entry(llvm::IRBuilder<>& builder,
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), offset),
       "obf.const.pool.ptr");
   llvm::Value* typed_ptr = builder.CreatePointerCast(
-      byte_ptr, llvm::PointerType::getUnqual(type), "obf.const.pool.typed_ptr");
+      byte_ptr, llvm::PointerType::get(context, 0), "obf.const.pool.typed_ptr");
   return builder.CreateLoad(type, typed_ptr, "obf.const.pool.load");
 }
 
