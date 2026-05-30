@@ -40,8 +40,8 @@ entry:
 ; CHECK-DAG: %obf.opaque.seed.lhs.dec = mul i64 %obf.opaque.seed.lhs.sub,
 ; CHECK-DAG: %obf.opaque.seed.rhs.mul = mul i64 %obf.opaque.seed.freeze,
 ; CHECK-DAG: %obf.opaque.seed.rhs.dec = mul i64 %obf.opaque.seed.rhs.sub,
-; CHECK: %obf.opaque.true = icmp eq i64 %obf.opaque.expr.a, %obf.opaque.expr.b
-; CHECK: br i1 %obf.opaque.true, label %merge, label %obf.bogus
+; CHECK: %obf.bogus.true = icmp eq i64 %obf.opaque.expr.a, %obf.opaque.expr.b
+; CHECK: br i1 %obf.bogus.true, label %merge, label %obf.bogus
 ; CHECK: obf.bogus:
 ; CHECK: %obf.bogus.seed = load i64, ptr @rt_core_ea
 ; CHECK: br label %obf.bogus.loop

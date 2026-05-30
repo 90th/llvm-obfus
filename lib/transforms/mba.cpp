@@ -100,6 +100,29 @@ struct mba_features {
   bool enable_simplifier_barriers = true;
 };
 
+// BudgetTracker defers its FromContext factory until after derive_budget
+// is defined below.
+struct BudgetTracker {
+  std::uint32_t remaining = 0;
+  bool enabled = false;
+
+  static BudgetTracker FromContext(const builder_context& ctx);
+
+  bool HasBudget(std::uint32_t cost) const {
+    return !enabled || remaining >= cost;
+  }
+
+  void Deduct(std::uint32_t n) {
+    if (n >= remaining) {
+      remaining = 0;
+    } else {
+      remaining -= n;
+    }
+  }
+
+  bool Exhausted() const { return enabled && remaining == 0; }
+};
+
 std::uint32_t clamped_depth(const builder_context& context) {
   return std::min(context.depth, max_mba_depth);
 }
@@ -148,6 +171,11 @@ mba_features derive_features(const builder_context& context) {
 
 bool has_budget(const builder_context& context, std::uint32_t instruction_cost) {
   return derive_budget(context).max_ir_instructions >= instruction_cost;
+}
+
+BudgetTracker BudgetTracker::FromContext(const builder_context& ctx) {
+  const auto b = derive_budget(ctx);
+  return {b.max_ir_instructions, b.max_ir_instructions > 0};
 }
 
 unsigned get_integer_bit_width(const llvm::Type* type) {
@@ -1134,7 +1162,8 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                              const builder_context& context,
                              std::uint64_t salt,
                              llvm::StringRef name,
-                             std::uint32_t remaining_depth);
+                             std::uint32_t remaining_depth,
+                             BudgetTracker& budget);
 
 llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              llvm::Value* lhs,
@@ -1142,14 +1171,16 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              const builder_context& context,
                              std::uint64_t salt,
                              llvm::StringRef name,
-                             std::uint32_t remaining_depth);
+                             std::uint32_t remaining_depth,
+                             BudgetTracker& budget);
 
 llvm::Value* create_mul_impl(llvm::IRBuilder<>& builder,
                              llvm::Value* lhs,
                              llvm::Value* rhs,
                              const builder_context& context,
                              std::uint64_t salt,
-                             llvm::StringRef name) {
+                             llvm::StringRef name,
+                             BudgetTracker& budget) {
   const std::string result_name = name.empty() ? "obf.mba.mul" : name.str();
   if (!derive_features(context).enable_multiplication || !lhs->getType()->isIntegerTy() ||
       lhs->getType() != rhs->getType()) {
@@ -1182,7 +1213,7 @@ llvm::Value* create_mul_impl(llvm::IRBuilder<>& builder,
   }
 
   const llvm::APInt magnitude = constant.isNegative() ? -constant : constant;
-  if (!has_budget(context, 18) || magnitude.popcount() == 0 || magnitude.popcount() > 3) {
+  if (!budget.HasBudget(18) || magnitude.popcount() == 0 || magnitude.popcount() > 3) {
     return entangle_value_impl(
         builder, builder.CreateMul(lhs, rhs, result_name), context, salt, result_name);
   }
@@ -1212,7 +1243,8 @@ llvm::Value* create_mul_impl(llvm::IRBuilder<>& builder,
                                     context,
                                     mix_seed(salt, 0x401ULL + term_index),
                                     (result_name + ".acc." + llvm::Twine(term_index)).str(),
-                                    clamped_depth(context) > 0 ? clamped_depth(context) - 1 : 0);
+                                    clamped_depth(context) > 0 ? clamped_depth(context) - 1 : 0,
+                                    budget);
     }
     ++term_index;
   }
@@ -1227,7 +1259,8 @@ llvm::Value* create_mul_impl(llvm::IRBuilder<>& builder,
                                   context,
                                   mix_seed(salt, 0x577ULL),
                                   result_name + ".neg",
-                                  clamped_depth(context) > 0 ? clamped_depth(context) - 1 : 0);
+                                  clamped_depth(context) > 0 ? clamped_depth(context) - 1 : 0,
+                                  budget);
   }
 
   return entangle_value_impl(builder, accumulated, context, salt + 0x2ffULL, result_name);
@@ -1291,6 +1324,10 @@ llvm::Value* create_urem_impl(llvm::IRBuilder<>& builder,
 //   remaining_depth >= 1  →  one layer of MBA expansion; the combining
 //                            binary op at the bottom recurses with depth − 1.
 //
+// BudgetTracker is threaded through the entire expression tree.
+// When the budget is exhausted, _impl functions fall back to the
+// plain LLVM binary operation regardless of remaining recursion depth.
+//
 // The public create_{add,sub,xor} functions delegate here using
 // min(context.depth, max_mba_depth) so callers never have to think about
 // capping.
@@ -1302,7 +1339,8 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                              const builder_context& context,
                              std::uint64_t salt,
                              llvm::StringRef name,
-                             std::uint32_t remaining_depth);
+                             std::uint32_t remaining_depth,
+                             BudgetTracker& budget);
 
 llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              llvm::Value* lhs,
@@ -1310,7 +1348,8 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              const builder_context& context,
                              std::uint64_t salt,
                              llvm::StringRef name,
-                             std::uint32_t remaining_depth);
+                             std::uint32_t remaining_depth,
+                             BudgetTracker& budget);
 
 llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                              llvm::Value* lhs,
@@ -1318,7 +1357,8 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                              const builder_context& context,
                              std::uint64_t salt,
                              llvm::StringRef name,
-                             std::uint32_t remaining_depth);
+                             std::uint32_t remaining_depth,
+                             BudgetTracker& budget);
 
 llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                              llvm::Value* lhs,
@@ -1326,11 +1366,14 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                              const builder_context& context,
                              std::uint64_t salt,
                              llvm::StringRef name,
-                             std::uint32_t remaining_depth) {
-  if (remaining_depth == 0 || !is_supported_type(lhs->getType()) ||
+                             std::uint32_t remaining_depth,
+                             BudgetTracker& budget) {
+  if (remaining_depth == 0 || budget.Exhausted() || !is_supported_type(lhs->getType()) ||
       lhs->getType() != rhs->getType()) {
     return builder.CreateAdd(lhs, rhs, name.empty() ? "obf.mba.add" : name);
   }
+
+  budget.Deduct(4);
 
   switch (select_add_shape(context, salt)) {
     case add_shape::or_and: {
@@ -1346,7 +1389,7 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xd1ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
     case add_shape::xor_carry: {
       llvm::Value* xor_part = builder.CreateXor(lhs, rhs, "obf.mba.add.xor");
@@ -1363,7 +1406,7 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xd2ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
     case add_shape::affine_xor_carry: {
       if (!is_affine_scalar_type(lhs->getType())) {
@@ -1373,7 +1416,7 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                                context,
                                mix_seed(salt, 0xd3ULL * remaining_depth),
                                name,
-                               remaining_depth - 1);
+                               remaining_depth - 1, budget);
       }
 
       const unsigned bit_width = lhs->getType()->getIntegerBitWidth();
@@ -1408,7 +1451,7 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xd4ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
     case add_shape::xor_shifted_carry: {
       if (!supports_shift_by_one(lhs->getType())) {
@@ -1418,7 +1461,7 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                                context,
                                mix_seed(salt, 0xd5ULL * remaining_depth),
                                name,
-                               remaining_depth - 1);
+                               remaining_depth - 1, budget);
       }
 
       // x + y == (x ^ y) + ((x & y) << 1) in modular integer arithmetic.
@@ -1437,7 +1480,7 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xd6ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
   }
 
@@ -1450,11 +1493,14 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              const builder_context& context,
                              std::uint64_t salt,
                              llvm::StringRef name,
-                             std::uint32_t remaining_depth) {
-  if (remaining_depth == 0 || !is_supported_type(lhs->getType()) ||
+                             std::uint32_t remaining_depth,
+                             BudgetTracker& budget) {
+  if (remaining_depth == 0 || budget.Exhausted() || !is_supported_type(lhs->getType()) ||
       lhs->getType() != rhs->getType()) {
     return builder.CreateSub(lhs, rhs, name.empty() ? "obf.mba.sub" : name);
   }
+
+  budget.Deduct(4);
 
   switch (select_sub_shape(context, salt)) {
     case sub_shape::xor_borrow: {
@@ -1474,7 +1520,7 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xe1ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
     case sub_shape::lhs_rhs_only: {
       llvm::Value* lhs_only = builder.CreateAnd(
@@ -1491,7 +1537,7 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xe2ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
     case sub_shape::affine_xor_borrow: {
       if (!is_affine_scalar_type(lhs->getType())) {
@@ -1501,7 +1547,7 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                                context,
                                mix_seed(salt, 0xe3ULL * remaining_depth),
                                name,
-                               remaining_depth - 1);
+                               remaining_depth - 1, budget);
       }
 
       const unsigned bit_width = lhs->getType()->getIntegerBitWidth();
@@ -1539,7 +1585,7 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xe4ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
     case sub_shape::ones_complement_add: {
       // x - y == x + ~y + 1 modulo 2^n.
@@ -1554,14 +1600,14 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                                              context,
                                              mix_seed(salt, 0xe5ULL * remaining_depth),
                                              "obf.mba.sub.ones_complement.partial",
-                                             remaining_depth - 1);
+                                             remaining_depth - 1, budget);
       return create_add_impl(builder,
                              partial,
                              constant_i64_to_type(lhs->getType(), 1),
                              context,
                              mix_seed(salt, 0xe6ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
   }
 
@@ -1574,11 +1620,14 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                              const builder_context& context,
                              std::uint64_t salt,
                              llvm::StringRef name,
-                             std::uint32_t remaining_depth) {
-  if (remaining_depth == 0 || !is_supported_type(lhs->getType()) ||
+                             std::uint32_t remaining_depth,
+                             BudgetTracker& budget) {
+  if (remaining_depth == 0 || budget.Exhausted() || !is_supported_type(lhs->getType()) ||
       lhs->getType() != rhs->getType()) {
     return builder.CreateXor(lhs, rhs, name.empty() ? "obf.mba.xor" : name);
   }
+
+  budget.Deduct(4);
 
   switch (select_xor_shape(context, salt)) {
     case xor_shape::or_and_sub: {
@@ -1594,7 +1643,7 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xf1ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
     case xor_shape::disjoint_sum: {
       llvm::Value* lhs_only = builder.CreateAnd(
@@ -1611,7 +1660,7 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xf2ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
     case xor_shape::affine_or_and_sub: {
       if (!is_affine_scalar_type(lhs->getType())) {
@@ -1621,7 +1670,7 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                                context,
                                mix_seed(salt, 0xf3ULL * remaining_depth),
                                name,
-                               remaining_depth - 1);
+                               remaining_depth - 1, budget);
       }
 
       const unsigned bit_width = lhs->getType()->getIntegerBitWidth();
@@ -1650,7 +1699,7 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xf4ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
     case xor_shape::sum_minus_carry: {
       if (!supports_shift_by_one(lhs->getType())) {
@@ -1660,7 +1709,7 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                                context,
                                mix_seed(salt, 0xf5ULL * remaining_depth),
                                name,
-                               remaining_depth - 1);
+                               remaining_depth - 1, budget);
       }
 
       // x ^ y == (x + y) - ((x & y) << 1) in modular integer arithmetic.
@@ -1678,7 +1727,7 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                              context,
                              mix_seed(salt, 0xf6ULL * remaining_depth),
                              name,
-                             remaining_depth - 1);
+                             remaining_depth - 1, budget);
     }
   }
 
@@ -1800,7 +1849,8 @@ llvm::Value* create_add(llvm::IRBuilder<>& builder,
                         const builder_context& context,
                         std::uint64_t salt,
                         llvm::StringRef name) {
-  return create_add_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context));
+  auto budget = BudgetTracker::FromContext(context);
+  return create_add_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context), budget);
 }
 
 llvm::Value* create_sub(llvm::IRBuilder<>& builder,
@@ -1809,7 +1859,8 @@ llvm::Value* create_sub(llvm::IRBuilder<>& builder,
                         const builder_context& context,
                         std::uint64_t salt,
                         llvm::StringRef name) {
-  return create_sub_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context));
+  auto budget = BudgetTracker::FromContext(context);
+  return create_sub_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context), budget);
 }
 
 llvm::Value* create_xor(llvm::IRBuilder<>& builder,
@@ -1818,7 +1869,8 @@ llvm::Value* create_xor(llvm::IRBuilder<>& builder,
                         const builder_context& context,
                         std::uint64_t salt,
                         llvm::StringRef name) {
-  return create_xor_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context));
+  auto budget = BudgetTracker::FromContext(context);
+  return create_xor_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context), budget);
 }
 
 llvm::Value* create_mul(llvm::IRBuilder<>& builder,
@@ -1827,7 +1879,8 @@ llvm::Value* create_mul(llvm::IRBuilder<>& builder,
                         const builder_context& context,
                         std::uint64_t salt,
                         llvm::StringRef name) {
-  return create_mul_impl(builder, lhs, rhs, context, salt, name);
+  auto budget = BudgetTracker::FromContext(context);
+  return create_mul_impl(builder, lhs, rhs, context, salt, name, budget);
 }
 
 llvm::Value* create_udiv(llvm::IRBuilder<>& builder,

@@ -37,8 +37,8 @@ entry:
 ; CHECK: %obf.opaque.seed.freeze = freeze i64 %obf.opaque.seed
 ; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] =
 ; CHECK: [[EXPRB:%obf\.opaque\.expr\.b[^ ]*]] =
-; CHECK: %obf.opaque.true = icmp eq i64 [[EXPRA]], [[EXPRB]]
-; CHECK: br i1 %obf.opaque.true, label %merge, label %obf.bogus
+; CHECK: %obf.bogus.true = icmp eq i64 [[EXPRA]], [[EXPRB]]
+; CHECK: br i1 %obf.bogus.true, label %merge, label %obf.bogus
 ; CHECK: obf.bogus:
 ; CHECK: %obf.bogus.seed = load i64, ptr @rt_core_ea
 ; CHECK: br label %obf.bogus.loop

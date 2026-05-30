@@ -66,5 +66,4 @@ entry:
 ; IR: call { i64, i64 } @rt_core_ep{{[0-4]}}()
 
 ; SHAPES-DAG: entropy.thunk.swap
-; SHAPES-DAG: entropy.thunk.xor
-; SHAPES-DAG: entropy.thunk.addsub
+; SHAPES-DAG: entropy.thunk.select

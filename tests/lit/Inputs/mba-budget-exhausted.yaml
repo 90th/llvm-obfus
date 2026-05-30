@@ -1,0 +1,8 @@
+seed: 5555
+default_level: none
+targets:
+  - match: budget_tight
+    level: strong
+mba:
+  depth: 3
+  max_ir_instructions: 8
