@@ -24,11 +24,15 @@ entry:
 
 ; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @check
-; CHECK: %obf.opaque.entropy = load i64, ptr @rt_core_ea
-; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] = {{(add|sub|xor) i64}}
-; CHECK: [[EXPRB:%obf\.opaque\.expr\.b[^ ]*]] = {{(add|sub|xor) i64}}
+; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
+; CHECK: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
+; CHECK: %obf.opaque.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
+; CHECK: %obf.opaque.direct = extractvalue { i64, i64 } %obf.opaque.pair, 0
+; CHECK: %obf.opaque.indirect = extractvalue { i64, i64 } %obf.opaque.pair, 1
+; CHECK: %obf.opaque.entropy.mix = xor i64 %obf.opaque.direct, %obf.opaque.indirect
+; CHECK: %obf.opaque.seed =
+; CHECK: %obf.opaque.seed.freeze = freeze i64 %obf.opaque.seed
+; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] =
+; CHECK: [[EXPRB:%obf\.opaque\.expr\.b[^ ]*]] =
 ; CHECK: %obf.opaque.true = icmp eq i64 [[EXPRA]], [[EXPRB]]
 ; CHECK: %obf.opaque.cond = and i1 %gt, %obf.opaque.true
-; CHECK-NOT: %obf.opaque.dec =
-; CHECK-NOT: %obf.opaque.mul =
-; CHECK-NOT: %obf.opaque.and =

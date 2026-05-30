@@ -1,0 +1,7 @@
+seed: 222
+default_level: none
+mba:
+  depth: 3
+targets:
+  - match: branchy
+    level: strong

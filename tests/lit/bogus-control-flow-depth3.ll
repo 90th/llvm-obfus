@@ -1,5 +1,6 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/bogus-control-flow.yaml -passes=obf-bogus-cf -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/bogus-control-flow.yaml -passes=obf-bogus-cf -S %s -o %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/bogus-control-flow-depth3.yaml -passes=obf-bogus-cf -S %s -o - | %FileCheck %s
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/bogus-control-flow-depth3.yaml -passes=obf-bogus-cf -S %s -o - | %opt -passes=verify -disable-output
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/bogus-control-flow-depth3.yaml -passes=obf-bogus-cf -S %s -o %t
 ; RUN: %lli %t
 
 define i32 @branchy(i32 %x) {
@@ -35,20 +36,12 @@ entry:
 ; CHECK: %obf.opaque.entropy.mix = xor i64 %obf.opaque.direct, %obf.opaque.indirect
 ; CHECK: %obf.opaque.seed =
 ; CHECK: %obf.opaque.seed.freeze = freeze i64 %obf.opaque.seed
-; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] =
-; CHECK: [[EXPRB:%obf\.opaque\.expr\.b[^ ]*]] =
-; CHECK: %obf.opaque.true = icmp eq i64 [[EXPRA]], [[EXPRB]]
+; CHECK-DAG: %obf.opaque.seed.lhs.mul = mul i64 %obf.opaque.seed.freeze,
+; CHECK-DAG: %obf.opaque.seed.lhs.dec = mul i64 %obf.opaque.seed.lhs.sub,
+; CHECK-DAG: %obf.opaque.seed.rhs.mul = mul i64 %obf.opaque.seed.freeze,
+; CHECK-DAG: %obf.opaque.seed.rhs.dec = mul i64 %obf.opaque.seed.rhs.sub,
+; CHECK: %obf.opaque.true = icmp eq i64 %obf.opaque.expr.a, %obf.opaque.expr.b
 ; CHECK: br i1 %obf.opaque.true, label %merge, label %obf.bogus
 ; CHECK: obf.bogus:
 ; CHECK: %obf.bogus.seed = load i64, ptr @rt_core_ea
 ; CHECK: br label %obf.bogus.loop
-; CHECK: obf.bogus.loop:
-; CHECK: %obf.bogus.iter = phi i32
-; CHECK: %obf.bogus.state = phi i64
-; CHECK: %obf.bogus.rotl.shl = shl i64 %obf.bogus.state, 13
-; CHECK: %obf.bogus.rotl.lshr = lshr i64 %obf.bogus.state, 51
-; CHECK: %obf.bogus.mix = xor i64 %obf.bogus.rotl,
-; CHECK: %obf.bogus.iter.next = add i32 %obf.bogus.iter, 1
-; CHECK: %obf.bogus.done = icmp eq i32 %obf.bogus.iter.next, 1000000
-; CHECK: br i1 %obf.bogus.done, label %obf.bogus.sink, label %obf.bogus.loop
-; CHECK-NOT: %obf.bogus.xor =

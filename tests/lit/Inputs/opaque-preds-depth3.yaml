@@ -1,0 +1,7 @@
+seed: 333
+default_level: none
+mba:
+  depth: 3
+targets:
+  - match: check
+    level: strong

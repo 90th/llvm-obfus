@@ -1844,9 +1844,6 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
   llvm::Module* module = function.getParent();
   if (module == nullptr) { return nullptr; }
 
-  llvm::GlobalVariable* anchor = get_or_create_entropy_anchor(*module);
-  llvm::Value* entropy = builder.CreateLoad(builder.getInt64Ty(), anchor, "obf.opaque.entropy");
-
   builder_context seed_context =
       get_or_create_builder_context(function, "opaque.seed", salt_base ^ 0x5f3759dfULL);
   builder_context context_a =
@@ -1857,25 +1854,61 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
   context_a.depth = mba_depth;
   context_b.depth = mba_depth;
 
+  const entropy_pair entropy =
+      load_entropy_anchor_pair(builder, seed_context.entropy_anchor, seed_context, salt_base, "obf.opaque");
+  if (entropy.direct == nullptr || entropy.indirect == nullptr) { return nullptr; }
+
+  llvm::Value* entropy_seed =
+      builder.CreateXor(entropy.direct, entropy.indirect, "obf.opaque.entropy.mix");
+
   // i anchor both sides to the same seed so this predicate stays true even as the wrappers drift.
-  llvm::Value* seed =
-      entangle_value(builder, entropy, seed_context, salt_base + 0x11ULL, "obf.opaque.seed");
+  llvm::Value* seed = entangle_value(
+      builder, entropy_seed, seed_context, salt_base + 0x11ULL, "obf.opaque.seed");
+  llvm::Value* stable_seed = builder.CreateFreeze(seed, "obf.opaque.seed.freeze");
+
+  llvm::Value* predicate_lhs = stable_seed;
+  llvm::Value* predicate_rhs = stable_seed;
+  if (mba_depth >= 3 && is_affine_scalar_type(builder.getInt64Ty())) {
+    const std::uint64_t affine_seed =
+        derive_shape_seed(seed_context, "mba.predicate.affine", salt_base, builder.getInt64Ty());
+    const llvm::APInt multiplier = make_odd_affine_multiplier(64, affine_seed ^ 0x410a11ceULL);
+    const llvm::APInt inverse = compute_mod_inverse_pow2(multiplier);
+    const llvm::APInt bias = make_affine_bias(64, affine_seed ^ 0x510a11ceULL);
+
+    llvm::Value* lhs_encoded =
+        build_affine_encode(builder, stable_seed, multiplier, bias, "obf.opaque.seed.lhs");
+    llvm::Value* rhs_encoded =
+        build_affine_encode(builder, stable_seed, multiplier, bias, "obf.opaque.seed.rhs");
+    predicate_lhs =
+        build_affine_decode(builder, lhs_encoded, inverse, bias, "obf.opaque.seed.lhs");
+    predicate_rhs =
+        build_affine_decode(builder, rhs_encoded, inverse, bias, "obf.opaque.seed.rhs");
+  }
+
   llvm::Value* zero_a = create_opaque_integer(builder,
                                               builder.getInt64Ty(),
                                               context_a,
                                               llvm::APInt(64, 0),
                                               salt_base + 0x21ULL,
                                               "obf.opaque.zero.a");
-  llvm::Value* expr_a =
-      create_add(builder, seed, zero_a, context_a, salt_base + 0x31ULL, "obf.opaque.expr.a");
+  llvm::Value* expr_a = create_add(builder,
+                                   predicate_lhs,
+                                   zero_a,
+                                   context_a,
+                                   salt_base + 0x31ULL,
+                                   "obf.opaque.expr.a");
   llvm::Value* zero_b = create_opaque_integer(builder,
                                               builder.getInt64Ty(),
                                               context_b,
                                               llvm::APInt(64, 0),
                                               salt_base + 0x51ULL,
                                               "obf.opaque.zero.b");
-  llvm::Value* expr_b =
-      create_xor(builder, seed, zero_b, context_b, salt_base + 0x61ULL, "obf.opaque.expr.b");
+  llvm::Value* expr_b = create_xor(builder,
+                                   predicate_rhs,
+                                   zero_b,
+                                   context_b,
+                                   salt_base + 0x61ULL,
+                                   "obf.opaque.expr.b");
 
   return builder.CreateICmpEQ(expr_a, expr_b, result_name);
 }
