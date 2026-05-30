@@ -167,6 +167,17 @@ std::uint32_t apply_opcode_match_transform(opcode_match_transform transform, std
   return value;
 }
 
+llvm::APInt make_vm_dispatch_affine_multiplier(unsigned bit_width, std::uint64_t seed) {
+  llvm::APInt multiplier(bit_width, mix_seed(seed, 0xa5a5a5a5f00df00dULL), false, true);
+  multiplier |= llvm::APInt(bit_width, 1);
+  if (multiplier == llvm::APInt(bit_width, 1)) { multiplier = llvm::APInt(bit_width, 3); }
+  return multiplier;
+}
+
+llvm::APInt make_vm_dispatch_affine_bias(unsigned bit_width, std::uint64_t seed) {
+  return llvm::APInt(bit_width, mix_seed(seed, 0x13579bdf2468ace0ULL), false, true);
+}
+
 llvm::Value* materialize_opcode_word(llvm::IRBuilder<>& builder,
                                      const rewrite_function_context& context,
                                      std::uint32_t value,
@@ -301,8 +312,30 @@ llvm::Value* build_dispatch_key(llvm::IRBuilder<>& builder,
       context.mba_context,
       salt + 2,
       "obf.vm.dispatch.index.mix");
-  return mba::create_xor(
-      builder, seed_mix, index_mix, context.mba_context, salt + 3, "obf.vm.dispatch.key");
+  llvm::Value* mixed_key = mba::create_xor(
+      builder, seed_mix, index_mix, context.mba_context, salt + 3, "obf.vm.dispatch.key.mix");
+  if (context.mba_context.depth < 2 || context.ptr_int_type->getBitWidth() <= 1) {
+    return mixed_key;
+  }
+
+  const unsigned bit_width = context.ptr_int_type->getBitWidth();
+  const std::uint64_t affine_seed = mix_seed(context.bytecode_seed, salt ^ 0x7004ULL);
+  const llvm::APInt affine_multiplier =
+      make_vm_dispatch_affine_multiplier(bit_width, affine_seed ^ 0x410a11ceULL);
+  const llvm::APInt affine_bias =
+      make_vm_dispatch_affine_bias(bit_width, affine_seed ^ 0x510a11ceULL);
+  llvm::Value* affine_mul = mba::create_mul(builder,
+                                            mixed_key,
+                                            llvm::ConstantInt::get(context.ptr_int_type, affine_multiplier),
+                                            context.mba_context,
+                                            salt + 4,
+                                            "obf.vm.dispatch.key.affine.mul");
+  return mba::create_add(builder,
+                         affine_mul,
+                         llvm::ConstantInt::get(context.ptr_int_type, affine_bias),
+                         context.mba_context,
+                         salt + 5,
+                         "obf.vm.dispatch.key");
 }
 
 std::uint32_t build_switch_site_multiplier(std::uint64_t bytecode_seed, std::uint64_t salt) {

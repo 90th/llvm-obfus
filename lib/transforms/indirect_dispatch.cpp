@@ -14,6 +14,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
 
+#include "llvm/ADT/APInt.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -46,6 +48,10 @@ struct site_masking {
   llvm::Type* pointer_type = nullptr;
   llvm::ConstantInt* key_constant = nullptr;
   llvm::ConstantInt* bias_constant = nullptr;
+  llvm::ConstantInt* affine_multiplier_constant = nullptr;
+  llvm::ConstantInt* affine_bias_constant = nullptr;
+  llvm::ConstantInt* affine_inverse_constant = nullptr;
+  bool use_affine_delta = false;
   unsigned rotate_amount = 0;
   llvm::DenseMap<llvm::BasicBlock*, llvm::Value*> encoded_tokens;
 };
@@ -260,10 +266,31 @@ llvm::Instruction* get_entry_insertion_point(llvm::Function& function) {
   return function.getEntryBlock().getTerminator();
 }
 
+llvm::APInt make_odd_affine_multiplier(unsigned bit_width, std::uint64_t seed) {
+  llvm::APInt multiplier(bit_width, mix_seed(seed, 0xa5a5a5a5f00df00dULL), false, true);
+  multiplier |= llvm::APInt(bit_width, 1);
+  if (multiplier == llvm::APInt(bit_width, 1)) { multiplier = llvm::APInt(bit_width, 3); }
+  return multiplier;
+}
+
+llvm::APInt compute_mod_inverse_pow2(const llvm::APInt& odd_value) {
+  const unsigned bit_width = odd_value.getBitWidth();
+  llvm::APInt inverse(bit_width, 1);
+  for (unsigned round = 0; round < bit_width; ++round) {
+    inverse *= llvm::APInt(bit_width, 2) - odd_value * inverse;
+  }
+  return inverse;
+}
+
+llvm::APInt make_affine_bias(unsigned bit_width, std::uint64_t seed) {
+  return llvm::APInt(bit_width, mix_seed(seed, 0x13579bdf2468ace0ULL), false, true);
+}
+
 site_masking materialize_site_tokens(llvm::Function& function,
                                      llvm::BasicBlock& anchor_block,
                                      llvm::ArrayRef<llvm::BasicBlock*> unique_targets,
                                      llvm::IRBuilder<llvm::NoFolder>& entry_builder,
+                                     const mba::builder_context& mba_context,
                                      std::uint64_t site_seed,
                                      std::size_t site_index) {
   const llvm::DataLayout& data_layout = function.getParent()->getDataLayout();
@@ -281,12 +308,32 @@ site_masking materialize_site_tokens(llvm::Function& function,
       llvm::ConstantInt::get(int_type, mix_seed(site_seed, 0x6b65795f7331ULL));
   llvm::ConstantInt* bias_constant =
       llvm::ConstantInt::get(int_type, mix_seed(site_seed, 0x626961735f7331ULL));
+  const bool use_affine_delta = mba_context.depth >= 2 && bit_width > 1;
+  llvm::ConstantInt* affine_multiplier_constant = nullptr;
+  llvm::ConstantInt* affine_bias_constant = nullptr;
+  llvm::ConstantInt* affine_inverse_constant = nullptr;
+  if (use_affine_delta) {
+    const llvm::APInt affine_multiplier =
+        make_odd_affine_multiplier(bit_width, mix_seed(site_seed, 0x616666696e652e6dULL));
+    const llvm::APInt affine_bias =
+        make_affine_bias(bit_width, mix_seed(site_seed, 0x616666696e652e62ULL));
+    affine_multiplier_constant = llvm::cast<llvm::ConstantInt>(
+        llvm::ConstantInt::get(int_type, affine_multiplier));
+    affine_bias_constant =
+        llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(int_type, affine_bias));
+    affine_inverse_constant = llvm::cast<llvm::ConstantInt>(
+        llvm::ConstantInt::get(int_type, compute_mod_inverse_pow2(affine_multiplier)));
+  }
 
   site_masking masking;
   masking.int_type = int_type;
   masking.pointer_type = llvm::BlockAddress::get(&function, &anchor_block)->getType();
   masking.key_constant = key_constant;
   masking.bias_constant = bias_constant;
+  masking.affine_multiplier_constant = affine_multiplier_constant;
+  masking.affine_bias_constant = affine_bias_constant;
+  masking.affine_inverse_constant = affine_inverse_constant;
+  masking.use_affine_delta = use_affine_delta;
   masking.rotate_amount = rotate_amount;
 
   llvm::Constant* anchor_address = llvm::BlockAddress::get(&function, &anchor_block);
@@ -297,9 +344,20 @@ site_masking materialize_site_tokens(llvm::Function& function,
     llvm::Constant* target_address = llvm::BlockAddress::get(&function, target);
     llvm::Constant* target_int = llvm::ConstantExpr::getPtrToInt(target_address, int_type);
     llvm::Constant* delta = llvm::ConstantExpr::getSub(target_int, anchor_int);
+    llvm::Value* encoded_delta = delta;
+    if (use_affine_delta) {
+      llvm::Value* scaled_delta = entry_builder.CreateMul(
+          delta,
+          affine_multiplier_constant,
+          make_site_name(site_index, "aff.mul" + std::to_string(target_index)));
+      encoded_delta = entry_builder.CreateAdd(
+          scaled_delta,
+          affine_bias_constant,
+          make_site_name(site_index, "aff.enc" + std::to_string(target_index)));
+    }
 
     llvm::Value* xored = entry_builder.CreateXor(
-        delta,
+        encoded_delta,
         key_constant,
         make_site_name(site_index, "xor" + std::to_string(target_index)));
     llvm::Value* rotated = create_rotate_left(entry_builder,
@@ -338,6 +396,20 @@ llvm::Value* decode_selected_token(llvm::IRBuilder<>& builder,
                                        mba_context,
                                        salt_base ^ 0x23ULL,
                                        "obf.idis.delta");
+  if (masking.use_affine_delta) {
+    llvm::Value* affine_sub = mba::create_sub(builder,
+                                              delta,
+                                              masking.affine_bias_constant,
+                                              mba_context,
+                                              salt_base ^ 0x2dULL,
+                                              "obf.idis.affine.sub");
+    delta = mba::create_mul(builder,
+                            affine_sub,
+                            masking.affine_inverse_constant,
+                            mba_context,
+                            salt_base ^ 0x2fULL,
+                            "obf.idis.affine.dec");
+  }
   llvm::Value* anchor = builder.CreatePtrToInt(
       llvm::BlockAddress::get(&function, &anchor_block), masking.int_type, "obf.idis.anchor");
   llvm::Value* dest_int = mba::create_add(builder,
@@ -365,7 +437,7 @@ bool rewrite_branch_site(llvm::BranchInst& branch,
   if (!is_legal_anchor_block(source_block, anchor_block)) { return false; }
 
   const site_masking masking = materialize_site_tokens(
-      function, anchor_block, unique_targets, entry_builder, site_seed, site_index);
+      function, anchor_block, unique_targets, entry_builder, mba_context, site_seed, site_index);
 
   llvm::IRBuilder<> builder(function.getContext());
   builder.SetInsertPoint(&branch);
@@ -403,7 +475,7 @@ bool rewrite_switch_site(llvm::SwitchInst& switch_inst,
   if (!is_legal_anchor_block(source_block, anchor_block)) { return false; }
 
   const site_masking masking = materialize_site_tokens(
-      function, anchor_block, unique_targets, entry_builder, site_seed, site_index);
+      function, anchor_block, unique_targets, entry_builder, mba_context, site_seed, site_index);
 
   llvm::IRBuilder<> builder(function.getContext());
   builder.SetInsertPoint(&switch_inst);

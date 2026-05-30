@@ -1,4 +1,6 @@
 default_level: strong
+mba:
+  depth: 2
 indirect_dispatch:
   enabled: true
   max_sites_per_function: 8

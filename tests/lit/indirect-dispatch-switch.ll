@@ -40,9 +40,15 @@ entry:
 
 ; CHECK-LABEL: define i32 @switch_dispatch(i32 %x)
 ; CHECK: entry:
-; CHECK: %obf.idis.site0.xor0 = xor i64 sub (i64 ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64), i64 ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64)), {{-?[0-9]+}}
-; CHECK: %obf.idis.site0.xor1 = xor i64 sub (i64 ptrtoint (ptr blockaddress(@switch_dispatch, %zero) to i64), i64 ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64)), {{-?[0-9]+}}
-; CHECK: %obf.idis.site0.xor2 = xor i64 sub (i64 ptrtoint (ptr blockaddress(@switch_dispatch, %seven) to i64), i64 ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64)), {{-?[0-9]+}}
+; CHECK: %obf.idis.site0.aff.mul0 = mul i64 sub (i64 ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64), i64 ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64)), {{-?[0-9]+}}
+; CHECK: %obf.idis.site0.aff.enc0 = add i64 %obf.idis.site0.aff.mul0, {{-?[0-9]+}}
+; CHECK: %obf.idis.site0.xor0 = xor i64 %obf.idis.site0.aff.enc0, {{-?[0-9]+}}
+; CHECK: %obf.idis.site0.aff.mul1 = mul i64 sub (i64 ptrtoint (ptr blockaddress(@switch_dispatch, %zero) to i64), i64 ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64)), {{-?[0-9]+}}
+; CHECK: %obf.idis.site0.aff.enc1 = add i64 %obf.idis.site0.aff.mul1, {{-?[0-9]+}}
+; CHECK: %obf.idis.site0.xor1 = xor i64 %obf.idis.site0.aff.enc1, {{-?[0-9]+}}
+; CHECK: %obf.idis.site0.aff.mul2 = mul i64 sub (i64 ptrtoint (ptr blockaddress(@switch_dispatch, %seven) to i64), i64 ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64)), {{-?[0-9]+}}
+; CHECK: %obf.idis.site0.aff.enc2 = add i64 %obf.idis.site0.aff.mul2, {{-?[0-9]+}}
+; CHECK: %obf.idis.site0.xor2 = xor i64 %obf.idis.site0.aff.enc2, {{-?[0-9]+}}
 ; CHECK: %obf.idis.state = freeze i32 %x
 ; CHECK: %obf.idis.case0 = icmp eq i32 %obf.idis.state, 0
 ; CHECK: %obf.idis.sel0 = select i1 %obf.idis.case0, i64 %obf.idis.site0.tok1, i64 %obf.idis.site0.tok0
@@ -55,6 +61,8 @@ entry:
 ; CHECK: %obf.idis.rot = or i64 %obf.idis.rot.lshr, %obf.idis.rot.shl
 ; CHECK: %obf.mba.xor
 ; CHECK: %obf.idis.delta =
+; CHECK: %obf.idis.affine.sub =
+; CHECK: %obf.idis.affine.dec =
 ; CHECK: %obf.mba.add
 ; CHECK: ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64)
 ; CHECK: %obf.idis.dest = inttoptr i64 %obf.idis.addr to ptr

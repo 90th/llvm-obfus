@@ -347,9 +347,10 @@ constant_encoding_options build_constant_encoding_options(const obfuscation_conf
   return options;
 }
 
-control_flattening_options build_control_flattening_options(const obfuscation_config&,
+control_flattening_options build_control_flattening_options(const obfuscation_config& config,
                                                             const policy_decision& decision) {
   control_flattening_options options;
+  options.mba_depth = config.mba.depth;
   options.seed = decision.seed;
   if (has_strong_classical(decision.policy.level)) {
     options.max_blocks = 20;
