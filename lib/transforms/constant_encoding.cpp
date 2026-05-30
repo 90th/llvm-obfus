@@ -333,24 +333,69 @@ std::uint64_t derive_opaque_seed(const llvm::Function& function, std::uint64_t s
   return seed;
 }
 
+mba::builder_context derive_inline_opaque_context(llvm::Function* function,
+                                                  const mba::builder_context& base_context,
+                                                  llvm::StringRef prefix,
+                                                  std::uint64_t seed_base) {
+  if (function == nullptr) {
+    mba::builder_context context = base_context;
+    context.seed_base = mix_seed(seed_base, stable_hash_string(prefix));
+    return context;
+  }
+
+  mba::builder_context context = mba::get_or_create_builder_context(*function, prefix, seed_base);
+  context.depth = base_context.depth;
+  return context;
+}
+
+llvm::Value* create_inline_opaque_integer(llvm::IRBuilder<>& builder,
+                                          llvm::Function* function,
+                                          llvm::IntegerType* type,
+                                          const llvm::APInt& value,
+                                          const mba::builder_context& base_context,
+                                          llvm::StringRef prefix,
+                                          std::uint64_t seed_base,
+                                          std::uint64_t salt,
+                                          llvm::StringRef name) {
+  mba::builder_context context =
+      derive_inline_opaque_context(function, base_context, prefix, seed_base);
+  return mba::create_opaque_integer(builder, type, context, value, salt, name);
+}
+
 llvm::Value* build_opaque_mask(llvm::IRBuilder<>& builder,
                                std::uint64_t opaque_seed_base,
                                llvm::IntegerType* type,
                                const llvm::APInt& key,
                                const mba::builder_context& mba_context,
                                std::uint64_t salt) {
+  llvm::Function* function =
+      builder.GetInsertBlock() != nullptr ? builder.GetInsertBlock()->getParent() : nullptr;
   const llvm::APInt base_seed(type->getBitWidth(),
                               opaque_seed_base,
                               /*isSigned=*/false,
                               /*implicitTrunc=*/true);
-  mba::builder_context seed_context = mba_context;
-  seed_context.seed_base = opaque_seed_base;
-  llvm::Value* typed_seed = mba::create_opaque_integer(
-      builder, type, seed_context, base_seed, salt ^ 0x55aa55aaULL, "obf.const.seed");
+  llvm::Value* typed_seed = create_inline_opaque_integer(builder,
+                                                         function,
+                                                         type,
+                                                         base_seed,
+                                                         mba_context,
+                                                         "obf.const.seed",
+                                                         opaque_seed_base,
+                                                         salt ^ 0x55aa55aaULL,
+                                                         "obf.const.seed");
   const llvm::APInt delta = key ^ base_seed;
+  llvm::Value* opaque_delta = create_inline_opaque_integer(builder,
+                                                           function,
+                                                           type,
+                                                           delta,
+                                                           mba_context,
+                                                           "obf.const.mask.delta",
+                                                           mix_seed(opaque_seed_base, 0xd3110a7aULL),
+                                                           salt ^ 0x6b1d2c39ULL,
+                                                           "obf.const.mask.delta");
   return mba::create_xor(builder,
                          typed_seed,
-                         llvm::ConstantInt::get(type, delta),
+                         opaque_delta,
                          mba_context,
                          salt,
                          "obf.const.mask");
@@ -703,8 +748,18 @@ std::size_t apply_mba_inline_uses(llvm::ArrayRef<planned_constant_use> uses,
                                           mba_context,
                                           local_seed ^
                                               static_cast<std::uint64_t>(use.operand_index + 1));
+    llvm::Value* opaque_encoded = create_inline_opaque_integer(
+        builder,
+        use.function,
+        use.type,
+        encoded,
+        mba_context,
+        "obf.const.encoded",
+        mix_seed(opaque_seed_base, 0xe0c0de01ULL),
+        local_seed ^ 0x9f4a7c1500b5ULL,
+        "obf.const.encoded");
     llvm::Value* decoded = mba::create_xor(builder,
-                                           llvm::ConstantInt::get(use.type, encoded),
+                                           opaque_encoded,
                                            mask,
                                            mba_context,
                                            local_seed ^ 0xd6e8feb86659fd93ULL,
