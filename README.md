@@ -13,7 +13,9 @@ The design goal is simple: make static recovery materially harder while staying 
 - Protection levels are `none`, `light`, `strong`, `vm`, and `strong_vm`.
 - `vm` and `strong_vm` lower selected functions into VM-backed execution paths.
 - `strong_vm` implementation bodies continue through later hardening stages, not just the public wrapper.
-- MBA rewriting owns arithmetic identity diversification such as `add`, `sub`, and `xor`, both directly and as part of other transforms such as constant reconstruction.
+- MBA rewriting owns arithmetic identity diversification across `add`, `sub`, `xor`, and `mul`, both directly and as part of other transforms such as constant reconstruction and opaque predicates.
+- Shape families include linear identities (`x ^ y = (x | y) - (x & y)`), affine wrappers (`Encode(x) = a*x + b` with odd modular multiplier), polynomial zero terms (depth 3+), and constant-multiplication decomposition.
+- A private `BudgetTracker` enforces a per-expression IR-instruction cap derived from `mba.depth`; when the budget is exhausted mid-expansion the engine falls back to the plain LLVM binary operation.
 - `instruction_substitution` stays focused on distinct logical rewrites such as boolean identity transformations instead of duplicating MBA arithmetic forms.
 
 ### Seeded Indirect Dispatch
@@ -130,6 +132,9 @@ Top-level sections currently supported by the loader:
 | Setting | `fast` | `standard` | `guarded` | `fortress` | `lab` |
 |---|---|---|---|---|---|
 | `mba.depth` | 1 | 1 | 2 | 3 | 4 |
+| `mba.enable_polynomial` | derived | derived | derived | derived | true |
+| `mba.enable_multiplication` | derived | derived | derived | derived | true |
+| `mba.max_ir_instructions` | derived | derived | derived | derived | 320 |
 | `block_split.max_splits_per_function` | 1 | 1 | 2 | 4 | 8 |
 | `string_encoding.min_string_length` | 3 | 2 | 2 | 1 | 1 |
 | `string_encoding.max_strings_per_module` | 32 | 128 | 256 | 512 | 1024 |
@@ -138,7 +143,7 @@ Top-level sections currently supported by the loader:
 | `constant_encoding.max_constants_per_function` | 2 | 4 | 8 | 16 | 32 |
 | `security.fail_on_public_obf_symbol` | false | true | true | true | true |
 
-All profiles default to `authenticated_mode: false`, `indirect_dispatch.enabled: false`, `min_instructions_per_block: 2` (`fortress` and `lab` use `1`), `min_bit_width: 8`, `default_level: none`, and `constant_encoding.mode: mba_inline`. Explicit top-level YAML keys override profile defaults.
+All profiles default to `authenticated_mode: false`, `indirect_dispatch.enabled: false`, `min_instructions_per_block: 2` (`fortress` and `lab` use `1`), `min_bit_width: 8`, `default_level: none`, and `constant_encoding.mode: mba_inline`. MBA override fields (`enable_polynomial`, `enable_multiplication`, `max_ir_instructions`) are absent by default and derived from `mba.depth`: polynomial and multiplication families enable at depth 3+, and the IR-instruction budget scales with depth (`64` at depth 1, `128` at depth 2, `192` at depth 3, `256` at depth 4). Explicit top-level YAML keys override profile defaults.
 
 ### Per-Function Annotations
 
@@ -176,6 +181,9 @@ constant_encoding:
 
 mba:
   depth: 3
+  enable_polynomial: true
+  enable_multiplication: true
+  max_ir_instructions: 320
 
 indirect_dispatch:
   enabled: true
@@ -314,6 +322,8 @@ Requested release sweep:
 cmake --build build --target obf-benchmarks obf-seed-diversity obf-unit-tests
 ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests"
 ```
+
+The lit suite covers 108 tests across MBA engine shapes, opaque predicates, bogus control flow, control flattening, opaque GEP, constant encoding (inline and keyed-pool), string encoding (lazy, eager, auth), indirect dispatch, VM lowering, VM handler and dispatcher polymorphism, seed determinism, safe pipeline ordering, security gates, and artifact cleanup. Every test passes `opt -passes=verify`, FileCheck, and `lli` execution validation. An InstCombine collapse audit confirms runtime entropy anchors prevent the simplifier from folding polynomial zeros or opaque predicates.
 
 ## Repository Layout
 
