@@ -826,13 +826,29 @@ llvm::Value* emit_binary(llvm::IRBuilder<>& builder,
       }
       break;
     case opcode::udiv:
-      result = builder.CreateUDiv(lhs, rhs, "obf.vm.udiv");
+      if (instruction.operands[1].kind == value_ref_kind::constant) {
+        llvm::Value* div_rhs = materialize_rhs();
+        if (const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(instruction.operands[1].constant)) {
+          div_rhs = const_cast<llvm::ConstantInt*>(constant);
+        }
+        result = mba::create_udiv(builder, lhs, div_rhs, mba_context, salt + 7, "obf.vm.udiv");
+      } else {
+        result = builder.CreateUDiv(lhs, rhs, "obf.vm.udiv");
+      }
       break;
     case opcode::sdiv:
       result = builder.CreateSDiv(lhs, rhs, "obf.vm.sdiv");
       break;
     case opcode::urem:
-      result = builder.CreateURem(lhs, rhs, "obf.vm.urem");
+      if (instruction.operands[1].kind == value_ref_kind::constant) {
+        llvm::Value* rem_rhs = materialize_rhs();
+        if (const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(instruction.operands[1].constant)) {
+          rem_rhs = const_cast<llvm::ConstantInt*>(constant);
+        }
+        result = mba::create_urem(builder, lhs, rem_rhs, mba_context, salt + 8, "obf.vm.urem");
+      } else {
+        result = builder.CreateURem(lhs, rhs, "obf.vm.urem");
+      }
       break;
     case opcode::srem:
       result = builder.CreateSRem(lhs, rhs, "obf.vm.srem");

@@ -1,0 +1,13 @@
+seed: 9001
+default_level: none
+targets:
+  - match: const_udiv_pow2
+    level: vm
+  - match: const_urem_pow2
+    level: vm
+  - match: const_udiv_nonpow2
+    level: vm
+  - match: var_udiv
+    level: vm
+mba:
+  depth: 3

@@ -72,6 +72,20 @@ llvm::Value* create_mul(llvm::IRBuilder<>& builder,
                         std::uint64_t salt,
                         llvm::StringRef name = {});
 
+llvm::Value* create_udiv(llvm::IRBuilder<>& builder,
+                         llvm::Value* lhs,
+                         llvm::Value* rhs,
+                         const builder_context& context,
+                         std::uint64_t salt,
+                         llvm::StringRef name = {});
+
+llvm::Value* create_urem(llvm::IRBuilder<>& builder,
+                         llvm::Value* lhs,
+                         llvm::Value* rhs,
+                         const builder_context& context,
+                         std::uint64_t salt,
+                         llvm::StringRef name = {});
+
 llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
                                           llvm::Function& function,
                                           std::uint32_t mba_depth,

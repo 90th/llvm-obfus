@@ -1217,6 +1217,56 @@ llvm::Value* create_mul_impl(llvm::IRBuilder<>& builder,
   return entangle_value_impl(builder, accumulated, context, salt + 0x2ffULL, result_name);
 }
 
+llvm::Value* create_udiv_impl(llvm::IRBuilder<>& builder,
+                              llvm::Value* lhs,
+                              llvm::Value* rhs,
+                              const builder_context& context,
+                              std::uint64_t salt,
+                              llvm::StringRef name) {
+  const mba_features features = derive_features(context);
+  if (!features.enable_division_constants || !lhs->getType()->isIntegerTy() ||
+      lhs->getType() != rhs->getType()) {
+    return builder.CreateUDiv(lhs, rhs, name.empty() ? "obf.mba.udiv" : name);
+  }
+
+  const auto* divisor = llvm::dyn_cast<llvm::ConstantInt>(rhs);
+  if (divisor == nullptr || divisor->isZero() || !divisor->getValue().isPowerOf2()) {
+    return builder.CreateUDiv(lhs, rhs, name.empty() ? "obf.mba.udiv" : name);
+  }
+
+  const unsigned shift_amount = divisor->getValue().logBase2();
+  llvm::Value* masked_lhs = mask_with_zero_xor(
+      builder, lhs, context, salt + 0x611ULL, (name.empty() ? "obf.mba.udiv" : name).str() + ".lhs");
+  return builder.CreateLShr(masked_lhs,
+                            constant_i64_to_type(lhs->getType(), shift_amount),
+                            name.empty() ? "obf.mba.udiv" : name);
+}
+
+llvm::Value* create_urem_impl(llvm::IRBuilder<>& builder,
+                              llvm::Value* lhs,
+                              llvm::Value* rhs,
+                              const builder_context& context,
+                              std::uint64_t salt,
+                              llvm::StringRef name) {
+  const mba_features features = derive_features(context);
+  if (!features.enable_division_constants || !lhs->getType()->isIntegerTy() ||
+      lhs->getType() != rhs->getType()) {
+    return builder.CreateURem(lhs, rhs, name.empty() ? "obf.mba.urem" : name);
+  }
+
+  const auto* divisor = llvm::dyn_cast<llvm::ConstantInt>(rhs);
+  if (divisor == nullptr || divisor->isZero() || !divisor->getValue().isPowerOf2()) {
+    return builder.CreateURem(lhs, rhs, name.empty() ? "obf.mba.urem" : name);
+  }
+
+  llvm::APInt remainder_mask = divisor->getValue() - 1;
+  llvm::Value* masked_lhs = mask_with_zero_add(
+      builder, lhs, context, salt + 0x711ULL, (name.empty() ? "obf.mba.urem" : name).str() + ".lhs");
+  return builder.CreateAnd(masked_lhs,
+                           constant_apint_to_type(lhs->getType(), remainder_mask),
+                           name.empty() ? "obf.mba.urem" : name);
+}
+
 // ---------------------------------------------------------------------------
 // Recursive MBA implementation helpers.
 //
@@ -1762,6 +1812,24 @@ llvm::Value* create_mul(llvm::IRBuilder<>& builder,
                         std::uint64_t salt,
                         llvm::StringRef name) {
   return create_mul_impl(builder, lhs, rhs, context, salt, name);
+}
+
+llvm::Value* create_udiv(llvm::IRBuilder<>& builder,
+                         llvm::Value* lhs,
+                         llvm::Value* rhs,
+                         const builder_context& context,
+                         std::uint64_t salt,
+                         llvm::StringRef name) {
+  return create_udiv_impl(builder, lhs, rhs, context, salt, name);
+}
+
+llvm::Value* create_urem(llvm::IRBuilder<>& builder,
+                         llvm::Value* lhs,
+                         llvm::Value* rhs,
+                         const builder_context& context,
+                         std::uint64_t salt,
+                         llvm::StringRef name) {
+  return create_urem_impl(builder, lhs, rhs, context, salt, name);
 }
 
 llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
