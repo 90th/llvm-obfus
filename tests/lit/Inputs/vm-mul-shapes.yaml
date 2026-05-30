@@ -1,0 +1,9 @@
+seed: 9001
+default_level: none
+targets:
+  - match: const_mul
+    level: vm
+  - match: var_mul
+    level: vm
+mba:
+  depth: 3

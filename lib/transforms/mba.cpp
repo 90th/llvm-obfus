@@ -11,6 +11,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/Support/FormatVariadic.h"
 
+#include <algorithm>
 #include <cstdint>
 
 namespace obf::mba {
@@ -25,24 +26,38 @@ enum class opaque_zero_shape {
   cmp_select_pair,
   affine_cancel_pair,
   affine_self_diff,
+  linear_equiv_pair,
+  polynomial_binomial_pair,
+  polynomial_affine_pair,
 };
 
 enum class add_shape {
   or_and,
   xor_carry,
   affine_xor_carry,
+  xor_shifted_carry,
 };
 
 enum class sub_shape {
   xor_borrow,
   lhs_rhs_only,
   affine_xor_borrow,
+  ones_complement_add,
 };
 
 enum class xor_shape {
   or_and_sub,
   disjoint_sum,
   affine_or_and_sub,
+  sum_minus_carry,
+};
+
+enum class opaque_integer_shape {
+  entangled_constant,
+  xor_split,
+  add_split,
+  affine_decode,
+  zero_add,
 };
 
 enum class entangle_shape {
@@ -69,7 +84,135 @@ enum class entropy_accessor_variant {
   add_sub_neutral,
 };
 
+struct mba_budget {
+  std::uint32_t max_ir_instructions = 16;
+  std::uint32_t max_terms = 4;
+  std::uint32_t max_mul_terms = 0;
+};
+
+struct mba_features {
+  bool enable_linear_permutations = false;
+  bool enable_affine_wrappers = true;
+  bool enable_polynomial_zeros = false;
+  bool enable_multiplication = false;
+  bool enable_division_constants = false;
+  bool enable_simplifier_barriers = true;
+};
+
+std::uint32_t clamped_depth(const builder_context& context) {
+  return std::min(context.depth, max_mba_depth);
+}
+
+mba_budget derive_budget(const builder_context& context) {
+  switch (clamped_depth(context)) {
+    case 0:
+      return {.max_ir_instructions = 0, .max_terms = 1, .max_mul_terms = 0};
+    case 1:
+      return {.max_ir_instructions = 64, .max_terms = 4, .max_mul_terms = 0};
+    case 2:
+      return {.max_ir_instructions = 128, .max_terms = 6, .max_mul_terms = 2};
+    case 3:
+      return {.max_ir_instructions = 192, .max_terms = 8, .max_mul_terms = 3};
+    case 4:
+      return {.max_ir_instructions = 256, .max_terms = 10, .max_mul_terms = 4};
+    default:
+      return {.max_ir_instructions = 320, .max_terms = 12, .max_mul_terms = 4};
+  }
+}
+
+mba_features derive_features(const builder_context& context) {
+  const std::uint32_t depth = clamped_depth(context);
+  return {.enable_linear_permutations = depth >= 2,
+          .enable_affine_wrappers = depth >= 1,
+          .enable_polynomial_zeros = depth >= 3,
+          .enable_multiplication = depth >= 3,
+          .enable_division_constants = depth >= 3,
+          .enable_simplifier_barriers = true};
+}
+
+bool has_budget(const builder_context& context, std::uint32_t instruction_cost) {
+  return derive_budget(context).max_ir_instructions >= instruction_cost;
+}
+
+unsigned get_integer_bit_width(const llvm::Type* type) {
+  if (const auto* integer_type = llvm::dyn_cast<llvm::IntegerType>(type)) {
+    return integer_type->getBitWidth();
+  }
+
+  const auto* vector_type = llvm::dyn_cast<llvm::FixedVectorType>(type);
+  if (vector_type == nullptr) { return 0; }
+  const auto* element_type = llvm::dyn_cast<llvm::IntegerType>(vector_type->getElementType());
+  return element_type == nullptr ? 0 : element_type->getBitWidth();
+}
+
+bool supports_shift_by_one(const llvm::Type* type) { return get_integer_bit_width(type) > 1; }
+
+std::uint64_t derive_shape_seed(const builder_context& context,
+                                llvm::StringRef family,
+                                std::uint64_t salt,
+                                const llvm::Type* type = nullptr,
+                                std::uint32_t remaining_depth = 0,
+                                std::uint64_t shape_ordinal = 0) {
+  std::uint64_t seed = context.seed_base;
+  seed = mix_seed(seed, stable_hash_string(family));
+  seed = mix_seed(seed, salt);
+  seed = mix_seed(seed, get_integer_bit_width(type));
+  seed = mix_seed(seed, remaining_depth);
+  seed = mix_seed(seed, shape_ordinal);
+  return seed;
+}
+
 opaque_zero_shape select_opaque_zero_shape(const builder_context& context, std::uint64_t salt) {
+  const mba_features features = derive_features(context);
+  const bool enable_linear = features.enable_linear_permutations && has_budget(context, 8);
+  const bool enable_polynomial = features.enable_polynomial_zeros && has_budget(context, 16);
+
+  if (enable_polynomial) {
+    switch (mix_seed(context.seed_base, salt ^ 0x4f7c2d1b9a031ULL) % 10U) {
+      case 0:
+        return opaque_zero_shape::xor_pair;
+      case 1:
+        return opaque_zero_shape::add_sub_pair;
+      case 2:
+        return opaque_zero_shape::sub_pair;
+      case 3:
+        return opaque_zero_shape::rotate_xor_pair;
+      case 4:
+        return opaque_zero_shape::cmp_select_pair;
+      case 5:
+        return opaque_zero_shape::affine_cancel_pair;
+      case 6:
+        return opaque_zero_shape::affine_self_diff;
+      case 7:
+        return opaque_zero_shape::linear_equiv_pair;
+      case 8:
+        return opaque_zero_shape::polynomial_binomial_pair;
+      default:
+        return opaque_zero_shape::polynomial_affine_pair;
+    }
+  }
+
+  if (enable_linear) {
+    switch (mix_seed(context.seed_base, salt ^ 0x4f7c2d1b9a031ULL) % 8U) {
+      case 0:
+        return opaque_zero_shape::xor_pair;
+      case 1:
+        return opaque_zero_shape::add_sub_pair;
+      case 2:
+        return opaque_zero_shape::sub_pair;
+      case 3:
+        return opaque_zero_shape::rotate_xor_pair;
+      case 4:
+        return opaque_zero_shape::cmp_select_pair;
+      case 5:
+        return opaque_zero_shape::affine_cancel_pair;
+      case 6:
+        return opaque_zero_shape::affine_self_diff;
+      default:
+        return opaque_zero_shape::linear_equiv_pair;
+    }
+  }
+
   switch (mix_seed(context.seed_base, salt ^ 0x4f7c2d1b9a031ULL) % 7U) {
     case 0:
       return opaque_zero_shape::xor_pair;
@@ -89,35 +232,78 @@ opaque_zero_shape select_opaque_zero_shape(const builder_context& context, std::
 }
 
 add_shape select_add_shape(const builder_context& context, std::uint64_t salt) {
-  switch (mix_seed(context.seed_base, salt ^ 0x61c8864680b583ebULL) % 3U) {
+  const mba_features features = derive_features(context);
+  const std::uint64_t shape_count =
+      features.enable_linear_permutations && has_budget(context, 6) ? 4U : 3U;
+  switch (mix_seed(context.seed_base, salt ^ 0x61c8864680b583ebULL) % shape_count) {
     case 0:
       return add_shape::or_and;
     case 1:
       return add_shape::xor_carry;
-    default:
+    case 2:
       return add_shape::affine_xor_carry;
+    default:
+      return add_shape::xor_shifted_carry;
   }
 }
 
 sub_shape select_sub_shape(const builder_context& context, std::uint64_t salt) {
-  switch (mix_seed(context.seed_base, salt ^ 0x94d049bb133111ebULL) % 3U) {
+  const mba_features features = derive_features(context);
+  const std::uint64_t shape_count =
+      features.enable_linear_permutations && has_budget(context, 5) ? 4U : 3U;
+  switch (mix_seed(context.seed_base, salt ^ 0x94d049bb133111ebULL) % shape_count) {
     case 0:
       return sub_shape::xor_borrow;
     case 1:
       return sub_shape::lhs_rhs_only;
-    default:
+    case 2:
       return sub_shape::affine_xor_borrow;
+    default:
+      return sub_shape::ones_complement_add;
   }
 }
 
 xor_shape select_xor_shape(const builder_context& context, std::uint64_t salt) {
-  switch (mix_seed(context.seed_base, salt ^ 0xdbe6d5d5fe4cce2fULL) % 3U) {
+  const mba_features features = derive_features(context);
+  const std::uint64_t shape_count =
+      features.enable_linear_permutations && has_budget(context, 7) ? 4U : 3U;
+  switch (mix_seed(context.seed_base, salt ^ 0xdbe6d5d5fe4cce2fULL) % shape_count) {
     case 0:
       return xor_shape::or_and_sub;
     case 1:
       return xor_shape::disjoint_sum;
-    default:
+    case 2:
       return xor_shape::affine_or_and_sub;
+    default:
+      return xor_shape::sum_minus_carry;
+  }
+}
+
+opaque_integer_shape select_opaque_integer_shape(const builder_context& context,
+                                                 std::uint64_t salt,
+                                                 llvm::IntegerType* type) {
+  const mba_features features = derive_features(context);
+  std::uint64_t shape_count =
+      features.enable_linear_permutations && has_budget(context, 8) ? 3U : 1U;
+  if (features.enable_linear_permutations && features.enable_affine_wrappers &&
+      type->getBitWidth() > 1 && has_budget(context, 10)) {
+    shape_count = std::max<std::uint64_t>(shape_count, 4U);
+  }
+  if (features.enable_linear_permutations && has_budget(context, 12)) {
+    shape_count = std::max<std::uint64_t>(shape_count, 5U);
+  }
+
+  switch (derive_shape_seed(context, "mba.opaque_integer", salt, type) % shape_count) {
+    case 0:
+      return opaque_integer_shape::entangled_constant;
+    case 1:
+      return opaque_integer_shape::xor_split;
+    case 2:
+      return opaque_integer_shape::add_split;
+    case 3:
+      return opaque_integer_shape::affine_decode;
+    default:
+      return opaque_integer_shape::zero_add;
   }
 }
 
@@ -485,8 +671,8 @@ llvm::Function* get_or_create_entropy_thunk(llvm::Module& module,
   return thunk;
 }
 
-llvm::Function* get_or_create_entropy_pair_accessor_variant(
-    llvm::Module& module, entropy_accessor_variant variant) {
+llvm::Function* get_or_create_entropy_pair_accessor_variant(llvm::Module& module,
+                                                            entropy_accessor_variant variant) {
   auto* pair_type = llvm::StructType::get(
       module.getContext(),
       {llvm::Type::getInt64Ty(module.getContext()), llvm::Type::getInt64Ty(module.getContext())});
@@ -512,8 +698,8 @@ llvm::AllocaInst* get_or_create_function_entropy_pair_cache(llvm::Function& func
                                                             std::uint64_t salt) {
   auto* pair_type = llvm::dyn_cast<llvm::StructType>(accessor.getReturnType());
   if (pair_type == nullptr) {
-    const std::string message = std::string(OBF_RT_LOAD_ENTROPY_PAIR_STR) +
-                                " return type is not a struct";
+    const std::string message =
+        std::string(OBF_RT_LOAD_ENTROPY_PAIR_STR) + " return type is not a struct";
     llvm::report_fatal_error(llvm::StringRef(message));
   }
 
@@ -554,10 +740,9 @@ entropy_pair load_entropy_anchor_pair(llvm::IRBuilder<>& builder,
   llvm::Module* module = entropy_anchor->getParent();
   if (module == nullptr || function == nullptr) { return {}; }
 
-    const entropy_accessor_variant accessor_variant =
+  const entropy_accessor_variant accessor_variant =
       select_entropy_accessor_variant(*function, context, salt);
-    llvm::Function* accessor =
-      get_or_create_entropy_pair_accessor_variant(*module, accessor_variant);
+  llvm::Function* accessor = get_or_create_entropy_pair_accessor_variant(*module, accessor_variant);
   llvm::AllocaInst* cache =
       get_or_create_function_entropy_pair_cache(*function, *accessor, context, salt);
   llvm::Value* pair = builder.CreateLoad(accessor->getReturnType(), cache, (name + ".pair").str());
@@ -578,8 +763,7 @@ llvm::Value* build_opaque_zero_xor_pair(llvm::IRBuilder<>& builder,
                                         llvm::Value* entropy_b,
                                         llvm::Constant* mask) {
   llvm::Value* delta = builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.xor_pair.delta");
-  llvm::Value* stable_delta =
-      builder.CreateFreeze(delta, "obf.mba.zero.xor_pair.delta.stable");
+  llvm::Value* stable_delta = builder.CreateFreeze(delta, "obf.mba.zero.xor_pair.delta.stable");
   llvm::Value* lhs = builder.CreateXor(delta, mask, "obf.mba.zero.xor_pair.lhs");
   llvm::Value* rhs = builder.CreateXor(stable_delta, mask, "obf.mba.zero.xor_pair.rhs");
   return builder.CreateXor(lhs, rhs, "obf.mba.zero.xor_pair");
@@ -590,11 +774,9 @@ llvm::Value* build_opaque_zero_sub_pair(llvm::IRBuilder<>& builder,
                                         llvm::Value* entropy_b,
                                         llvm::Constant* mask) {
   llvm::Value* delta = builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.sub_pair.delta");
-  llvm::Value* stable_delta =
-      builder.CreateFreeze(delta, "obf.mba.zero.sub_pair.delta.stable");
+  llvm::Value* stable_delta = builder.CreateFreeze(delta, "obf.mba.zero.sub_pair.delta.stable");
   llvm::Value* masked = builder.CreateXor(delta, mask, "obf.mba.zero.sub_pair.masked");
-  llvm::Value* unmasked =
-      builder.CreateXor(masked, mask, "obf.mba.zero.sub_pair.unmasked");
+  llvm::Value* unmasked = builder.CreateXor(masked, mask, "obf.mba.zero.sub_pair.unmasked");
   return builder.CreateSub(unmasked, stable_delta, "obf.mba.zero.sub_pair");
 }
 
@@ -611,25 +793,21 @@ llvm::Value* build_opaque_zero_affine_cancel_pair(llvm::IRBuilder<>& builder,
   const unsigned bit_width = target_type->getIntegerBitWidth();
   const llvm::APInt multiplier = make_odd_affine_multiplier(bit_width, salt ^ 0x410a11ceULL);
   const llvm::APInt delta = make_affine_bias(bit_width, salt ^ 0x510a11ceULL);
-  llvm::Value* term = builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.affine_cancel_pair.term");
+  llvm::Value* term =
+      builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.affine_cancel_pair.term");
   llvm::Value* shifted = builder.CreateAdd(
-      term,
-      constant_apint_to_type(target_type, delta),
-      "obf.mba.zero.affine_cancel_pair.shifted");
-  llvm::Value* lhs = builder.CreateMul(
-      shifted,
-      constant_apint_to_type(target_type, multiplier),
-      "obf.mba.zero.affine_cancel_pair.lhs");
-  llvm::Value* scaled_term = builder.CreateMul(
-      term,
-      constant_apint_to_type(target_type, multiplier),
-      "obf.mba.zero.affine_cancel_pair.scaled.term");
-  llvm::Value* scaled_delta = builder.CreateMul(
-      constant_apint_to_type(target_type, delta),
-      constant_apint_to_type(target_type, multiplier),
-      "obf.mba.zero.affine_cancel_pair.scaled.delta");
-  llvm::Value* rhs = builder.CreateAdd(
-      scaled_term, scaled_delta, "obf.mba.zero.affine_cancel_pair.rhs");
+      term, constant_apint_to_type(target_type, delta), "obf.mba.zero.affine_cancel_pair.shifted");
+  llvm::Value* lhs = builder.CreateMul(shifted,
+                                       constant_apint_to_type(target_type, multiplier),
+                                       "obf.mba.zero.affine_cancel_pair.lhs");
+  llvm::Value* scaled_term = builder.CreateMul(term,
+                                               constant_apint_to_type(target_type, multiplier),
+                                               "obf.mba.zero.affine_cancel_pair.scaled.term");
+  llvm::Value* scaled_delta = builder.CreateMul(constant_apint_to_type(target_type, delta),
+                                                constant_apint_to_type(target_type, multiplier),
+                                                "obf.mba.zero.affine_cancel_pair.scaled.delta");
+  llvm::Value* rhs =
+      builder.CreateAdd(scaled_term, scaled_delta, "obf.mba.zero.affine_cancel_pair.rhs");
   return builder.CreateSub(lhs, rhs, "obf.mba.zero.affine_cancel_pair");
 }
 
@@ -655,11 +833,92 @@ llvm::Value* build_opaque_zero_affine_self_diff(llvm::IRBuilder<>& builder,
   return builder.CreateSub(decoded, term, "obf.mba.zero.affine_self_diff.zero");
 }
 
+llvm::Value* build_opaque_zero_polynomial_binomial_pair(llvm::IRBuilder<>& builder,
+                                                        llvm::Value* entropy_a,
+                                                        llvm::Value* entropy_b,
+                                                        llvm::Type* target_type,
+                                                        const builder_context& context,
+                                                        std::uint64_t salt) {
+  if (!is_affine_scalar_type(target_type)) {
+    return build_opaque_zero_affine_self_diff(builder, entropy_a, entropy_b, target_type, salt);
+  }
+
+  const unsigned bit_width = target_type->getIntegerBitWidth();
+  llvm::Value* term = builder.CreateFreeze(
+      builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.poly_binomial.term.raw"),
+      "obf.mba.zero.poly_binomial.term");
+  const llvm::APInt c1(bit_width,
+                       derive_shape_seed(context, "mba.zero.poly_binomial.c1", salt, target_type),
+                       /*isSigned=*/false,
+                       /*implicitTrunc=*/true);
+  const llvm::APInt c2(bit_width,
+                       derive_shape_seed(context, "mba.zero.poly_binomial.c2", salt, target_type),
+                       /*isSigned=*/false,
+                       /*implicitTrunc=*/true);
+  const llvm::APInt csum = c1 + c2;
+  const llvm::APInt cprod = c1 * c2;
+  llvm::Value* lhs_a = builder.CreateAdd(
+      term, constant_apint_to_type(target_type, c1), "obf.mba.zero.poly_binomial.lhs.a");
+  llvm::Value* lhs_b = builder.CreateAdd(
+      term, constant_apint_to_type(target_type, c2), "obf.mba.zero.poly_binomial.lhs.b");
+  llvm::Value* lhs = builder.CreateMul(lhs_a, lhs_b, "obf.mba.zero.poly_binomial.lhs");
+  llvm::Value* term_sq = builder.CreateMul(term, term, "obf.mba.zero.poly_binomial.term_sq");
+  llvm::Value* linear = builder.CreateMul(
+      constant_apint_to_type(target_type, csum), term, "obf.mba.zero.poly_binomial.linear");
+  llvm::Value* rhs_partial =
+      builder.CreateAdd(term_sq, linear, "obf.mba.zero.poly_binomial.rhs.partial");
+  llvm::Value* rhs = builder.CreateAdd(
+      rhs_partial, constant_apint_to_type(target_type, cprod), "obf.mba.zero.poly_binomial.rhs");
+  return builder.CreateSub(lhs, rhs, "obf.mba.zero.poly_binomial");
+}
+
+llvm::Value* build_opaque_zero_polynomial_affine_pair(llvm::IRBuilder<>& builder,
+                                                      llvm::Value* entropy_a,
+                                                      llvm::Value* entropy_b,
+                                                      llvm::Type* target_type,
+                                                      const builder_context& context,
+                                                      std::uint64_t salt) {
+  if (!is_affine_scalar_type(target_type)) {
+    return build_opaque_zero_affine_cancel_pair(builder, entropy_a, entropy_b, target_type, salt);
+  }
+
+  const unsigned bit_width = target_type->getIntegerBitWidth();
+  llvm::Value* term = builder.CreateFreeze(
+      builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.poly_affine.term.raw"),
+      "obf.mba.zero.poly_affine.term");
+  const llvm::APInt coeff_a = make_odd_affine_multiplier(
+      bit_width, derive_shape_seed(context, "mba.zero.poly_affine.coeff_a", salt, target_type));
+  const llvm::APInt coeff_b = make_affine_bias(
+      bit_width, derive_shape_seed(context, "mba.zero.poly_affine.coeff_b", salt, target_type));
+  const llvm::APInt multiplier = make_odd_affine_multiplier(
+      bit_width, derive_shape_seed(context, "mba.zero.poly_affine.multiplier", salt, target_type));
+  const llvm::APInt inverse = compute_mod_inverse_pow2(multiplier);
+  const llvm::APInt bias = make_affine_bias(
+      bit_width, derive_shape_seed(context, "mba.zero.poly_affine.bias", salt, target_type));
+
+  llvm::Value* term_sq = builder.CreateMul(term, term, "obf.mba.zero.poly_affine.term_sq");
+  llvm::Value* poly_scaled = builder.CreateMul(constant_apint_to_type(target_type, coeff_a),
+                                               term_sq,
+                                               "obf.mba.zero.poly_affine.poly_scaled");
+  llvm::Value* poly = builder.CreateAdd(
+      poly_scaled, constant_apint_to_type(target_type, coeff_b), "obf.mba.zero.poly_affine.poly");
+  llvm::Value* lhs_encoded =
+      build_affine_encode(builder, poly, multiplier, bias, "obf.mba.zero.poly_affine.lhs");
+  llvm::Value* rhs_encoded =
+      build_affine_encode(builder, poly, multiplier, bias, "obf.mba.zero.poly_affine.rhs");
+  llvm::Value* lhs =
+      build_affine_decode(builder, lhs_encoded, inverse, bias, "obf.mba.zero.poly_affine.lhs.dec");
+  llvm::Value* rhs =
+      build_affine_decode(builder, rhs_encoded, inverse, bias, "obf.mba.zero.poly_affine.rhs.dec");
+  return builder.CreateSub(lhs, rhs, "obf.mba.zero.poly_affine");
+}
+
 llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
                                          opaque_zero_shape shape,
                                          llvm::Value* entropy_a,
                                          llvm::Value* entropy_b,
                                          llvm::Type* target_type,
+                                         const builder_context& context,
                                          llvm::Constant* mask,
                                          std::uint64_t salt) {
   // Every family must reduce to semantic zero on its own. That keeps opaque
@@ -674,8 +933,7 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
       llvm::Value* stable_delta =
           builder.CreateFreeze(delta, "obf.mba.zero.add_sub_pair.delta.stable");
       llvm::Value* lhs = builder.CreateAdd(delta, mask, "obf.mba.zero.add_sub_pair.lhs");
-      llvm::Value* rhs =
-          builder.CreateAdd(stable_delta, mask, "obf.mba.zero.add_sub_pair.rhs");
+      llvm::Value* rhs = builder.CreateAdd(stable_delta, mask, "obf.mba.zero.add_sub_pair.rhs");
       return builder.CreateSub(lhs, rhs, "obf.mba.zero.add_sub_pair");
     }
     case opaque_zero_shape::sub_pair:
@@ -717,17 +975,42 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
           builder.CreateFreeze(delta, "obf.mba.zero.cmp_select_pair.delta.stable");
       llvm::Value* zero_alt =
           builder.CreateSub(delta, stable_delta, "obf.mba.zero.cmp_select_pair.zero.alt");
-      return builder.CreateSelect(
-          equal,
-          llvm::Constant::getNullValue(target_type),
-          zero_alt,
-          "obf.mba.zero.cmp_select_pair");
+      return builder.CreateSelect(equal,
+                                  llvm::Constant::getNullValue(target_type),
+                                  zero_alt,
+                                  "obf.mba.zero.cmp_select_pair");
     }
     case opaque_zero_shape::affine_cancel_pair:
-      return build_opaque_zero_affine_cancel_pair(
-          builder, entropy_a, entropy_b, target_type, salt);
+      return build_opaque_zero_affine_cancel_pair(builder, entropy_a, entropy_b, target_type, salt);
     case opaque_zero_shape::affine_self_diff:
       return build_opaque_zero_affine_self_diff(builder, entropy_a, entropy_b, target_type, salt);
+    case opaque_zero_shape::linear_equiv_pair: {
+      if (!supports_shift_by_one(target_type)) {
+        return build_opaque_zero_sub_pair(
+            builder, entropy_a, entropy_b, constant_i64_to_type(target_type, salt ^ 0x3300ULL));
+      }
+
+      // (x | y) + (x & y) and (x ^ y) + ((x & y) << 1) are both x + y.
+      llvm::Value* stable_a = builder.CreateFreeze(entropy_a, "obf.mba.zero.linear_equiv_pair.a");
+      llvm::Value* stable_b = builder.CreateFreeze(entropy_b, "obf.mba.zero.linear_equiv_pair.b");
+      llvm::Value* or_part =
+          builder.CreateOr(stable_a, stable_b, "obf.mba.zero.linear_equiv_pair.or");
+      llvm::Value* and_part =
+          builder.CreateAnd(stable_a, stable_b, "obf.mba.zero.linear_equiv_pair.and");
+      llvm::Value* lhs = builder.CreateAdd(or_part, and_part, "obf.mba.zero.linear_equiv_pair.lhs");
+      llvm::Value* xor_part =
+          builder.CreateXor(stable_a, stable_b, "obf.mba.zero.linear_equiv_pair.xor");
+      llvm::Constant* one = constant_i64_to_type(target_type, 1);
+      llvm::Value* carry = builder.CreateShl(and_part, one, "obf.mba.zero.linear_equiv_pair.carry");
+      llvm::Value* rhs = builder.CreateAdd(xor_part, carry, "obf.mba.zero.linear_equiv_pair.rhs");
+      return builder.CreateSub(lhs, rhs, "obf.mba.zero.linear_equiv_pair");
+    }
+    case opaque_zero_shape::polynomial_binomial_pair:
+      return build_opaque_zero_polynomial_binomial_pair(
+          builder, entropy_a, entropy_b, target_type, context, salt);
+    case opaque_zero_shape::polynomial_affine_pair:
+      return build_opaque_zero_polynomial_affine_pair(
+          builder, entropy_a, entropy_b, target_type, context, salt);
   }
 
   return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
@@ -758,6 +1041,7 @@ llvm::Value* build_opaque_zero(llvm::IRBuilder<>& builder,
                                      entropy_a,
                                      entropy_b,
                                      target_type,
+                                     context,
                                      mask,
                                      salt);
 }
@@ -826,6 +1110,111 @@ llvm::Value* mask_with_zero_xor(llvm::IRBuilder<>& builder,
                                 llvm::StringRef name) {
   return builder.CreateXor(
       value, build_opaque_zero(builder, context, value->getType(), salt), name);
+}
+
+llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
+                             llvm::Value* lhs,
+                             llvm::Value* rhs,
+                             const builder_context& context,
+                             std::uint64_t salt,
+                             llvm::StringRef name,
+                             std::uint32_t remaining_depth);
+
+llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
+                             llvm::Value* lhs,
+                             llvm::Value* rhs,
+                             const builder_context& context,
+                             std::uint64_t salt,
+                             llvm::StringRef name,
+                             std::uint32_t remaining_depth);
+
+llvm::Value* create_mul_impl(llvm::IRBuilder<>& builder,
+                             llvm::Value* lhs,
+                             llvm::Value* rhs,
+                             const builder_context& context,
+                             std::uint64_t salt,
+                             llvm::StringRef name) {
+  const std::string result_name = name.empty() ? "obf.mba.mul" : name.str();
+  if (!derive_features(context).enable_multiplication || !lhs->getType()->isIntegerTy() ||
+      lhs->getType() != rhs->getType()) {
+    return entangle_value_impl(
+        builder, builder.CreateMul(lhs, rhs, result_name), context, salt, result_name);
+  }
+
+  llvm::Value* variable = lhs;
+  const llvm::ConstantInt* constant_operand = llvm::dyn_cast<llvm::ConstantInt>(rhs);
+  if (constant_operand == nullptr) {
+    constant_operand = llvm::dyn_cast<llvm::ConstantInt>(lhs);
+    variable = rhs;
+  }
+
+  if (constant_operand == nullptr) {
+    return entangle_value_impl(
+        builder, builder.CreateMul(lhs, rhs, result_name), context, salt, result_name);
+  }
+
+  const llvm::APInt constant = constant_operand->getValue();
+  if (constant.isZero()) {
+    return entangle_value_impl(builder,
+                               llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(lhs->getType()), constant),
+                               context,
+                               salt,
+                               result_name);
+  }
+  if (constant == llvm::APInt(constant.getBitWidth(), 1)) {
+    return entangle_value_impl(builder, variable, context, salt, result_name);
+  }
+
+  const llvm::APInt magnitude = constant.isNegative() ? -constant : constant;
+  if (!has_budget(context, 18) || magnitude.popcount() == 0 || magnitude.popcount() > 3) {
+    return entangle_value_impl(
+        builder, builder.CreateMul(lhs, rhs, result_name), context, salt, result_name);
+  }
+
+  llvm::Value* accumulated = nullptr;
+  unsigned term_index = 0;
+  for (unsigned bit = 0; bit < magnitude.getBitWidth(); ++bit) {
+    if (!magnitude[bit]) { continue; }
+
+    llvm::Value* term = variable;
+    if (bit != 0) {
+      term = builder.CreateShl(variable,
+                               constant_i64_to_type(variable->getType(), bit),
+                               (result_name + ".term.shl." + llvm::Twine(term_index)).str());
+    }
+    term = mask_with_zero_add(builder,
+                              term,
+                              context,
+                              salt + 0x200ULL + term_index,
+                              (result_name + ".term." + llvm::Twine(term_index)).str());
+    if (accumulated == nullptr) {
+      accumulated = term;
+    } else {
+      accumulated = create_add_impl(builder,
+                                    accumulated,
+                                    term,
+                                    context,
+                                    mix_seed(salt, 0x401ULL + term_index),
+                                    (result_name + ".acc." + llvm::Twine(term_index)).str(),
+                                    clamped_depth(context) > 0 ? clamped_depth(context) - 1 : 0);
+    }
+    ++term_index;
+  }
+
+  if (accumulated == nullptr) {
+    accumulated = llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(lhs->getType()), 0);
+  }
+  if (constant.isNegative()) {
+    accumulated = create_sub_impl(builder,
+                                  llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(lhs->getType()), 0),
+                                  accumulated,
+                                  context,
+                                  mix_seed(salt, 0x577ULL),
+                                  result_name + ".neg",
+                                  clamped_depth(context) > 0 ? clamped_depth(context) - 1 : 0);
+  }
+
+  return entangle_value_impl(builder, accumulated, context, salt + 0x2ffULL, result_name);
 }
 
 // ---------------------------------------------------------------------------
@@ -933,8 +1322,8 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
           and_part,
           llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(lhs->getType()), 1),
           "obf.mba.add.affine.carry.base");
-      llvm::Value* carry = mask_with_zero_add(
-          builder, carry_base, context, salt + 0x4d, "obf.mba.add.affine.carry");
+      llvm::Value* carry =
+          mask_with_zero_add(builder, carry_base, context, salt + 0x4d, "obf.mba.add.affine.carry");
       llvm::Value* enc_xor =
           build_affine_encode(builder, xor_part, multiplier, bias, "obf.mba.add.affine.xor");
       llvm::Value* enc_carry =
@@ -952,6 +1341,35 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                              build_opaque_zero(builder, context, lhs->getType(), salt + 0x59),
                              context,
                              mix_seed(salt, 0xd4ULL * remaining_depth),
+                             name,
+                             remaining_depth - 1);
+    }
+    case add_shape::xor_shifted_carry: {
+      if (!supports_shift_by_one(lhs->getType())) {
+        return create_add_impl(builder,
+                               lhs,
+                               rhs,
+                               context,
+                               mix_seed(salt, 0xd5ULL * remaining_depth),
+                               name,
+                               remaining_depth - 1);
+      }
+
+      // x + y == (x ^ y) + ((x & y) << 1) in modular integer arithmetic.
+      llvm::Value* xor_part = builder.CreateXor(lhs, rhs, "obf.mba.add.xor_shifted_carry.xor");
+      llvm::Value* and_part = builder.CreateAnd(lhs, rhs, "obf.mba.add.xor_shifted_carry.and");
+      llvm::Value* carry_base = builder.CreateShl(and_part,
+                                                  constant_i64_to_type(lhs->getType(), 1),
+                                                  "obf.mba.add.xor_shifted_carry.carry.base");
+      llvm::Value* masked_xor = mask_with_zero_xor(
+          builder, xor_part, context, salt + 0x5b, "obf.mba.add.xor_shifted_carry.xor.mask");
+      llvm::Value* carry = mask_with_zero_add(
+          builder, carry_base, context, salt + 0x5d, "obf.mba.add.xor_shifted_carry.carry");
+      return create_add_impl(builder,
+                             masked_xor,
+                             carry,
+                             context,
+                             mix_seed(salt, 0xd6ULL * remaining_depth),
                              name,
                              remaining_depth - 1);
     }
@@ -1027,10 +1445,10 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
       const llvm::APInt bias =
           make_affine_bias(bit_width, mix_seed(context.seed_base, salt ^ 0xb111ULL));
       llvm::Value* xor_part = builder.CreateXor(lhs, rhs, "obf.mba.sub.affine.xor");
-      llvm::Value* borrow_mask = builder.CreateAnd(
-          builder.CreateNot(lhs, "obf.mba.sub.affine.notlhs"),
-          rhs,
-          "obf.mba.sub.affine.borrow.mask");
+      llvm::Value* borrow_mask =
+          builder.CreateAnd(builder.CreateNot(lhs, "obf.mba.sub.affine.notlhs"),
+                            rhs,
+                            "obf.mba.sub.affine.borrow.mask");
       llvm::Value* borrow_base = builder.CreateShl(
           borrow_mask,
           llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(lhs->getType()), 1),
@@ -1039,8 +1457,8 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
           builder, borrow_base, context, salt + 0x7d, "obf.mba.sub.affine.borrow");
       llvm::Value* enc_xor =
           build_affine_encode(builder, xor_part, multiplier, bias, "obf.mba.sub.affine.xor");
-      llvm::Value* enc_borrow = build_affine_encode(
-          builder, borrow, multiplier, bias, "obf.mba.sub.affine.borrow");
+      llvm::Value* enc_borrow =
+          build_affine_encode(builder, borrow, multiplier, bias, "obf.mba.sub.affine.borrow");
       llvm::Value* encoded_diff =
           builder.CreateAdd(builder.CreateSub(enc_xor, enc_borrow, "obf.mba.sub.affine.enc.diff"),
                             constant_apint_to_type(lhs->getType(), bias),
@@ -1054,6 +1472,28 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              build_opaque_zero(builder, context, lhs->getType(), salt + 0x89),
                              context,
                              mix_seed(salt, 0xe4ULL * remaining_depth),
+                             name,
+                             remaining_depth - 1);
+    }
+    case sub_shape::ones_complement_add: {
+      // x - y == x + ~y + 1 modulo 2^n.
+      llvm::Value* not_rhs = builder.CreateNot(rhs, "obf.mba.sub.ones_complement.notrhs");
+      llvm::Value* masked_lhs =
+          mask_with_zero_add(builder, lhs, context, salt + 0x8b, "obf.mba.sub.ones_complement.lhs");
+      llvm::Value* masked_not = mask_with_zero_xor(
+          builder, not_rhs, context, salt + 0x8d, "obf.mba.sub.ones_complement.notrhs.mask");
+      llvm::Value* partial = create_add_impl(builder,
+                                             masked_lhs,
+                                             masked_not,
+                                             context,
+                                             mix_seed(salt, 0xe5ULL * remaining_depth),
+                                             "obf.mba.sub.ones_complement.partial",
+                                             remaining_depth - 1);
+      return create_add_impl(builder,
+                             partial,
+                             constant_i64_to_type(lhs->getType(), 1),
+                             context,
+                             mix_seed(salt, 0xe6ULL * remaining_depth),
                              name,
                              remaining_depth - 1);
     }
@@ -1146,6 +1586,34 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                              name,
                              remaining_depth - 1);
     }
+    case xor_shape::sum_minus_carry: {
+      if (!supports_shift_by_one(lhs->getType())) {
+        return create_xor_impl(builder,
+                               lhs,
+                               rhs,
+                               context,
+                               mix_seed(salt, 0xf5ULL * remaining_depth),
+                               name,
+                               remaining_depth - 1);
+      }
+
+      // x ^ y == (x + y) - ((x & y) << 1) in modular integer arithmetic.
+      llvm::Value* sum = builder.CreateAdd(lhs, rhs, "obf.mba.xor.sum_minus_carry.sum");
+      llvm::Value* and_part = builder.CreateAnd(lhs, rhs, "obf.mba.xor.sum_minus_carry.and");
+      llvm::Value* carry = builder.CreateShl(
+          and_part, constant_i64_to_type(lhs->getType(), 1), "obf.mba.xor.sum_minus_carry.carry");
+      llvm::Value* masked_sum = mask_with_zero_xor(
+          builder, sum, context, salt + 0xc1, "obf.mba.xor.sum_minus_carry.sum.mask");
+      llvm::Value* masked_carry = mask_with_zero_add(
+          builder, carry, context, salt + 0xc3, "obf.mba.xor.sum_minus_carry.carry.mask");
+      return create_sub_impl(builder,
+                             masked_sum,
+                             masked_carry,
+                             context,
+                             mix_seed(salt, 0xf6ULL * remaining_depth),
+                             name,
+                             remaining_depth - 1);
+    }
   }
 
   llvm_unreachable("unknown xor MBA shape");
@@ -1191,11 +1659,73 @@ llvm::Value* create_opaque_integer(llvm::IRBuilder<>& builder,
                                    const llvm::APInt& value,
                                    std::uint64_t salt,
                                    llvm::StringRef name) {
-  return entangle_value_impl(builder,
-                             llvm::ConstantInt::get(type, value),
-                             context,
-                             salt,
-                             name.empty() ? "obf.seed" : name);
+  const llvm::APInt normalized = value.sextOrTrunc(type->getBitWidth());
+  const std::string result_name = name.empty() ? "obf.seed" : name.str();
+  const auto make_key = [&](std::uint64_t family_salt) {
+    llvm::APInt key(type->getBitWidth(),
+                    derive_shape_seed(context, "mba.opaque_integer.key", salt ^ family_salt, type),
+                    /*isSigned=*/false,
+                    /*implicitTrunc=*/true);
+    if (key.isZero() && type->getBitWidth() > 1) { key = llvm::APInt(type->getBitWidth(), 0x5aU); }
+    return key;
+  };
+
+  switch (select_opaque_integer_shape(context, salt, type)) {
+    case opaque_integer_shape::entangled_constant:
+      return entangle_value_impl(
+          builder, llvm::ConstantInt::get(type, normalized), context, salt, result_name);
+    case opaque_integer_shape::xor_split: {
+      const llvm::APInt key = make_key(0x7811ULL);
+      llvm::Value* masked = llvm::ConstantInt::get(type, normalized ^ key);
+      llvm::Value* opaque_key = entangle_value_impl(builder,
+                                                    llvm::ConstantInt::get(type, key),
+                                                    context,
+                                                    salt + 0x17ULL,
+                                                    "obf.seed.xor_split.key");
+      llvm::Value* decoded = builder.CreateXor(masked, opaque_key, "obf.seed.xor_split.value");
+      return entangle_value_impl(builder, decoded, context, salt + 0x19ULL, result_name);
+    }
+    case opaque_integer_shape::add_split: {
+      const llvm::APInt key = make_key(0xadd5ULL);
+      llvm::Value* biased = llvm::ConstantInt::get(type, normalized - key);
+      llvm::Value* opaque_key = entangle_value_impl(builder,
+                                                    llvm::ConstantInt::get(type, key),
+                                                    context,
+                                                    salt + 0x1bULL,
+                                                    "obf.seed.add_split.key");
+      llvm::Value* decoded = builder.CreateAdd(biased, opaque_key, "obf.seed.add_split.value");
+      return entangle_value_impl(builder, decoded, context, salt + 0x1dULL, result_name);
+    }
+    case opaque_integer_shape::affine_decode: {
+      if (type->getBitWidth() <= 1) {
+        return entangle_value_impl(
+            builder, llvm::ConstantInt::get(type, normalized), context, salt, result_name);
+      }
+
+      const llvm::APInt multiplier = make_odd_affine_multiplier(
+          type->getBitWidth(), derive_shape_seed(context, "mba.opaque_integer.affine", salt, type));
+      const llvm::APInt inverse = compute_mod_inverse_pow2(multiplier);
+      const llvm::APInt bias = make_affine_bias(
+          type->getBitWidth(), derive_shape_seed(context, "mba.opaque_integer.bias", salt, type));
+      const llvm::APInt encoded = normalized * multiplier + bias;
+      llvm::Value* opaque_encoded = entangle_value_impl(builder,
+                                                        llvm::ConstantInt::get(type, encoded),
+                                                        context,
+                                                        salt + 0x1fULL,
+                                                        "obf.seed.affine.encoded");
+      llvm::Value* decoded =
+          build_affine_decode(builder, opaque_encoded, inverse, bias, "obf.seed.affine");
+      return entangle_value_impl(builder, decoded, context, salt + 0x23ULL, result_name);
+    }
+    case opaque_integer_shape::zero_add: {
+      llvm::Value* zero = build_opaque_zero(builder, context, type, salt + 0x25ULL);
+      llvm::Value* decoded = builder.CreateAdd(
+          llvm::ConstantInt::get(type, normalized), zero, "obf.seed.zero_add.value");
+      return entangle_value_impl(builder, decoded, context, salt + 0x27ULL, result_name);
+    }
+  }
+
+  llvm_unreachable("unknown opaque integer shape");
 }
 
 llvm::Value* create_add(llvm::IRBuilder<>& builder,
@@ -1204,8 +1734,7 @@ llvm::Value* create_add(llvm::IRBuilder<>& builder,
                         const builder_context& context,
                         std::uint64_t salt,
                         llvm::StringRef name) {
-  return create_add_impl(
-      builder, lhs, rhs, context, salt, name, std::min(context.depth, max_mba_depth));
+  return create_add_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context));
 }
 
 llvm::Value* create_sub(llvm::IRBuilder<>& builder,
@@ -1214,8 +1743,7 @@ llvm::Value* create_sub(llvm::IRBuilder<>& builder,
                         const builder_context& context,
                         std::uint64_t salt,
                         llvm::StringRef name) {
-  return create_sub_impl(
-      builder, lhs, rhs, context, salt, name, std::min(context.depth, max_mba_depth));
+  return create_sub_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context));
 }
 
 llvm::Value* create_xor(llvm::IRBuilder<>& builder,
@@ -1224,8 +1752,16 @@ llvm::Value* create_xor(llvm::IRBuilder<>& builder,
                         const builder_context& context,
                         std::uint64_t salt,
                         llvm::StringRef name) {
-  return create_xor_impl(
-      builder, lhs, rhs, context, salt, name, std::min(context.depth, max_mba_depth));
+  return create_xor_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context));
+}
+
+llvm::Value* create_mul(llvm::IRBuilder<>& builder,
+                        llvm::Value* lhs,
+                        llvm::Value* rhs,
+                        const builder_context& context,
+                        std::uint64_t salt,
+                        llvm::StringRef name) {
+  return create_mul_impl(builder, lhs, rhs, context, salt, name);
 }
 
 llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,

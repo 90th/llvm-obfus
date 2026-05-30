@@ -705,24 +705,39 @@ llvm::Value* emit_binary(llvm::IRBuilder<>& builder,
                          std::uint64_t salt) {
   if (!is_binary_opcode(instruction.op)) { llvm_unreachable("opcode is not a binary opcode"); }
 
-  llvm::Value* const lhs = materialize_value(builder,
-                                             slot_allocas,
-                                             slot_mapping,
-                                             program,
-                                             instruction.operands[0],
-                                             opaque_seed_slot,
-                                             opaque_seed_base,
-                                             mba_context,
-                                             salt + 1);
-  llvm::Value* const rhs = materialize_value(builder,
-                                             slot_allocas,
-                                             slot_mapping,
-                                             program,
-                                             instruction.operands[1],
-                                             opaque_seed_slot,
-                                             opaque_seed_base,
-                                             mba_context,
-                                             salt + 2);
+  llvm::Value* lhs = nullptr;
+  llvm::Value* rhs = nullptr;
+  const auto materialize_lhs = [&]() -> llvm::Value* {
+    if (lhs == nullptr) {
+      lhs = materialize_value(builder,
+                              slot_allocas,
+                              slot_mapping,
+                              program,
+                              instruction.operands[0],
+                              opaque_seed_slot,
+                              opaque_seed_base,
+                              mba_context,
+                              salt + 1);
+    }
+    return lhs;
+  };
+  const auto materialize_rhs = [&]() -> llvm::Value* {
+    if (rhs == nullptr) {
+      rhs = materialize_value(builder,
+                              slot_allocas,
+                              slot_mapping,
+                              program,
+                              instruction.operands[1],
+                              opaque_seed_slot,
+                              opaque_seed_base,
+                              mba_context,
+                              salt + 2);
+    }
+    return rhs;
+  };
+
+  lhs = materialize_lhs();
+  rhs = materialize_rhs();
 
   llvm::Value* result = nullptr;
   llvm::Instruction* flag_target = nullptr;
@@ -787,7 +802,28 @@ llvm::Value* emit_binary(llvm::IRBuilder<>& builder,
       }
       break;
     case opcode::mul:
-      result = builder.CreateMul(lhs, rhs, "obf.vm.mul");
+      if (!has_instruction_flag(instruction.flags, instruction_flag_nsw) &&
+          !has_instruction_flag(instruction.flags, instruction_flag_nuw) &&
+          (instruction.operands[0].kind == value_ref_kind::constant ||
+           instruction.operands[1].kind == value_ref_kind::constant)) {
+        llvm::Value* mul_lhs = materialize_lhs();
+        llvm::Value* mul_rhs = materialize_rhs();
+        if (instruction.operands[0].kind == value_ref_kind::constant) {
+          if (const auto* constant =
+                  llvm::dyn_cast<llvm::ConstantInt>(instruction.operands[0].constant)) {
+            mul_lhs = const_cast<llvm::ConstantInt*>(constant);
+          }
+        }
+        if (instruction.operands[1].kind == value_ref_kind::constant) {
+          if (const auto* constant =
+                  llvm::dyn_cast<llvm::ConstantInt>(instruction.operands[1].constant)) {
+            mul_rhs = const_cast<llvm::ConstantInt*>(constant);
+          }
+        }
+        result = mba::create_mul(builder, mul_lhs, mul_rhs, mba_context, salt + 6, "obf.vm.mul");
+      } else {
+        result = builder.CreateMul(lhs, rhs, "obf.vm.mul");
+      }
       break;
     case opcode::udiv:
       result = builder.CreateUDiv(lhs, rhs, "obf.vm.udiv");

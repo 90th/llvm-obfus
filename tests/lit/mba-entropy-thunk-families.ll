@@ -65,5 +65,6 @@ entry:
 ; IR-LABEL: define internal { i64, i64 } @__obf_entropy_thunk_
 ; IR: call { i64, i64 } @rt_core_ep{{[0-4]}}()
 
-; SHAPES-DAG: entropy.thunk.select
+; SHAPES-DAG: entropy.thunk.swap
+; SHAPES-DAG: entropy.thunk.xor
 ; SHAPES-DAG: entropy.thunk.addsub

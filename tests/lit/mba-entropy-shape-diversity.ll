@@ -2,6 +2,9 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/mba-entropy-shape-diversity.yaml -passes=obf-constant-encode -S %s -o - | %opt -passes=verify -disable-output
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/mba-entropy-shape-diversity.yaml -passes=obf-constant-encode -S %s -o %t
 ; RUN: %lli %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/mba-entropy-shape-diversity.yaml -passes=obf-constant-encode -S %s -o %t.first
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/mba-entropy-shape-diversity.yaml -passes=obf-constant-encode -S %s -o %t.second
+; RUN: cmp %t.first %t.second
 
 define i32 @shape_mix(i32 %x) {
 entry:
@@ -32,5 +35,14 @@ entry:
 ; CHECK-DAG: obf.mba.zero.add_sub_pair.delta
 ; CHECK-DAG: obf.mba.zero.affine_cancel_pair
 ; CHECK-DAG: obf.mba.zero.affine_self_diff
+; CHECK-DAG: obf.mba.zero.linear_equiv_pair
+; CHECK-DAG: obf.mba.add.xor_shifted_carry
+; CHECK-DAG: obf.mba.sub.ones_complement
+; CHECK-DAG: obf.mba.xor.sum_minus_carry
+; CHECK-DAG: obf.seed.add_split
+; CHECK-DAG: obf.seed.affine
+; CHECK-DAG: obf.seed.zero_add
+; CHECK-NOT: obf.mba.zero.poly_binomial
+; CHECK-NOT: obf.mba.zero.poly_affine
 ; CHECK-DAG: obf.entangle.xor_zero.zero
 ; CHECK: ret i32
