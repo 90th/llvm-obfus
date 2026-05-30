@@ -15,6 +15,7 @@ The design goal is simple: make static recovery materially harder while staying 
 - `strong_vm` implementation bodies continue through later hardening stages, not just the public wrapper.
 - MBA rewriting owns arithmetic identity diversification across `add`, `sub`, `xor`, and `mul`, both directly and as part of other transforms such as constant reconstruction and opaque predicates.
 - Shape families include linear identities (`x ^ y = (x | y) - (x & y)`), affine wrappers (`Encode(x) = a*x + b` with odd modular multiplier), polynomial zero terms (depth 3+), and constant-multiplication decomposition.
+- Entropy thunk interfaces are diversified per function across packed scalar, aggregate pair, and out-parameter forms, and first-hop entropy mixing uses per-site `xor`, `mul_add`, `rotate_xor`, or `bit_split` selection before MBA shape builders run.
 - A private `BudgetTracker` enforces a per-expression IR-instruction cap derived from `mba.depth`; when the budget is exhausted mid-expansion the engine falls back to the plain LLVM binary operation.
 - `instruction_substitution` stays focused on distinct logical rewrites such as boolean identity transformations instead of duplicating MBA arithmetic forms.
 
@@ -50,7 +51,7 @@ The design goal is simple: make static recovery materially harder while staying 
 - Authentication uses a keyed BLAKE2s tag over descriptor metadata plus ciphertext, and encryption uses a BLAKE2s-derived XOR keystream with a derived nonce. It does not use AES, ChaCha20, HMAC, or SipHash.
 - The emitted artifacts store the 32-byte `build_key` in internal globals and reconstruct derived keys at runtime from descriptor metadata. This is an embedded-key, self-contained runtime: no hardware token, remote service, white-box key split, or entropy-anchor binding is involved.
 - Integrity verification is fail-closed: descriptor mismatches, tag mismatches, and length mismatches trap in the runtime instead of returning tampered plaintext.
-- `runtime/entropy_anchor.c` supports opaque arithmetic and MBA-style transforms; it is separate from the keyed string and constant-pool key schedule.
+- `runtime/entropy_anchor.c` supports opaque arithmetic and MBA-style transforms; it is separate from the keyed string and constant-pool key schedule. It exposes five deterministic accessor variants (`direct`, `stack_roundtrip`, `split_recombine`, `xor_neutral`, `add_sub_neutral`) selected per function and salt.
 
 ### Stealth ABI And Artifact Cleanup
 
@@ -227,7 +228,7 @@ Useful cache variables:
 
 Feature report:
 
-- `obf-feature-report` is read-only and emits `obf.feature_report.v3` JSON with per-function policy decisions and per-transform strategy details.
+- `obf-feature-report` is read-only and emits `obf.feature_report.v3` JSON with per-function policy decisions, per-transform strategy details, and MBA shape counters under the `mba` payload for functions that use MBA rewrites.
 
 ```sh
 opt -load-pass-plugin build/obf_plugin.so \
