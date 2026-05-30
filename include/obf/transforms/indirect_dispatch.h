@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace llvm {
@@ -17,6 +18,9 @@ struct indirect_dispatch_options {
   bool target_vm_dispatchers = true;
   bool target_flattened_headers = true;
   std::uint32_t mba_depth = 1;
+  std::optional<std::uint32_t> mba_max_ir_instructions;
+  std::optional<bool> mba_enable_polynomial;
+  std::optional<bool> mba_enable_multiplication;
   std::uint64_t seed = 0;
 };
 

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,9 @@ namespace obf::vm {
 
 struct virtualization_options {
   std::uint32_t mba_depth = 1;
+  std::optional<std::uint32_t> mba_max_ir_instructions;
+  std::optional<bool> mba_enable_polynomial;
+  std::optional<bool> mba_enable_multiplication;
   bool hidden_token_handshake = false;
   bool prefer_island_helpers = false;
   std::vector<std::uint64_t> valid_hidden_tokens;

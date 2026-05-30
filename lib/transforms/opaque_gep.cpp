@@ -173,6 +173,11 @@ llvm::Value* lower_gep(llvm::GetElementPtrInst& instruction,
   llvm::IRBuilder<> builder(&instruction);
   mba::builder_context mba_context = base_context;
   mba_context.depth = options.mba_depth;
+  configure_context_overrides(
+      mba_context,
+      options.mba_max_ir_instructions,
+      options.mba_enable_polynomial,
+      options.mba_enable_multiplication);
 
   llvm::Value* base_ptr = instruction.getPointerOperand();
   llvm::Value* base_int = llvm::CastInst::Create(llvm::Instruction::PtrToInt,
@@ -236,6 +241,11 @@ opaque_gep_result run_opaque_gep(llvm::Function& function, const opaque_gep_opti
   mba::builder_context mba_context =
       mba::get_or_create_builder_context(function, "obf.gep", derive_mba_seed(function));
   mba_context.depth = options.mba_depth;
+  configure_context_overrides(
+      mba_context,
+      options.mba_max_ir_instructions,
+      options.mba_enable_polynomial,
+      options.mba_enable_multiplication);
 
   std::size_t lowered_count = 0;
   std::uint64_t salt = 1;

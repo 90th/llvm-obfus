@@ -1,5 +1,6 @@
 #include "obf/transforms/mba.h"
 
+#include "obf/frontend/config.h"
 #include "obf/support/runtime_abi_generated.h"
 #include "obf/support/stable_hash.h"
 
@@ -104,6 +105,15 @@ std::uint32_t clamped_depth(const builder_context& context) {
 }
 
 mba_budget derive_budget(const builder_context& context) {
+  if (context.max_ir_instructions_override.has_value()) {
+    return {.max_ir_instructions = *context.max_ir_instructions_override,
+            .max_terms = std::max<std::uint32_t>(4, *context.max_ir_instructions_override / 16),
+            .max_mul_terms =
+                *context.max_ir_instructions_override >= 192 ? 4U
+                : *context.max_ir_instructions_override >= 128 ? 2U
+                                                               : 0U};
+  }
+
   switch (clamped_depth(context)) {
     case 0:
       return {.max_ir_instructions = 0, .max_terms = 1, .max_mul_terms = 0};
@@ -122,10 +132,16 @@ mba_budget derive_budget(const builder_context& context) {
 
 mba_features derive_features(const builder_context& context) {
   const std::uint32_t depth = clamped_depth(context);
+  const bool enable_polynomial = context.enable_polynomial_override.has_value()
+                                     ? *context.enable_polynomial_override
+                                     : depth >= 3;
+  const bool enable_multiplication = context.enable_multiplication_override.has_value()
+                                         ? *context.enable_multiplication_override
+                                         : depth >= 3;
   return {.enable_linear_permutations = depth >= 2,
           .enable_affine_wrappers = depth >= 1,
-          .enable_polynomial_zeros = depth >= 3,
-          .enable_multiplication = depth >= 3,
+          .enable_polynomial_zeros = enable_polynomial,
+          .enable_multiplication = enable_multiplication,
           .enable_division_constants = depth >= 3,
           .enable_simplifier_barriers = true};
 }
@@ -1840,7 +1856,10 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
                                           std::uint64_t context_b_salt,
                                           llvm::StringRef context_a_name,
                                           llvm::StringRef context_b_name,
-                                          llvm::StringRef result_name) {
+                                          llvm::StringRef result_name,
+                                          std::optional<std::uint32_t> max_ir_override,
+                                          std::optional<bool> poly_override,
+                                          std::optional<bool> mul_override) {
   llvm::Module* module = function.getParent();
   if (module == nullptr) { return nullptr; }
 
@@ -1853,6 +1872,15 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
   seed_context.depth = mba_depth;
   context_a.depth = mba_depth;
   context_b.depth = mba_depth;
+  seed_context.max_ir_instructions_override = max_ir_override;
+  seed_context.enable_polynomial_override = poly_override;
+  seed_context.enable_multiplication_override = mul_override;
+  context_a.max_ir_instructions_override = max_ir_override;
+  context_a.enable_polynomial_override = poly_override;
+  context_a.enable_multiplication_override = mul_override;
+  context_b.max_ir_instructions_override = max_ir_override;
+  context_b.enable_polynomial_override = poly_override;
+  context_b.enable_multiplication_override = mul_override;
 
   const entropy_pair entropy =
       load_entropy_anchor_pair(builder, seed_context.entropy_anchor, seed_context, salt_base, "obf.opaque");
@@ -1914,3 +1942,13 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
 }
 
 }  // namespace obf::mba
+
+namespace obf {
+
+void configure_context_overrides(mba::builder_context& ctx, const mba_config& cfg) {
+  ctx.max_ir_instructions_override = cfg.max_ir_instructions;
+  ctx.enable_polynomial_override = cfg.enable_polynomial;
+  ctx.enable_multiplication_override = cfg.enable_multiplication;
+}
+
+}  // namespace obf

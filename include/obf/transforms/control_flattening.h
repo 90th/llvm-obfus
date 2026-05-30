@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace llvm {
@@ -16,6 +17,9 @@ struct control_flattening_options {
   std::size_t max_instructions = 128;
   std::size_t max_decoy_states = 2;
   std::uint32_t mba_depth = 1;
+  std::optional<std::uint32_t> mba_max_ir_instructions;
+  std::optional<bool> mba_enable_polynomial;
+  std::optional<bool> mba_enable_multiplication;
   std::uint64_t seed = 0;
 };
 

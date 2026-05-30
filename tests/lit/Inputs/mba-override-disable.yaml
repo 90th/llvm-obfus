@@ -1,0 +1,8 @@
+seed: 4242
+default_level: none
+targets:
+  - match: check
+    level: strong
+mba:
+  depth: 3
+  enable_polynomial: false

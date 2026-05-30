@@ -59,6 +59,9 @@ struct constant_encoding_config {
 
 struct mba_config {
   std::uint32_t depth = 1;
+  std::optional<std::uint32_t> max_ir_instructions;
+  std::optional<bool> enable_polynomial;
+  std::optional<bool> enable_multiplication;
 };
 
 struct indirect_dispatch_config {

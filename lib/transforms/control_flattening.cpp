@@ -175,7 +175,10 @@ llvm::Value* encode_state_id(llvm::IRBuilder<>& builder,
 llvm::Value* build_true_opaque_predicate(llvm::IRBuilder<>& builder,
                                           llvm::Function& function,
                                           std::uint32_t mba_depth,
-                                          std::uint64_t salt_base) {
+                                          std::uint64_t salt_base,
+                                          std::optional<std::uint32_t> max_ir,
+                                          std::optional<bool> poly,
+                                          std::optional<bool> mul) {
   return mba::build_entropy_true_predicate(builder,
                                            function,
                                            mba_depth,
@@ -184,12 +187,18 @@ llvm::Value* build_true_opaque_predicate(llvm::IRBuilder<>& builder,
                                            0x27182818ULL,
                                            "obf.flat.decoy.a",
                                            "obf.flat.decoy.b",
-                                           "obf.flat.decoy.true");
+                                           "obf.flat.decoy.true",
+                                           max_ir,
+                                           poly,
+                                           mul);
 }
 
 llvm::BasicBlock* create_decoy_trap(llvm::Function& function,
                                     std::uint32_t mba_depth,
-                                    std::uint64_t salt_base) {
+                                    std::uint64_t salt_base,
+                                    std::optional<std::uint32_t> max_ir,
+                                    std::optional<bool> poly,
+                                    std::optional<bool> mul) {
   llvm::Module* module = function.getParent();
   if (module == nullptr) { return nullptr; }
 
@@ -234,7 +243,8 @@ llvm::BasicBlock* create_decoy_trap(llvm::Function& function,
   llvm::Value* next_iteration = loop_builder.CreateAdd(
       iteration, llvm::ConstantInt::get(loop_builder.getInt32Ty(), 1), "obf.flat.decoy.iter.next");
   llvm::Value* predicate =
-      build_true_opaque_predicate(loop_builder, function, mba_depth, salt_base + 0x71ULL);
+      build_true_opaque_predicate(loop_builder, function, mba_depth, salt_base + 0x71ULL,
+                                  max_ir, poly, mul);
   loop_builder.CreateCondBr(predicate, loop, trap);
 
   iteration->addIncoming(llvm::ConstantInt::get(loop_builder.getInt32Ty(), 0), entry);
@@ -596,12 +606,20 @@ control_flattening_result run_control_flattening(llvm::Function& function,
       mba::get_or_create_builder_context(function, "obf.flat", 0x2f4d8f13ULL);
   mba_context.seed_base = mix_seed(mba_context.seed_base, options.seed);
   mba_context.depth = options.mba_depth;
+  configure_context_overrides(
+      mba_context,
+      options.mba_max_ir_instructions,
+      options.mba_enable_polynomial,
+      options.mba_enable_multiplication);
 
   for (std::size_t decoy_index = 0; decoy_index < decoy_count; ++decoy_index) {
     llvm::BasicBlock* decoy_entry = create_decoy_trap(
         function,
         options.mba_depth,
-        mix_seed(options.seed, static_cast<std::uint64_t>(decoy_index + 1)));
+        mix_seed(options.seed, static_cast<std::uint64_t>(decoy_index + 1)),
+        options.mba_max_ir_instructions,
+        options.mba_enable_polynomial,
+        options.mba_enable_multiplication);
     if (decoy_entry == nullptr) { continue; }
 
     decoy_states.push_back(

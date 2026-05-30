@@ -25,6 +25,9 @@ struct constant_encoding_options {
   std::size_t max_constants_per_function = 4;
   unsigned min_bit_width = 8;
   std::uint32_t mba_depth = 1;
+  std::optional<std::uint32_t> mba_max_ir_instructions;
+  std::optional<bool> mba_enable_polynomial;
+  std::optional<bool> mba_enable_multiplication;
 };
 
 struct constant_encoding_result {

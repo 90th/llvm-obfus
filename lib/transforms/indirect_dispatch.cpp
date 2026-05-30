@@ -539,6 +539,11 @@ indirect_dispatch_result run_indirect_dispatch(llvm::Function& function,
   mba::builder_context mba_context =
       mba::get_or_create_builder_context(function, "obf.idis", options.seed);
   mba_context.depth = options.mba_depth;
+  configure_context_overrides(
+      mba_context,
+      options.mba_max_ir_instructions,
+      options.mba_enable_polynomial,
+      options.mba_enable_multiplication);
 
   for (std::size_t site_index = 0; site_index < collection.sites.size(); ++site_index) {
     const dispatch_site& site = collection.sites[site_index];

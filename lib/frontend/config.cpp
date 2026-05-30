@@ -97,6 +97,9 @@ template <>
 struct MappingTraits<obf::mba_config> {
   static void mapping(IO& io, obf::mba_config& config) {
     io.mapOptional("depth", config.depth, std::uint32_t{1});
+    io.mapOptional("max_ir_instructions", config.max_ir_instructions);
+    io.mapOptional("enable_polynomial", config.enable_polynomial);
+    io.mapOptional("enable_multiplication", config.enable_multiplication);
   }
 };
 
@@ -251,6 +254,9 @@ obfuscation_config defaults_for_profile(config_profile profile) {
                                 .authenticated_mode = false};
       config.constant_encoding.max_constants_per_function = 32;
       config.mba.depth = 4;
+      config.mba.max_ir_instructions = 320;
+      config.mba.enable_polynomial = true;
+      config.mba.enable_multiplication = true;
       config.security.fail_on_public_obf_symbol = true;
       break;
   }
@@ -376,6 +382,27 @@ std::string summarize_config(const obfuscation_config& config) {
   stream << "constant_encoding.mode: " << to_string(config.constant_encoding.mode) << '\n';
   stream << "constant_encoding.min_bit_width: " << config.constant_encoding.min_bit_width << '\n';
   stream << "mba.depth: " << config.mba.depth << '\n';
+  stream << "mba.max_ir_instructions: ";
+  if (config.mba.max_ir_instructions.has_value()) {
+    stream << *config.mba.max_ir_instructions;
+  } else {
+    stream << "derived";
+  }
+  stream << '\n';
+  stream << "mba.enable_polynomial: ";
+  if (config.mba.enable_polynomial.has_value()) {
+    stream << (*config.mba.enable_polynomial ? "true" : "false");
+  } else {
+    stream << "derived";
+  }
+  stream << '\n';
+  stream << "mba.enable_multiplication: ";
+  if (config.mba.enable_multiplication.has_value()) {
+    stream << (*config.mba.enable_multiplication ? "true" : "false");
+  } else {
+    stream << "derived";
+  }
+  stream << '\n';
   stream << "indirect_dispatch.enabled: "
          << (config.indirect_dispatch.enabled ? "true" : "false") << '\n';
   stream << "indirect_dispatch.max_sites_per_function: "

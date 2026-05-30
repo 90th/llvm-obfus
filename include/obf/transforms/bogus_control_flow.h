@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace llvm {
@@ -13,6 +14,9 @@ namespace obf {
 struct bogus_control_flow_options {
   std::size_t max_insertions_per_function = 1;
   std::uint32_t mba_depth = 1;
+  std::optional<std::uint32_t> mba_max_ir_instructions;
+  std::optional<bool> mba_enable_polynomial;
+  std::optional<bool> mba_enable_multiplication;
 };
 
 struct bogus_control_flow_result {

@@ -1216,7 +1216,13 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
   const mba::builder_context mba_context{.entropy_anchor =
                                              mba::get_or_create_entropy_anchor(*module),
                                          .seed_base = opaque_seed_base,
-                                         .depth = options.mba_depth};
+                                         .depth = options.mba_depth,
+                                         .max_ir_instructions_override =
+                                             options.mba_max_ir_instructions,
+                                         .enable_polynomial_override =
+                                             options.mba_enable_polynomial,
+                                         .enable_multiplication_override =
+                                             options.mba_enable_multiplication};
     std::uint32_t bytecode_anchor_real_count = 0;
     std::uint32_t bytecode_anchor_decoy_count = 0;
     llvm::SmallVector<llvm::GlobalVariable*, 8> bytecode_anchor_globals =
@@ -1711,7 +1717,13 @@ void rewrite_function_body_state_islands(llvm::Function& function,
   const mba::builder_context mba_context{.entropy_anchor =
                                              mba::get_or_create_entropy_anchor(*module),
                                          .seed_base = opaque_seed_base,
-                                         .depth = options.mba_depth};
+                                         .depth = options.mba_depth,
+                                         .max_ir_instructions_override =
+                                             options.mba_max_ir_instructions,
+                                         .enable_polynomial_override =
+                                             options.mba_enable_polynomial,
+                                         .enable_multiplication_override =
+                                             options.mba_enable_multiplication};
   entry_builder.CreateStore(build_hidden_token_seed(entry_builder,
                                                     hidden_token_arg,
                                                     program.instructions.empty()
@@ -2037,7 +2049,12 @@ void rewrite_function_body(llvm::Function& function,
   llvm::AllocaInst* opaque_seed = nullptr;
   llvm::GlobalVariable* entropy_anchor = mba::get_or_create_entropy_anchor(*function.getParent());
   const mba::builder_context mba_context{
-      .entropy_anchor = entropy_anchor, .seed_base = opaque_seed_base, .depth = options.mba_depth};
+      .entropy_anchor = entropy_anchor,
+      .seed_base = opaque_seed_base,
+      .depth = options.mba_depth,
+      .max_ir_instructions_override = options.mba_max_ir_instructions,
+      .enable_polynomial_override = options.mba_enable_polynomial,
+      .enable_multiplication_override = options.mba_enable_multiplication};
 
   llvm::Argument* hidden_token_arg = nullptr;
   if (options.hidden_token_handshake && function.arg_size() > 0) {

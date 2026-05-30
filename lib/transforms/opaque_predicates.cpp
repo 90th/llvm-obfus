@@ -98,7 +98,11 @@ opaque_predicate_result run_opaque_predicates(llvm::Function& function,
                                           0x13579bdfULL,
                                           0x2468ace0ULL,
                                           "obf.opaque.a",
-                                          "obf.opaque.b");
+                                          "obf.opaque.b",
+                                          "obf.opaque.true",
+                                          options.mba_max_ir_instructions,
+                                          options.mba_enable_polynomial,
+                                          options.mba_enable_multiplication);
     if (predicate == nullptr) { continue; }
 
     llvm::Value* new_cond = builder.CreateAnd(branch->getCondition(), predicate, "obf.opaque.cond");

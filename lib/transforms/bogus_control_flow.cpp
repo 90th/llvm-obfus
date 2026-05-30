@@ -147,7 +147,11 @@ bogus_control_flow_result run_bogus_control_flow(llvm::Function& function,
                                           0x31415926ULL,
                                           0x27182818ULL,
                                           "obf.bogus.pred.a",
-                                          "obf.bogus.pred.b");
+                                          "obf.bogus.pred.b",
+                                          "obf.bogus.true",
+                                          options.mba_max_ir_instructions,
+                                          options.mba_enable_polynomial,
+                                          options.mba_enable_multiplication);
     if (predicate == nullptr) {
       sink->eraseFromParent();
       bogus->eraseFromParent();

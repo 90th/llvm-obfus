@@ -344,6 +344,9 @@ constant_encoding_options build_constant_encoding_options(const obfuscation_conf
   }
 
   options.mba_depth = config.mba.depth;
+  options.mba_max_ir_instructions = config.mba.max_ir_instructions;
+  options.mba_enable_polynomial = config.mba.enable_polynomial;
+  options.mba_enable_multiplication = config.mba.enable_multiplication;
   return options;
 }
 
@@ -351,6 +354,9 @@ control_flattening_options build_control_flattening_options(const obfuscation_co
                                                             const policy_decision& decision) {
   control_flattening_options options;
   options.mba_depth = config.mba.depth;
+  options.mba_max_ir_instructions = config.mba.max_ir_instructions;
+  options.mba_enable_polynomial = config.mba.enable_polynomial;
+  options.mba_enable_multiplication = config.mba.enable_multiplication;
   options.seed = decision.seed;
   if (has_strong_classical(decision.policy.level)) {
     options.max_blocks = 20;
@@ -370,6 +376,9 @@ indirect_dispatch_options build_indirect_dispatch_options(const obfuscation_conf
   options.target_vm_dispatchers = config.indirect_dispatch.target_vm_dispatchers;
   options.target_flattened_headers = config.indirect_dispatch.target_flattened_headers;
   options.mba_depth = config.mba.depth;
+  options.mba_max_ir_instructions = config.mba.max_ir_instructions;
+  options.mba_enable_polynomial = config.mba.enable_polynomial;
+  options.mba_enable_multiplication = config.mba.enable_multiplication;
   options.seed = decision.seed;
   return options;
 }
@@ -390,6 +399,9 @@ opaque_gep_options build_opaque_gep_options(const obfuscation_config& config,
                                             const policy_decision&) {
   opaque_gep_options options;
   options.mba_depth = config.mba.depth;
+  options.mba_max_ir_instructions = config.mba.max_ir_instructions;
+  options.mba_enable_polynomial = config.mba.enable_polynomial;
+  options.mba_enable_multiplication = config.mba.enable_multiplication;
   return options;
 }
 
@@ -397,6 +409,9 @@ function_outlining_options build_function_outlining_options(const obfuscation_co
                                                             const policy_decision& decision) {
   function_outlining_options options;
   options.mba_depth = config.mba.depth;
+  options.mba_max_ir_instructions = config.mba.max_ir_instructions;
+  options.mba_enable_polynomial = config.mba.enable_polynomial;
+  options.mba_enable_multiplication = config.mba.enable_multiplication;
   options.seed = decision.seed;
   if (has_strong_classical(decision.policy.level)) {
     options.min_cluster_size = 2;
@@ -412,6 +427,9 @@ bogus_control_flow_options build_bogus_control_flow_options(const obfuscation_co
   if (has_strong_classical(decision.policy.level)) { options.max_insertions_per_function = 2; }
 
   options.mba_depth = config.mba.depth;
+  options.mba_max_ir_instructions = config.mba.max_ir_instructions;
+  options.mba_enable_polynomial = config.mba.enable_polynomial;
+  options.mba_enable_multiplication = config.mba.enable_multiplication;
   return options;
 }
 
@@ -421,6 +439,9 @@ opaque_predicate_options build_opaque_predicate_options(const obfuscation_config
   if (has_strong_classical(decision.policy.level)) { options.max_insertions_per_function = 2; }
 
   options.mba_depth = config.mba.depth;
+  options.mba_max_ir_instructions = config.mba.max_ir_instructions;
+  options.mba_enable_polynomial = config.mba.enable_polynomial;
+  options.mba_enable_multiplication = config.mba.enable_multiplication;
   return options;
 }
 

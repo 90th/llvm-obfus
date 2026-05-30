@@ -5,6 +5,7 @@
 #include "llvm/IR/IRBuilder.h"
 
 #include <cstdint>
+#include <optional>
 
 namespace llvm {
 class Function;
@@ -15,7 +16,11 @@ class Type;
 class Value;
 }  // namespace llvm
 
-namespace obf::mba {
+namespace obf {
+
+struct mba_config;
+
+namespace mba {
 
 inline constexpr std::uint32_t max_mba_depth = 5;
 
@@ -23,6 +28,9 @@ struct builder_context {
   llvm::GlobalVariable* entropy_anchor = nullptr;
   std::uint64_t seed_base = 0;
   std::uint32_t depth = 1;
+  std::optional<std::uint32_t> max_ir_instructions_override = std::nullopt;
+  std::optional<bool> enable_polynomial_override = std::nullopt;
+  std::optional<bool> enable_multiplication_override = std::nullopt;
 };
 
 llvm::GlobalVariable* get_or_create_entropy_anchor(llvm::Module& module);
@@ -94,6 +102,22 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
                                           std::uint64_t context_b_salt,
                                           llvm::StringRef context_a_name,
                                           llvm::StringRef context_b_name,
-                                          llvm::StringRef result_name = "obf.opaque.true");
+                                          llvm::StringRef result_name = "obf.opaque.true",
+                                          std::optional<std::uint32_t> max_ir_override = std::nullopt,
+                                          std::optional<bool> poly_override = std::nullopt,
+                                          std::optional<bool> mul_override = std::nullopt);
 
-}  // namespace obf::mba
+}  // namespace mba
+
+void configure_context_overrides(mba::builder_context& ctx, const mba_config& cfg);
+
+inline void configure_context_overrides(mba::builder_context& ctx,
+                                        std::optional<std::uint32_t> max_ir,
+                                        std::optional<bool> poly,
+                                        std::optional<bool> mul) {
+  ctx.max_ir_instructions_override = max_ir;
+  ctx.enable_polynomial_override = poly;
+  ctx.enable_multiplication_override = mul;
+}
+
+}  // namespace obf

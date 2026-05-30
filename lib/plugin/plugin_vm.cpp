@@ -2302,6 +2302,9 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
       binding.state = target_candidate.state;
 
       vm::virtualization_options vm_options{.mba_depth = config.mba.depth,
+                    .mba_max_ir_instructions = config.mba.max_ir_instructions,
+                    .mba_enable_polynomial = config.mba.enable_polynomial,
+                    .mba_enable_multiplication = config.mba.enable_multiplication,
                     .hidden_token_handshake = true,
                     .prefer_island_helpers = true,
                     .valid_hidden_tokens = {},

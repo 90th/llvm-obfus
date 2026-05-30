@@ -731,6 +731,11 @@ std::size_t apply_mba_inline_uses(llvm::ArrayRef<planned_constant_use> uses,
       mba_context = mba::get_or_create_builder_context(
           *use.function, "obf.const.mba", opaque_seed_base);
       mba_context.depth = options.mba_depth;
+      configure_context_overrides(
+          mba_context,
+          options.mba_max_ir_instructions,
+          options.mba_enable_polynomial,
+          options.mba_enable_multiplication);
     }
 
     std::uint64_t& local_seed = function_local_seeds[use.function];
@@ -990,6 +995,11 @@ constant_encoding_result run_constant_encoding(llvm::Function& function,
     mba::builder_context ctx =
         mba::get_or_create_builder_context(function, "obf.const.mba", opaque_seed_base);
     ctx.depth = options.mba_depth;
+    configure_context_overrides(
+        ctx,
+        options.mba_max_ir_instructions,
+        options.mba_enable_polynomial,
+        options.mba_enable_multiplication);
     return ctx;
   }();
 
