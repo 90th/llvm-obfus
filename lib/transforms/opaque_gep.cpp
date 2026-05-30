@@ -132,7 +132,9 @@ bool is_supported_gep(const llvm::GetElementPtrInst& instruction,
 
 llvm::Value* build_scaled_offset_term(llvm::IRBuilder<>& builder,
                                       llvm::Value* index,
-                                      const llvm::APInt& multiplier) {
+                                      const llvm::APInt& multiplier,
+                                      const mba::builder_context& context,
+                                      std::uint64_t salt) {
   llvm::Value* index64 = index;
   if (!index64->getType()->isIntegerTy(64)) {
     index64 = builder.CreateSExtOrTrunc(index64, builder.getInt64Ty(), "obf.gep.index");
@@ -143,8 +145,12 @@ llvm::Value* build_scaled_offset_term(llvm::IRBuilder<>& builder,
 
   if (multiplier64.isAllOnes()) { return builder.CreateNeg(index64, "obf.gep.scale.neg"); }
 
-  return builder.CreateMul(
-      index64, llvm::ConstantInt::get(builder.getInt64Ty(), multiplier64), "obf.gep.scale");
+  return mba::create_mul(builder,
+                         index64,
+                         llvm::ConstantInt::get(builder.getInt64Ty(), multiplier64),
+                         context,
+                         salt,
+                         "obf.gep.scale");
 }
 
 llvm::Value* lower_gep(llvm::GetElementPtrInst& instruction,
@@ -194,7 +200,8 @@ llvm::Value* lower_gep(llvm::GetElementPtrInst& instruction,
   }
 
   for (const auto& entry : variable_offsets) {
-    llvm::Value* term = build_scaled_offset_term(builder, entry.first, entry.second);
+    llvm::Value* term =
+        build_scaled_offset_term(builder, entry.first, entry.second, mba_context, local_salt);
     offset_value =
         mba::create_add(builder, offset_value, term, mba_context, local_salt, "obf.gep.offset");
     ++local_salt;
