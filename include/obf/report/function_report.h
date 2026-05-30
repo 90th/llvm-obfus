@@ -2,6 +2,7 @@
 
 #include "obf/analysis/function_features.h"
 #include "obf/policy/policy_engine.h"
+#include "obf/transforms/mba.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
@@ -35,6 +36,8 @@ struct transform_report_entry {
   std::size_t unprotected_use_count = 0;
   bool inline_eligible = false;
   bool has_strategy_payload = false;
+  bool has_mba_shape_payload = false;
+  mba::mba_shape_counts mba_counts;
   std::vector<std::string> use_kinds;
 };
 

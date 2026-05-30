@@ -264,6 +264,27 @@ build_transform_reports(llvm::Module& module,
     }
   }
 
+  for (const function_pipeline_state& state : states) {
+    if (state.function == nullptr) { continue; }
+    if (state.mba_counts.linear_count == 0 && state.mba_counts.affine_count == 0 &&
+        state.mba_counts.polynomial_count == 0 && state.mba_counts.mul_count == 0) {
+      continue;
+    }
+
+    auto entry = make_transform_report(
+        "mba", "function", state.function->getName(), true, "", 0);
+    const std::size_t total = state.mba_counts.linear_count + state.mba_counts.affine_count +
+                              state.mba_counts.polynomial_count + state.mba_counts.mul_count;
+    entry.detail = "linear:" + std::to_string(state.mba_counts.linear_count) +
+                   " affine:" + std::to_string(state.mba_counts.affine_count) +
+                   " polynomial:" + std::to_string(state.mba_counts.polynomial_count) +
+                   " mul:" + std::to_string(state.mba_counts.mul_count);
+    entry.count = total;
+    entry.has_mba_shape_payload = true;
+    entry.mba_counts = state.mba_counts;
+    reports.push_back(std::move(entry));
+  }
+
   const llvm::StringMap<std::uint64_t> string_function_seeds = build_function_seed_map(
       states, [](const function_policy& policy) { return policy.allow_string_encoding; });
   const llvm::StringMap<protection_level> string_function_levels = build_function_level_map(
@@ -309,6 +330,8 @@ build_transform_reports(llvm::Module& module,
     entry.use_kinds = result.use_kinds;
     reports.push_back(std::move(entry));
   }
+
+  mba::clear_mba_counters();
 
   return reports;
 }

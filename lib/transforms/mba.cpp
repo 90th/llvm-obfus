@@ -4,6 +4,7 @@
 #include "obf/support/runtime_abi_generated.h"
 #include "obf/support/stable_hash.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -18,6 +19,8 @@
 namespace obf::mba {
 
 namespace {
+
+llvm::DenseMap<llvm::Function*, mba_shape_counts> g_mba_counters;
 
 enum class opaque_zero_shape {
   xor_pair,
@@ -1080,8 +1083,13 @@ llvm::Value* build_opaque_zero(llvm::IRBuilder<>& builder,
       cast_i64_to_type(builder, entropy.indirect, target_type, "obf.entropy.b.cast");
   llvm::Constant* mask =
       constant_i64_to_type(target_type, mix_seed(context.seed_base, salt ^ 0x13579bdfULL));
+  const opaque_zero_shape shape = select_opaque_zero_shape(context, salt);
+  if (shape == opaque_zero_shape::polynomial_binomial_pair ||
+      shape == opaque_zero_shape::polynomial_affine_pair) {
+    get_mba_counters(*builder.GetInsertBlock()->getParent()).polynomial_count++;
+  }
   return build_opaque_zero_for_shape(builder,
-                                     select_opaque_zero_shape(context, salt),
+                                     shape,
                                      entropy_a,
                                      entropy_b,
                                      target_type,
@@ -1217,6 +1225,8 @@ llvm::Value* create_mul_impl(llvm::IRBuilder<>& builder,
     return entangle_value_impl(
         builder, builder.CreateMul(lhs, rhs, result_name), context, salt, result_name);
   }
+
+  get_mba_counters(*builder.GetInsertBlock()->getParent()).mul_count++;
 
   llvm::Value* accumulated = nullptr;
   unsigned term_index = 0;
@@ -1375,8 +1385,11 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
 
   budget.Deduct(4);
 
+  auto& add_counters = get_mba_counters(*builder.GetInsertBlock()->getParent());
+
   switch (select_add_shape(context, salt)) {
     case add_shape::or_and: {
+      add_counters.linear_count++;
       llvm::Value* or_part = builder.CreateOr(lhs, rhs, "obf.mba.add.or");
       llvm::Value* and_part = builder.CreateAnd(lhs, rhs, "obf.mba.add.and");
       llvm::Value* lhs_term =
@@ -1392,6 +1405,7 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                              remaining_depth - 1, budget);
     }
     case add_shape::xor_carry: {
+      add_counters.linear_count++;
       llvm::Value* xor_part = builder.CreateXor(lhs, rhs, "obf.mba.add.xor");
       llvm::Value* and_part = builder.CreateAnd(lhs, rhs, "obf.mba.add.and");
       llvm::Value* carry = builder.CreateAdd(
@@ -1418,6 +1432,8 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                                name,
                                remaining_depth - 1, budget);
       }
+
+      add_counters.affine_count++;
 
       const unsigned bit_width = lhs->getType()->getIntegerBitWidth();
       const llvm::APInt multiplier =
@@ -1464,6 +1480,8 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
                                remaining_depth - 1, budget);
       }
 
+      add_counters.linear_count++;
+
       // x + y == (x ^ y) + ((x & y) << 1) in modular integer arithmetic.
       llvm::Value* xor_part = builder.CreateXor(lhs, rhs, "obf.mba.add.xor_shifted_carry.xor");
       llvm::Value* and_part = builder.CreateAnd(lhs, rhs, "obf.mba.add.xor_shifted_carry.and");
@@ -1502,8 +1520,11 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
 
   budget.Deduct(4);
 
+  auto& sub_counters = get_mba_counters(*builder.GetInsertBlock()->getParent());
+
   switch (select_sub_shape(context, salt)) {
     case sub_shape::xor_borrow: {
+      sub_counters.linear_count++;
       llvm::Value* xor_part = builder.CreateXor(lhs, rhs, "obf.mba.sub.xor");
       llvm::Value* borrow_mask = builder.CreateAnd(
           builder.CreateNot(lhs, "obf.mba.sub.notlhs"), rhs, "obf.mba.sub.borrow.mask");
@@ -1523,6 +1544,7 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              remaining_depth - 1, budget);
     }
     case sub_shape::lhs_rhs_only: {
+      sub_counters.linear_count++;
       llvm::Value* lhs_only = builder.CreateAnd(
           lhs, builder.CreateNot(rhs, "obf.mba.sub.notrhs"), "obf.mba.sub.lhs.only");
       llvm::Value* rhs_only = builder.CreateAnd(
@@ -1549,6 +1571,8 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                                name,
                                remaining_depth - 1, budget);
       }
+
+      sub_counters.affine_count++;
 
       const unsigned bit_width = lhs->getType()->getIntegerBitWidth();
       const llvm::APInt multiplier =
@@ -1588,6 +1612,7 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
                              remaining_depth - 1, budget);
     }
     case sub_shape::ones_complement_add: {
+      sub_counters.linear_count++;
       // x - y == x + ~y + 1 modulo 2^n.
       llvm::Value* not_rhs = builder.CreateNot(rhs, "obf.mba.sub.ones_complement.notrhs");
       llvm::Value* masked_lhs =
@@ -1629,8 +1654,11 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
 
   budget.Deduct(4);
 
+  auto& xor_counters = get_mba_counters(*builder.GetInsertBlock()->getParent());
+
   switch (select_xor_shape(context, salt)) {
     case xor_shape::or_and_sub: {
+      xor_counters.linear_count++;
       llvm::Value* or_part = builder.CreateOr(lhs, rhs, "obf.mba.xor.or");
       llvm::Value* and_part = builder.CreateAnd(lhs, rhs, "obf.mba.xor.and");
       llvm::Value* masked_or =
@@ -1646,6 +1674,7 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                              remaining_depth - 1, budget);
     }
     case xor_shape::disjoint_sum: {
+      xor_counters.linear_count++;
       llvm::Value* lhs_only = builder.CreateAnd(
           lhs, builder.CreateNot(rhs, "obf.mba.xor.notrhs"), "obf.mba.xor.lhs.only");
       llvm::Value* rhs_only = builder.CreateAnd(
@@ -1672,6 +1701,8 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                                name,
                                remaining_depth - 1, budget);
       }
+
+      xor_counters.affine_count++;
 
       const unsigned bit_width = lhs->getType()->getIntegerBitWidth();
       const llvm::APInt multiplier =
@@ -1712,6 +1743,8 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
                                remaining_depth - 1, budget);
       }
 
+      xor_counters.linear_count++;
+
       // x ^ y == (x + y) - ((x & y) << 1) in modular integer arithmetic.
       llvm::Value* sum = builder.CreateAdd(lhs, rhs, "obf.mba.xor.sum_minus_carry.sum");
       llvm::Value* and_part = builder.CreateAnd(lhs, rhs, "obf.mba.xor.sum_minus_carry.and");
@@ -1735,6 +1768,14 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
 }
 
 }  // namespace
+
+mba_shape_counts& get_mba_counters(llvm::Function& func) {
+  return g_mba_counters[&func];
+}
+
+void clear_mba_counters() {
+  g_mba_counters.clear();
+}
 
 llvm::GlobalVariable* get_or_create_entropy_anchor(llvm::Module& module) {
   if (llvm::GlobalVariable* existing = module.getNamedGlobal(OBF_RT_ENTROPY_ANCHOR_STR)) {

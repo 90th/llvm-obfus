@@ -107,6 +107,16 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
                                           std::optional<bool> poly_override = std::nullopt,
                                           std::optional<bool> mul_override = std::nullopt);
 
+struct mba_shape_counts {
+  std::size_t linear_count = 0;
+  std::size_t affine_count = 0;
+  std::size_t polynomial_count = 0;
+  std::size_t mul_count = 0;
+};
+
+mba_shape_counts& get_mba_counters(llvm::Function& func);
+void clear_mba_counters();
+
 }  // namespace mba
 
 void configure_context_overrides(mba::builder_context& ctx, const mba_config& cfg);

@@ -93,6 +93,15 @@ std::string format_feature_report(llvm::StringRef module_name,
       transform_json["strategy"] = llvm::json::Value(std::move(strategy_json));
     }
 
+    if (entry.has_mba_shape_payload) {
+      llvm::json::Object mba_json;
+      mba_json["linear"] = static_cast<std::int64_t>(entry.mba_counts.linear_count);
+      mba_json["affine"] = static_cast<std::int64_t>(entry.mba_counts.affine_count);
+      mba_json["polynomial"] = static_cast<std::int64_t>(entry.mba_counts.polynomial_count);
+      mba_json["mul"] = static_cast<std::int64_t>(entry.mba_counts.mul_count);
+      transform_json["mba"] = llvm::json::Value(std::move(mba_json));
+    }
+
     transforms_json.push_back(llvm::json::Value(std::move(transform_json)));
   }
 

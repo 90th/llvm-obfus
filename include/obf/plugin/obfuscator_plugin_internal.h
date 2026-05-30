@@ -15,6 +15,7 @@
 #include "obf/transforms/function_outlining.h"
 #include "obf/transforms/indirect_dispatch.h"
 #include "obf/transforms/instruction_substitution.h"
+#include "obf/transforms/mba.h"
 #include "obf/transforms/opaque_gep.h"
 #include "obf/transforms/opaque_predicates.h"
 #include "obf/transforms/string_encoding.h"
@@ -42,6 +43,7 @@ namespace obf {
 struct function_pipeline_state {
   llvm::Function* function = nullptr;
   function_report_entry report;
+  mba::mba_shape_counts mba_counts;
 };
 
 struct virtualized_call_site {

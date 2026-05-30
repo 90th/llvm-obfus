@@ -293,8 +293,14 @@ class feature_report_pass : public llvm::PassInfoMixin<feature_report_pass> {
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
     const obfuscation_config config = load_active_config();
-    const llvm::SmallVector<function_pipeline_state, 32> states =
+    llvm::SmallVector<function_pipeline_state, 32> states =
         build_pipeline_state(module, config);
+
+    for (auto& state : states) {
+      if (state.function != nullptr) {
+        state.mba_counts = mba::get_mba_counters(*state.function);
+      }
+    }
 
     llvm::SmallVector<function_report_entry, 32> entries;
     entries.reserve(states.size());
