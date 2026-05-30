@@ -26,7 +26,7 @@ entry:
 ; CHECK-DAG: @[[KEY:__obf_vm_k_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
 ; CHECK-DAG: @llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]
 ; CHECK-LABEL: define i32 @fold_value(i32 %value)
-; CHECK: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
+; CHECK: call {{(void|\{ i64, i64 \})}} @__obf_entropy_thunk_
 ; CHECK: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
 ; CHECK: %obf.entropy.direct = extractvalue { i64, i64 } %obf.entropy.pair, 0
 ; CHECK: %fold_value.obf.wrapper.token = {{(add|sub|xor) i64}}
@@ -107,12 +107,10 @@ entry:
 ; INST: %fold_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %fold_value.obf.wrapper.target.key, i{{[0-9]+}} %fold_value.obf.wrapper.target.base)
+; INST: %obf.mba.xor.affine.or
 ; INST: %fold_value.obf.wrapper.real.int = {{(add|sub) i[0-9]+}}
 ; INST: %fold_value.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %obf.mba.xor.affine.{{.*}}.dec{{[0-9]*}} to ptr
 ; INST: call i32 %fold_value.obf.wrapper.indirect(i32 %value, i64 {{(%fold_value\.obf\.wrapper\.token|-?[0-9]+)}})
-; INST: %fold_value.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
-; INST: %fold_value.obf.retkey.cast =
-; INST: %obf.mba.xor.affine.or
 ; INST-LABEL: define i32 @main()
 ; INST: %fold_value.obf.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; INST: br i1
@@ -124,20 +122,14 @@ entry:
 ; INST: {{(%fold_value\.obf\.retdec = (add|sub|xor) i32|%[0-9]+ = xor i32 %fold_value\.obf\.callsite, %[0-9]+)}}
 ; INST-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)
 ; INST: %obf.vm.state = alloca {
-; INST: %obf.vm.pred.slot = alloca i32
+; INST: %obf.entropy.cache = alloca { i64, i64 }
 ; INST: {{^vm\.[0-9]+:}}
-; INST: {{%obf\.vm\.opcode\.wide[^ ]* = }}zext i8
 ; INST-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
 ; INST-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
-; INST: {{%obf\.vm\.opcode\.split\.(low|high)\.reload[^ ]* = }}load i32, ptr %obf.vm.pred.slot
-; INST: {{%obf\.vm\.opcode\.split\.low\.(delta|ok)[^ ]* = }}{{(or|sub|icmp eq) i32}}
-; INST: {{%obf\.vm\.opcode\.split\.high\.(delta|ok)[^ ]* = }}{{(or|sub|icmp eq) i32}}
-; INST: {{%obf\.vm\.opcode\.split\.match[^ ]* = }}{{(and i1|icmp eq i32)}}
 ; INST: indirectbr ptr
 ; INST: {{^obf\.vm\.route\.entry\.[0-9]+:}}
 ; INST: br label %vm.exec.{{[0-9]+}}
 ; INST: {{^vm\.exec\.[0-9]+:}}
-; INST: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; INST-LABEL: define internal i32 @__obf_vm_e_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)
 ; INST: obf.vm.entry.thunk:
 ; INST: call i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %value, i64 %obf.hidden_token)

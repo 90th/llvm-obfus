@@ -26,6 +26,6 @@ entry:
 ; at depth 3 with polynomial disabled, the opaque predicate must still
 ; be emitted and must preserve branch behavior
 ; CHECK: %obf.opaque.pair = load
-; CHECK: %obf.opaque.entropy.mix = xor i64
+; CHECK: %obf.opaque.entropy.mix{{.*}} = {{.*}}
 ; CHECK: %obf.opaque.true = icmp eq i64 %obf.opaque.expr.a, %obf.opaque.expr.b
 

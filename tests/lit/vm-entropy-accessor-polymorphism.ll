@@ -60,10 +60,10 @@ entry:
 }
 
 ; IR-DAG: @rt_core_ea = external externally_initialized global i64, align 8
-; IR-COUNT-5: %obf.entropy.cache.init{{[0-9]*}} = call { i64, i64 } @__obf_entropy_thunk_
-; IR-LABEL: define internal { i64, i64 } @__obf_entropy_thunk_
+; IR-COUNT-5: call {{.*}} @__obf_entropy_thunk_
+; IR-LABEL: define internal {{(void|\{ i64, i64 \})}} @__obf_entropy_thunk_
 ; IR: call { i64, i64 } @rt_core_ep{{[0-4]}}()
-; IR: ret { i64, i64 }
+; IR: ret {{(void|\{ i64, i64 \})}}
 ; IR-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i8
 ; IR-NOT: {{%obf\.vm\.opcode\.match[^ ]* = }}icmp eq i32
 ; IR: {{%obf\.vm\.opcode\.split\.(low|high)\.reload[^ ]* = }}load i32, ptr %obf.vm.pred.slot

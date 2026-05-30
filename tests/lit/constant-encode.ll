@@ -18,7 +18,7 @@ entry:
 
 ; IR-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; IR-LABEL: define i32 @value()
-; IR: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
+; IR: call {{(void|\{ i64, i64 \})}} @__obf_entropy_thunk_
 ; IR: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
 ; IR: %obf.entropy.direct = extractvalue { i64, i64 } %obf.entropy.pair, 0
 ; IR: %obf.entropy.indirect = extractvalue { i64, i64 } %obf.entropy.pair, 1
@@ -30,8 +30,8 @@ entry:
 
 ; INST-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; INST-LABEL: define i32 @value()
-; INST: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
+; INST: call {{(void|\{ i64, i64 \})}} @__obf_entropy_thunk_
 ; INST: ret i32 42
 ; INST-LABEL: define i32 @main()
-; INST: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
+; INST: call {{(void|\{ i64, i64 \})}} @__obf_entropy_thunk_
 ; INST: %ok = icmp ne i32 %value, 42

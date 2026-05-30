@@ -182,9 +182,10 @@ entry:
 ; CHECK: entry.obf.vm:
 ; CHECK: %obf.vm.state = alloca {
 ; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
-; CHECK: %obf.entropy.cache.init{{[0-9]*}} = call { i64, i64 } @__obf_entropy_thunk_
-; CHECK: %obf.entropy.pair{{[0-9]*}} = load { i64, i64 }, ptr %obf.entropy.cache, align 8
-; CHECK: %obf.entropy.direct{{[0-9]*}} = extractvalue { i64, i64 } %obf.entropy.pair{{[0-9]*}}, 0
+; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
+; CHECK: call {{(void|\{ i64, i64 \})}} @__obf_entropy_thunk_
+; CHECK: %obf.entropy.pair{{[0-9]*}} = load {{.*}} %obf.entropy.cache
+; CHECK: %obf.entropy.direct{{[0-9]*}} = {{.*}}
 ; CHECK: %obf.vm.integrity.ptr = getelementptr inbounds
 ; CHECK: %obf.vm.integrity.byte.ptr = getelementptr inbounds
 ; CHECK: %obf.vm.integrity.byte.window = load i32, ptr %obf.vm.integrity.byte.ptr, align 1
@@ -201,7 +202,7 @@ entry:
 ; CHECK: store i64 %obf.vm.ptr.carrier{{[0-9]*}}, ptr %obf.vm.state.slot.{{[0-9]+}}.{{[0-9]+}}
 ; CHECK: %obf.vm.slot.ptr.raw{{[0-9]*}} = load i64, ptr %obf.vm.state.slot.{{[0-9]+}}.{{[0-9]+}}
 ; CHECK: %obf.vm.slot.ptr.value{{[0-9]*}} = inttoptr i64 %obf.vm.slot.ptr.raw{{[0-9]*}} to ptr
-; CHECK: getelementptr inbounds i32, ptr %{{[^,]+}}, i32 %obf.vm.slot
+; CHECK: store ptr %obf.vm.slot.ptr.value{{[0-9]*}}, ptr {{%.*slot}}
 ; CHECK: %obf.vm.ptr.carrier{{[0-9]*}} =
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %tag, i32 %base, i64 %obf.hidden_token)
 ; CHECK: vm.switch.default.

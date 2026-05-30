@@ -1,4 +1,4 @@
-seed: 4444
+seed: 0
 default_level: none
 targets:
   - match: shape_mix

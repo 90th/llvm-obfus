@@ -26,11 +26,11 @@ entry:
 ; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @check
 ; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
-; CHECK: %obf.entropy.cache.init = call { i64, i64 } @__obf_entropy_thunk_
+; CHECK: call {{(void|\{ i64, i64 \})}} @__obf_entropy_thunk_
 ; CHECK: %obf.opaque.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
 ; CHECK: %obf.opaque.direct = extractvalue { i64, i64 } %obf.opaque.pair, 0
 ; CHECK: %obf.opaque.indirect = extractvalue { i64, i64 } %obf.opaque.pair, 1
-; CHECK: %obf.opaque.entropy.mix = xor i64 %obf.opaque.direct, %obf.opaque.indirect
+; CHECK: %obf.opaque.entropy.mix{{.*}} = {{.*}}
 ; CHECK: %obf.opaque.seed =
 ; CHECK: %obf.opaque.seed.freeze = freeze i64 %obf.opaque.seed
 ; CHECK-DAG: %obf.opaque.seed.lhs.mul = mul i64 %obf.opaque.seed.freeze,
