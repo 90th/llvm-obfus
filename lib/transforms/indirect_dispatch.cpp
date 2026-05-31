@@ -41,7 +41,11 @@ struct dispatch_site {
 struct site_collection {
   llvm::SmallVector<dispatch_site, 8> sites;
   std::string detail;
+  std::size_t selected_branch_sites = 0;
+  std::size_t selected_switch_sites = 0;
   std::size_t skipped_max_switch_targets = 0;
+  std::size_t first_oversized_switch_targets = 0;
+  std::size_t max_switch_targets_limit = 0;
   std::size_t blocked_non_integral_program_address_space = 0;
   std::size_t blocked_unsupported_function_shape = 0;
 };
@@ -63,6 +67,23 @@ site_collection make_empty_site_collection(std::string detail) {
   return {.sites = {}, .detail = std::move(detail)};
 }
 
+llvm::StringRef selected_site_shape(std::size_t branch_sites, std::size_t switch_sites) {
+  if (branch_sites != 0 && switch_sites == 0) { return "branch_only"; }
+  if (branch_sites == 0 && switch_sites != 0) { return "switch_only"; }
+  if (branch_sites != 0 && switch_sites != 0) { return "mixed"; }
+  return "none";
+}
+
+void append_selection_summary(std::string& detail, const site_collection& collection) {
+  detail += "; selected(branch_sites=";
+  detail += std::to_string(collection.selected_branch_sites);
+  detail += ", switch_sites=";
+  detail += std::to_string(collection.selected_switch_sites);
+  detail += ", shape=";
+  detail += selected_site_shape(collection.selected_branch_sites, collection.selected_switch_sites).str();
+  detail += ")";
+}
+
 std::string make_site_name(std::size_t site_index, llvm::StringRef suffix) {
   return "obf.idis.site" + std::to_string(site_index) + "." + suffix.str();
 }
@@ -71,6 +92,13 @@ std::string make_result_detail(const indirect_dispatch_result& result, llvm::Str
   std::string detail = std::to_string(result.site_count) + " site(s) rewritten (branches=" +
          std::to_string(result.branch_site_count) + ", switches=" +
          std::to_string(result.switch_site_count) + "); " + suffix.str();
+  detail += "; selected(branch_sites=";
+  detail += std::to_string(result.branch_site_count);
+  detail += ", switch_sites=";
+  detail += std::to_string(result.switch_site_count);
+  detail += ", shape=";
+  detail += selected_site_shape(result.branch_site_count, result.switch_site_count).str();
+  detail += ")";
   if (result.skipped_max_switch_targets != 0 ||
       result.blocked_non_integral_program_address_space != 0 ||
       result.blocked_unsupported_function_shape != 0) {
@@ -81,6 +109,12 @@ std::string make_result_detail(const indirect_dispatch_result& result, llvm::Str
     detail += ", unsupported_function_shape=";
     detail += std::to_string(result.blocked_unsupported_function_shape);
     detail += ")";
+  }
+  if (result.first_oversized_switch_targets != 0 && result.max_switch_targets_limit != 0) {
+    detail += "; first_oversized_switch_targets=";
+    detail += std::to_string(result.first_oversized_switch_targets);
+    detail += ">";
+    detail += std::to_string(result.max_switch_targets_limit);
   }
   return detail;
 }
@@ -99,6 +133,12 @@ void append_skip_summary(std::string& detail, const site_collection& collection)
   detail += ", unsupported_function_shape=";
   detail += std::to_string(collection.blocked_unsupported_function_shape);
   detail += ")";
+  if (collection.first_oversized_switch_targets != 0 && collection.max_switch_targets_limit != 0) {
+    detail += "; first_oversized_switch_targets=";
+    detail += std::to_string(collection.first_oversized_switch_targets);
+    detail += ">";
+    detail += std::to_string(collection.max_switch_targets_limit);
+  }
 }
 
 llvm::BasicBlock& select_anchor_block(llvm::BasicBlock& source_block,
@@ -192,7 +232,9 @@ site_collection collect_sites(const llvm::Function& function,
   const unsigned program_address_space = data_layout.getProgramAddressSpace();
   if (data_layout.isNonIntegralAddressSpace(program_address_space)) {
     site_collection collection = make_empty_site_collection("non-integral program address space");
+    collection.max_switch_targets_limit = options.max_switch_targets;
     collection.blocked_non_integral_program_address_space = 1;
+    append_selection_summary(collection.detail, collection);
     append_skip_summary(collection.detail, collection);
     return collection;
   }
@@ -200,14 +242,19 @@ site_collection collect_sites(const llvm::Function& function,
   std::string unsupported_detail;
   if (has_unsupported_function_shape(function, unsupported_detail)) {
     site_collection collection = make_empty_site_collection(std::move(unsupported_detail));
+    collection.max_switch_targets_limit = options.max_switch_targets;
     collection.blocked_unsupported_function_shape = 1;
+    append_selection_summary(collection.detail, collection);
     append_skip_summary(collection.detail, collection);
     return collection;
   }
 
   llvm::SmallVector<dispatch_site, 8> sites;
   std::size_t next_site_index = 0;
+  std::size_t selected_branch_sites = 0;
+  std::size_t selected_switch_sites = 0;
   std::size_t skipped_max_switch_targets = 0;
+  std::size_t first_oversized_switch_targets = 0;
   for (const llvm::BasicBlock& block : function) {
     if (sites.size() >= options.max_sites_per_function) { break; }
 
@@ -224,6 +271,7 @@ site_collection collect_sites(const llvm::Function& function,
         append_unique_target(site.unique_targets, branch->getSuccessor(1));
         site.seed = derive_site_seed(function, options, next_site_index++);
         sites.push_back(std::move(site));
+        ++selected_branch_sites;
         continue;
       }
     }
@@ -235,6 +283,9 @@ site_collection collect_sites(const llvm::Function& function,
 
     if (switch_inst->getNumCases() + 1 > options.max_switch_targets) {
       ++skipped_max_switch_targets;
+      if (first_oversized_switch_targets == 0) {
+        first_oversized_switch_targets = switch_inst->getNumCases() + 1;
+      }
       continue;
     }
 
@@ -249,11 +300,17 @@ site_collection collect_sites(const llvm::Function& function,
     }
     site.seed = derive_site_seed(function, options, next_site_index++);
     sites.push_back(std::move(site));
+    ++selected_switch_sites;
   }
 
   if (sites.empty()) {
     site_collection collection = make_empty_site_collection("no supported branch or switch sites");
+    collection.max_switch_targets_limit = options.max_switch_targets;
+    collection.selected_branch_sites = selected_branch_sites;
+    collection.selected_switch_sites = selected_switch_sites;
     collection.skipped_max_switch_targets = skipped_max_switch_targets;
+    collection.first_oversized_switch_targets = first_oversized_switch_targets;
+    append_selection_summary(collection.detail, collection);
     append_skip_summary(collection.detail, collection);
     return collection;
   }
@@ -261,7 +318,12 @@ site_collection collect_sites(const llvm::Function& function,
   const auto site_count = sites.size();
   site_collection collection{.sites = std::move(sites),
                              .detail = std::to_string(site_count) + " site(s) selected",
+                             .selected_branch_sites = selected_branch_sites,
+                             .selected_switch_sites = selected_switch_sites,
                              .skipped_max_switch_targets = skipped_max_switch_targets};
+  collection.max_switch_targets_limit = options.max_switch_targets;
+  collection.first_oversized_switch_targets = first_oversized_switch_targets;
+  append_selection_summary(collection.detail, collection);
   append_skip_summary(collection.detail, collection);
   return collection;
 }
@@ -558,6 +620,8 @@ indirect_dispatch_result analyze_indirect_dispatch(const llvm::Function& functio
                                                    const indirect_dispatch_options& options) {
   const site_collection collection = collect_sites(function, options);
   indirect_dispatch_result result;
+  result.first_oversized_switch_targets = collection.first_oversized_switch_targets;
+  result.max_switch_targets_limit = collection.max_switch_targets_limit;
   result.skipped_max_switch_targets = collection.skipped_max_switch_targets;
   result.blocked_non_integral_program_address_space =
       collection.blocked_non_integral_program_address_space;
@@ -581,6 +645,8 @@ indirect_dispatch_result run_indirect_dispatch(llvm::Function& function,
                                                const indirect_dispatch_options& options) {
   const site_collection collection = collect_sites(function, options);
   indirect_dispatch_result result;
+  result.first_oversized_switch_targets = collection.first_oversized_switch_targets;
+  result.max_switch_targets_limit = collection.max_switch_targets_limit;
   result.skipped_max_switch_targets = collection.skipped_max_switch_targets;
   result.blocked_non_integral_program_address_space =
       collection.blocked_non_integral_program_address_space;

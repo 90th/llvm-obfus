@@ -39,6 +39,17 @@ ret:
   ret i32 42
 }
 
+define i32 @small_branch(i1 %cond) {
+entry:
+  br i1 %cond, label %left, label %right
+
+left:
+  ret i32 1
+
+right:
+  ret i32 2
+}
+
 ; IR-LABEL: define i32 @oversized_switch(i32 %x)
 ; IR: switch i32 %x, label %default
 ; IR-NOT: indirectbr
@@ -47,5 +58,17 @@ ret:
 ; IR-NOT: switch i32 %x
 ; IR: indirectbr
 
-; REPORT: oversized_switch|skipped|no supported branch or switch sites; skipped(max_switch_targets=1, non_integral_program_as=0, unsupported_function_shape=0)
+; IR-LABEL: define i32 @small_branch(i1 %cond)
+; IR-NOT: br i1 %cond
+; IR: indirectbr
+
+; REPORT: oversized_switch|skipped|no supported branch or switch sites
+; REPORT-SAME: selected(branch_sites=0, switch_sites=0, shape=none)
+; REPORT-SAME: skipped(max_switch_targets=1, non_integral_program_as=0, unsupported_function_shape=0)
+; REPORT-SAME: first_oversized_switch_targets=12>3
+
 ; REPORT: small_switch|applied|1 site(s) selected
+; REPORT-SAME: selected(branch_sites=0, switch_sites=1, shape=switch_only)
+
+; REPORT: small_branch|applied|1 site(s) selected
+; REPORT-SAME: selected(branch_sites=1, switch_sites=0, shape=branch_only)
