@@ -986,7 +986,7 @@ bool is_strong_vm_plaintext_violation(const string_strategy_plan& plan,
            !is_authenticated_result(plan.result);
   }
 
-  return plan.result.fallback_reason == "strong_vm_no_global_plaintext";
+  return true;
 }
 
 std::string describe_strong_vm_owners(const classified_string_candidate& candidate) {

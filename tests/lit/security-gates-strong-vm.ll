@@ -2,6 +2,7 @@
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-off.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=OFF
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-unvirtualized.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=UNVIRT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-string.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=STRING
+; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=VARARGS
 
 @.secret = private unnamed_addr constant [6 x i8] c"hello\00"
 @.table = private unnamed_addr constant [1 x ptr] [ptr @.secret]
@@ -39,6 +40,11 @@ entry:
   ret i32 %ret
 }
 
+define i32 @has_varargs(i32 %x, ...) {
+entry:
+  ret i32 %x
+}
+
 ; PASS-LABEL: define i32 @strong_ok(i32 %0)
 ; PASS: call i32 %{{[^ ]+}}(i32 %0, i64 %{{[^)]+}})
 ; PASS: define internal i32 @{{_[0-9a-f]+}}(i32 %0, i64 %1)
@@ -54,3 +60,6 @@ entry:
 ; STRING: private unnamed_addr constant [1 x ptr] [ptr
 ; STRING: define internal void @{{.*}}() {
 ; STRING: call ptr @rt_core_sd1(
+
+; VARARGS: LLVM ERROR: strong_vm invariant violation: function has_varargs was not virtualized
+; VARARGS: reason_tag=varargs_unsupported

@@ -167,8 +167,7 @@ void enforce_strong_vm_string_gate(llvm::Module& module,
   for (const string_encoding_result& result : results) {
     if (!result.has_strong_vm_use) { continue; }
 
-    const bool leaves_plaintext =
-        !result.applied && result.fallback_reason == "strong_vm_no_global_plaintext";
+    const bool leaves_plaintext = !result.applied;
     const bool uses_global_fallback =
         result.applied && result.mode != string_encoding_mode::inline_stack_decode &&
         result.key_schedule != string_key_schedule_kind::blake2s_keyed_auth_v3;
