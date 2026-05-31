@@ -1,0 +1,10 @@
+seed: 9292
+default_level: strong
+mba:
+  depth: 1
+indirect_dispatch:
+  enabled: true
+  max_sites_per_function: 8
+  max_switch_targets: 3
+  target_vm_dispatchers: true
+  target_flattened_headers: true

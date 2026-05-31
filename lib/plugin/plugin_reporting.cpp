@@ -1,5 +1,6 @@
 #include "obf/plugin/obfuscator_plugin_internal.h"
 
+#include "obf/transforms/indirect_dispatch.h"
 #include "obf/vm/candidate_analysis.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -275,6 +276,19 @@ build_transform_reports(llvm::Module& module,
                                               result.insertion_count > 0,
                                               result.detail,
                                               result.insertion_count));
+    }
+
+    if (config.indirect_dispatch.enabled) {
+      const indirect_dispatch_options options =
+          build_indirect_dispatch_options(config, state.report.decision);
+      const indirect_dispatch_result result =
+          analyze_indirect_dispatch(*function, options);
+      reports.push_back(make_transform_report("indirect_dispatch",
+                                              "function",
+                                              function->getName(),
+                                              result.site_count > 0,
+                                              result.detail,
+                                              result.site_count));
     }
   }
 
