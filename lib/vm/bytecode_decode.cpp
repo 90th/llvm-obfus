@@ -256,6 +256,9 @@ llvm::Value* fetch_byte(llvm::IRBuilder<>& builder,
   bytecode_anchor_selection selection = select_bytecode_anchor(builder, context, offset, salt);
   if (!selection.valid()) { return builder.getInt8(0); }
 
+  const std::uint64_t fetch_count = selection.array_type->getNumElements();
+  if (offset >= fetch_count) { return builder.getInt8(0); }
+
   llvm::Value* slot = builder.CreateInBoundsGEP(selection.anchor->getValueType(),
                                                 selection.base,
                                                 {builder.getInt32(0), builder.getInt32(offset)},
@@ -330,6 +333,9 @@ decoded_metadata_span_result decode_metadata_span(llvm::IRBuilder<>& builder,
     bytecode_anchor_selection selection =
       select_bytecode_anchor(builder, context, byte_offset, byte_salt ^ 0x5f0fULL);
     if (!selection.valid()) { return result; }
+
+    const std::uint64_t span_count = selection.array_type->getNumElements();
+    if (byte_offset >= span_count) { return result; }
 
     llvm::Value* slot =
       builder.CreateInBoundsGEP(selection.array_type,
@@ -639,6 +645,10 @@ void emit_instruction_integrity_probes(llvm::IRBuilder<>& builder,
     bytecode_anchor_selection selection =
       select_bytecode_anchor(builder, context.function_context, probe_offset, probe_salt);
     if (!selection.valid()) { continue; }
+
+    const std::uint64_t probe_count = selection.array_type->getNumElements();
+    if (probe_offset >= probe_count) { continue; }
+
     llvm::Value* byte_ptr =
       builder.CreateInBoundsGEP(selection.anchor->getValueType(),
                     selection.base,

@@ -1071,6 +1071,12 @@ void apply_string_encoding_limit(std::vector<string_strategy_plan>& plans,
   std::size_t encoded_count = 0;
   for (string_strategy_plan& plan : plans) {
     if (!plan.result.applied) { continue; }
+    if (plan.result.has_strong_vm_use) { ++encoded_count; }
+  }
+
+  for (string_strategy_plan& plan : plans) {
+    if (!plan.result.applied) { continue; }
+    if (plan.result.has_strong_vm_use) { continue; }
 
     if (encoded_count >= options.max_strings_per_module) {
       plan.result.mode = string_encoding_mode::skipped;
