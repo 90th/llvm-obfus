@@ -1,0 +1,8 @@
+seed: 9191
+default_level: none
+overrides:
+  - name: main
+    level: none
+targets:
+  - match: has_varargs_loop
+    level: strong_vm

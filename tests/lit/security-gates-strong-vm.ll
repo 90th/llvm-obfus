@@ -5,6 +5,7 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-string.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=STRING
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-pass.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=VARARGS-PASS
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-region-pass.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=VARARGS-REGION-PASS --implicit-check-not='LLVM ERROR'
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-loop-pass.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=VARARGS-LOOP-PASS --implicit-check-not='LLVM ERROR'
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=VARARGS
 
 declare void @llvm.va_start(ptr)
@@ -89,6 +90,28 @@ merge:
   ret i32 %result
 }
 
+define i32 @has_varargs_loop(i32 %n, i32 %x, ...) {
+entry:
+  %list = alloca ptr, align 8
+  call void @llvm.va_start(ptr %list)
+  br label %loop
+
+loop:
+  %i = phi i32 [ 0, %entry ], [ %next, %body ]
+  %acc = phi i32 [ 0, %entry ], [ %sum, %body ]
+  %cond = icmp slt i32 %i, %n
+  br i1 %cond, label %body, label %exit
+
+body:
+  %sum = add i32 %acc, %x
+  %next = add i32 %i, 1
+  br label %loop
+
+exit:
+  call void @llvm.va_end(ptr %list)
+  ret i32 %acc
+}
+
 ; PASS-LABEL: define i32 @strong_ok(i32 %0)
 ; PASS: call i32 %{{[^ ]+}}(i32 %0, i64 %{{[^)]+}})
 ; PASS: define internal i32 @{{_[0-9a-f]+}}(i32 %0, i64 %1)
@@ -119,6 +142,11 @@ merge:
 ; VARARGS-REGION-PASS: define internal void @{{_[0-9a-f]+}}(i1 %0, i32 %1, ptr %2)
 ; VARARGS-REGION-PASS: call void %{{[^ ]+}}(i1 %0, i32 %1, ptr %{{[^,]+}}, i64 %{{[^)]+}})
 ; VARARGS-REGION-PASS: attributes #{{[0-9]+}} = { {{.*}}"obf.vm.entry.thunk"{{.*}} }
+
+; VARARGS-LOOP-PASS-LABEL: define i32 @has_varargs_loop(i32 %0, i32 %1, ...)
+; VARARGS-LOOP-PASS: call void @llvm.va_start{{.*}}(ptr %{{[^)]+}})
+; VARARGS-LOOP-PASS: call void %{{[^ ]+}}(i32 %0, i32 %1, ptr %{{[^,]+}}, i64 %{{[^)]+}})
+; VARARGS-LOOP-PASS: define internal void @{{_[0-9a-f]+}}(i32 %0, i32 %1, ptr %2, i64 %3)
 
 ; VARARGS: LLVM ERROR: strong_vm invariant violation: function has_varargs_access was not virtualized
 ; VARARGS: reason_tag=varargs_unsupported

@@ -9,6 +9,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
@@ -17,6 +18,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
@@ -118,6 +120,81 @@ struct vm_region_candidate {
   llvm::SmallVector<llvm::BasicBlock*, 8> region_blocks;
   std::size_t score = 0;
 };
+
+bool region_contains_vararg_intrinsic(llvm::ArrayRef<llvm::BasicBlock*> region_blocks) {
+  for (llvm::BasicBlock* region_block : region_blocks) {
+    if (region_block == nullptr) { continue; }
+
+    for (const llvm::Instruction& instruction : *region_block) {
+      if (llvm::isa<llvm::VAArgInst>(instruction)) { return true; }
+
+      const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction);
+      if (intrinsic == nullptr) { continue; }
+      switch (intrinsic->getIntrinsicID()) {
+        case llvm::Intrinsic::vastart:
+        case llvm::Intrinsic::vaend:
+        case llvm::Intrinsic::vacopy:
+          return true;
+        default:
+          break;
+      }
+    }
+  }
+
+  return false;
+}
+
+void append_vm_region_candidate(llvm::Function& function,
+                                llvm::BasicBlock* header,
+                                llvm::ArrayRef<llvm::BasicBlock*> region_blocks,
+                                llvm::SmallVectorImpl<vm_region_candidate>& candidates) {
+  if (header == nullptr || region_contains_vararg_intrinsic(region_blocks)) { return; }
+
+  llvm::CodeExtractorAnalysisCache cache(function);
+  llvm::DominatorTree dom_tree(function);
+  llvm::AssumptionCache assumption_cache(function);
+  llvm::CodeExtractor extractor(region_blocks,
+                                &dom_tree,
+                                /*AggregateArgs=*/false,
+                                /*BFI=*/nullptr,
+                                /*BPI=*/nullptr,
+                                &assumption_cache,
+                                /*AllowVarArgs=*/false,
+                                /*AllowAlloca=*/false,
+                                /*AllocationBlock=*/nullptr,
+                                "obf.vm.region.check");
+  if (!extractor.isEligible()) { return; }
+
+  std::size_t instruction_count = 0;
+  for (llvm::BasicBlock* region_block : region_blocks) {
+    instruction_count += region_block->size();
+  }
+
+  llvm::SmallVector<llvm::BasicBlock*, 8> stored_blocks(region_blocks.begin(),
+                                                        region_blocks.end());
+  candidates.push_back(vm_region_candidate{.header = header,
+                                           .region_blocks = std::move(stored_blocks),
+                                           .score = instruction_count});
+}
+
+void collect_loop_region_candidates(llvm::Function& function,
+                                    llvm::Loop& loop,
+                                    llvm::SmallVectorImpl<vm_region_candidate>& candidates) {
+  if (!loop.isInnermost()) {
+    for (llvm::Loop* subloop : loop) {
+      if (subloop != nullptr) { collect_loop_region_candidates(function, *subloop, candidates); }
+    }
+    return;
+  }
+
+  llvm::SmallVector<llvm::BasicBlock*, 8> region_blocks;
+  for (llvm::BasicBlock* block : loop.blocks()) {
+    if (block != nullptr) { region_blocks.push_back(block); }
+  }
+
+  if (region_blocks.empty()) { return; }
+  append_vm_region_candidate(function, loop.getHeader(), region_blocks, candidates);
+}
 
 enum class vm_resolver_shape {
   cached_sentinel_global,
@@ -449,6 +526,9 @@ find_regional_vm_candidates(llvm::Function& function, const llvm::StringSet<>& s
   llvm::SmallVector<vm_region_candidate, 8> candidates;
   if (skip_functions.contains(function.getName())) { return candidates; }
 
+  llvm::DominatorTree dom_tree(function);
+  llvm::LoopInfo loop_info(dom_tree);
+
   for (llvm::BasicBlock& block : function) {
     if (block.getName().starts_with("entry.obf.vm") || block.getName().starts_with("trap.obf.vm") ||
         block.getName().starts_with("vm.")) {
@@ -457,32 +537,6 @@ find_regional_vm_candidates(llvm::Function& function, const llvm::StringSet<>& s
 
     auto* branch = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator());
     if (branch == nullptr || !branch->isConditional()) { continue; }
-
-    const auto append_candidate = [&](llvm::SmallVectorImpl<llvm::BasicBlock*>& region_blocks) {
-      llvm::CodeExtractorAnalysisCache cache(function);
-      llvm::DominatorTree dom_tree(function);
-      llvm::AssumptionCache assumption_cache(function);
-      llvm::CodeExtractor extractor(region_blocks,
-                                    &dom_tree,
-                                    /*AggregateArgs=*/false,
-                                    /*BFI=*/nullptr,
-                                    /*BPI=*/nullptr,
-                                    &assumption_cache,
-                                    /*AllowVarArgs=*/false,
-                                    /*AllowAlloca=*/false,
-                                    /*AllocationBlock=*/nullptr,
-                                    "obf.vm.region.check");
-      if (!extractor.isEligible()) { return; }
-
-      std::size_t instruction_count = 0;
-      for (llvm::BasicBlock* region_block : region_blocks) {
-        instruction_count += region_block->size();
-      }
-      llvm::SmallVector<llvm::BasicBlock*, 8> stored_blocks(region_blocks.begin(),
-                                                            region_blocks.end());
-      candidates.push_back(vm_region_candidate{
-          .header = &block, .region_blocks = std::move(stored_blocks), .score = instruction_count});
-    };
 
     llvm::SmallVector<llvm::BasicBlock*, 8> region_blocks;
     llvm::BasicBlock* true_block = branch->getSuccessor(0);
@@ -498,7 +552,7 @@ find_regional_vm_candidates(llvm::Function& function, const llvm::StringSet<>& s
         if (merge_block != &block && merge_block != true_block && merge_block != false_block &&
             llvm::pred_size(merge_block) == 2) {
           region_blocks = {&block, true_block, false_block};
-          append_candidate(region_blocks);
+          append_vm_region_candidate(function, &block, region_blocks, candidates);
         }
       }
     }
@@ -511,9 +565,13 @@ find_regional_vm_candidates(llvm::Function& function, const llvm::StringSet<>& s
       auto* succ_term = llvm::dyn_cast<llvm::BranchInst>(successor->getTerminator());
       if (succ_term != nullptr && succ_term->isUnconditional()) {
         region_blocks = {&block, successor};
-        append_candidate(region_blocks);
+        append_vm_region_candidate(function, &block, region_blocks, candidates);
       }
     }
+  }
+
+  for (llvm::Loop* loop : loop_info) {
+    if (loop != nullptr) { collect_loop_region_candidates(function, *loop, candidates); }
   }
 
   llvm::sort(candidates, [](const vm_region_candidate& lhs, const vm_region_candidate& rhs) {
