@@ -64,6 +64,32 @@ bool has_virtualized_binding_for_state(const virtualized_function_map& virtualiz
   return false;
 }
 
+llvm::StringRef classify_vm_candidate_reason_tag(llvm::StringRef reason) {
+  if (reason.contains("varargs unsupported")) { return "varargs_unsupported"; }
+  if (reason.contains("exceptions unsupported")) { return "exceptions_unsupported"; }
+  if (reason.contains("eh pad unsupported")) { return "eh_pad_unsupported"; }
+  if (reason.contains("inline asm unsupported")) { return "inline_asm_unsupported"; }
+  if (reason.contains("no whole-function or regional VM target")) { return "no_vm_target"; }
+  if (reason.contains("unsupported")) { return "unsupported_shape"; }
+  return "unclassified";
+}
+
+llvm::StringRef vm_candidate_reason_remediation(llvm::StringRef reason_tag) {
+  if (reason_tag == "varargs_unsupported") {
+    return "remove varargs or lower protection level for this function";
+  }
+  if (reason_tag == "exceptions_unsupported" || reason_tag == "eh_pad_unsupported") {
+    return "exclude EH-heavy function from strong_vm or refactor EH boundary";
+  }
+  if (reason_tag == "inline_asm_unsupported") {
+    return "remove inline asm or exclude function from strong_vm";
+  }
+  if (reason_tag == "no_vm_target") {
+    return "ensure function has a whole-function or regional VM target";
+  }
+  return "review candidate analysis detail and adjust function policy";
+}
+
 void enforce_strong_vm_virtualization_gate(
     const llvm::SmallVectorImpl<function_pipeline_state>& states,
     const virtualized_function_map& virtualized_functions) {
@@ -81,7 +107,15 @@ void enforce_strong_vm_virtualization_gate(
     detail += "; policy_detail=";
     detail += state.report.decision.detail;
     detail += "; reason=";
-    detail += result.detail.empty() ? "no whole-function or regional VM target" : result.detail;
+    const llvm::StringRef reason =
+        result.detail.empty() ? llvm::StringRef("no whole-function or regional VM target")
+                              : llvm::StringRef(result.detail);
+    detail += reason.str();
+    const llvm::StringRef reason_tag = classify_vm_candidate_reason_tag(reason);
+    detail += "; reason_tag=";
+    detail += reason_tag.str();
+    detail += "; remediation=";
+    detail += vm_candidate_reason_remediation(reason_tag).str();
     report_strong_vm_invariant_violation(detail);
   }
 }
