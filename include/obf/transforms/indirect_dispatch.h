@@ -28,6 +28,9 @@ struct indirect_dispatch_result {
   std::size_t site_count = 0;
   std::size_t branch_site_count = 0;
   std::size_t switch_site_count = 0;
+  std::size_t skipped_max_switch_targets = 0;
+  std::size_t blocked_non_integral_program_address_space = 0;
+  std::size_t blocked_unsupported_function_shape = 0;
   std::string detail;
 };
 

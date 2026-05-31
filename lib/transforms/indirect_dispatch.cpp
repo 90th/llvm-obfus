@@ -41,6 +41,9 @@ struct dispatch_site {
 struct site_collection {
   llvm::SmallVector<dispatch_site, 8> sites;
   std::string detail;
+  std::size_t skipped_max_switch_targets = 0;
+  std::size_t blocked_non_integral_program_address_space = 0;
+  std::size_t blocked_unsupported_function_shape = 0;
 };
 
 struct site_masking {
@@ -65,9 +68,37 @@ std::string make_site_name(std::size_t site_index, llvm::StringRef suffix) {
 }
 
 std::string make_result_detail(const indirect_dispatch_result& result, llvm::StringRef suffix) {
-  return std::to_string(result.site_count) + " site(s) rewritten (branches=" +
+  std::string detail = std::to_string(result.site_count) + " site(s) rewritten (branches=" +
          std::to_string(result.branch_site_count) + ", switches=" +
          std::to_string(result.switch_site_count) + "); " + suffix.str();
+  if (result.skipped_max_switch_targets != 0 ||
+      result.blocked_non_integral_program_address_space != 0 ||
+      result.blocked_unsupported_function_shape != 0) {
+    detail += "; skipped(max_switch_targets=";
+    detail += std::to_string(result.skipped_max_switch_targets);
+    detail += ", non_integral_program_as=";
+    detail += std::to_string(result.blocked_non_integral_program_address_space);
+    detail += ", unsupported_function_shape=";
+    detail += std::to_string(result.blocked_unsupported_function_shape);
+    detail += ")";
+  }
+  return detail;
+}
+
+void append_skip_summary(std::string& detail, const site_collection& collection) {
+  if (collection.skipped_max_switch_targets == 0 &&
+      collection.blocked_non_integral_program_address_space == 0 &&
+      collection.blocked_unsupported_function_shape == 0) {
+    return;
+  }
+
+  detail += "; skipped(max_switch_targets=";
+  detail += std::to_string(collection.skipped_max_switch_targets);
+  detail += ", non_integral_program_as=";
+  detail += std::to_string(collection.blocked_non_integral_program_address_space);
+  detail += ", unsupported_function_shape=";
+  detail += std::to_string(collection.blocked_unsupported_function_shape);
+  detail += ")";
 }
 
 llvm::BasicBlock& select_anchor_block(llvm::BasicBlock& source_block,
@@ -160,16 +191,23 @@ site_collection collect_sites(const llvm::Function& function,
   const llvm::DataLayout& data_layout = module->getDataLayout();
   const unsigned program_address_space = data_layout.getProgramAddressSpace();
   if (data_layout.isNonIntegralAddressSpace(program_address_space)) {
-    return make_empty_site_collection("non-integral program address space");
+    site_collection collection = make_empty_site_collection("non-integral program address space");
+    collection.blocked_non_integral_program_address_space = 1;
+    append_skip_summary(collection.detail, collection);
+    return collection;
   }
 
   std::string unsupported_detail;
   if (has_unsupported_function_shape(function, unsupported_detail)) {
-    return make_empty_site_collection(std::move(unsupported_detail));
+    site_collection collection = make_empty_site_collection(std::move(unsupported_detail));
+    collection.blocked_unsupported_function_shape = 1;
+    append_skip_summary(collection.detail, collection);
+    return collection;
   }
 
   llvm::SmallVector<dispatch_site, 8> sites;
   std::size_t next_site_index = 0;
+  std::size_t skipped_max_switch_targets = 0;
   for (const llvm::BasicBlock& block : function) {
     if (sites.size() >= options.max_sites_per_function) { break; }
 
@@ -195,7 +233,10 @@ site_collection collect_sites(const llvm::Function& function,
     const auto* switch_inst = llvm::dyn_cast<llvm::SwitchInst>(terminator);
     if (switch_inst == nullptr || switch_inst->getNumCases() == 0) { continue; }
 
-    if (switch_inst->getNumCases() + 1 > options.max_switch_targets) { continue; }
+    if (switch_inst->getNumCases() + 1 > options.max_switch_targets) {
+      ++skipped_max_switch_targets;
+      continue;
+    }
 
     dispatch_site site;
     site.kind = dispatch_site_kind::switch_dispatch;
@@ -210,11 +251,19 @@ site_collection collect_sites(const llvm::Function& function,
     sites.push_back(std::move(site));
   }
 
-  if (sites.empty()) { return make_empty_site_collection("no supported branch or switch sites"); }
+  if (sites.empty()) {
+    site_collection collection = make_empty_site_collection("no supported branch or switch sites");
+    collection.skipped_max_switch_targets = skipped_max_switch_targets;
+    append_skip_summary(collection.detail, collection);
+    return collection;
+  }
 
   const auto site_count = sites.size();
-  return {.sites = std::move(sites),
-          .detail = std::to_string(site_count) + " site(s) selected"};
+  site_collection collection{.sites = std::move(sites),
+                             .detail = std::to_string(site_count) + " site(s) selected",
+                             .skipped_max_switch_targets = skipped_max_switch_targets};
+  append_skip_summary(collection.detail, collection);
+  return collection;
 }
 
 template <typename BuilderT>
@@ -509,6 +558,10 @@ indirect_dispatch_result analyze_indirect_dispatch(const llvm::Function& functio
                                                    const indirect_dispatch_options& options) {
   const site_collection collection = collect_sites(function, options);
   indirect_dispatch_result result;
+  result.skipped_max_switch_targets = collection.skipped_max_switch_targets;
+  result.blocked_non_integral_program_address_space =
+      collection.blocked_non_integral_program_address_space;
+  result.blocked_unsupported_function_shape = collection.blocked_unsupported_function_shape;
   result.detail = collection.detail;
   for (const dispatch_site& site : collection.sites) {
     ++result.site_count;
@@ -528,6 +581,10 @@ indirect_dispatch_result run_indirect_dispatch(llvm::Function& function,
                                                const indirect_dispatch_options& options) {
   const site_collection collection = collect_sites(function, options);
   indirect_dispatch_result result;
+  result.skipped_max_switch_targets = collection.skipped_max_switch_targets;
+  result.blocked_non_integral_program_address_space =
+      collection.blocked_non_integral_program_address_space;
+  result.blocked_unsupported_function_shape = collection.blocked_unsupported_function_shape;
   if (collection.sites.empty()) {
     result.detail = collection.detail;
     return result;
