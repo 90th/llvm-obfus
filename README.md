@@ -354,7 +354,7 @@ cmake --build build --target obf-benchmarks obf-seed-diversity obf-unit-tests
 ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests"
 ```
 
-The lit suite covers 108 tests across MBA engine shapes, opaque predicates, bogus control flow, control flattening, opaque GEP, constant encoding (inline and keyed-pool), string encoding (lazy, eager, auth), indirect dispatch, VM lowering, VM handler and dispatcher polymorphism, seed determinism, safe pipeline ordering, security gates, and artifact cleanup. Every test passes `opt -passes=verify`, FileCheck, and `lli` execution validation. An InstCombine collapse audit confirms runtime entropy anchors prevent the simplifier from folding polynomial zeros or opaque predicates.
+The lit suite covers 109 tests across MBA engine shapes, opaque predicates, bogus control flow, control flattening, opaque GEP, constant encoding (inline and keyed-pool), string encoding (lazy, eager, auth), indirect dispatch, VM lowering, VM handler and dispatcher polymorphism, seed determinism, safe pipeline ordering, security gates, and artifact cleanup. Every test passes `opt -passes=verify`, FileCheck, and `lli` execution validation. An InstCombine collapse audit confirms runtime entropy anchors prevent the simplifier from folding polynomial zeros or opaque predicates.
 
 ## Repository Layout
 
