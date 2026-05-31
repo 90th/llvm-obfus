@@ -26,7 +26,6 @@
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <algorithm>
-#include <optional>
 #include <string>
 
 namespace obf {
@@ -1060,6 +1059,9 @@ llvm::Function* clone_vm_implementation(llvm::Function& interface_function,
                           value_map,
                           llvm::CloneFunctionChangeType::LocalChangesOnly,
                           returns);
+  if (interface_function.hasPersonalityFn()) {
+    implementation_function->setPersonalityFn(interface_function.getPersonalityFn());
+  }
   sanitize_vm_implementation_attributes(*implementation_function, interface_function);
   return implementation_function;
 }
@@ -2117,8 +2119,17 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
       for (llvm::Use& use : call->uses()) { original_uses.push_back(&use); }
 
       llvm::SmallVector<llvm::Value*, 8> arguments;
-      arguments.reserve(call->arg_size() + 1);
-      for (llvm::Use& argument : call->args()) { arguments.push_back(argument.get()); }
+      const std::size_t fixed_arg_count = function.arg_size();
+      const std::size_t forwarded_arg_count =
+          function.isVarArg() ? std::min<std::size_t>(fixed_arg_count, call->arg_size())
+                              : call->arg_size();
+      arguments.reserve(forwarded_arg_count + 1);
+      std::size_t arg_index = 0;
+      for (llvm::Use& argument : call->args()) {
+        if (arg_index >= forwarded_arg_count) { break; }
+        arguments.push_back(argument.get());
+        ++arg_index;
+      }
       arguments.push_back(hidden_token);
 
       auto* rewritten_call = builder.CreateCall(
@@ -2216,8 +2227,17 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
     for (llvm::Use& use : call->uses()) { original_uses.push_back(&use); }
 
     llvm::SmallVector<llvm::Value*, 8> arguments;
-    arguments.reserve(call->arg_size() + 1);
-    for (llvm::Use& argument : call->args()) { arguments.push_back(argument.get()); }
+    const std::size_t fixed_arg_count = function.arg_size();
+    const std::size_t forwarded_arg_count =
+        function.isVarArg() ? std::min<std::size_t>(fixed_arg_count, call->arg_size())
+                            : call->arg_size();
+    arguments.reserve(forwarded_arg_count + 1);
+    std::size_t arg_index = 0;
+    for (llvm::Use& argument : call->args()) {
+      if (arg_index >= forwarded_arg_count) { break; }
+      arguments.push_back(argument.get());
+      ++arg_index;
+    }
     arguments.push_back(hidden_token);
 
     auto* rewritten_call = call_builder.CreateCall(

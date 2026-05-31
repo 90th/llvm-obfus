@@ -1,8 +1,15 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=PASS --implicit-check-not='@__obf_vm_target_strong_ok' --implicit-check-not='@__obf_vm_seedcase_strong_ok' --implicit-check-not='@__obf_vm_seed_resolve'
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-eh-pass.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=EH-PASS --implicit-check-not='LLVM ERROR'
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-off.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=OFF
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-unvirtualized.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=UNVIRT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-string.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=STRING
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-pass.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=VARARGS-PASS
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-region-pass.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=VARARGS-REGION-PASS --implicit-check-not='LLVM ERROR'
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=VARARGS
+
+declare void @llvm.va_start(ptr)
+declare void @llvm.va_end(ptr)
+declare i32 @__gxx_personality_v0(...)
 
 @.secret = private unnamed_addr constant [6 x i8] c"hello\00"
 @.table = private unnamed_addr constant [1 x ptr] [ptr @.secret]
@@ -11,6 +18,12 @@ define i32 @strong_ok(i32 %x) {
 entry:
   %xor = xor i32 %x, 42
   %sum = add i32 %xor, 7
+  ret i32 %sum
+}
+
+define i32 @personality_only(i32 %x) personality ptr @__gxx_personality_v0 {
+entry:
+  %sum = add i32 %x, 9
   ret i32 %sum
 }
 
@@ -45,9 +58,44 @@ entry:
   ret i32 %x
 }
 
+define i32 @has_varargs_access(i32 %x, ...) {
+entry:
+  %list = alloca ptr, align 8
+  call void @llvm.va_start(ptr %list)
+  call void @llvm.va_end(ptr %list)
+  ret i32 %x
+}
+
+define i32 @has_varargs_region(i1 %flag, i32 %x, ...) {
+entry:
+  %list = alloca ptr, align 8
+  call void @llvm.va_start(ptr %list)
+  br label %dispatch
+
+dispatch:
+  br i1 %flag, label %then, label %else
+
+then:
+  %inc = add i32 %x, 1
+  br label %merge
+
+else:
+  %dec = sub i32 %x, 1
+  br label %merge
+
+merge:
+  %result = phi i32 [ %inc, %then ], [ %dec, %else ]
+  call void @llvm.va_end(ptr %list)
+  ret i32 %result
+}
+
 ; PASS-LABEL: define i32 @strong_ok(i32 %0)
 ; PASS: call i32 %{{[^ ]+}}(i32 %0, i64 %{{[^)]+}})
 ; PASS: define internal i32 @{{_[0-9a-f]+}}(i32 %0, i64 %1)
+
+; EH-PASS-LABEL: define i32 @personality_only(i32 %0)
+; EH-PASS: call i32 %{{[^ ]+}}(i32 %0, i64 %{{[^)]+}})
+; EH-PASS: define internal i32 @{{_[0-9a-f]+}}(i32 %0, i64 %1) {{.*}} personality ptr @__gxx_personality_v0
 
 ; OFF: LLVM ERROR: strong_vm invariant violation: function unsupported_alloca was not virtualized
 
@@ -61,5 +109,16 @@ entry:
 ; STRING: define internal void @{{.*}}() {
 ; STRING: call ptr @rt_core_sd1(
 
-; VARARGS: LLVM ERROR: strong_vm invariant violation: function has_varargs was not virtualized
+; VARARGS-PASS-LABEL: define i32 @has_varargs(i32 %0, ...)
+; VARARGS-PASS: call i32 %{{[^ ]+}}(i32 %0, i64 %{{[^)]+}})
+
+; VARARGS-REGION-PASS-LABEL: define i32 @has_varargs_region(i1 %0, i32 %1, ...)
+; VARARGS-REGION-PASS: call void @llvm.va_start{{.*}}(ptr %{{[^)]+}})
+; VARARGS-REGION-PASS: call void @{{_[0-9a-f]+}}(i1 %0, i32 %1, ptr %{{[^)]+}})
+; VARARGS-REGION-PASS: call void @llvm.va_end{{.*}}(ptr %{{[^)]+}})
+; VARARGS-REGION-PASS: define internal void @{{_[0-9a-f]+}}(i1 %0, i32 %1, ptr %2)
+; VARARGS-REGION-PASS: call void %{{[^ ]+}}(i1 %0, i32 %1, ptr %{{[^,]+}}, i64 %{{[^)]+}})
+; VARARGS-REGION-PASS: attributes #{{[0-9]+}} = { {{.*}}"obf.vm.entry.thunk"{{.*}} }
+
+; VARARGS: LLVM ERROR: strong_vm invariant violation: function has_varargs_access was not virtualized
 ; VARARGS: reason_tag=varargs_unsupported

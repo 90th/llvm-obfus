@@ -4,5 +4,5 @@ overrides:
   - name: main
     level: none
 targets:
-  - match: has_varargs_access
+  - match: has_varargs
     level: strong_vm
