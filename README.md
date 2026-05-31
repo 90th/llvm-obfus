@@ -274,6 +274,36 @@ Other standalone passes:
 
 `obf-driver` currently loads a config and prints a summary. It is not a full compile driver.
 
+## Visual Examples (Ghidra)
+
+<details>
+<summary>Expand visual examples and analysis</summary>
+
+These screenshots compare one baseline function with one obfuscated function from the `license_demo` benchmark.
+
+- Baseline function: `FUN_004008f0` from `license_demo.baseline`
+- Obfuscated function: `FUN_00400510` from `license_demo.obfuscated`
+
+What the baseline image shows:
+
+- A compact, readable verification-style routine.
+- Clear control flow (simple bounds and loop structure).
+- Data-dependent operations that remain semantically recoverable in the decompiler.
+
+What the obfuscated image shows:
+
+- Large opaque arithmetic chains with mixed rotates/xors/add-masks.
+- Decompiler warnings around jump-table recovery and indirect control transfer.
+- Significantly reduced semantic readability despite valid executable behavior.
+
+pseudocode comparison:
+
+| Baseline (`license_demo.baseline` / `FUN_004008f0`) | Obfuscated (`license_demo.obfuscated` / `FUN_00400510`) |
+|---|---|
+| ![license_demo baseline pseudocode (FUN_004008f0)](images/baseline_present.png) | ![license_demo obfuscated pseudocode (FUN_00400510)](images/obfuscated_present.png) |
+
+</details>
+
 ## Benchmarks
 
 Benchmark targets build paired baseline and obfuscated artifacts under `build/benchmarks/<name>/`. The benchmark build passes `--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}` to `opt`, so `OBF_BENCHMARK_SEED` controls the effective benchmark seed for the whole build tree even when a sample benchmark config contains its own `seed:` entry.
