@@ -245,7 +245,17 @@ llvm::BasicBlock* create_decoy_trap(llvm::Function& function,
   llvm::Value* predicate =
       build_true_opaque_predicate(loop_builder, function, mba_depth, salt_base + 0x71ULL,
                                   max_ir, poly, mul);
-  loop_builder.CreateCondBr(predicate, loop, trap);
+    const std::uint32_t decoy_iteration_limit =
+      256U + static_cast<std::uint32_t>(
+           mix_seed(salt_base, stable_hash_string(function.getName()) ^ function.size()) %
+           1024ULL);
+  llvm::Value* below_limit = loop_builder.CreateICmpULT(
+      iteration,
+      llvm::ConstantInt::get(loop_builder.getInt32Ty(), decoy_iteration_limit),
+      "obf.flat.decoy.below_limit");
+  llvm::Value* continue_loop = loop_builder.CreateAnd(
+      predicate, below_limit, "obf.flat.decoy.cont");
+  loop_builder.CreateCondBr(continue_loop, loop, trap);
 
   iteration->addIncoming(llvm::ConstantInt::get(loop_builder.getInt32Ty(), 0), entry);
   iteration->addIncoming(next_iteration, loop);

@@ -935,14 +935,24 @@ llvm::Value* create_entropy_mix(llvm::IRBuilder<>& builder,
     case entropy_mix_shape::rotate_xor: {
       std::uint64_t rot_a = mix_seed(context.seed_base, salt ^ 0x44e6ULL) & 0x3F;
       std::uint64_t rot_b = mix_seed(context.seed_base, salt ^ 0x55f7ULL) & 0x3F;
-      llvm::Value* ra = builder.CreateOr(
-          builder.CreateShl(entropy_a, rot_a, (name + ".a.rot").str()),
-          builder.CreateLShr(entropy_a, 64 - rot_a, (name + ".a.rot2").str()),
-          (name + ".a.rot.pack").str());
-      llvm::Value* rb = builder.CreateOr(
-          builder.CreateShl(entropy_b, rot_b, (name + ".b.rot").str()),
-          builder.CreateLShr(entropy_b, 64 - rot_b, (name + ".b.rot2").str()),
-          (name + ".b.rot.pack").str());
+      llvm::Value* ra;
+      if (rot_a == 0) {
+        ra = entropy_a;
+      } else {
+        ra = builder.CreateOr(
+            builder.CreateShl(entropy_a, rot_a, (name + ".a.rot").str()),
+            builder.CreateLShr(entropy_a, 64 - rot_a, (name + ".a.rot2").str()),
+            (name + ".a.rot.pack").str());
+      }
+      llvm::Value* rb;
+      if (rot_b == 0) {
+        rb = entropy_b;
+      } else {
+        rb = builder.CreateOr(
+            builder.CreateShl(entropy_b, rot_b, (name + ".b.rot").str()),
+            builder.CreateLShr(entropy_b, 64 - rot_b, (name + ".b.rot2").str()),
+            (name + ".b.rot.pack").str());
+      }
       return builder.CreateXor(ra, rb, (name + ".rotx").str());
     }
     case entropy_mix_shape::bit_split: {

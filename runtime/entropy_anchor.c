@@ -1,6 +1,7 @@
 #include <stdint.h>
 
 #include "obf/support/runtime_abi_generated.h"
+#include "obf/support/runtime_atomic.h"
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -37,10 +38,10 @@ __declspec(noinline)
 __attribute__((noinline))
 #endif
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR(void) {
-  const uint64_t direct = OBF_RT_ENTROPY_ANCHOR;
+  const uint64_t direct = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t * const ref_ptr = kEntropyAnchorRef;
-  *ref_ptr = direct;
-  const uint64_t indirect = OBF_RT_ENTROPY_ANCHOR;
+  ObfAtomicStoreU64Relaxed(ref_ptr, direct);
+  const uint64_t indirect = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   return BuildEntropyPair(direct, indirect);
 }
 
@@ -50,12 +51,12 @@ __declspec(noinline)
 __attribute__((noinline))
 #endif
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V1(void) {
-  const uint64_t direct = OBF_RT_ENTROPY_ANCHOR;
+  const uint64_t direct = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t * const ref_ptr = kEntropyAnchorRef;
   volatile uint64_t scratch_direct = direct;
   volatile uint64_t scratch_indirect = 0;
-  *ref_ptr = scratch_direct;
-  scratch_indirect = *ref_ptr;
+  ObfAtomicStoreU64Relaxed(ref_ptr, (uint64_t)scratch_direct);
+  scratch_indirect = ObfAtomicLoadU64Relaxed(ref_ptr);
   return BuildEntropyPair((uint64_t)scratch_direct, (uint64_t)scratch_indirect);
 }
 
@@ -65,13 +66,13 @@ __declspec(noinline)
 __attribute__((noinline))
 #endif
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V2(void) {
-  const uint64_t base = OBF_RT_ENTROPY_ANCHOR;
+  const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t * const ref_ptr = kEntropyAnchorRef;
   const uint64_t low = base & 0xffffffffULL;
   const uint64_t high = (base >> 32) & 0xffffffffULL;
   const uint64_t direct = low | (high << 32);
-  *ref_ptr = direct;
-  const uint64_t indirect_source = *ref_ptr;
+  ObfAtomicStoreU64Relaxed(ref_ptr, direct);
+  const uint64_t indirect_source = ObfAtomicLoadU64Relaxed(ref_ptr);
   const uint64_t indirect_low = indirect_source & 0xffffffffULL;
   const uint64_t indirect_high = (indirect_source >> 32) & 0xffffffffULL;
   const uint64_t indirect = indirect_low | (indirect_high << 32);
@@ -84,13 +85,13 @@ __declspec(noinline)
 __attribute__((noinline))
 #endif
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V3(void) {
-  const uint64_t base = OBF_RT_ENTROPY_ANCHOR;
+  const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t * const ref_ptr = kEntropyAnchorRef;
   volatile uint64_t key = 0x9e3779b97f4a7c15ULL;
   const uint64_t direct_masked = base ^ key;
   const uint64_t direct = direct_masked ^ key;
-  *ref_ptr = direct;
-  const uint64_t indirect_masked = (*ref_ptr) ^ key;
+  ObfAtomicStoreU64Relaxed(ref_ptr, direct);
+  const uint64_t indirect_masked = ObfAtomicLoadU64Relaxed(ref_ptr) ^ key;
   const uint64_t indirect = indirect_masked ^ key;
   return BuildEntropyPair(direct, indirect);
 }
@@ -101,13 +102,13 @@ __declspec(noinline)
 __attribute__((noinline))
 #endif
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V4(void) {
-  const uint64_t base = OBF_RT_ENTROPY_ANCHOR;
+  const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t * const ref_ptr = kEntropyAnchorRef;
   volatile uint64_t bias = 0x6a09e667f3bcc909ULL;
   const uint64_t direct_biased = base + bias;
   const uint64_t direct = direct_biased - bias;
-  *ref_ptr = direct;
-  const uint64_t indirect_biased = (*ref_ptr) + bias;
+  ObfAtomicStoreU64Relaxed(ref_ptr, direct);
+  const uint64_t indirect_biased = ObfAtomicLoadU64Relaxed(ref_ptr) + bias;
   const uint64_t indirect = indirect_biased - bias;
   return BuildEntropyPair(direct, indirect);
 }
@@ -181,7 +182,8 @@ static uint64_t ReadHardwareEntropy(void) {
 }
 
 static void InitializeObfEntropyAnchor(void) {
-  OBF_RT_ENTROPY_ANCHOR ^= ReadHardwareEntropy();
+  const uint64_t current = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
+  ObfAtomicStoreU64Relaxed(&OBF_RT_ENTROPY_ANCHOR, current ^ ReadHardwareEntropy());
 }
 
 #if defined(_MSC_VER)
