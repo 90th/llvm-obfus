@@ -58,7 +58,7 @@ entry:
 ; CHECK: %obf.idis.sel2 = select i1 %obf.idis.case2, i64 %obf.idis.site0.tok2, i64 %obf.idis.sel1
 ; CHECK: %obf.mba.sub
 ; CHECK: %obf.idis.unbias =
-; CHECK: %obf.idis.rot = or i64 %obf.idis.rot.lshr, %obf.idis.rot.shl
+; CHECK: %obf.idis.rot.rot = or i64 %obf.idis.rot.lshr, %obf.idis.rot.shl
 ; CHECK: %obf.mba.xor
 ; CHECK: %obf.idis.delta =
 ; CHECK: %obf.idis.affine.sub =

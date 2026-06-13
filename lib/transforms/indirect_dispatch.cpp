@@ -400,10 +400,16 @@ site_masking materialize_site_tokens(llvm::Function& function,
     llvm::Constant* delta = llvm::ConstantExpr::getSub(target_int, anchor_int);
     llvm::Value* encoded_delta = delta;
     if (use_affine_delta) {
-      encoded_delta = support::build_affine_encode(
-          entry_builder, delta, affine_multiplier_constant->getValue(), affine_bias_constant->getValue(),
+      llvm::Value* scaled_delta = entry_builder.CreateMul(
+          delta,
+          affine_multiplier_constant,
           support::scoped_ir_name(std::string("obf.idis.site") + std::to_string(site_index),
-                                  "aff" + std::to_string(target_index)));
+                                  "aff.mul" + std::to_string(target_index)));
+      encoded_delta = entry_builder.CreateAdd(
+          scaled_delta,
+          affine_bias_constant,
+          support::scoped_ir_name(std::string("obf.idis.site") + std::to_string(site_index),
+                                  "aff.enc" + std::to_string(target_index)));
     }
 
     llvm::Value* xored = entry_builder.CreateXor(

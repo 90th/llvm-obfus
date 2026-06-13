@@ -548,7 +548,7 @@ llvm::Value* create_cfg_state_placeholder_call(llvm::IRBuilder<>& builder,
 }
 
 std::string make_decoder_name(llvm::StringRef global_name, llvm::StringRef prefix) {
-  return obf::support::scoped_ir_name(prefix, obf::support::sanitize_ir_name(global_name));
+  return (prefix + obf::support::sanitize_ir_name(global_name)).str();
 }
 
 std::string make_string_generated_name(llvm::Module& module,

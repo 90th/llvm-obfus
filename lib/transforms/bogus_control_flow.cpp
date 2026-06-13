@@ -45,7 +45,7 @@ void populate_dse_trap(llvm::Function& function, llvm::BasicBlock& bogus, llvm::
   llvm::IRBuilder<> loop_builder(loop);
   llvm::PHINode* iteration = loop_builder.CreatePHI(loop_builder.getInt32Ty(), 2, "obf.bogus.iter");
   llvm::PHINode* state = loop_builder.CreatePHI(loop_builder.getInt64Ty(), 2, "obf.bogus.state");
-  auto loop_state = support::build_decoy_loop_core(loop_builder, state, iteration, "obf.bogus.decoy");
+  auto loop_state = support::build_decoy_loop_core(loop_builder, state, iteration, "obf.bogus");
   llvm::Value* done = loop_builder.CreateICmpEQ(
       loop_state.next_iteration,
       llvm::ConstantInt::get(loop_builder.getInt32Ty(), dse_trap_iterations),
