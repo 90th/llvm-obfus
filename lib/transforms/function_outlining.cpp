@@ -1,5 +1,6 @@
 #include "obf/transforms/function_outlining.h"
 
+#include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
@@ -158,14 +159,9 @@ void obfuscate_shard_calls(llvm::Function& parent,
                            llvm::Function& shard,
                            const function_outlining_options& options,
                            std::uint64_t salt_base) {
-  mba::builder_context context = mba::get_or_create_builder_context(
-      parent, "obf.shard.call", mix_seed(options.seed, salt_base));
-  context.depth = options.mba_depth;
-  configure_context_overrides(
-      context,
-      options.mba_max_ir_instructions,
-      options.mba_enable_polynomial,
-      options.mba_enable_multiplication);
+  auto context = obf::support::make_mba_context(
+      parent, "obf.shard.call", mix_seed(options.seed, salt_base),
+      {options.mba_depth, options.mba_max_ir_instructions, options.mba_enable_polynomial, options.mba_enable_multiplication});
 
   std::uint64_t local_salt = salt_base;
   llvm::SmallVector<llvm::CallBase*, 4> calls;

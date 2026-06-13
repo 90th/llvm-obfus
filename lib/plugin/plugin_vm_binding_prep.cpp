@@ -3,6 +3,7 @@
 #include "obf/plugin/obfuscator_plugin_internal.h"
 
 #include "obf/support/generated_names.h"
+#include "obf/support/mba_config_builder.h"
 #include "obf/transforms/mba.h"
 
 #include "llvm/IR/Attributes.h"
@@ -153,8 +154,9 @@ llvm::Value* build_hidden_token_value(llvm::IRBuilder<>& builder,
                                       std::uint64_t token,
                                       std::uint32_t mba_depth,
                                       std::uint64_t salt) {
-  mba::builder_context context = mba::get_or_create_builder_context(owner, prefix, token ^ salt);
-  context.depth = mba_depth;
+  mba_config cfg;
+  cfg.depth = mba_depth;
+  auto context = obf::support::make_mba_context(owner, prefix, token ^ salt, cfg);
   return mba::create_opaque_integer(builder,
                                     builder.getInt64Ty(),
                                     context,

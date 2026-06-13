@@ -1,5 +1,6 @@
 #include "obf/transforms/opaque_gep.h"
 
+#include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
@@ -250,14 +251,9 @@ opaque_gep_result run_opaque_gep(llvm::Function& function, const opaque_gep_opti
     }
   }
 
-  mba::builder_context mba_context =
-      mba::get_or_create_builder_context(function, "obf.gep", derive_mba_seed(function));
-  mba_context.depth = options.mba_depth;
-  configure_context_overrides(
-      mba_context,
-      options.mba_max_ir_instructions,
-      options.mba_enable_polynomial,
-      options.mba_enable_multiplication);
+  auto mba_context = obf::support::make_mba_context(
+      function, "obf.gep", derive_mba_seed(function),
+      {options.mba_depth, options.mba_max_ir_instructions, options.mba_enable_polynomial, options.mba_enable_multiplication});
 
   std::size_t lowered_count = 0;
   std::uint64_t salt = 1;

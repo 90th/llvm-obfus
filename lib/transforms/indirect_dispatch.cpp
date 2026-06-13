@@ -1,6 +1,7 @@
 #include "obf/transforms/indirect_dispatch.h"
 
 #include "obf/support/affine_helpers.h"
+#include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
@@ -590,14 +591,9 @@ indirect_dispatch_result run_indirect_dispatch(llvm::Function& function,
   llvm::Instruction* entry_insertion_point = get_entry_insertion_point(function);
   llvm::IRBuilder<llvm::NoFolder> entry_builder(function.getContext(), llvm::NoFolder());
   entry_builder.SetInsertPoint(entry_insertion_point);
-  mba::builder_context mba_context =
-      mba::get_or_create_builder_context(function, "obf.idis", options.seed);
-  mba_context.depth = options.mba_depth;
-  configure_context_overrides(
-      mba_context,
-      options.mba_max_ir_instructions,
-      options.mba_enable_polynomial,
-      options.mba_enable_multiplication);
+  auto mba_context = obf::support::make_mba_context(
+      function, "obf.idis", options.seed,
+      {options.mba_depth, options.mba_max_ir_instructions, options.mba_enable_polynomial, options.mba_enable_multiplication});
 
   for (std::size_t site_index = 0; site_index < collection.sites.size(); ++site_index) {
     const dispatch_site& site = collection.sites[site_index];

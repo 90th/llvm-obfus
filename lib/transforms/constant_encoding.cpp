@@ -3,6 +3,7 @@
 #include "obf/analysis/annotation_utils.h"
 #include "obf/support/auth_encoding.h"
 #include "obf/support/generated_names.h"
+#include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
@@ -749,14 +750,9 @@ std::size_t apply_mba_inline_uses(llvm::ArrayRef<planned_constant_use> uses,
 
     mba::builder_context& mba_context = mba_contexts[use.function];
     if (mba_context.entropy_anchor == nullptr) {
-      mba_context = mba::get_or_create_builder_context(
-          *use.function, "obf.const.mba", opaque_seed_base);
-      mba_context.depth = options.mba_depth;
-      configure_context_overrides(
-          mba_context,
-          options.mba_max_ir_instructions,
-          options.mba_enable_polynomial,
-          options.mba_enable_multiplication);
+      mba_context = obf::support::make_mba_context(
+          *use.function, "obf.const.mba", opaque_seed_base,
+          {options.mba_depth, options.mba_max_ir_instructions, options.mba_enable_polynomial, options.mba_enable_multiplication});
     }
 
     std::uint64_t& local_seed = function_local_seeds[use.function];
@@ -1023,17 +1019,9 @@ constant_encoding_result run_constant_encoding(llvm::Function& function,
     for (llvm::Instruction& instruction : block) { original_instructions.push_back(&instruction); }
   }
 
-  const mba::builder_context mba_context = [&] {
-    mba::builder_context ctx =
-        mba::get_or_create_builder_context(function, "obf.const.mba", opaque_seed_base);
-    ctx.depth = options.mba_depth;
-    configure_context_overrides(
-        ctx,
-        options.mba_max_ir_instructions,
-        options.mba_enable_polynomial,
-        options.mba_enable_multiplication);
-    return ctx;
-  }();
+  const mba::builder_context mba_context = obf::support::make_mba_context(
+      function, "obf.const.mba", opaque_seed_base,
+      {options.mba_depth, options.mba_max_ir_instructions, options.mba_enable_polynomial, options.mba_enable_multiplication});
 
   for (llvm::Instruction* instruction : original_instructions) {
     if (instruction == nullptr || encoded_count >= options.max_constants_per_function) { continue; }

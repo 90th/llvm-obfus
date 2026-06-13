@@ -4,6 +4,7 @@
 
 #include "obf/plugin/obfuscator_plugin_internal.h"
 
+#include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
@@ -285,11 +286,11 @@ llvm::Function* get_or_create_vm_target_seed_case_resolver(llvm::Function& inter
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(module->getContext(), "entry", resolver);
   llvm::IRBuilder<> builder(entry);
   const llvm::APInt key = derive_vm_target_key(interface_function, ptr_int_type);
-  mba::builder_context resolve_context =
-      mba::get_or_create_builder_context(*resolver,
-                                         (interface_function.getName() + ".obf.seed").str(),
-                                         key.getLimitedValue() ^ 0x63f000ULL);
-  resolve_context.depth = mba_depth;
+  mba_config resolve_cfg;
+  resolve_cfg.depth = mba_depth;
+  auto resolve_context = obf::support::make_mba_context(
+      *resolver, (interface_function.getName() + ".obf.seed").str(),
+      key.getLimitedValue() ^ 0x63f000ULL, resolve_cfg);
 
   llvm::Value* target_int = builder.CreatePtrToInt(
       &implementation_function, ptr_int_type, interface_function.getName() + ".obf.seed.target");
@@ -552,11 +553,11 @@ llvm::Value* decode_virtualized_target_seed_local(llvm::IRBuilder<>& builder,
                                            prefix.str() + ".target.base");
 
   const llvm::APInt key = derive_vm_target_key(interface_function, ptr_int_type);
-  mba::builder_context resolve_context =
-      mba::get_or_create_builder_context(owner,
-                                         (prefix + ".target.local.seed").str(),
-                                         key.getLimitedValue() ^ seed_base ^ 0x63f000ULL);
-  resolve_context.depth = mba_depth;
+  mba_config resolve_cfg;
+  resolve_cfg.depth = mba_depth;
+  auto resolve_context = obf::support::make_mba_context(
+      owner, (prefix + ".target.local.seed").str(),
+      key.getLimitedValue() ^ seed_base ^ 0x63f000ULL, resolve_cfg);
   const vm_pointer_materialization_shape pointer_shape =
       select_vm_pointer_materialization_shape(interface_function, seed_base, prefix);
   llvm::Value* resolved_target = materialize_vm_impl_pointer_int(builder,

@@ -1,5 +1,6 @@
 #include "obf/transforms/control_flattening.h"
 
+#include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/cfg_state_placeholders.h"
 #include "obf/transforms/mba.h"
@@ -612,15 +613,10 @@ control_flattening_result run_control_flattening(llvm::Function& function,
     }
   }
 
-  mba::builder_context mba_context =
-      mba::get_or_create_builder_context(function, "obf.flat", 0x2f4d8f13ULL);
+  auto mba_context = obf::support::make_mba_context(
+      function, "obf.flat", 0x2f4d8f13ULL,
+      {options.mba_depth, options.mba_max_ir_instructions, options.mba_enable_polynomial, options.mba_enable_multiplication});
   mba_context.seed_base = mix_seed(mba_context.seed_base, options.seed);
-  mba_context.depth = options.mba_depth;
-  configure_context_overrides(
-      mba_context,
-      options.mba_max_ir_instructions,
-      options.mba_enable_polynomial,
-      options.mba_enable_multiplication);
 
   for (std::size_t decoy_index = 0; decoy_index < decoy_count; ++decoy_index) {
     llvm::BasicBlock* decoy_entry = create_decoy_trap(
