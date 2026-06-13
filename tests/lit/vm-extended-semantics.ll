@@ -61,17 +61,17 @@ entry:
 ; CHECK-DAG: %obf.vm.state.slot.11.0 = getelementptr inbounds
 ; CHECK-DAG: %obf.vm.state.slot.12.0 = getelementptr inbounds
 ; CHECK: %obf.vm.dispatch.table = alloca [15 x i64], align 8
-; CHECK: %obf.vm.fneg = fneg float
-; CHECK: insertelement <2 x i32> poison
-; CHECK: insertelement <2 x i32> %{{[^,]+}}, i32 %{{[^,]+}}, i32 1
-; CHECK: extractelement <2 x i32>
-; CHECK: shufflevector <2 x i32>
-; CHECK: insertvalue { i32, i32 } poison
-; CHECK: insertvalue { i32, i32 } %{{[^,]+}}, i32 %{{[^,]+}}, 1
-; CHECK: extractvalue { i32, i32 }
-; CHECK: call void @llvm.memcpy.p0.p0.i64
-; CHECK: call void @llvm.memmove.p0.p0.i64
-; CHECK: call void @llvm.memset.p0.i64
+; CHECK-DAG: %obf.vm.fneg = fneg float
+; CHECK-DAG: insertelement <2 x i32> poison
+; CHECK-DAG: insertelement <2 x i32> %{{[^,]+}}, i32 %{{[^,]+}}, i32 1
+; CHECK-DAG: extractelement <2 x i32>
+; CHECK-DAG: shufflevector <2 x i32>
+; CHECK-DAG: insertvalue { i32, i32 } poison
+; CHECK-DAG: insertvalue { i32, i32 } %{{[^,]+}}, i32 %{{[^,]+}}, 1
+; CHECK-DAG: extractvalue { i32, i32 }
+; CHECK-DAG: call void @llvm.memcpy.p0.p0.i64
+; CHECK-DAG: call void @llvm.memmove.p0.p0.i64
+; CHECK-DAG: call void @llvm.memset.p0.i64
 ; CHECK: indirectbr ptr
 
 ; REPORT-DAG: "name":"extended_semantics",

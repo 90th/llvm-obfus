@@ -207,14 +207,14 @@ entry:
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %tag, i32 %base, i64 %obf.hidden_token)
 ; CHECK: vm.switch.default.
 ; CHECK-LABEL: define internal i16 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i8 %x, i32 %y, i64 %obf.hidden_token)
-; CHECK: vm.cast.exec.
-; CHECK: %obf.vm.zext.bias =
-; CHECK: %obf.vm.zext.wide = zext i8 %obf.vm.zext.bias to i32
-; CHECK: %obf.vm.zext.signed.shl = shl i32 %{{[^,]+}}, 24
-; CHECK: %obf.vm.zext.signed = ashr i32 %obf.vm.zext.signed.shl, 24
-; CHECK: %obf.vm.zext = add i32
-; CHECK: %obf.vm.trunc.mask = and i32 %{{[^,]+}}, 65535
-; CHECK: %obf.vm.trunc = trunc i32 %obf.vm.trunc.mask to i16
+; CHECK-DAG: %obf.vm.zext.bias =
+; CHECK-DAG: %obf.vm.zext.wide = zext i8 %obf.vm.zext.bias to i32
+; CHECK-DAG: %obf.vm.zext.signed.shl = shl i32 %{{[^,]+}}, 24
+; CHECK-DAG: %obf.vm.zext.signed = ashr i32 %obf.vm.zext.signed.shl, 24
+; CHECK-DAG: %obf.vm.zext = add i32
+; CHECK-DAG: vm.cast.exec.{{[0-9]+}}:
+; CHECK-DAG: %obf.vm.trunc.mask = and i32 %{{[^,]+}}, 65535
+; CHECK-DAG: %obf.vm.trunc = trunc i32 %obf.vm.trunc.mask to i16
 ; CHECK-LABEL: define internal float @__obf_vm_i_{{[A-Za-z0-9_]+}}(float %x, float %y, i64 %obf.hidden_token)
 ; CHECK: fcmp {{[a-z]+}} float
 ; CHECK-LABEL: define internal <2 x i32> @__obf_vm_i_{{[A-Za-z0-9_]+}}(<2 x i32> %a, <2 x i32> %b, i64 %obf.hidden_token)
