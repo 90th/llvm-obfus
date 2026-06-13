@@ -1,5 +1,6 @@
 #include "obf/transforms/function_outlining.h"
 
+#include "obf/support/flattening_metadata.h"
 #include "obf/support/ir_name.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
@@ -17,11 +18,13 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/CodeExtractor.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,9 +48,39 @@ bool is_terminal_handler(const llvm::BasicBlock& block) {
   return llvm::isa<llvm::ReturnInst>(terminator) || llvm::isa<llvm::UnreachableInst>(terminator);
 }
 
-bool is_dispatch_match_branch(const llvm::BasicBlock& block, const llvm::BranchInst& branch) {
-  if (!block.getName().starts_with("obf.flat.dispatch") || !branch.isConditional()) { return false; }
+bool is_flattened_function(const llvm::Function& function) {
+  return function.getMetadata(flattening::kFlattenedMD) != nullptr;
+}
 
+std::optional<flattening::block_role> get_block_role(const llvm::BasicBlock& block) {
+  const llvm::Instruction* term = block.getTerminator();
+  if (!term) return std::nullopt;
+  const llvm::MDNode* node = term->getMetadata(flattening::kFlattenedBlockMD);
+  if (!node) return std::nullopt;
+  if (node->getNumOperands() < 2) return std::nullopt;
+  const auto* cam = llvm::mdconst::dyn_extract<llvm::ConstantInt>(node->getOperand(1));
+  if (!cam) return std::nullopt;
+  return static_cast<flattening::block_role>(cam->getZExtValue());
+}
+
+bool is_dispatch_block(const llvm::BasicBlock& block) {
+  auto role = get_block_role(block);
+  if (!role) return false;
+  switch (*role) {
+    case flattening::block_role::root_dispatch:
+    case flattening::block_role::dispatch_split:
+    case flattening::block_role::dispatch_left:
+    case flattening::block_role::dispatch_right:
+    case flattening::block_role::dispatch_leaf:
+      return true;
+    default: return false;
+  }
+}
+
+bool is_dispatch_match_branch(const llvm::BasicBlock& block, const llvm::BranchInst& branch) {
+  if (!branch.isConditional()) return false;
+  if (is_dispatch_block(block)) return true;
+  if (!block.getName().starts_with("obf.flat.dispatch")) return false;
   const auto* compare = llvm::dyn_cast<llvm::ICmpInst>(branch.getCondition());
   return compare != nullptr && compare->getPredicate() == llvm::CmpInst::ICMP_EQ;
 }
@@ -60,7 +93,7 @@ llvm::BasicBlock* find_flatten_default_target(llvm::Function& function) {
     if (branch == nullptr || !is_dispatch_match_branch(block, *branch)) { continue; }
 
     llvm::BasicBlock* fallback = branch->getSuccessor(1);
-    if (fallback == nullptr || fallback->getName().starts_with("obf.flat.dispatch.split")) {
+    if (fallback == nullptr || is_dispatch_block(*fallback)) {
       continue;
     }
 
@@ -76,8 +109,27 @@ llvm::BasicBlock* find_flatten_default_target(llvm::Function& function) {
 }
 
 bool is_outline_eligible_handler(const llvm::BasicBlock& block, llvm::BasicBlock* default_target) {
-  if (&block == default_target || is_terminal_handler(block) ||
-      block.getName().starts_with("obf.flat.edge") ||
+  if (&block == default_target || is_terminal_handler(block)) return false;
+
+  auto role = get_block_role(block);
+  if (role) {
+    switch (*role) {
+      case flattening::block_role::edge:
+      case flattening::block_role::decoy:
+      case flattening::block_role::setup:
+      case flattening::block_role::root_dispatch:
+      case flattening::block_role::dispatch_split:
+      case flattening::block_role::dispatch_left:
+      case flattening::block_role::dispatch_right:
+      case flattening::block_role::dispatch_leaf:
+      case flattening::block_role::terminal:
+        return false;
+      case flattening::block_role::handler:
+        return true;
+    }
+  }
+
+  if (block.getName().starts_with("obf.flat.edge") ||
       block.getName().starts_with("obf.flat.decoy")) {
     return false;
   }
@@ -294,9 +346,13 @@ function_outlining_result analyze_impl(const llvm::Function& function,
                                        const function_outlining_options& options) {
   if (function.isDeclaration()) { return {.shard_count = 0, .detail = "declaration"}; }
 
+  if (!is_flattened_function(function)) {
+    return {.shard_count = 0, .detail = "not a flattened function"};
+  }
+
   llvm::Function& mutable_function = const_cast<llvm::Function&>(function);
   const std::vector<handler_info> handlers = collect_handler_infos(mutable_function, options.seed);
-  if (handlers.empty()) { return {.shard_count = 0, .detail = "not a flattened handler graph"}; }
+  if (handlers.empty()) { return {.shard_count = 0, .detail = "no handlers found in flattened function"}; }
 
   const std::size_t min_cluster_size = std::max<std::size_t>(1, options.min_cluster_size);
   const std::size_t possible = handlers.size() / min_cluster_size;
