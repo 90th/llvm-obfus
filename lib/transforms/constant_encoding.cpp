@@ -17,6 +17,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/Alignment.h"
 
 #include <algorithm>
 #include <array>
@@ -43,12 +44,14 @@ struct keyed_pool_entry {
   llvm::IntegerType* type = nullptr;
   llvm::APInt value;
   std::size_t offset = 0;
+  llvm::Align alignment = llvm::Align(1);
 };
 
 struct keyed_pool_plan {
   llvm::SmallVector<keyed_pool_entry, 8> entries;
   llvm::SmallVector<keyed_pool_use, 8> uses;
   std::size_t byte_length = 0;
+  llvm::Align alignment = llvm::Align(1);
   std::uint64_t pool_id = 0;
 };
 
@@ -75,6 +78,7 @@ struct keyed_pool_table_plan {
   llvm::SmallVector<keyed_pool_entry, 8> entries;
   llvm::SmallVector<keyed_pool_table_use, 8> uses;
   std::size_t byte_length = 0;
+  llvm::Align alignment = llvm::Align(1);
   std::uint64_t pool_id = 0;
 };
 
@@ -112,6 +116,17 @@ bool is_large_constant_type(const llvm::IntegerType& type) { return type.getBitW
 
 std::size_t get_storage_bytes(const llvm::APInt& value) {
   return std::max<std::size_t>(1, (value.getBitWidth() + 7) / 8);
+}
+
+llvm::Align get_integer_type_alignment(const llvm::DataLayout& data_layout,
+                                       llvm::IntegerType& type) {
+  const llvm::Align abi_align = data_layout.getABITypeAlign(&type);
+  return abi_align.value() == 0 ? llvm::Align(1) : abi_align;
+}
+
+std::size_t align_pool_offset(std::size_t offset, llvm::Align alignment) {
+  const std::size_t alignment_value = alignment.value();
+  return ((offset + alignment_value - 1) / alignment_value) * alignment_value;
 }
 
 bool is_supported_constant_operand(const llvm::Instruction& instruction,
@@ -256,11 +271,17 @@ void collect_keyed_pool_table_users(const llvm::Value& value,
 bool extract_keyed_pool_table_entries(const llvm::GlobalVariable& global,
                                       const constant_encoding_options& options,
                                       llvm::SmallVectorImpl<keyed_pool_entry>& entries,
-                                      std::size_t& byte_length) {
+                                      std::size_t& byte_length,
+                                      llvm::Align& pool_alignment) {
   if (!global.hasInitializer() || !global.isConstant() || global.isThreadLocal() ||
       !global.hasLocalLinkage()) {
     return false;
   }
+
+  const llvm::Module* module = global.getParent();
+  if (module == nullptr) { return false; }
+
+  const llvm::DataLayout& data_layout = module->getDataLayout();
 
   auto* array_type = llvm::dyn_cast<llvm::ArrayType>(global.getValueType());
   if (array_type == nullptr || array_type->getNumElements() < 2) { return false; }
@@ -273,6 +294,10 @@ bool extract_keyed_pool_table_entries(const llvm::GlobalVariable& global,
 
   entries.clear();
   byte_length = 0;
+  pool_alignment = llvm::Align(1);
+
+  const llvm::Align entry_alignment = get_integer_type_alignment(data_layout, *element_type);
+  pool_alignment = std::max(pool_alignment, entry_alignment);
 
   if (const auto* data = llvm::dyn_cast<llvm::ConstantDataSequential>(global.getInitializer())) {
     if (!data->getElementType()->isIntegerTy(element_type->getBitWidth()) || data->isString()) {
@@ -281,7 +306,10 @@ bool extract_keyed_pool_table_entries(const llvm::GlobalVariable& global,
 
     for (std::uint64_t index = 0; index < data->getNumElements(); ++index) {
       const llvm::APInt value = data->getElementAsAPInt(index);
-      entries.push_back({.type = element_type, .value = value, .offset = byte_length});
+      const std::size_t offset = align_pool_offset(byte_length, entry_alignment);
+      entries.push_back(
+          {.type = element_type, .value = value, .offset = offset, .alignment = entry_alignment});
+      byte_length = offset;
       byte_length += get_storage_bytes(value);
     }
     return !entries.empty();
@@ -294,7 +322,12 @@ bool extract_keyed_pool_table_entries(const llvm::GlobalVariable& global,
     const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(operand);
     if (constant == nullptr || constant->getType() != element_type) { return false; }
 
-    entries.push_back({.type = element_type, .value = constant->getValue(), .offset = byte_length});
+    const std::size_t offset = align_pool_offset(byte_length, entry_alignment);
+    entries.push_back({.type = element_type,
+                       .value = constant->getValue(),
+                       .offset = offset,
+                       .alignment = entry_alignment});
+    byte_length = offset;
     byte_length += get_storage_bytes(constant->getValue());
   }
 
@@ -448,12 +481,6 @@ std::uint64_t derive_keyed_pool_module_id(const llvm::Module& module) {
   return module_id;
 }
 
-void append_apint_bytes(llvm::SmallVectorImpl<std::uint8_t>& bytes, const llvm::APInt& value) {
-  const std::size_t storage_bytes = get_storage_bytes(value);
-  bytes.resize(bytes.size() + storage_bytes);
-  std::memcpy(bytes.end() - storage_bytes, value.getRawData(), storage_bytes);
-}
-
 llvm::Constant* create_byte_array_constant(llvm::LLVMContext& context,
                                            llvm::ArrayRef<std::uint8_t> bytes) {
   return llvm::ConstantDataArray::get(context, bytes);
@@ -521,19 +548,21 @@ llvm::GlobalVariable* create_keyed_pool_build_key_global(llvm::Module& module,
 
 llvm::GlobalVariable* create_keyed_pool_destination_global(llvm::Module& module,
                                                            const keyed_pool_payload& payload,
+                                                           llvm::Align alignment,
                                                            std::uint64_t seed,
                                                            std::uint64_t pool_id) {
   const std::string name =
       make_unique_obf_symbol_name(module, "__obf_const_buf", "pool", seed ^ pool_id ^ 0xb0f1ULL);
-  return new llvm::GlobalVariable(module,
-                                  llvm::ArrayType::get(llvm::Type::getInt8Ty(module.getContext()),
-                                                       payload.ciphertext.size()),
-                                  false,
-                                  llvm::GlobalValue::InternalLinkage,
-                                  llvm::ConstantAggregateZero::get(
-                                      llvm::ArrayType::get(llvm::Type::getInt8Ty(module.getContext()),
-                                                           payload.ciphertext.size())),
-                                  name);
+  auto* destination = new llvm::GlobalVariable(
+      module,
+      llvm::ArrayType::get(llvm::Type::getInt8Ty(module.getContext()), payload.ciphertext.size()),
+      false,
+      llvm::GlobalValue::InternalLinkage,
+      llvm::ConstantAggregateZero::get(
+          llvm::ArrayType::get(llvm::Type::getInt8Ty(module.getContext()), payload.ciphertext.size())),
+      name);
+  destination->setAlignment(alignment);
+  return destination;
 }
 
 llvm::GlobalVariable* create_keyed_pool_state_global(llvm::Module& module,
@@ -640,7 +669,8 @@ llvm::Function* create_keyed_pool_helper(llvm::Module& module,
 llvm::Value* build_integer_from_pool_entry(llvm::IRBuilder<>& builder,
                                            llvm::Function& helper,
                                            llvm::IntegerType* type,
-                                           std::size_t offset) {
+                                           std::size_t offset,
+                                           llvm::Align alignment) {
   llvm::LLVMContext& context = builder.getContext();
   llvm::Value* base = builder.CreateCall(&helper, {}, "obf.const.pool.base");
   llvm::Value* byte_ptr = builder.CreateInBoundsGEP(
@@ -648,18 +678,9 @@ llvm::Value* build_integer_from_pool_entry(llvm::IRBuilder<>& builder,
       base,
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), offset),
       "obf.const.pool.ptr");
-  llvm::Value* typed_ptr = builder.CreatePointerCast(
-      byte_ptr, llvm::PointerType::get(context, 0), "obf.const.pool.typed_ptr");
-  return builder.CreateLoad(type, typed_ptr, "obf.const.pool.load");
-}
-
-std::optional<std::size_t> find_entry_offset(const keyed_pool_plan& plan,
-                                             llvm::IntegerType* type,
-                                             const llvm::APInt& value) {
-  for (const keyed_pool_entry& entry : plan.entries) {
-    if (entry.type == type && entry.value == value) { return entry.offset; }
-  }
-  return std::nullopt;
+  llvm::Value* typed_ptr =
+      builder.CreatePointerCast(byte_ptr, llvm::PointerType::getUnqual(context), "obf.const.pool.typed_ptr");
+  return builder.CreateAlignedLoad(type, typed_ptr, alignment, "obf.const.pool.load");
 }
 
 std::uint64_t derive_keyed_pool_id_from_entries(llvm::ArrayRef<keyed_pool_entry> entries,
@@ -679,10 +700,10 @@ keyed_pool_payload build_keyed_pool_payload(llvm::ArrayRef<keyed_pool_entry> ent
                                             std::uint64_t module_id,
                                             std::uint64_t seed) {
   keyed_pool_payload payload;
-  llvm::SmallVector<std::uint8_t, 64> plaintext;
-  plaintext.reserve(byte_length);
+  llvm::SmallVector<std::uint8_t, 64> plaintext(byte_length, 0);
   for (const keyed_pool_entry& entry : entries) {
-    append_apint_bytes(plaintext, entry.value);
+    const std::size_t storage_bytes = get_storage_bytes(entry.value);
+    std::memcpy(plaintext.data() + entry.offset, entry.value.getRawData(), storage_bytes);
   }
 
   const auth::BuildKey build_key = auth::DeriveBuildKey(seed);
@@ -777,8 +798,8 @@ std::size_t apply_mba_inline_uses(llvm::ArrayRef<planned_constant_use> uses,
   return encoded_count;
 }
 
-std::optional<keyed_pool_plan> build_keyed_pool_plan_for_type(
-    llvm::Type* key,
+std::optional<keyed_pool_plan> build_keyed_pool_plan_for_function(
+    llvm::Function& function,
     keyed_pool_plan& source,
     const constant_encoding_options& options,
     std::uint64_t seed) {
@@ -787,7 +808,7 @@ std::optional<keyed_pool_plan> build_keyed_pool_plan_for_type(
   llvm::DenseMap<llvm::Function*, std::size_t> per_function_counts;
   keyed_pool_plan plan;
   for (const keyed_pool_use& use : source.uses) {
-    if (use.function == nullptr) { continue; }
+    if (use.function != &function) { continue; }
 
     std::size_t& function_count = per_function_counts[use.function];
     if (function_count >= options.max_constants_per_function) { continue; }
@@ -807,18 +828,28 @@ std::optional<keyed_pool_plan> build_keyed_pool_plan_for_type(
 
   plan.entries.clear();
   plan.byte_length = 0;
+  plan.alignment = llvm::Align(1);
+  llvm::Module* parent_module = function.getParent();
+  if (parent_module == nullptr) { return std::nullopt; }
+  const llvm::DataLayout& data_layout = parent_module->getDataLayout();
   for (const auto& unique_value : unique_values) {
-    const std::size_t offset = plan.byte_length;
+    const llvm::Align entry_alignment =
+        get_integer_type_alignment(data_layout, *unique_value.first);
+    plan.alignment = std::max(plan.alignment, entry_alignment);
+    const std::size_t offset = align_pool_offset(plan.byte_length, entry_alignment);
     const std::size_t width = get_storage_bytes(unique_value.second);
-    plan.entries.push_back({.type = unique_value.first, .value = unique_value.second, .offset = offset});
-    plan.byte_length += width;
+    plan.entries.push_back({.type = unique_value.first,
+                            .value = unique_value.second,
+                            .offset = offset,
+                            .alignment = entry_alignment});
+    plan.byte_length = offset + width;
   }
 
   if (plan.entries.empty()) { return std::nullopt; }
 
   plan.pool_id = derive_keyed_pool_id_from_entries(
       plan.entries,
-      seed ^ static_cast<std::uint64_t>(llvm::cast<llvm::IntegerType>(key)->getScalarSizeInBits()));
+      seed ^ stable_hash_string(function.getName(), 0x66756e635f7031ULL));
   return plan;
 }
 
@@ -885,13 +916,13 @@ llvm::SmallVector<planned_constant_use, 32> collect_planned_constant_uses(
   return uses;
 }
 
-llvm::DenseMap<llvm::Type*, keyed_pool_plan> build_keyed_pool_plans_from_uses(
+llvm::DenseMap<llvm::Function*, keyed_pool_plan> build_keyed_pool_plans_from_uses(
     llvm::ArrayRef<planned_constant_use> uses) {
-  llvm::DenseMap<llvm::Type*, keyed_pool_plan> plans;
+  llvm::DenseMap<llvm::Function*, keyed_pool_plan> plans;
   for (const planned_constant_use& use : uses) {
-    if (use.strategy != planned_constant_strategy::keyed_pool) { continue; }
+    if (use.strategy != planned_constant_strategy::keyed_pool || use.function == nullptr) { continue; }
 
-    keyed_pool_plan& plan = plans[use.type];
+    keyed_pool_plan& plan = plans[use.function];
     plan.uses.push_back({.instruction = use.instruction,
                          .operand_index = use.operand_index,
                          .function = use.function,
@@ -915,7 +946,8 @@ std::optional<keyed_pool_table_plan> build_keyed_pool_table_plan(
 
   keyed_pool_table_plan plan;
   plan.global = &global;
-  if (!extract_keyed_pool_table_entries(global, options, plan.entries, plan.byte_length)) {
+  if (!extract_keyed_pool_table_entries(
+          global, options, plan.entries, plan.byte_length, plan.alignment)) {
     return std::nullopt;
   }
 
@@ -1056,7 +1088,7 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
 
   llvm::SmallVector<planned_constant_use, 32> uses =
       collect_planned_constant_uses(module, get_seed, options);
-  llvm::DenseMap<llvm::Type*, keyed_pool_plan> plans = build_keyed_pool_plans_from_uses(uses);
+  llvm::DenseMap<llvm::Function*, keyed_pool_plan> plans = build_keyed_pool_plans_from_uses(uses);
 
   llvm::SmallVector<keyed_pool_table_plan, 8> table_plans;
   for (llvm::GlobalVariable& global : module.globals()) {
@@ -1072,7 +1104,7 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
 
   for (auto& entry : plans) {
     std::optional<keyed_pool_plan> planned =
-        build_keyed_pool_plan_for_type(entry.first, entry.second, options, seed);
+        build_keyed_pool_plan_for_function(*entry.first, entry.second, options, seed);
     if (!planned.has_value()) { continue; }
 
     keyed_pool_plan& plan = *planned;
@@ -1083,7 +1115,7 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
     llvm::GlobalVariable* build_key =
         create_keyed_pool_build_key_global(module, seed, plan.pool_id);
     llvm::GlobalVariable* destination =
-        create_keyed_pool_destination_global(module, payload, seed, plan.pool_id);
+        create_keyed_pool_destination_global(module, payload, plan.alignment, seed, plan.pool_id);
     llvm::GlobalVariable* state = create_keyed_pool_state_global(module, seed, plan.pool_id);
     llvm::GlobalVariable* descriptor = create_keyed_pool_descriptor_global(
         module, payload, *destination, *ciphertext, *build_key, *state, seed, plan.pool_id);
@@ -1091,11 +1123,18 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
         create_keyed_pool_helper(module, *descriptor, *destination, payload.metadata.length, seed ^ plan.pool_id);
 
     for (const keyed_pool_use& use : plan.uses) {
-      const std::optional<std::size_t> offset = find_entry_offset(plan, use.type, use.value);
-      if (!offset.has_value()) { continue; }
+      const keyed_pool_entry* entry = nullptr;
+      for (const keyed_pool_entry& candidate : plan.entries) {
+        if (candidate.type == use.type && candidate.value == use.value) {
+          entry = &candidate;
+          break;
+        }
+      }
+      if (entry == nullptr) { continue; }
 
       llvm::IRBuilder<> builder(use.instruction);
-      llvm::Value* decoded = build_integer_from_pool_entry(builder, *helper, use.type, *offset);
+      llvm::Value* decoded =
+          build_integer_from_pool_entry(builder, *helper, use.type, entry->offset, entry->alignment);
       use.instruction->setOperand(use.operand_index, decoded);
       ++encoded_count;
     }
@@ -1107,6 +1146,7 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
     keyed_pool_plan payload_plan;
     payload_plan.entries = plan.entries;
     payload_plan.byte_length = plan.byte_length;
+    payload_plan.alignment = plan.alignment;
     payload_plan.pool_id = plan.pool_id;
 
     const keyed_pool_payload payload =
@@ -1116,7 +1156,7 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
     llvm::GlobalVariable* build_key =
         create_keyed_pool_build_key_global(module, seed, plan.pool_id);
     llvm::GlobalVariable* destination =
-        create_keyed_pool_destination_global(module, payload, seed, plan.pool_id);
+        create_keyed_pool_destination_global(module, payload, plan.alignment, seed, plan.pool_id);
     llvm::GlobalVariable* state = create_keyed_pool_state_global(module, seed, plan.pool_id);
     llvm::GlobalVariable* descriptor = create_keyed_pool_descriptor_global(
         module, payload, *destination, *ciphertext, *build_key, *state, seed, plan.pool_id);
