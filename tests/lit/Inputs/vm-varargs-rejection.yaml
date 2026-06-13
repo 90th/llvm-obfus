@@ -1,0 +1,11 @@
+seed: 5150
+default_level: none
+targets:
+  - match: plain_vm_varargs
+    level: vm
+  - match: vastart_vm_varargs
+    level: vm
+  - match: plain_strong_vm_varargs
+    level: strong_vm
+  - match: vastart_strong_vm_varargs
+    level: strong_vm

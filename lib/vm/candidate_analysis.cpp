@@ -22,27 +22,6 @@ candidate_result reject(llvm::StringRef detail) {
   return {.eligible = false, .detail = detail.str()};
 }
 
-bool has_unsupported_varargs_usage(const llvm::Function& function) {
-  for (const llvm::BasicBlock& block : function) {
-    for (const llvm::Instruction& instruction : block) {
-      if (llvm::isa<llvm::VAArgInst>(instruction)) { return true; }
-
-      const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction);
-      if (intrinsic == nullptr) { continue; }
-      switch (intrinsic->getIntrinsicID()) {
-        case llvm::Intrinsic::vastart:
-        case llvm::Intrinsic::vaend:
-        case llvm::Intrinsic::vacopy:
-          return true;
-        default:
-          break;
-      }
-    }
-  }
-
-  return false;
-}
-
 bool is_supported_scalar_type(const llvm::Type* type) {
   return type->isIntegerTy() || type->isFloatingPointTy() || type->isPointerTy();
 }
@@ -344,9 +323,7 @@ std::uint32_t add_slot(bytecode_program& program, const llvm::Type* type) {
 candidate_result build_program(const llvm::Function& function, bytecode_program* program_output) {
   if (function.isDeclaration()) { return reject("declaration"); }
 
-  if (function.isVarArg() && has_unsupported_varargs_usage(function)) {
-    return reject("varargs unsupported");
-  }
+  if (function.isVarArg()) { return reject("varargs unsupported by VM lowering"); }
 
   if (!is_supported_type(function.getReturnType())) { return reject("unsupported return type"); }
 

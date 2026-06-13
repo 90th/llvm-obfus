@@ -738,6 +738,8 @@ discover_vm_targets_for_state(const function_pipeline_state& state,
     return targets;
   }
 
+  if (state.function->isVarArg()) { return targets; }
+
   const vm::candidate_result whole_function_analysis = vm::analyze_candidate(*state.function);
 
   if (state.report.decision.policy.level == protection_level::strong_vm) {

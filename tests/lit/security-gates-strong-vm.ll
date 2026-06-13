@@ -3,9 +3,9 @@
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-off.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=OFF
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-unvirtualized.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=UNVIRT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-string.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=STRING
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-pass.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=VARARGS-PASS
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-region-pass.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=VARARGS-REGION-PASS --implicit-check-not='LLVM ERROR'
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-loop-pass.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=VARARGS-LOOP-PASS --implicit-check-not='LLVM ERROR'
+; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-pass.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=VARARGS-PLAIN
+; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-region-pass.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=VARARGS-REGION
+; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs-loop-pass.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=VARARGS-LOOP
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/Inputs/security-gates-strong-vm-varargs.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=VARARGS
 
 declare void @llvm.va_start(ptr)
@@ -132,21 +132,14 @@ exit:
 ; STRING: define internal void @{{.*}}() {
 ; STRING: call ptr @rt_core_sd1(
 
-; VARARGS-PASS-LABEL: define i32 @has_varargs(i32 %0, ...)
-; VARARGS-PASS: call i32 %{{[^ ]+}}(i32 %0, i64 %{{[^)]+}})
+; VARARGS-PLAIN: LLVM ERROR: strong_vm invariant violation: function has_varargs was not virtualized
+; VARARGS-PLAIN: reason_tag=varargs_unsupported
 
-; VARARGS-REGION-PASS-LABEL: define i32 @has_varargs_region(i1 %0, i32 %1, ...)
-; VARARGS-REGION-PASS: call void @llvm.va_start{{.*}}(ptr %{{[^)]+}})
-; VARARGS-REGION-PASS: call void @{{_[0-9a-f]+}}(i1 %0, i32 %1, ptr %{{[^)]+}})
-; VARARGS-REGION-PASS: call void @llvm.va_end{{.*}}(ptr %{{[^)]+}})
-; VARARGS-REGION-PASS: define internal void @{{_[0-9a-f]+}}(i1 %0, i32 %1, ptr %2)
-; VARARGS-REGION-PASS: call void %{{[^ ]+}}(i1 %0, i32 %1, ptr %{{[^,]+}}, i64 %{{[^)]+}})
-; VARARGS-REGION-PASS: attributes #{{[0-9]+}} = { {{.*}}"obf.vm.entry.thunk"{{.*}} }
+; VARARGS-REGION: LLVM ERROR: strong_vm invariant violation: function has_varargs_region was not virtualized
+; VARARGS-REGION: reason_tag=varargs_unsupported
 
-; VARARGS-LOOP-PASS-LABEL: define i32 @has_varargs_loop(i32 %0, i32 %1, ...)
-; VARARGS-LOOP-PASS: call void @llvm.va_start{{.*}}(ptr %{{[^)]+}})
-; VARARGS-LOOP-PASS: call void %{{[^ ]+}}(i32 %0, i32 %1, ptr %{{[^,]+}}, i64 %{{[^)]+}})
-; VARARGS-LOOP-PASS: define internal void @{{_[0-9a-f]+}}(i32 %0, i32 %1, ptr %2, i64 %3)
+; VARARGS-LOOP: LLVM ERROR: strong_vm invariant violation: function has_varargs_loop was not virtualized
+; VARARGS-LOOP: reason_tag=varargs_unsupported
 
 ; VARARGS: LLVM ERROR: strong_vm invariant violation: function has_varargs_access was not virtualized
 ; VARARGS: reason_tag=varargs_unsupported
