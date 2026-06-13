@@ -1,5 +1,6 @@
 #include "obf/transforms/indirect_dispatch.h"
 
+#include "obf/support/affine_helpers.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
@@ -328,42 +329,6 @@ site_collection collect_sites(const llvm::Function& function,
   return collection;
 }
 
-template <typename BuilderT>
-llvm::Value* create_rotate_left(BuilderT& builder,
-                                llvm::Value* value,
-                                unsigned rotate_amount,
-                                llvm::StringRef name) {
-  auto* int_type = llvm::cast<llvm::IntegerType>(value->getType());
-  if (rotate_amount == 0 || rotate_amount % int_type->getBitWidth() == 0) { return value; }
-
-  llvm::Value* shl = builder.CreateShl(
-      value, llvm::ConstantInt::get(int_type, rotate_amount), (name + ".shl").str());
-  llvm::Value* lshr = builder.CreateLShr(value,
-                                         llvm::ConstantInt::get(int_type,
-                                                                int_type->getBitWidth() -
-                                                                    rotate_amount),
-                                         (name + ".lshr").str());
-  return builder.CreateOr(shl, lshr, name);
-}
-
-template <typename BuilderT>
-llvm::Value* create_rotate_right(BuilderT& builder,
-                                 llvm::Value* value,
-                                 unsigned rotate_amount,
-                                 llvm::StringRef name) {
-  auto* int_type = llvm::cast<llvm::IntegerType>(value->getType());
-  if (rotate_amount == 0 || rotate_amount % int_type->getBitWidth() == 0) { return value; }
-
-  llvm::Value* lshr = builder.CreateLShr(
-      value, llvm::ConstantInt::get(int_type, rotate_amount), (name + ".lshr").str());
-  llvm::Value* shl = builder.CreateShl(value,
-                                       llvm::ConstantInt::get(int_type,
-                                                              int_type->getBitWidth() -
-                                                                  rotate_amount),
-                                       (name + ".shl").str());
-  return builder.CreateOr(lshr, shl, name);
-}
-
 llvm::Instruction* get_entry_insertion_point(llvm::Function& function) {
   for (llvm::Instruction& instruction : function.getEntryBlock()) {
     if (llvm::isa<llvm::PHINode>(instruction) || llvm::isa<llvm::AllocaInst>(instruction) ||
@@ -375,26 +340,6 @@ llvm::Instruction* get_entry_insertion_point(llvm::Function& function) {
   }
 
   return function.getEntryBlock().getTerminator();
-}
-
-llvm::APInt make_odd_affine_multiplier(unsigned bit_width, std::uint64_t seed) {
-  llvm::APInt multiplier(bit_width, mix_seed(seed, 0xa5a5a5a5f00df00dULL), false, true);
-  multiplier |= llvm::APInt(bit_width, 1);
-  if (multiplier == llvm::APInt(bit_width, 1)) { multiplier = llvm::APInt(bit_width, 3); }
-  return multiplier;
-}
-
-llvm::APInt compute_mod_inverse_pow2(const llvm::APInt& odd_value) {
-  const unsigned bit_width = odd_value.getBitWidth();
-  llvm::APInt inverse(bit_width, 1);
-  for (unsigned round = 0; round < bit_width; ++round) {
-    inverse *= llvm::APInt(bit_width, 2) - odd_value * inverse;
-  }
-  return inverse;
-}
-
-llvm::APInt make_affine_bias(unsigned bit_width, std::uint64_t seed) {
-  return llvm::APInt(bit_width, mix_seed(seed, 0x13579bdf2468ace0ULL), false, true);
 }
 
 site_masking materialize_site_tokens(llvm::Function& function,
@@ -425,15 +370,15 @@ site_masking materialize_site_tokens(llvm::Function& function,
   llvm::ConstantInt* affine_inverse_constant = nullptr;
   if (use_affine_delta) {
     const llvm::APInt affine_multiplier =
-        make_odd_affine_multiplier(bit_width, mix_seed(site_seed, 0x616666696e652e6dULL));
+        support::make_odd_affine_multiplier(bit_width, mix_seed(site_seed, 0x616666696e652e6dULL));
     const llvm::APInt affine_bias =
-        make_affine_bias(bit_width, mix_seed(site_seed, 0x616666696e652e62ULL));
+        support::make_affine_bias(bit_width, mix_seed(site_seed, 0x616666696e652e62ULL));
     affine_multiplier_constant = llvm::cast<llvm::ConstantInt>(
         llvm::ConstantInt::get(int_type, affine_multiplier));
     affine_bias_constant =
         llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(int_type, affine_bias));
     affine_inverse_constant = llvm::cast<llvm::ConstantInt>(
-        llvm::ConstantInt::get(int_type, compute_mod_inverse_pow2(affine_multiplier)));
+        llvm::ConstantInt::get(int_type, support::compute_mod_inverse_pow2(affine_multiplier)));
   }
 
   site_masking masking;
@@ -457,21 +402,16 @@ site_masking materialize_site_tokens(llvm::Function& function,
     llvm::Constant* delta = llvm::ConstantExpr::getSub(target_int, anchor_int);
     llvm::Value* encoded_delta = delta;
     if (use_affine_delta) {
-      llvm::Value* scaled_delta = entry_builder.CreateMul(
-          delta,
-          affine_multiplier_constant,
-          make_site_name(site_index, "aff.mul" + std::to_string(target_index)));
-      encoded_delta = entry_builder.CreateAdd(
-          scaled_delta,
-          affine_bias_constant,
-          make_site_name(site_index, "aff.enc" + std::to_string(target_index)));
+      encoded_delta = support::build_affine_encode(
+          entry_builder, delta, affine_multiplier_constant->getValue(), affine_bias_constant->getValue(),
+          make_site_name(site_index, "aff" + std::to_string(target_index)));
     }
 
     llvm::Value* xored = entry_builder.CreateXor(
         encoded_delta,
         key_constant,
         make_site_name(site_index, "xor" + std::to_string(target_index)));
-    llvm::Value* rotated = create_rotate_left(entry_builder,
+    llvm::Value* rotated = support::rotate_left_scalar(entry_builder,
                                               xored,
                                               rotate_amount,
                                               make_site_name(site_index,
@@ -500,7 +440,7 @@ llvm::Value* decode_selected_token(llvm::IRBuilder<>& builder,
                                           salt_base ^ 0x11ULL,
                                           "obf.idis.unbias");
   llvm::Value* rotated =
-      create_rotate_right(builder, unbiased, masking.rotate_amount, "obf.idis.rot");
+      support::rotate_right_scalar(builder, unbiased, masking.rotate_amount, "obf.idis.rot");
   llvm::Value* delta = mba::create_xor(builder,
                                        rotated,
                                        masking.key_constant,
@@ -508,18 +448,9 @@ llvm::Value* decode_selected_token(llvm::IRBuilder<>& builder,
                                        salt_base ^ 0x23ULL,
                                        "obf.idis.delta");
   if (masking.use_affine_delta) {
-    llvm::Value* affine_sub = mba::create_sub(builder,
-                                              delta,
-                                              masking.affine_bias_constant,
-                                              mba_context,
-                                              salt_base ^ 0x2dULL,
-                                              "obf.idis.affine.sub");
-    delta = mba::create_mul(builder,
-                            affine_sub,
-                            masking.affine_inverse_constant,
-                            mba_context,
-                            salt_base ^ 0x2fULL,
-                            "obf.idis.affine.dec");
+    delta = support::build_affine_decode(
+        builder, delta, masking.affine_inverse_constant->getValue(),
+        masking.affine_bias_constant->getValue(), "obf.idis.affine");
   }
   llvm::Value* anchor = builder.CreatePtrToInt(
       llvm::BlockAddress::get(&function, &anchor_block), masking.int_type, "obf.idis.anchor");

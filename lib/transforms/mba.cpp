@@ -1,6 +1,7 @@
 #include "obf/transforms/mba.h"
 
 #include "obf/frontend/config.h"
+#include "obf/support/affine_helpers.h"
 #include "obf/support/runtime_abi_generated.h"
 #include "obf/support/stable_hash.h"
 
@@ -497,66 +498,6 @@ bool is_affine_scalar_type(const llvm::Type* target_type) {
   return integer_type != nullptr && integer_type->getBitWidth() > 1;
 }
 
-llvm::APInt make_odd_affine_multiplier(unsigned bit_width, std::uint64_t seed) {
-  llvm::APInt multiplier(bit_width, mix_seed(seed, 0xa5a5a5a5f00df00dULL), false, true);
-  multiplier |= llvm::APInt(bit_width, 1);
-  if (multiplier == llvm::APInt(bit_width, 1)) { multiplier = llvm::APInt(bit_width, 3); }
-  return multiplier;
-}
-
-llvm::APInt compute_mod_inverse_pow2(const llvm::APInt& odd_value) {
-  const unsigned bit_width = odd_value.getBitWidth();
-  llvm::APInt inverse(bit_width, 1);
-  for (unsigned round = 0; round < bit_width; ++round) {
-    inverse *= llvm::APInt(bit_width, 2) - odd_value * inverse;
-  }
-  return inverse;
-}
-
-llvm::APInt make_affine_bias(unsigned bit_width, std::uint64_t seed) {
-  return llvm::APInt(bit_width, mix_seed(seed, 0x13579bdf2468ace0ULL), false, true);
-}
-
-llvm::Value* build_affine_encode(llvm::IRBuilder<>& builder,
-                                 llvm::Value* value,
-                                 const llvm::APInt& multiplier,
-                                 const llvm::APInt& bias,
-                                 llvm::StringRef prefix) {
-  llvm::Value* scaled = builder.CreateMul(
-      value, constant_apint_to_type(value->getType(), multiplier), (prefix + ".mul").str());
-  return builder.CreateAdd(
-      scaled, constant_apint_to_type(value->getType(), bias), (prefix + ".enc").str());
-}
-
-llvm::Value* build_affine_decode(llvm::IRBuilder<>& builder,
-                                 llvm::Value* value,
-                                 const llvm::APInt& inverse,
-                                 const llvm::APInt& bias,
-                                 llvm::StringRef prefix) {
-  llvm::Value* unshifted = builder.CreateSub(
-      value, constant_apint_to_type(value->getType(), bias), (prefix + ".sub").str());
-  return builder.CreateMul(
-      unshifted, constant_apint_to_type(value->getType(), inverse), (prefix + ".dec").str());
-}
-
-llvm::Value* rotate_left_scalar(llvm::IRBuilder<>& builder,
-                                llvm::Value* value,
-                                unsigned amount,
-                                llvm::StringRef name_prefix) {
-  auto* integer_type = llvm::dyn_cast<llvm::IntegerType>(value->getType());
-  if (integer_type == nullptr || integer_type->getBitWidth() <= 1) { return nullptr; }
-
-  const unsigned bit_width = integer_type->getBitWidth();
-  amount %= bit_width;
-  if (amount == 0) { return value; }
-
-  auto* left_amount = llvm::ConstantInt::get(integer_type, amount);
-  auto* right_amount = llvm::ConstantInt::get(integer_type, bit_width - amount);
-  llvm::Value* left = builder.CreateShl(value, left_amount, (name_prefix + ".shl").str());
-  llvm::Value* right = builder.CreateLShr(value, right_amount, (name_prefix + ".lshr").str());
-  return builder.CreateOr(left, right, (name_prefix + ".rot").str());
-}
-
 struct entropy_pair {
   llvm::Value* direct = nullptr;
   llvm::Value* indirect = nullptr;
@@ -1013,8 +954,8 @@ llvm::Value* build_opaque_zero_affine_cancel_pair(llvm::IRBuilder<>& builder,
   }
 
   const unsigned bit_width = target_type->getIntegerBitWidth();
-  const llvm::APInt multiplier = make_odd_affine_multiplier(bit_width, salt ^ 0x410a11ceULL);
-  const llvm::APInt delta = make_affine_bias(bit_width, salt ^ 0x510a11ceULL);
+  const llvm::APInt multiplier = support::make_odd_affine_multiplier(bit_width, salt ^ 0x410a11ceULL);
+  const llvm::APInt delta = support::make_affine_bias(bit_width, salt ^ 0x510a11ceULL);
   llvm::Value* term =
       builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.affine_cancel_pair.term");
   llvm::Value* shifted = builder.CreateAdd(
@@ -1044,14 +985,14 @@ llvm::Value* build_opaque_zero_affine_self_diff(llvm::IRBuilder<>& builder,
   }
 
   const unsigned bit_width = target_type->getIntegerBitWidth();
-  const llvm::APInt multiplier = make_odd_affine_multiplier(bit_width, salt ^ 0x610a11ceULL);
-  const llvm::APInt inverse = compute_mod_inverse_pow2(multiplier);
-  const llvm::APInt bias = make_affine_bias(bit_width, salt ^ 0x710a11ceULL);
+  const llvm::APInt multiplier = support::make_odd_affine_multiplier(bit_width, salt ^ 0x610a11ceULL);
+  const llvm::APInt inverse = support::compute_mod_inverse_pow2(multiplier);
+  const llvm::APInt bias = support::make_affine_bias(bit_width, salt ^ 0x710a11ceULL);
   llvm::Value* term = builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.affine_self_diff.term");
   llvm::Value* encoded =
-      build_affine_encode(builder, term, multiplier, bias, "obf.mba.zero.affine_self_diff");
+      support::build_affine_encode(builder, term, multiplier, bias, "obf.mba.zero.affine_self_diff");
   llvm::Value* decoded =
-      build_affine_decode(builder, encoded, inverse, bias, "obf.mba.zero.affine_self_diff");
+      support::build_affine_decode(builder, encoded, inverse, bias, "obf.mba.zero.affine_self_diff");
   return builder.CreateSub(decoded, term, "obf.mba.zero.affine_self_diff.zero");
 }
 
@@ -1108,14 +1049,14 @@ llvm::Value* build_opaque_zero_polynomial_affine_pair(llvm::IRBuilder<>& builder
   llvm::Value* term = builder.CreateFreeze(
       builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.poly_affine.term.raw"),
       "obf.mba.zero.poly_affine.term");
-  const llvm::APInt coeff_a = make_odd_affine_multiplier(
+  const llvm::APInt coeff_a = support::make_odd_affine_multiplier(
       bit_width, derive_shape_seed(context, "mba.zero.poly_affine.coeff_a", salt, target_type));
-  const llvm::APInt coeff_b = make_affine_bias(
+  const llvm::APInt coeff_b = support::make_affine_bias(
       bit_width, derive_shape_seed(context, "mba.zero.poly_affine.coeff_b", salt, target_type));
-  const llvm::APInt multiplier = make_odd_affine_multiplier(
+  const llvm::APInt multiplier = support::make_odd_affine_multiplier(
       bit_width, derive_shape_seed(context, "mba.zero.poly_affine.multiplier", salt, target_type));
-  const llvm::APInt inverse = compute_mod_inverse_pow2(multiplier);
-  const llvm::APInt bias = make_affine_bias(
+  const llvm::APInt inverse = support::compute_mod_inverse_pow2(multiplier);
+  const llvm::APInt bias = support::make_affine_bias(
       bit_width, derive_shape_seed(context, "mba.zero.poly_affine.bias", salt, target_type));
 
   llvm::Value* term_sq = builder.CreateMul(term, term, "obf.mba.zero.poly_affine.term_sq");
@@ -1125,13 +1066,13 @@ llvm::Value* build_opaque_zero_polynomial_affine_pair(llvm::IRBuilder<>& builder
   llvm::Value* poly = builder.CreateAdd(
       poly_scaled, constant_apint_to_type(target_type, coeff_b), "obf.mba.zero.poly_affine.poly");
   llvm::Value* lhs_encoded =
-      build_affine_encode(builder, poly, multiplier, bias, "obf.mba.zero.poly_affine.lhs");
+      support::build_affine_encode(builder, poly, multiplier, bias, "obf.mba.zero.poly_affine.lhs");
   llvm::Value* rhs_encoded =
-      build_affine_encode(builder, poly, multiplier, bias, "obf.mba.zero.poly_affine.rhs");
+      support::build_affine_encode(builder, poly, multiplier, bias, "obf.mba.zero.poly_affine.rhs");
   llvm::Value* lhs =
-      build_affine_decode(builder, lhs_encoded, inverse, bias, "obf.mba.zero.poly_affine.lhs.dec");
+      support::build_affine_decode(builder, lhs_encoded, inverse, bias, "obf.mba.zero.poly_affine.lhs.dec");
   llvm::Value* rhs =
-      build_affine_decode(builder, rhs_encoded, inverse, bias, "obf.mba.zero.poly_affine.rhs.dec");
+      support::build_affine_decode(builder, rhs_encoded, inverse, bias, "obf.mba.zero.poly_affine.rhs.dec");
   return builder.CreateSub(lhs, rhs, "obf.mba.zero.poly_affine");
 }
 
@@ -1180,9 +1121,9 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
 
       const unsigned amount = static_cast<unsigned>((salt % (bit_width - 1)) + 1);
       llvm::Value* lhs =
-          rotate_left_scalar(builder, lhs_seed, amount, "obf.mba.zero.rotate_xor_pair.lhs");
+          support::rotate_left_scalar(builder, lhs_seed, amount, "obf.mba.zero.rotate_xor_pair.lhs");
       llvm::Value* rhs =
-          rotate_left_scalar(builder, rhs_seed, amount, "obf.mba.zero.rotate_xor_pair.rhs");
+          support::rotate_left_scalar(builder, rhs_seed, amount, "obf.mba.zero.rotate_xor_pair.rhs");
       if (lhs == nullptr || rhs == nullptr) {
         return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
       }
@@ -1623,10 +1564,10 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
 
       const unsigned bit_width = lhs->getType()->getIntegerBitWidth();
       const llvm::APInt multiplier =
-          make_odd_affine_multiplier(bit_width, mix_seed(context.seed_base, salt ^ 0xa110ULL));
-      const llvm::APInt inverse = compute_mod_inverse_pow2(multiplier);
+          support::make_odd_affine_multiplier(bit_width, mix_seed(context.seed_base, salt ^ 0xa110ULL));
+      const llvm::APInt inverse = support::compute_mod_inverse_pow2(multiplier);
       const llvm::APInt bias =
-          make_affine_bias(bit_width, mix_seed(context.seed_base, salt ^ 0xa111ULL));
+          support::make_affine_bias(bit_width, mix_seed(context.seed_base, salt ^ 0xa111ULL));
       llvm::Value* xor_part = builder.CreateXor(lhs, rhs, "obf.mba.add.affine.xor");
       llvm::Value* and_part = builder.CreateAnd(lhs, rhs, "obf.mba.add.affine.and");
       llvm::Value* carry_base = builder.CreateShl(
@@ -1636,15 +1577,15 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
       llvm::Value* carry =
           mask_with_zero_add(builder, carry_base, context, salt + 0x4d, "obf.mba.add.affine.carry");
       llvm::Value* enc_xor =
-          build_affine_encode(builder, xor_part, multiplier, bias, "obf.mba.add.affine.xor");
+          support::build_affine_encode(builder, xor_part, multiplier, bias, "obf.mba.add.affine.xor");
       llvm::Value* enc_carry =
-          build_affine_encode(builder, carry, multiplier, bias, "obf.mba.add.affine.carry");
+          support::build_affine_encode(builder, carry, multiplier, bias, "obf.mba.add.affine.carry");
       llvm::Value* encoded_sum =
           builder.CreateSub(builder.CreateAdd(enc_xor, enc_carry, "obf.mba.add.affine.enc.sum"),
                             constant_apint_to_type(lhs->getType(), bias),
                             "obf.mba.add.affine.enc.norm");
       llvm::Value* decoded =
-          build_affine_decode(builder, encoded_sum, inverse, bias, "obf.mba.add.affine.sum");
+          support::build_affine_decode(builder, encoded_sum, inverse, bias, "obf.mba.add.affine.sum");
       llvm::Value* masked =
           mask_with_zero_xor(builder, decoded, context, salt + 0x57, "obf.mba.add.affine.mask");
       return create_add_impl(builder,
@@ -1762,10 +1703,10 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
 
       const unsigned bit_width = lhs->getType()->getIntegerBitWidth();
       const llvm::APInt multiplier =
-          make_odd_affine_multiplier(bit_width, mix_seed(context.seed_base, salt ^ 0xb110ULL));
-      const llvm::APInt inverse = compute_mod_inverse_pow2(multiplier);
+          support::make_odd_affine_multiplier(bit_width, mix_seed(context.seed_base, salt ^ 0xb110ULL));
+      const llvm::APInt inverse = support::compute_mod_inverse_pow2(multiplier);
       const llvm::APInt bias =
-          make_affine_bias(bit_width, mix_seed(context.seed_base, salt ^ 0xb111ULL));
+          support::make_affine_bias(bit_width, mix_seed(context.seed_base, salt ^ 0xb111ULL));
       llvm::Value* xor_part = builder.CreateXor(lhs, rhs, "obf.mba.sub.affine.xor");
       llvm::Value* borrow_mask =
           builder.CreateAnd(builder.CreateNot(lhs, "obf.mba.sub.affine.notlhs"),
@@ -1778,15 +1719,15 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
       llvm::Value* borrow = mask_with_zero_add(
           builder, borrow_base, context, salt + 0x7d, "obf.mba.sub.affine.borrow");
       llvm::Value* enc_xor =
-          build_affine_encode(builder, xor_part, multiplier, bias, "obf.mba.sub.affine.xor");
+          support::build_affine_encode(builder, xor_part, multiplier, bias, "obf.mba.sub.affine.xor");
       llvm::Value* enc_borrow =
-          build_affine_encode(builder, borrow, multiplier, bias, "obf.mba.sub.affine.borrow");
+          support::build_affine_encode(builder, borrow, multiplier, bias, "obf.mba.sub.affine.borrow");
       llvm::Value* encoded_diff =
           builder.CreateAdd(builder.CreateSub(enc_xor, enc_borrow, "obf.mba.sub.affine.enc.diff"),
                             constant_apint_to_type(lhs->getType(), bias),
                             "obf.mba.sub.affine.enc.norm");
       llvm::Value* decoded =
-          build_affine_decode(builder, encoded_diff, inverse, bias, "obf.mba.sub.affine.diff");
+          support::build_affine_decode(builder, encoded_diff, inverse, bias, "obf.mba.sub.affine.diff");
       llvm::Value* masked =
           mask_with_zero_xor(builder, decoded, context, salt + 0x87, "obf.mba.sub.affine.mask");
       return create_sub_impl(builder,
@@ -1892,22 +1833,22 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
 
       const unsigned bit_width = lhs->getType()->getIntegerBitWidth();
       const llvm::APInt multiplier =
-          make_odd_affine_multiplier(bit_width, mix_seed(context.seed_base, salt ^ 0xc110ULL));
-      const llvm::APInt inverse = compute_mod_inverse_pow2(multiplier);
+          support::make_odd_affine_multiplier(bit_width, mix_seed(context.seed_base, salt ^ 0xc110ULL));
+      const llvm::APInt inverse = support::compute_mod_inverse_pow2(multiplier);
       const llvm::APInt bias =
-          make_affine_bias(bit_width, mix_seed(context.seed_base, salt ^ 0xc111ULL));
+          support::make_affine_bias(bit_width, mix_seed(context.seed_base, salt ^ 0xc111ULL));
       llvm::Value* or_part = builder.CreateOr(lhs, rhs, "obf.mba.xor.affine.or");
       llvm::Value* and_part = builder.CreateAnd(lhs, rhs, "obf.mba.xor.affine.and");
       llvm::Value* enc_or =
-          build_affine_encode(builder, or_part, multiplier, bias, "obf.mba.xor.affine.or");
+          support::build_affine_encode(builder, or_part, multiplier, bias, "obf.mba.xor.affine.or");
       llvm::Value* enc_and =
-          build_affine_encode(builder, and_part, multiplier, bias, "obf.mba.xor.affine.and");
+          support::build_affine_encode(builder, and_part, multiplier, bias, "obf.mba.xor.affine.and");
       llvm::Value* encoded =
           builder.CreateAdd(builder.CreateSub(enc_or, enc_and, "obf.mba.xor.affine.enc.diff"),
                             constant_apint_to_type(lhs->getType(), bias),
                             "obf.mba.xor.affine.enc.norm");
       llvm::Value* decoded =
-          build_affine_decode(builder, encoded, inverse, bias, "obf.mba.xor.affine.diff");
+          support::build_affine_decode(builder, encoded, inverse, bias, "obf.mba.xor.affine.diff");
       llvm::Value* masked =
           mask_with_zero_add(builder, decoded, context, salt + 0xbb, "obf.mba.xor.affine.mask");
       return create_add_impl(builder,
@@ -2044,10 +1985,10 @@ llvm::Value* create_opaque_integer(llvm::IRBuilder<>& builder,
             builder, llvm::ConstantInt::get(type, normalized), context, salt, result_name);
       }
 
-      const llvm::APInt multiplier = make_odd_affine_multiplier(
+      const llvm::APInt multiplier = support::make_odd_affine_multiplier(
           type->getBitWidth(), derive_shape_seed(context, "mba.opaque_integer.affine", salt, type));
-      const llvm::APInt inverse = compute_mod_inverse_pow2(multiplier);
-      const llvm::APInt bias = make_affine_bias(
+      const llvm::APInt inverse = support::compute_mod_inverse_pow2(multiplier);
+      const llvm::APInt bias = support::make_affine_bias(
           type->getBitWidth(), derive_shape_seed(context, "mba.opaque_integer.bias", salt, type));
       const llvm::APInt encoded = normalized * multiplier + bias;
       llvm::Value* opaque_encoded = entangle_value_impl(builder,
@@ -2056,7 +1997,7 @@ llvm::Value* create_opaque_integer(llvm::IRBuilder<>& builder,
                                                         salt + 0x1fULL,
                                                         "obf.seed.affine.encoded");
       llvm::Value* decoded =
-          build_affine_decode(builder, opaque_encoded, inverse, bias, "obf.seed.affine");
+          support::build_affine_decode(builder, opaque_encoded, inverse, bias, "obf.seed.affine");
       return entangle_value_impl(builder, decoded, context, salt + 0x23ULL, result_name);
     }
     case opaque_integer_shape::zero_add: {
@@ -2179,18 +2120,18 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
   if (mba_depth >= 3 && is_affine_scalar_type(builder.getInt64Ty())) {
     const std::uint64_t affine_seed =
         derive_shape_seed(seed_context, "mba.predicate.affine", salt_base, builder.getInt64Ty());
-    const llvm::APInt multiplier = make_odd_affine_multiplier(64, affine_seed ^ 0x410a11ceULL);
-    const llvm::APInt inverse = compute_mod_inverse_pow2(multiplier);
-    const llvm::APInt bias = make_affine_bias(64, affine_seed ^ 0x510a11ceULL);
+    const llvm::APInt multiplier = support::make_odd_affine_multiplier(64, affine_seed ^ 0x410a11ceULL);
+    const llvm::APInt inverse = support::compute_mod_inverse_pow2(multiplier);
+    const llvm::APInt bias = support::make_affine_bias(64, affine_seed ^ 0x510a11ceULL);
 
     llvm::Value* lhs_encoded =
-        build_affine_encode(builder, stable_seed, multiplier, bias, "obf.opaque.seed.lhs");
+        support::build_affine_encode(builder, stable_seed, multiplier, bias, "obf.opaque.seed.lhs");
     llvm::Value* rhs_encoded =
-        build_affine_encode(builder, stable_seed, multiplier, bias, "obf.opaque.seed.rhs");
+        support::build_affine_encode(builder, stable_seed, multiplier, bias, "obf.opaque.seed.rhs");
     predicate_lhs =
-        build_affine_decode(builder, lhs_encoded, inverse, bias, "obf.opaque.seed.lhs");
+        support::build_affine_decode(builder, lhs_encoded, inverse, bias, "obf.opaque.seed.lhs");
     predicate_rhs =
-        build_affine_decode(builder, rhs_encoded, inverse, bias, "obf.opaque.seed.rhs");
+        support::build_affine_decode(builder, rhs_encoded, inverse, bias, "obf.opaque.seed.rhs");
   }
 
   llvm::Value* zero_a = create_opaque_integer(builder,

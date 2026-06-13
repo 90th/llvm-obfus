@@ -131,6 +131,8 @@ add_library(obf_core
   lib/vm/virtualize_dispatch_return.cpp
   lib/vm/virtualize_body_rewrite.cpp
   lib/vm/virtualize.cpp
+  # Support
+  lib/support/affine_helpers.cpp
 )
 llvm_update_compile_flags(obf_core)
 target_include_directories(obf_core PUBLIC ${PROJECT_SOURCE_DIR}/include
