@@ -3,11 +3,13 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/Type.h"
 
@@ -322,6 +324,14 @@ std::uint32_t add_slot(bytecode_program& program, const llvm::Type* type) {
 
 candidate_result build_program(const llvm::Function& function, bytecode_program* program_output) {
   if (function.isDeclaration()) { return reject("declaration"); }
+
+  const llvm::Module* module = function.getParent();
+  if (module == nullptr) { return reject("detached function"); }
+
+  const llvm::DataLayout& data_layout = module->getDataLayout();
+  if (data_layout.isNonIntegralAddressSpace(function.getAddressSpace())) {
+    return reject("non-integral pointer space unsupported by VM lowering");
+  }
 
   if (function.isVarArg()) { return reject("varargs unsupported by VM lowering"); }
 

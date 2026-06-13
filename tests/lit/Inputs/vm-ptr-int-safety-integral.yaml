@@ -1,0 +1,6 @@
+seed: 9001
+default_level: none
+debug_preserve_generated_names: true
+targets:
+  - match: integral_vm
+    level: vm

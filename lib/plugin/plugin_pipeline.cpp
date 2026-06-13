@@ -66,6 +66,9 @@ bool has_virtualized_binding_for_state(const virtualized_function_map& virtualiz
 
 llvm::StringRef classify_vm_candidate_reason_tag(llvm::StringRef reason) {
   if (reason.contains("varargs unsupported")) { return "varargs_unsupported"; }
+  if (reason.contains("non-integral pointer space unsupported")) {
+    return "non_integral_pointer_unsupported";
+  }
   if (reason.contains("exceptions unsupported")) { return "exceptions_unsupported"; }
   if (reason.contains("eh pad unsupported")) { return "eh_pad_unsupported"; }
   if (reason.contains("inline asm unsupported")) { return "inline_asm_unsupported"; }
@@ -77,6 +80,9 @@ llvm::StringRef classify_vm_candidate_reason_tag(llvm::StringRef reason) {
 llvm::StringRef vm_candidate_reason_remediation(llvm::StringRef reason_tag) {
   if (reason_tag == "varargs_unsupported") {
     return "remove varargs or lower protection level for this function";
+  }
+  if (reason_tag == "non_integral_pointer_unsupported") {
+    return "use an integral function pointer address space or exclude function from vm";
   }
   if (reason_tag == "exceptions_unsupported" || reason_tag == "eh_pad_unsupported") {
     return "exclude EH-heavy function from strong_vm or refactor EH boundary";

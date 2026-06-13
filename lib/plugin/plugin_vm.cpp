@@ -787,6 +787,7 @@ llvm::IntegerType* get_vm_pointer_int_type(llvm::Function& function) {
   if (module == nullptr) { return nullptr; }
 
   const llvm::DataLayout& data_layout = module->getDataLayout();
+  if (data_layout.isNonIntegralAddressSpace(function.getAddressSpace())) { return nullptr; }
   return data_layout.getIntPtrType(module->getContext(), function.getAddressSpace());
 }
 
@@ -1464,6 +1465,7 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
   if (interface_function == nullptr || interface_function->isDeclaration()) { return binding; }
   llvm::Module* module = interface_function->getParent();
   if (module == nullptr) { return binding; }
+  if (get_vm_pointer_int_type(*interface_function) == nullptr) { return binding; }
 
   llvm::SmallVector<llvm::CallBase*, 16> direct_call_sites;
   for (llvm::User* user : interface_function->users()) {
@@ -1557,8 +1559,8 @@ llvm::GlobalVariable* get_or_create_vm_target_global(llvm::Function& function,
   llvm::Module* module = function.getParent();
   if (module == nullptr) { return nullptr; }
 
-  const llvm::DataLayout& data_layout = module->getDataLayout();
-  auto* ptr_int_type = data_layout.getIntPtrType(module->getContext(), function.getAddressSpace());
+  auto* ptr_int_type = get_vm_pointer_int_type(function);
+  if (ptr_int_type == nullptr) { return nullptr; }
   const llvm::APInt key = derive_vm_target_key(function, ptr_int_type);
   const llvm::APInt sentinel = derive_vm_target_sentinel(key);
 
