@@ -5,6 +5,7 @@
 #include "obf/support/constant_materialization.h"
 #include "obf/support/generated_names.h"
 #include "obf/support/ir_name.h"
+#include "obf/support/value_utils.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/cfg_state_placeholders.h"
 
@@ -185,13 +186,6 @@ std::string to_string(string_use_kind kind) {
   return "generic_operand";
 }
 
-bool operand_references_global(llvm::Value* operand, const llvm::GlobalVariable& global) {
-  if (operand == nullptr) { return false; }
-
-  llvm::Value* underlying = llvm::getUnderlyingObject(operand);
-  return underlying == &global;
-}
-
 bool is_local_constant_forwarding_global(const llvm::GlobalVariable& global) {
   return global.hasInitializer() && global.isConstant() && !global.isThreadLocal() &&
          global.hasLocalLinkage();
@@ -207,8 +201,6 @@ bool is_generated_vm_owner(const llvm::Function& function) {
   return function.getName().starts_with("__obf_vm_");
 }
 
-bool operand_references_value(const llvm::Value* operand, const llvm::Value& value);
-
 bool is_direct_string_pointer_forward(const llvm::Value& value,
                                       const llvm::GlobalVariable& global) {
   const auto* forwarding_global = llvm::dyn_cast<llvm::GlobalVariable>(&value);
@@ -217,7 +209,7 @@ bool is_direct_string_pointer_forward(const llvm::Value& value,
     return false;
   }
 
-  return operand_references_global(const_cast<llvm::Constant*>(forwarding_global->getInitializer()),
+  return support::operand_references_global(const_cast<llvm::Constant*>(forwarding_global->getInitializer()),
                                    global);
 }
 
@@ -227,7 +219,7 @@ bool is_forwarded_string_pointer_load(const llvm::Value& value,
   const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction);
   return load != nullptr && load->getType()->isPointerTy() &&
          is_direct_string_pointer_forward(value, global) &&
-         operand_references_value(load->getPointerOperand(), value);
+         support::operand_references_value(load->getPointerOperand(), value);
 }
 
 bool is_inline_safe_forwarded_pointer_value(const llvm::Value& value,
@@ -239,18 +231,18 @@ bool is_inline_safe_forwarded_pointer_value(const llvm::Value& value,
     if (instruction == nullptr) { return false; }
 
     if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(instruction)) {
-      if (!operand_references_value(load->getPointerOperand(), value)) { return false; }
+      if (!support::operand_references_value(load->getPointerOperand(), value)) { return false; }
       continue;
     }
 
     if (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(instruction)) {
-      if (!operand_references_value(gep->getPointerOperand(), value)) { return false; }
+      if (!support::operand_references_value(gep->getPointerOperand(), value)) { return false; }
       if (!is_inline_safe_forwarded_pointer_value(*gep, visited)) { return false; }
       continue;
     }
 
     if (const auto* cast = llvm::dyn_cast<llvm::BitCastInst>(instruction)) {
-      if (!operand_references_value(cast->getOperand(0), value)) { return false; }
+      if (!support::operand_references_value(cast->getOperand(0), value)) { return false; }
       if (!is_inline_safe_forwarded_pointer_value(*cast, visited)) { return false; }
       continue;
     }
@@ -272,19 +264,6 @@ bool is_inline_safe_forwarded_pointer_value(const llvm::Value& value) {
   return is_inline_safe_forwarded_pointer_value(value, visited);
 }
 
-bool operand_references_value(const llvm::Value* operand, const llvm::Value& value) {
-  if (operand == nullptr) { return false; }
-
-  if (operand == &value) { return true; }
-
-  if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(&value)) {
-    return operand_references_global(const_cast<llvm::Value*>(operand), *global);
-  }
-
-  llvm::Value* underlying = llvm::getUnderlyingObject(const_cast<llvm::Value*>(operand));
-  return underlying == &value;
-}
-
 bool collect_forwarded_pointer_load_uses(const llvm::Value& value,
                                          const llvm::Instruction& instruction,
                                          bool is_protected,
@@ -296,7 +275,7 @@ bool collect_forwarded_pointer_load_uses(const llvm::Value& value,
 
   bool matched_forwarding_operand = false;
   for (llvm::Value* operand : instruction.operands()) {
-    if (operand_references_value(operand, value)) {
+    if (support::operand_references_value(operand, value)) {
       matched_forwarding_operand = true;
       break;
     }
@@ -342,7 +321,7 @@ bool has_forwarded_pointer_table_use(const llvm::Value& value,
 
       if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(instruction)) {
         if (load->getType()->isPointerTy() &&
-            operand_references_value(load->getPointerOperand(), value)) {
+            support::operand_references_value(load->getPointerOperand(), value)) {
           return true;
         }
       }
@@ -483,7 +462,7 @@ void collect_string_users(const llvm::Value& value,
       bool matched_operand = false;
       for (unsigned operand_index = 0; operand_index < instruction->getNumOperands();
            ++operand_index) {
-        if (!operand_references_global(instruction->getOperand(operand_index), global)) {
+        if (!support::operand_references_global(instruction->getOperand(operand_index), global)) {
           continue;
         }
 

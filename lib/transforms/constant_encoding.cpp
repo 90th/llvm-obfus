@@ -6,6 +6,7 @@
 #include "obf/support/generated_names.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
+#include "obf/support/value_utils.h"
 #include "obf/transforms/mba.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -155,35 +156,6 @@ bool is_supported_constant_operand(const llvm::Instruction& instruction,
   return true;
 }
 
-void add_unique_function(llvm::SmallVectorImpl<llvm::Function*>& functions,
-                         llvm::Function* function) {
-  if (function == nullptr) { return; }
-  if (std::find(functions.begin(), functions.end(), function) != functions.end()) { return; }
-  functions.push_back(function);
-}
-
-bool constant_references_value(const llvm::Constant* constant, const llvm::Value& value) {
-  if (constant == &value) { return true; }
-
-  for (const llvm::Value* operand : constant->operands()) {
-    if (operand == &value) { return true; }
-    const auto* operand_constant = llvm::dyn_cast<llvm::Constant>(operand);
-    if (operand_constant != nullptr && constant_references_value(operand_constant, value)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-bool operand_references_value(const llvm::Value* operand, const llvm::Value& value) {
-  if (operand == nullptr) { return false; }
-  if (operand == &value) { return true; }
-
-  const auto* operand_constant = llvm::dyn_cast<llvm::Constant>(operand);
-  return operand_constant != nullptr && constant_references_value(operand_constant, value);
-}
-
 bool expand_constant_expressions_referencing_global(llvm::Function& function,
                                                     const llvm::GlobalVariable& global) {
   llvm::SmallVector<llvm::Instruction*, 64> instructions;
@@ -199,7 +171,7 @@ bool expand_constant_expressions_referencing_global(llvm::Function& function,
       for (unsigned incoming_index = 0; incoming_index < phi->getNumIncomingValues();
            ++incoming_index) {
         auto* constant = llvm::dyn_cast<llvm::Constant>(phi->getIncomingValue(incoming_index));
-        if (constant == nullptr || !constant_references_value(constant, global)) { continue; }
+        if (constant == nullptr || !support::constant_references_value(constant, global)) { continue; }
 
         llvm::Instruction* insert_before = phi->getIncomingBlock(incoming_index)->getTerminator();
         phi->setIncomingValue(incoming_index,
@@ -212,7 +184,7 @@ bool expand_constant_expressions_referencing_global(llvm::Function& function,
     for (unsigned operand_index = 0; operand_index < instruction->getNumOperands();
          ++operand_index) {
       auto* constant = llvm::dyn_cast<llvm::Constant>(instruction->getOperand(operand_index));
-      if (constant == nullptr || !constant_references_value(constant, global)) { continue; }
+      if (constant == nullptr || !support::constant_references_value(constant, global)) { continue; }
 
       instruction->setOperand(operand_index,
                               support::materialize_constant_expression(constant, instruction));
@@ -233,7 +205,7 @@ void collect_keyed_pool_table_users(const llvm::Value& value,
     if (const auto* instruction = llvm::dyn_cast<llvm::Instruction>(user)) {
       llvm::Function* function = const_cast<llvm::Function*>(instruction->getFunction());
       if (function != nullptr && get_seed(function->getName()).has_value()) {
-        add_unique_function(summary.protected_functions, function);
+        support::add_unique_function(summary.protected_functions, function);
       } else {
         summary.has_unprotected_use = true;
       }
@@ -333,7 +305,7 @@ void collect_direct_keyed_pool_table_uses(llvm::GlobalVariable& global,
     if (function == nullptr || !get_seed(function->getName()).has_value()) { continue; }
 
     for (unsigned operand_index = 0; operand_index < instruction->getNumOperands(); ++operand_index) {
-      if (!operand_references_value(instruction->getOperand(operand_index), global)) { continue; }
+      if (!support::operand_references_value(instruction->getOperand(operand_index), global)) { continue; }
 
       uses.push_back({.instruction = instruction, .operand_index = operand_index, .function = function});
     }
@@ -959,7 +931,7 @@ void rewrite_keyed_pool_table_use(llvm::Instruction& instruction,
     }
   }
 
-  if (rewritten == nullptr && operand_references_value(operand, global)) {
+  if (rewritten == nullptr && support::operand_references_value(operand, global)) {
     rewritten = builder.CreateCall(&helper, {}, "obf.const.pool.base");
   }
 

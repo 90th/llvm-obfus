@@ -135,6 +135,7 @@ add_library(obf_core
   lib/support/affine_helpers.cpp
   lib/support/constant_materialization.cpp
   lib/support/mba_config_builder.cpp
+  lib/support/value_utils.cpp
 )
 llvm_update_compile_flags(obf_core)
 target_include_directories(obf_core PUBLIC ${PROJECT_SOURCE_DIR}/include
