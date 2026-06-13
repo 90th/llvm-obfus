@@ -135,6 +135,7 @@ add_library(obf_core
   lib/support/affine_helpers.cpp
   lib/support/constant_materialization.cpp
   lib/support/decoy_trap.cpp
+  lib/support/flattening_metadata.cpp
   lib/support/mba_config_builder.cpp
   lib/support/value_utils.cpp
 )

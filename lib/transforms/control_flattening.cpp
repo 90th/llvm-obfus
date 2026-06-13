@@ -1,6 +1,7 @@
 #include "obf/transforms/control_flattening.h"
 
 #include "obf/support/decoy_trap.h"
+#include "obf/support/flattening_metadata.h"
 #include "obf/support/ir_name.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
@@ -220,6 +221,7 @@ llvm::BasicBlock* create_decoy_trap(llvm::Function& function,
                                                      mix_seed(salt_base, 0xd6e8feb86659fd93ULL)),
                               "obf.flat.decoy.state.init");
   entry_builder.CreateBr(loop);
+  flattening::tag_block(*entry, flattening::block_role::decoy);
 
   llvm::IRBuilder<> loop_builder(loop);
   llvm::PHINode* iteration =
@@ -241,6 +243,7 @@ llvm::BasicBlock* create_decoy_trap(llvm::Function& function,
   llvm::Value* continue_loop = loop_builder.CreateAnd(
       predicate, below_limit, "obf.flat.decoy.cont");
   loop_builder.CreateCondBr(continue_loop, loop, trap);
+  flattening::tag_block(*loop, flattening::block_role::decoy);
 
   iteration->addIncoming(llvm::ConstantInt::get(loop_builder.getInt32Ty(), 0), entry);
   iteration->addIncoming(loop_state.next_iteration, loop);
@@ -250,6 +253,7 @@ llvm::BasicBlock* create_decoy_trap(llvm::Function& function,
   llvm::IRBuilder<> trap_builder(trap);
   trap_builder.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(module, llvm::Intrinsic::trap));
   trap_builder.CreateUnreachable();
+  flattening::tag_block(*trap, flattening::block_role::decoy);
   return entry;
 }
 
@@ -371,13 +375,15 @@ llvm::Value* materialize_dispatch_state_constant(llvm::IRBuilder<>& builder,
 void emit_dispatch_subtree(llvm::BasicBlock& block,
                            const dispatch_tree_context& context,
                            std::vector<dispatch_case> cases,
-                           std::size_t depth);
+                           std::size_t depth,
+                           flattening::block_role role);
 
 void emit_dispatch_leaf(llvm::BasicBlock& block,
                         const dispatch_tree_context& context,
                         const dispatch_case& single_case,
                         std::size_t depth,
-                        std::size_t ordinal) {
+                        std::size_t ordinal,
+                        flattening::block_role role) {
   llvm::IRBuilder<> builder(&block);
   llvm::Value* compare_state = materialize_dispatch_state_constant(
       builder,
@@ -388,21 +394,24 @@ void emit_dispatch_leaf(llvm::BasicBlock& block,
   llvm::Value* is_match =
       builder.CreateICmpEQ(context.state_value, compare_state, "obf.flat.dispatch.eq");
   builder.CreateCondBr(is_match, single_case.target, context.default_target);
+  flattening::tag_block(block, role);
 }
 
 void emit_dispatch_subtree(llvm::BasicBlock& block,
                            const dispatch_tree_context& context,
                            std::vector<dispatch_case> cases,
-                           std::size_t depth) {
+                           std::size_t depth,
+                           flattening::block_role role) {
   if (cases.empty()) {
     llvm::IRBuilder<> builder(&block);
     builder.CreateBr(context.default_target);
+    flattening::tag_block(block, role);
     return;
   }
 
   const std::size_t ordinal = context.tree_state.next_ordinal++;
   if (cases.size() == 1) {
-    emit_dispatch_leaf(block, context, cases.front(), depth, ordinal);
+    emit_dispatch_leaf(block, context, cases.front(), depth, ordinal, role);
     return;
   }
 
@@ -468,11 +477,13 @@ void emit_dispatch_subtree(llvm::BasicBlock& block,
   split_builder.CreateCondBr(is_less,
                              left_entry != nullptr ? left_entry : context.default_target,
                              right_entry != nullptr ? right_entry : context.default_target);
+  flattening::tag_block(*split_block, flattening::block_role::dispatch_split);
 
-  if (left_entry != nullptr) { emit_dispatch_subtree(*left_entry, context, left_cases, depth + 1); }
+  if (left_entry != nullptr) { emit_dispatch_subtree(*left_entry, context, left_cases, depth + 1, flattening::block_role::dispatch_left); }
   if (right_entry != nullptr) {
-    emit_dispatch_subtree(*right_entry, context, right_cases, depth + 1);
+    emit_dispatch_subtree(*right_entry, context, right_cases, depth + 1, flattening::block_role::dispatch_right);
   }
+  flattening::tag_block(block, role);
 }
 
 }  // namespace
@@ -528,6 +539,7 @@ control_flattening_result run_control_flattening(llvm::Function& function,
       llvm::BasicBlock::Create(context, "obf.flat.dispatch", &function, original_entry);
   llvm::IRBuilder<> setup_builder(setup);
   setup_builder.CreateBr(dispatch);
+  flattening::tag_block(*setup, flattening::block_role::setup);
   hoist_entry_allocas_to_setup(*original_entry, *setup);
 
   std::vector<llvm::BasicBlock*> blocks;
@@ -642,6 +654,7 @@ control_flattening_result run_control_flattening(llvm::Function& function,
                           transition_salt + static_cast<std::uint64_t>(transition_edges.size() + 1),
                           state_ids[successor]);
       edge_builder.CreateBr(dispatch);
+      flattening::tag_block(*edge_block, flattening::block_role::edge);
       block_edges.push_back(
           {.source = block, .successor = successor, .block = edge_block, .next_state = next_state});
     }
@@ -688,7 +701,9 @@ control_flattening_result run_control_flattening(llvm::Function& function,
       .mba_context = mba_context,
       .tree_state = tree_state,
   };
-  emit_dispatch_subtree(*dispatch, tree_context, dispatch_cases, 0);
+  emit_dispatch_subtree(*dispatch, tree_context, dispatch_cases, 0, flattening::block_role::root_dispatch);
+
+  flattening::tag_function(function);
 
   return {.flattened = true,
           .state_count = analysis.state_count + decoy_states.size(),
