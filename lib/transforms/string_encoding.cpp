@@ -2,6 +2,7 @@
 
 #include "obf/analysis/annotation_utils.h"
 #include "obf/support/auth_encoding.h"
+#include "obf/support/constant_materialization.h"
 #include "obf/support/generated_names.h"
 #include "obf/support/ir_name.h"
 #include "obf/support/stable_hash.h"
@@ -1253,11 +1254,6 @@ llvm::StructType* get_authenticated_descriptor_type(llvm::LLVMContext& context) 
                                tag_type);
 }
 
-llvm::Constant* create_byte_array_constant(llvm::LLVMContext& context,
-                                           llvm::ArrayRef<std::uint8_t> bytes) {
-  return llvm::ConstantDataArray::get(context, bytes);
-}
-
 llvm::Constant* create_authenticated_descriptor_initializer(
     llvm::LLVMContext& context,
     const string_strategy_plan& plan,
@@ -1282,8 +1278,8 @@ llvm::Constant* create_authenticated_descriptor_initializer(
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), plan.site_id));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.version));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.flags));
-  fields.push_back(create_byte_array_constant(context, payload.metadata.nonce));
-  fields.push_back(create_byte_array_constant(context, payload.tag));
+  fields.push_back(support::create_byte_array_constant(context, payload.metadata.nonce));
+  fields.push_back(support::create_byte_array_constant(context, payload.tag));
   return llvm::ConstantStruct::get(descriptor_type, fields);
 }
 

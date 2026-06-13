@@ -133,6 +133,7 @@ add_library(obf_core
   lib/vm/virtualize.cpp
   # Support
   lib/support/affine_helpers.cpp
+  lib/support/constant_materialization.cpp
   lib/support/mba_config_builder.cpp
 )
 llvm_update_compile_flags(obf_core)

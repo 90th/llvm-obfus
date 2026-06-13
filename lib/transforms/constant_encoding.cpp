@@ -2,6 +2,7 @@
 
 #include "obf/analysis/annotation_utils.h"
 #include "obf/support/auth_encoding.h"
+#include "obf/support/constant_materialization.h"
 #include "obf/support/generated_names.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
@@ -183,22 +184,6 @@ bool operand_references_value(const llvm::Value* operand, const llvm::Value& val
   return operand_constant != nullptr && constant_references_value(operand_constant, value);
 }
 
-llvm::Value* materialize_constant_expression(llvm::Value* value, llvm::Instruction* insert_before) {
-  auto* expression = llvm::dyn_cast<llvm::ConstantExpr>(value);
-  if (expression == nullptr) { return value; }
-
-  llvm::Instruction* materialized = expression->getAsInstruction();
-  materialized->insertBefore(insert_before->getIterator());
-  for (unsigned operand_index = 0; operand_index < materialized->getNumOperands();
-       ++operand_index) {
-    materialized->setOperand(
-        operand_index,
-        materialize_constant_expression(materialized->getOperand(operand_index), materialized));
-  }
-
-  return materialized;
-}
-
 bool expand_constant_expressions_referencing_global(llvm::Function& function,
                                                     const llvm::GlobalVariable& global) {
   llvm::SmallVector<llvm::Instruction*, 64> instructions;
@@ -218,7 +203,7 @@ bool expand_constant_expressions_referencing_global(llvm::Function& function,
 
         llvm::Instruction* insert_before = phi->getIncomingBlock(incoming_index)->getTerminator();
         phi->setIncomingValue(incoming_index,
-                              materialize_constant_expression(constant, insert_before));
+                              support::materialize_constant_expression(constant, insert_before));
         changed = true;
       }
       continue;
@@ -230,7 +215,7 @@ bool expand_constant_expressions_referencing_global(llvm::Function& function,
       if (constant == nullptr || !constant_references_value(constant, global)) { continue; }
 
       instruction->setOperand(operand_index,
-                              materialize_constant_expression(constant, instruction));
+                              support::materialize_constant_expression(constant, instruction));
       changed = true;
     }
   }
@@ -482,11 +467,6 @@ std::uint64_t derive_keyed_pool_module_id(const llvm::Module& module) {
   return module_id;
 }
 
-llvm::Constant* create_byte_array_constant(llvm::LLVMContext& context,
-                                           llvm::ArrayRef<std::uint8_t> bytes) {
-  return llvm::ConstantDataArray::get(context, bytes);
-}
-
 llvm::StructType* get_keyed_pool_descriptor_type(llvm::LLVMContext& context) {
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type* i32_ptr_type = llvm::PointerType::getUnqual(context);
@@ -528,7 +508,7 @@ llvm::GlobalVariable* create_keyed_pool_ciphertext_global(llvm::Module& module,
                                                        payload.ciphertext.size()),
                                   true,
                                   llvm::GlobalValue::InternalLinkage,
-                                  create_byte_array_constant(module.getContext(), payload.ciphertext),
+                                  support::create_byte_array_constant(module.getContext(), payload.ciphertext),
                                   name);
 }
 
@@ -600,8 +580,8 @@ llvm::GlobalVariable* create_keyed_pool_descriptor_global(llvm::Module& module,
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.pool_id));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.version));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.flags));
-  fields.push_back(create_byte_array_constant(context, payload.metadata.nonce));
-  fields.push_back(create_byte_array_constant(context, payload.tag));
+  fields.push_back(support::create_byte_array_constant(context, payload.metadata.nonce));
+  fields.push_back(support::create_byte_array_constant(context, payload.tag));
   const std::string name =
       make_unique_obf_symbol_name(module, "__obf_const_desc", "pool", seed ^ pool_id ^ 0xd35cULL);
   return new llvm::GlobalVariable(module,

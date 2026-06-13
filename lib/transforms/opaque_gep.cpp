@@ -1,5 +1,6 @@
 #include "obf/transforms/opaque_gep.h"
 
+#include "obf/support/constant_materialization.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
@@ -38,21 +39,7 @@ std::uint64_t derive_mba_seed(const llvm::Function& function) {
   return seed == 0 ? 0x61e1f3b77b6d4c29ULL : seed;
 }
 
-llvm::Value* materialize_constant_expression(llvm::Value* value, llvm::Instruction* insert_before) {
-  auto* expression = llvm::dyn_cast<llvm::ConstantExpr>(value);
-  if (expression == nullptr) { return value; }
 
-  llvm::Instruction* materialized = expression->getAsInstruction();
-  materialized->insertBefore(insert_before->getIterator());
-  for (unsigned operand_index = 0; operand_index < materialized->getNumOperands();
-       ++operand_index) {
-    materialized->setOperand(
-        operand_index,
-        materialize_constant_expression(materialized->getOperand(operand_index), materialized));
-  }
-
-  return materialized;
-}
 
 bool expand_gep_constant_expressions(llvm::Function& function) {
   llvm::SmallVector<llvm::Instruction*, 64> instructions;
@@ -72,7 +59,7 @@ bool expand_gep_constant_expressions(llvm::Function& function) {
 
         llvm::Instruction* insert_before = phi->getIncomingBlock(incoming_index)->getTerminator();
         phi->setIncomingValue(incoming_index,
-                              materialize_constant_expression(constant, insert_before));
+                              support::materialize_constant_expression(constant, insert_before));
         changed = true;
       }
       continue;
@@ -84,7 +71,7 @@ bool expand_gep_constant_expressions(llvm::Function& function) {
       if (constant == nullptr || !constant_contains_gep(constant)) { continue; }
 
       instruction->setOperand(operand_index,
-                              materialize_constant_expression(constant, instruction));
+                              support::materialize_constant_expression(constant, instruction));
       changed = true;
     }
   }

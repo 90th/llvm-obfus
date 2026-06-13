@@ -1,5 +1,6 @@
 #include "obf/vm/virtualize_internal.h"
 
+#include "obf/support/constant_materialization.h"
 #include "obf/support/stable_hash.h"
 
 #include "llvm/ADT/StringExtras.h"
@@ -12,14 +13,6 @@
 namespace obf::vm {
 
 namespace {
-
-std::uint64_t stable_hash_constant(const llvm::Constant& constant) {
-  std::string printed;
-  llvm::raw_string_ostream stream(printed);
-  constant.printAsOperand(stream, /*PrintType=*/true);
-  stream.flush();
-  return stable_hash_string(printed);
-}
 
 bool should_obfuscate_vm_constant(const llvm::ConstantInt& constant) {
   if (constant.getType()->isIntegerTy(1)) { return false; }
@@ -90,7 +83,7 @@ llvm::Value* materialize_constant(llvm::IRBuilder<>& builder,
 llvm::GlobalVariable* get_or_create_pointer_constant_cell(llvm::Module& module,
                                                           const llvm::Constant& constant) {
   const std::string global_name =
-      ("__obf_vm_ptrconst_" + llvm::utohexstr(stable_hash_constant(constant)));
+      ("__obf_vm_ptrconst_" + llvm::utohexstr(support::stable_hash_constant(constant)));
   if (llvm::GlobalVariable* existing = module.getNamedGlobal(global_name)) {
     if (existing->getValueType() != constant.getType()) {
       llvm_unreachable("vm pointer constant cell has unexpected type");
