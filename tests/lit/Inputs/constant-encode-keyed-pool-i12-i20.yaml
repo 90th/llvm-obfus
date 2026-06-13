@@ -1,0 +1,13 @@
+seed: 4242
+default_level: none
+targets:
+  - match: i12_values
+    level: strong
+  - match: i20_values
+    level: strong
+  - match: i24_values
+    level: strong
+constant_encoding:
+  mode: keyed_pool
+  max_constants_per_function: 8
+  min_bit_width: 8

@@ -111,7 +111,7 @@ bool is_auto_inline_instruction(const llvm::Instruction& instruction) {
 bool is_large_constant_type(const llvm::IntegerType& type) { return type.getBitWidth() > 32; }
 
 std::size_t get_storage_bytes(const llvm::APInt& value) {
-  return std::max<std::size_t>(1, value.getBitWidth() / 8);
+  return std::max<std::size_t>(1, (value.getBitWidth() + 7) / 8);
 }
 
 bool is_supported_constant_operand(const llvm::Instruction& instruction,
