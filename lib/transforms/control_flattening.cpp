@@ -1,5 +1,6 @@
 #include "obf/transforms/control_flattening.h"
 
+#include "obf/support/ir_name.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/cfg_state_placeholders.h"
@@ -361,10 +362,6 @@ void shuffle_dispatch_cases(std::vector<dispatch_case>& cases, std::mt19937& rng
   std::shuffle(cases.begin(), cases.end(), rng);
 }
 
-std::string make_dispatch_block_name(llvm::StringRef role, std::size_t ordinal) {
-  return ("obf.flat.dispatch." + role + std::to_string(ordinal)).str();
-}
-
 std::uint64_t build_dispatch_tree_salt(const mba::builder_context& mba_context,
                                        std::size_t depth,
                                        std::size_t ordinal,
@@ -447,16 +444,22 @@ void emit_dispatch_subtree(llvm::BasicBlock& block,
   }
 
   llvm::BasicBlock* split_block = llvm::BasicBlock::Create(
-      context.function.getContext(), make_dispatch_block_name("split", ordinal), &context.function);
+      context.function.getContext(),
+      obf::support::scoped_ir_name("obf.flat.dispatch", "split", ordinal),
+      &context.function);
   llvm::BasicBlock* left_entry = left_cases.empty()
                                      ? nullptr
                                      : llvm::BasicBlock::Create(context.function.getContext(),
-                                                               make_dispatch_block_name("left", ordinal),
+                                                               obf::support::scoped_ir_name("obf.flat.dispatch",
+                                                                                            "left",
+                                                                                            ordinal),
                                                                &context.function);
   llvm::BasicBlock* right_entry = right_cases.empty()
                                       ? nullptr
                                       : llvm::BasicBlock::Create(context.function.getContext(),
-                                                                make_dispatch_block_name("right", ordinal),
+                                                                obf::support::scoped_ir_name("obf.flat.dispatch",
+                                                                                             "right",
+                                                                                             ordinal),
                                                                 &context.function);
 
   llvm::IRBuilder<> equality_builder(&block);

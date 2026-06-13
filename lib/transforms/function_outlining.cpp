@@ -1,5 +1,6 @@
 #include "obf/transforms/function_outlining.h"
 
+#include "obf/support/ir_name.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
@@ -149,12 +150,6 @@ std::size_t choose_cluster_size(std::size_t remaining,
   return std::clamp(chosen, min_size, max_size);
 }
 
-std::string build_shard_name(std::uint64_t seed, std::uint64_t index) {
-  return "__obf_shard_" +
-         llvm::utohexstr(mix_seed(seed == 0 ? 0xbadc0ffee0ddf00dULL : seed, index + 1),
-                         /*LowerCase=*/true);
-}
-
 void obfuscate_shard_calls(llvm::Function& parent,
                            llvm::Function& shard,
                            const function_outlining_options& options,
@@ -274,7 +269,7 @@ bool try_extract_cluster(llvm::Function& function,
                                 /*AllowVarArgs=*/false,
                                 /*AllowAlloca=*/false,
                                 /*AllocationBlock=*/nullptr,
-                                build_shard_name(options.seed, cluster_index));
+                                support::shard_name(options.seed, cluster_index));
   if (!extractor.isEligible()) {
     discard_cluster();
     return false;
@@ -286,7 +281,7 @@ bool try_extract_cluster(llvm::Function& function,
     return false;
   }
 
-  shard->setName(build_shard_name(options.seed, cluster_index));
+  shard->setName(support::shard_name(options.seed, cluster_index));
   shard->setLinkage(llvm::GlobalValue::InternalLinkage);
   shard->setDSOLocal(true);
   obfuscate_shard_calls(function, *shard, options, cluster_index + 1);

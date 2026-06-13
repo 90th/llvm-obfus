@@ -1,6 +1,7 @@
 #include "obf/transforms/indirect_dispatch.h"
 
 #include "obf/support/affine_helpers.h"
+#include "obf/support/ir_name.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
@@ -84,10 +85,6 @@ void append_selection_summary(std::string& detail, const site_collection& collec
   detail += ", shape=";
   detail += selected_site_shape(collection.selected_branch_sites, collection.selected_switch_sites).str();
   detail += ")";
-}
-
-std::string make_site_name(std::size_t site_index, llvm::StringRef suffix) {
-  return "obf.idis.site" + std::to_string(site_index) + "." + suffix.str();
 }
 
 std::string make_result_detail(const indirect_dispatch_result& result, llvm::StringRef suffix) {
@@ -405,22 +402,26 @@ site_masking materialize_site_tokens(llvm::Function& function,
     if (use_affine_delta) {
       encoded_delta = support::build_affine_encode(
           entry_builder, delta, affine_multiplier_constant->getValue(), affine_bias_constant->getValue(),
-          make_site_name(site_index, "aff" + std::to_string(target_index)));
+          support::scoped_ir_name(std::string("obf.idis.site") + std::to_string(site_index),
+                                  "aff" + std::to_string(target_index)));
     }
 
     llvm::Value* xored = entry_builder.CreateXor(
         encoded_delta,
         key_constant,
-        make_site_name(site_index, "xor" + std::to_string(target_index)));
+        support::scoped_ir_name(std::string("obf.idis.site") + std::to_string(site_index),
+                                "xor" + std::to_string(target_index)));
     llvm::Value* rotated = support::rotate_left_scalar(entry_builder,
                                               xored,
                                               rotate_amount,
-                                              make_site_name(site_index,
-                                                             "rot" + std::to_string(target_index)));
+                                              support::scoped_ir_name(
+                                                  std::string("obf.idis.site") + std::to_string(site_index),
+                                                  "rot" + std::to_string(target_index)));
     llvm::Value* encoded = entry_builder.CreateAdd(
         rotated,
         bias_constant,
-        make_site_name(site_index, "tok" + std::to_string(target_index)));
+        support::scoped_ir_name(std::string("obf.idis.site") + std::to_string(site_index),
+                                "tok" + std::to_string(target_index)));
     masking.encoded_tokens[target] = encoded;
   }
 

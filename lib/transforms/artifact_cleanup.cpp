@@ -1,5 +1,6 @@
 #include "obf/transforms/artifact_cleanup.h"
 
+#include "obf/support/ir_name.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/cfg_state_placeholders.h"
 
@@ -75,26 +76,6 @@ bool ShouldRenameAlias(const llvm::GlobalAlias& alias, const artifact_cleanup_op
   return alias.getName().starts_with("__obf_") || alias.hasLocalLinkage();
 }
 
-std::string BuildObfuscatedName(const llvm::Module& module,
-                                llvm::StringRef original_name,
-                                std::uint64_t seed_base,
-                                std::uint64_t ordinal) {
-  std::uint64_t state = seed_base == 0 ? 0x6d2534f1f6c7a29bULL : seed_base;
-  state = mix_seed(state, stable_hash_string(module.getName()));
-  state = mix_seed(state, stable_hash_string(original_name));
-  state = mix_seed(state, ordinal + 1);
-
-  const std::size_t hex_length = 12 + static_cast<std::size_t>(state & 0xfU);
-  std::string material;
-  material.reserve(hex_length + 16);
-  while (material.size() < hex_length) {
-    material += llvm::utohexstr(state, /*LowerCase=*/true);
-    state = mix_seed(state, material.size() + 1);
-  }
-
-  return "_" + material.substr(0, hex_length);
-}
-
 template <typename GlobalT>
 bool RenameGlobalLike(GlobalT& value,
                       const llvm::Module& module,
@@ -105,7 +86,8 @@ bool RenameGlobalLike(GlobalT& value,
 
   std::uint64_t salt = ordinal;
   while (true) {
-    const std::string candidate = BuildObfuscatedName(module, original_name, options.seed, salt);
+    const std::string candidate = obf::support::obfuscated_symbol_name(
+        module.getName(), original_name, options.seed, salt);
     llvm::GlobalValue* existing = module.getNamedValue(candidate);
     if (existing == nullptr || existing == &value) {
       if (candidate == original_name) { return false; }

@@ -3,6 +3,7 @@
 #include "obf/analysis/annotation_utils.h"
 #include "obf/support/auth_encoding.h"
 #include "obf/support/generated_names.h"
+#include "obf/support/ir_name.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/cfg_state_placeholders.h"
 
@@ -566,22 +567,8 @@ llvm::Value* create_cfg_state_placeholder_call(llvm::IRBuilder<>& builder,
   return builder.CreateCall(placeholder);
 }
 
-std::string sanitize_name(llvm::StringRef name) {
-  std::string result;
-  result.reserve(name.size());
-  for (const char ch : name) {
-    if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) {
-      result.push_back(ch);
-    } else {
-      result.push_back('_');
-    }
-  }
-
-  return result;
-}
-
 std::string make_decoder_name(llvm::StringRef global_name, llvm::StringRef prefix) {
-  return (prefix + sanitize_name(global_name)).str();
+  return obf::support::scoped_ir_name(prefix, obf::support::sanitize_ir_name(global_name));
 }
 
 std::string make_string_generated_name(llvm::Module& module,
