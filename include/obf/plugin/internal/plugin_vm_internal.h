@@ -1,6 +1,7 @@
 #ifndef OBF_PLUGIN_INTERNAL_PLUGIN_VM_INTERNAL_H
 #define OBF_PLUGIN_INTERNAL_PLUGIN_VM_INTERNAL_H
 
+#include "obf/frontend/config.h"
 #include "obf/plugin/internal/plugin_vm_types.h"
 
 namespace obf {
