@@ -1,7 +1,8 @@
 #pragma once
 
+#include "obf/plugin/internal/plugin_vm_types.h"
+
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Module.h"
 #include "obf/frontend/config.h"
@@ -17,12 +18,8 @@ namespace obf {
 // Forward declarations (opaque types to break coupling)
 struct function_pipeline_state;
 struct obfuscation_config;
-struct virtualized_function_binding;
 struct function_report_entry;
 // Note: protection_level is defined in config.h (included above), no forward needed
-
-// Typedefs
-using virtualized_function_map = llvm::StringMap<virtualized_function_binding>;
 
 // Core pipeline functions
 llvm::SmallVector<function_pipeline_state, 32>

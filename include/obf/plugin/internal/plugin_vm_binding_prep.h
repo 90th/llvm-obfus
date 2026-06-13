@@ -1,0 +1,7 @@
+#ifndef OBF_PLUGIN_INTERNAL_PLUGIN_VM_BINDING_PREP_H
+#define OBF_PLUGIN_INTERNAL_PLUGIN_VM_BINDING_PREP_H
+
+namespace obf {
+}
+
+#endif

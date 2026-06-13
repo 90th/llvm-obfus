@@ -1,0 +1,7 @@
+#ifndef OBF_VM_INTERNAL_VIRTUALIZE_BODY_REWRITE_H
+#define OBF_VM_INTERNAL_VIRTUALIZE_BODY_REWRITE_H
+
+namespace obf::vm {
+}
+
+#endif

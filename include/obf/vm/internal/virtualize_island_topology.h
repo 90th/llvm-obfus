@@ -1,0 +1,7 @@
+#ifndef OBF_VM_INTERNAL_VIRTUALIZE_ISLAND_TOPOLOGY_H
+#define OBF_VM_INTERNAL_VIRTUALIZE_ISLAND_TOPOLOGY_H
+
+namespace obf::vm {
+}
+
+#endif

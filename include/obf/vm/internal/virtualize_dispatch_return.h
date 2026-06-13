@@ -1,0 +1,7 @@
+#ifndef OBF_VM_INTERNAL_VIRTUALIZE_DISPATCH_RETURN_H
+#define OBF_VM_INTERNAL_VIRTUALIZE_DISPATCH_RETURN_H
+
+namespace obf::vm {
+}
+
+#endif

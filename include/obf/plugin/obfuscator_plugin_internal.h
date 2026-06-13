@@ -2,6 +2,7 @@
 #define OBF_PLUGIN_OBFUSCATOR_PLUGIN_INTERNAL_H
 
 #include "obf/frontend/config.h"
+#include "obf/plugin/internal/plugin_vm_types.h"
 #include "obf/report/function_report.h"
 #include "obf/plugin/stage_signatures.h"
 
@@ -24,11 +25,9 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/ValueHandle.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <string>
 
 namespace llvm {
 
@@ -44,36 +43,6 @@ struct function_pipeline_state {
   llvm::Function* function = nullptr;
   function_report_entry report;
   mba::mba_shape_counts mba_counts;
-};
-
-struct virtualized_call_site {
-  llvm::WeakTrackingVH call;
-  std::uint64_t hidden_token = 0;
-};
-
-struct virtualized_function_binding {
-  llvm::Function* interface_function = nullptr;
-  llvm::Function* implementation_function = nullptr;
-  const function_pipeline_state* state = nullptr;
-  llvm::SmallVector<virtualized_call_site, 8> call_sites;
-  std::uint64_t wrapper_token = 0;
-  std::string vm_symbol_tag;
-  std::string target_cache_global_name;
-  std::string target_seed_global_name;
-  std::string decode_key_global_name;
-  std::string seed_case_function_name;
-  bool uses_target_cache = false;
-  bool uses_shared_seed_resolver = false;
-  llvm::Function* entry_thunk_function = nullptr;
-  std::string entry_thunk_function_name;
-};
-
-using virtualized_function_map = llvm::StringMap<virtualized_function_binding>;
-
-struct vm_target_candidate {
-  llvm::Function* function = nullptr;
-  const function_pipeline_state* state = nullptr;
-  std::size_t nesting_depth = 0;
 };
 
 obfuscation_config load_active_config();

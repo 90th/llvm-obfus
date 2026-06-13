@@ -1,16 +1,11 @@
 #pragma once
 
-#include "llvm/ADT/SmallVector.h"
+#include "obf/vm/micro_ir.h"
 
 #include <cstddef>
 #include <cstdint>
 
 namespace obf::vm {
-
-// Type aliases for VM slot storage
-using slot_cells = llvm::SmallVector<llvm::Value*, 4>;
-using slot_storage = llvm::SmallVector<slot_cells, 16>;
-using slot_cell_mapping = std::vector<std::uint32_t>;
 
 // VM configuration constants
 inline constexpr std::uint32_t vm_slot_rotation_cell_count = 3;

@@ -126,6 +126,10 @@ add_library(obf_core
   lib/vm/handler_lowering_memory.cpp
   lib/vm/handler_lowering_scalar.cpp
   lib/vm/value_materialization.cpp
+  lib/vm/virtualize_anchor_scattering.cpp
+  lib/vm/virtualize_island_topology.cpp
+  lib/vm/virtualize_dispatch_return.cpp
+  lib/vm/virtualize_body_rewrite.cpp
   lib/vm/virtualize.cpp
 )
 llvm_update_compile_flags(obf_core)
@@ -134,6 +138,11 @@ target_include_directories(obf_core PUBLIC ${PROJECT_SOURCE_DIR}/include
 target_link_libraries(obf_core PRIVATE ${OBF_LLVM_LIBS})
 
 add_llvm_pass_plugin(obf_plugin
+  lib/plugin/plugin_vm_target_discovery.cpp
+  lib/plugin/plugin_vm_binding_prep.cpp
+  lib/plugin/plugin_vm_resolvers.cpp
+  lib/plugin/plugin_vm_wrapper_emission.cpp
+  lib/plugin/plugin_vm_callsite_rewriting.cpp
   lib/plugin/plugin_vm.cpp
   lib/plugin/plugin_pipeline.cpp
   lib/plugin/plugin_reporting.cpp
