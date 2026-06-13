@@ -132,22 +132,25 @@ bool is_supported_gep(const llvm::GetElementPtrInst& instruction,
 
 llvm::Value* build_scaled_offset_term(llvm::IRBuilder<>& builder,
                                       llvm::Value* index,
+                                      llvm::IntegerType* ptr_int_type,
                                       const llvm::APInt& multiplier,
                                       const mba::builder_context& context,
                                       std::uint64_t salt) {
-  llvm::Value* index64 = index;
-  if (!index64->getType()->isIntegerTy(64)) {
-    index64 = builder.CreateSExtOrTrunc(index64, builder.getInt64Ty(), "obf.gep.index");
+  llvm::Value* scaled_index = index;
+  if (scaled_index->getType() != ptr_int_type) {
+    scaled_index = builder.CreateSExtOrTrunc(index, ptr_int_type, "obf.gep.index");
   }
 
-  const llvm::APInt multiplier64 = multiplier.sextOrTrunc(64);
-  if (multiplier64.isOne()) { return index64; }
+  const llvm::APInt typed_multiplier = multiplier.sextOrTrunc(ptr_int_type->getBitWidth());
+  if (typed_multiplier.isOne()) { return scaled_index; }
 
-  if (multiplier64.isAllOnes()) { return builder.CreateNeg(index64, "obf.gep.scale.neg"); }
+  if (typed_multiplier.isAllOnes()) {
+    return builder.CreateNeg(scaled_index, "obf.gep.scale.neg");
+  }
 
   return mba::create_mul(builder,
-                         index64,
-                         llvm::ConstantInt::get(builder.getInt64Ty(), multiplier64),
+                         scaled_index,
+                         llvm::ConstantInt::get(ptr_int_type, typed_multiplier),
                          context,
                          salt,
                          "obf.gep.scale");
@@ -164,9 +167,12 @@ llvm::Value* lower_gep(llvm::GetElementPtrInst& instruction,
   const llvm::DataLayout& data_layout = module->getDataLayout();
   if (!is_supported_gep(instruction, data_layout)) { return nullptr; }
 
+  auto* ptr_int_type = data_layout.getIntPtrType(function->getContext(), instruction.getAddressSpace());
+  const unsigned ptr_bit_width = ptr_int_type->getBitWidth();
+
   llvm::SmallMapVector<llvm::Value*, llvm::APInt, 4> variable_offsets;
-  llvm::APInt constant_offset(64, 0);
-  if (!instruction.collectOffset(data_layout, 64, variable_offsets, constant_offset)) {
+  llvm::APInt constant_offset(ptr_bit_width, 0);
+  if (!instruction.collectOffset(data_layout, ptr_bit_width, variable_offsets, constant_offset)) {
     return nullptr;
   }
 
@@ -182,20 +188,25 @@ llvm::Value* lower_gep(llvm::GetElementPtrInst& instruction,
   llvm::Value* base_ptr = instruction.getPointerOperand();
   llvm::Value* base_int = llvm::CastInst::Create(llvm::Instruction::PtrToInt,
                                                  base_ptr,
-                                                 builder.getInt64Ty(),
+                                                 ptr_int_type,
                                                  "obf.gep.base",
                                                  instruction.getIterator());
   llvm::Value* offset_value = mba::create_opaque_integer(
-      builder, builder.getInt64Ty(), mba_context, llvm::APInt(64, 0), salt, "obf.gep.offset.base");
+      builder,
+      ptr_int_type,
+      mba_context,
+      llvm::APInt(ptr_bit_width, 0),
+      salt,
+      "obf.gep.offset.base");
 
   std::uint64_t local_salt = salt + 1;
   if (!constant_offset.isZero()) {
     offset_value = mba::create_add(builder,
                                    offset_value,
                                    mba::create_opaque_integer(builder,
-                                                              builder.getInt64Ty(),
+                                                              ptr_int_type,
                                                               mba_context,
-                                                              constant_offset.sextOrTrunc(64),
+                                                              constant_offset.sextOrTrunc(ptr_bit_width),
                                                               local_salt,
                                                               "obf.gep.offset.const"),
                                    mba_context,
@@ -206,7 +217,8 @@ llvm::Value* lower_gep(llvm::GetElementPtrInst& instruction,
 
   for (const auto& entry : variable_offsets) {
     llvm::Value* term =
-        build_scaled_offset_term(builder, entry.first, entry.second, mba_context, local_salt);
+        build_scaled_offset_term(
+            builder, entry.first, ptr_int_type, entry.second, mba_context, local_salt);
     offset_value =
         mba::create_add(builder, offset_value, term, mba_context, local_salt, "obf.gep.offset");
     ++local_salt;

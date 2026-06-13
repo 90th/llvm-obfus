@@ -178,15 +178,19 @@ void obfuscate_shard_calls(llvm::Function& parent,
 
   for (llvm::CallBase* call : calls) {
     llvm::IRBuilder<> builder(call);
+    llvm::Module* module = parent.getParent();
+    if (module == nullptr) { continue; }
+    auto* ptr_int_type =
+        module->getDataLayout().getIntPtrType(parent.getContext(), shard.getAddressSpace());
     llvm::Value* base = llvm::CastInst::Create(llvm::Instruction::PtrToInt,
                                                &shard,
-                                               builder.getInt64Ty(),
+                                               ptr_int_type,
                                                "obf.shard.addr.base",
                                                call->getIterator());
     llvm::Value* zero = mba::create_opaque_integer(builder,
-                                                   builder.getInt64Ty(),
+                                                   ptr_int_type,
                                                    context,
-                                                   llvm::APInt(64, 0),
+                                                   llvm::APInt(ptr_int_type->getBitWidth(), 0),
                                                    local_salt + 0x11ULL,
                                                    "obf.shard.addr.zero");
     llvm::Value* address =
