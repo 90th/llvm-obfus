@@ -1,5 +1,6 @@
 #include "obf/transforms/bogus_control_flow.h"
 
+#include "obf/support/decoy_trap.h"
 #include "obf/transforms/mba.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -44,34 +45,17 @@ void populate_dse_trap(llvm::Function& function, llvm::BasicBlock& bogus, llvm::
   llvm::IRBuilder<> loop_builder(loop);
   llvm::PHINode* iteration = loop_builder.CreatePHI(loop_builder.getInt32Ty(), 2, "obf.bogus.iter");
   llvm::PHINode* state = loop_builder.CreatePHI(loop_builder.getInt64Ty(), 2, "obf.bogus.state");
-  llvm::Value* rotl_shl = loop_builder.CreateShl(
-      state, llvm::ConstantInt::get(loop_builder.getInt64Ty(), 13), "obf.bogus.rotl.shl");
-  llvm::Value* rotl_lshr = loop_builder.CreateLShr(
-      state, llvm::ConstantInt::get(loop_builder.getInt64Ty(), 51), "obf.bogus.rotl.lshr");
-  llvm::Value* rotl = loop_builder.CreateOr(rotl_shl, rotl_lshr, "obf.bogus.rotl");
-  llvm::Value* mixed = loop_builder.CreateXor(
-      rotl,
-      llvm::ConstantInt::get(loop_builder.getInt64Ty(), 0x9e3779b97f4a7c15ULL),
-      "obf.bogus.mix");
-  llvm::Value* multiplied = loop_builder.CreateMul(
-      mixed,
-      llvm::ConstantInt::get(loop_builder.getInt64Ty(), 0x94d049bb133111ebULL),
-      "obf.bogus.mul");
-  llvm::Value* iteration64 =
-      loop_builder.CreateZExt(iteration, loop_builder.getInt64Ty(), "obf.bogus.iter64");
-  llvm::Value* next_state = loop_builder.CreateXor(multiplied, iteration64, "obf.bogus.state.next");
-  llvm::Value* next_iteration = loop_builder.CreateAdd(
-      iteration, llvm::ConstantInt::get(loop_builder.getInt32Ty(), 1), "obf.bogus.iter.next");
+  auto loop_state = support::build_decoy_loop_core(loop_builder, state, iteration, "obf.bogus.decoy");
   llvm::Value* done = loop_builder.CreateICmpEQ(
-      next_iteration,
+      loop_state.next_iteration,
       llvm::ConstantInt::get(loop_builder.getInt32Ty(), dse_trap_iterations),
       "obf.bogus.done");
   loop_builder.CreateCondBr(done, &sink, loop);
 
   iteration->addIncoming(llvm::ConstantInt::get(loop_builder.getInt32Ty(), 0), &bogus);
-  iteration->addIncoming(next_iteration, loop);
+  iteration->addIncoming(loop_state.next_iteration, loop);
   state->addIncoming(initial_state, &bogus);
-  state->addIncoming(next_state, loop);
+  state->addIncoming(loop_state.next_state, loop);
 
   llvm::IRBuilder<> sink_builder(&sink);
   sink_builder.CreateBr(sink.getNextNode());

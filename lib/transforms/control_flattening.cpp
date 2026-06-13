@@ -1,5 +1,6 @@
 #include "obf/transforms/control_flattening.h"
 
+#include "obf/support/decoy_trap.h"
 #include "obf/support/ir_name.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
@@ -225,25 +226,7 @@ llvm::BasicBlock* create_decoy_trap(llvm::Function& function,
       loop_builder.CreatePHI(loop_builder.getInt32Ty(), 2, "obf.flat.decoy.iter");
   llvm::PHINode* state =
       loop_builder.CreatePHI(loop_builder.getInt64Ty(), 2, "obf.flat.decoy.state");
-  llvm::Value* rotl_shl = loop_builder.CreateShl(
-      state, llvm::ConstantInt::get(loop_builder.getInt64Ty(), 13), "obf.flat.decoy.rotl.shl");
-  llvm::Value* rotl_lshr = loop_builder.CreateLShr(
-      state, llvm::ConstantInt::get(loop_builder.getInt64Ty(), 51), "obf.flat.decoy.rotl.lshr");
-  llvm::Value* rotl = loop_builder.CreateOr(rotl_shl, rotl_lshr, "obf.flat.decoy.rotl");
-  llvm::Value* mixed = loop_builder.CreateXor(
-      rotl,
-      llvm::ConstantInt::get(loop_builder.getInt64Ty(), 0x9e3779b97f4a7c15ULL),
-      "obf.flat.decoy.mix");
-  llvm::Value* multiplied = loop_builder.CreateMul(
-      mixed,
-      llvm::ConstantInt::get(loop_builder.getInt64Ty(), 0x94d049bb133111ebULL),
-      "obf.flat.decoy.mul");
-  llvm::Value* iteration64 =
-      loop_builder.CreateZExt(iteration, loop_builder.getInt64Ty(), "obf.flat.decoy.iter64");
-  llvm::Value* next_state =
-      loop_builder.CreateXor(multiplied, iteration64, "obf.flat.decoy.state.next");
-  llvm::Value* next_iteration = loop_builder.CreateAdd(
-      iteration, llvm::ConstantInt::get(loop_builder.getInt32Ty(), 1), "obf.flat.decoy.iter.next");
+  auto loop_state = support::build_decoy_loop_core(loop_builder, state, iteration, "obf.flat.decoy");
   llvm::Value* predicate =
       build_true_opaque_predicate(loop_builder, function, mba_depth, salt_base + 0x71ULL,
                                   max_ir, poly, mul);
@@ -260,9 +243,9 @@ llvm::BasicBlock* create_decoy_trap(llvm::Function& function,
   loop_builder.CreateCondBr(continue_loop, loop, trap);
 
   iteration->addIncoming(llvm::ConstantInt::get(loop_builder.getInt32Ty(), 0), entry);
-  iteration->addIncoming(next_iteration, loop);
+  iteration->addIncoming(loop_state.next_iteration, loop);
   state->addIncoming(initial_state, entry);
-  state->addIncoming(next_state, loop);
+  state->addIncoming(loop_state.next_state, loop);
 
   llvm::IRBuilder<> trap_builder(trap);
   trap_builder.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(module, llvm::Intrinsic::trap));
