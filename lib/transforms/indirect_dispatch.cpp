@@ -456,9 +456,18 @@ llvm::Value* decode_selected_token(llvm::IRBuilder<>& builder,
                                        salt_base ^ 0x23ULL,
                                        "obf.idis.delta");
   if (masking.use_affine_delta) {
-    delta = support::build_affine_decode(
-        builder, delta, masking.affine_inverse_constant->getValue(),
-        masking.affine_bias_constant->getValue(), "obf.idis.affine");
+    llvm::Value* affine_sub = mba::create_sub(builder,
+                                              delta,
+                                              masking.affine_bias_constant,
+                                              mba_context,
+                                              salt_base ^ 0x2dULL,
+                                              "obf.idis.affine.sub");
+    delta = mba::create_mul(builder,
+                            affine_sub,
+                            masking.affine_inverse_constant,
+                            mba_context,
+                            salt_base ^ 0x2fULL,
+                            "obf.idis.affine.dec");
   }
   llvm::Value* anchor = builder.CreatePtrToInt(
       llvm::BlockAddress::get(&function, &anchor_block), masking.int_type, "obf.idis.anchor");
