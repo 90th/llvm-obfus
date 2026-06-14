@@ -27,9 +27,9 @@ right:
 
 ; CHECK-NOT: @__obf_get_cfg_state
 ; CHECK-NOT: @__obf_get_expected_cfg_state
-; CHECK-LABEL: define i32 @main() {
+; CHECK-LABEL: define i32 @main()
 ; CHECK: %obf.state = phi i32
 ; CHECK-DAG: call ptr @[[STRHELPER:__obf_str_l_[A-Za-z0-9_]+]](ptr {{.*}}, i32 %obf.state, i32 {{-?[0-9][0-9][0-9][0-9][0-9]+}})
 ; CHECK-DAG: call ptr @[[STRHELPER]](ptr {{.*}}, i32 %obf.state, i32 {{-?[0-9][0-9][0-9][0-9][0-9]+}})
-; CHECK: define internal ptr @[[STRHELPER]](ptr %desc, i32 %cfg_state, i32 %expected_state) {
+; CHECK: define internal ptr @[[STRHELPER]](ptr %desc, i32 %cfg_state, i32 %expected_state)
 ; CHECK: %obf.str.state.delta = xor i32 %cfg_state, %expected_state
