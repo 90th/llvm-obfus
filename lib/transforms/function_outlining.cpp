@@ -52,6 +52,10 @@ bool is_flattened_function(const llvm::Function& function) {
   return function.getMetadata(flattening::kFlattenedMD) != nullptr;
 }
 
+bool has_legacy_dispatch_name(const llvm::BasicBlock& block) {
+  return block.getName().starts_with("obf.flat.dispatch");
+}
+
 std::optional<flattening::block_role> get_block_role(const llvm::BasicBlock& block) {
   const llvm::Instruction* term = block.getTerminator();
   if (!term) return std::nullopt;
@@ -65,7 +69,7 @@ std::optional<flattening::block_role> get_block_role(const llvm::BasicBlock& blo
 
 bool is_dispatch_block(const llvm::BasicBlock& block) {
   auto role = get_block_role(block);
-  if (!role) return false;
+  if (!role) return has_legacy_dispatch_name(block);
   switch (*role) {
     case flattening::block_role::root_dispatch:
     case flattening::block_role::dispatch_split:
@@ -79,8 +83,8 @@ bool is_dispatch_block(const llvm::BasicBlock& block) {
 
 bool is_dispatch_match_branch(const llvm::BasicBlock& block, const llvm::BranchInst& branch) {
   if (!branch.isConditional()) return false;
-  if (is_dispatch_block(block)) return true;
-  if (!block.getName().starts_with("obf.flat.dispatch")) return false;
+  if (get_block_role(block)) return is_dispatch_block(block);
+  if (!has_legacy_dispatch_name(block)) return false;
   const auto* compare = llvm::dyn_cast<llvm::ICmpInst>(branch.getCondition());
   return compare != nullptr && compare->getPredicate() == llvm::CmpInst::ICMP_EQ;
 }
@@ -346,11 +350,11 @@ function_outlining_result analyze_impl(const llvm::Function& function,
                                        const function_outlining_options& options) {
   if (function.isDeclaration()) { return {.shard_count = 0, .detail = "declaration"}; }
 
-  if (!is_flattened_function(function)) {
+  llvm::Function& mutable_function = const_cast<llvm::Function&>(function);
+  if (!is_flattened_function(function) && find_flatten_default_target(mutable_function) == nullptr) {
     return {.shard_count = 0, .detail = "not a flattened function"};
   }
 
-  llvm::Function& mutable_function = const_cast<llvm::Function&>(function);
   const std::vector<handler_info> handlers = collect_handler_infos(mutable_function, options.seed);
   if (handlers.empty()) { return {.shard_count = 0, .detail = "no handlers found in flattened function"}; }
 
