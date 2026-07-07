@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string_view>
+#include <utility>
 
 LLVM_YAML_IS_SEQUENCE_VECTOR(obf::function_override)
 LLVM_YAML_IS_SEQUENCE_VECTOR(obf::target_rule)
@@ -120,6 +121,7 @@ struct MappingTraits<obf::security_gate_config> {
   static void mapping(IO& io, obf::security_gate_config& config) {
     io.mapOptional("fail_on_public_obf_symbol", config.fail_on_public_obf_symbol, false);
     io.mapOptional("strip_release_markers", config.strip_release_markers, false);
+    io.mapOptional("allow_unsafe_config", config.allow_unsafe_config, false);
   }
 };
 
@@ -284,6 +286,88 @@ obfuscation_config apply_profile_defaults(const obfuscation_config& raw_config,
   return config;
 }
 
+bool is_vm_level(protection_level level) {
+  switch (level) {
+    case protection_level::vm:
+    case protection_level::strong_vm:
+      return true;
+    case protection_level::none:
+    case protection_level::light:
+    case protection_level::strong:
+      return false;
+  }
+  llvm_unreachable("unknown protection level");
+}
+
+bool is_strong_vm_level(protection_level level) {
+  return level == protection_level::strong_vm;
+}
+
+bool config_selects_level(const obfuscation_config& config,
+                          bool (*predicate)(protection_level)) {
+  if (predicate(config.default_level)) { return true; }
+  for (const function_override& override : config.overrides) {
+    if (predicate(override.level)) { return true; }
+  }
+  for (const target_rule& rule : config.targets) {
+    if (predicate(rule.level)) { return true; }
+  }
+  return false;
+}
+
+bool config_selects_vm(const obfuscation_config& config) {
+  return config_selects_level(config, is_vm_level);
+}
+
+bool config_selects_strong_vm(const obfuscation_config& config) {
+  return config_selects_level(config, is_strong_vm_level);
+}
+
+bool is_high_security_profile(config_profile profile) {
+  switch (profile) {
+    case config_profile::fortress:
+    case config_profile::lab:
+      return true;
+    case config_profile::fast:
+    case config_profile::standard:
+    case config_profile::guarded:
+      return false;
+  }
+  llvm_unreachable("unknown config profile");
+}
+
+llvm::Error validate_security_preflight(const obfuscation_config& config) {
+  if (config.security.allow_unsafe_config) { return llvm::Error::success(); }
+
+  if (config.debug_preserve_generated_names && config_selects_vm(config)) {
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "security preflight failure: vm/strong_vm config cannot use "
+        "debug_preserve_generated_names: true; disable debug_preserve_generated_names or set "
+        "security.allow_unsafe_config: true");
+  }
+
+  if (config_selects_strong_vm(config) && !config.security.fail_on_public_obf_symbol) {
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "security preflight failure: strong_vm config requires "
+        "security.fail_on_public_obf_symbol: true; enable the public-symbol gate or set "
+        "security.allow_unsafe_config: true");
+  }
+
+  if (config.profile.has_value() && is_high_security_profile(*config.profile) &&
+      !config.security.fail_on_public_obf_symbol) {
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "security preflight failure: profile %s requires "
+        "security.fail_on_public_obf_symbol: true; enable the public-symbol gate or set "
+        "security.allow_unsafe_config: true",
+        to_string(*config.profile).str().c_str());
+  }
+
+  return llvm::Error::success();
+}
+
 }  // namespace
 
 llvm::StringRef to_string(config_profile profile) {
@@ -337,7 +421,11 @@ llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path) {
         input.error(), "failed to parse config '%s'", path.str().c_str());
   }
 
-  return apply_profile_defaults(config, presence);
+  config = apply_profile_defaults(config, presence);
+  if (llvm::Error preflight_error = validate_security_preflight(config)) {
+    return std::move(preflight_error);
+  }
+  return config;
 }
 
 std::string summarize_config(const obfuscation_config& config) {
@@ -418,6 +506,8 @@ std::string summarize_config(const obfuscation_config& config) {
          << (config.security.fail_on_public_obf_symbol ? "true" : "false") << '\n';
   stream << "security.strip_release_markers: "
          << (config.security.strip_release_markers ? "true" : "false") << '\n';
+  stream << "security.allow_unsafe_config: "
+         << (config.security.allow_unsafe_config ? "true" : "false") << '\n';
   stream << "debug_preserve_generated_names: "
          << (config.debug_preserve_generated_names ? "true" : "false") << '\n';
 

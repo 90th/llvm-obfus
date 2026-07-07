@@ -6,3 +6,5 @@ targets:
 string_encoding:
   prefer_lazy_decode: true
   allow_ctor_fallback: true
+security:
+  fail_on_public_obf_symbol: true

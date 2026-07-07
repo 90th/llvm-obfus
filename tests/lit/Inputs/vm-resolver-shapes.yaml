@@ -5,3 +5,5 @@ targets:
     level: vm
   - match: strong_vm_value
     level: strong_vm
+security:
+  fail_on_public_obf_symbol: true

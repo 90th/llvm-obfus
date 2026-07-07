@@ -75,6 +75,7 @@ struct indirect_dispatch_config {
 struct security_gate_config {
   bool fail_on_public_obf_symbol = false;
   bool strip_release_markers = false;
+  bool allow_unsafe_config = false;
 };
 
 struct obfuscation_config {

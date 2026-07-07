@@ -9,3 +9,5 @@ constant_encoding:
 block_split:
   max_splits_per_function: 1
   min_instructions_per_block: 2
+security:
+  fail_on_public_obf_symbol: true

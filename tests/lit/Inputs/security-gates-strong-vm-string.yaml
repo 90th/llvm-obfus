@@ -13,3 +13,5 @@ string_encoding:
   allow_ctor_fallback: true
 mba:
   depth: 1
+security:
+  fail_on_public_obf_symbol: true

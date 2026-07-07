@@ -9,3 +9,5 @@ overrides:
     level: strong_vm
 mba:
   depth: 2
+security:
+  fail_on_public_obf_symbol: true

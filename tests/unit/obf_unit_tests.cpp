@@ -379,6 +379,8 @@ void TestConfigEdgeCases() {
     out << "    level: strong_vm\n";
     out << "  - match: \"hash_*\"\n";
     out << "    level: vm\n";
+    out << "security:\n";
+    out << "  fail_on_public_obf_symbol: true\n";
   }
 
   llvm::Expected<obf::obfuscation_config> loaded2 = obf::load_config_from_file(path2.string());

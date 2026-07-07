@@ -21,3 +21,5 @@ string_encoding:
 constant_encoding:
   max_constants_per_function: 1
   min_bit_width: 8
+security:
+  fail_on_public_obf_symbol: true

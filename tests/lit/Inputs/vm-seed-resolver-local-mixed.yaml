@@ -5,3 +5,5 @@ targets:
     level: strong_vm
   - match: normal_target
     level: vm
+security:
+  fail_on_public_obf_symbol: true

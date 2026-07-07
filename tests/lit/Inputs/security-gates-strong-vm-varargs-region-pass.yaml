@@ -6,3 +6,5 @@ overrides:
 targets:
   - match: has_varargs_region
     level: strong_vm
+security:
+  fail_on_public_obf_symbol: true

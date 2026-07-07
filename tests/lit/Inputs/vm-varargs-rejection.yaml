@@ -9,3 +9,5 @@ targets:
     level: strong_vm
   - match: vastart_strong_vm_varargs
     level: strong_vm
+security:
+  fail_on_public_obf_symbol: true

@@ -3,3 +3,5 @@ default_level: none
 targets:
   - match: seed_case
     level: strong_vm
+security:
+  fail_on_public_obf_symbol: true

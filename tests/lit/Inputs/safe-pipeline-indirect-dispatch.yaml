@@ -19,3 +19,5 @@ indirect_dispatch:
   max_switch_targets: 12
   target_vm_dispatchers: true
   target_flattened_headers: true
+security:
+  fail_on_public_obf_symbol: true

@@ -1,0 +1,5 @@
+profile: standard
+debug_preserve_generated_names: true
+targets:
+  - match: profile_accept
+    level: vm

@@ -2,5 +2,3 @@ profile: fast
 targets:
   - match: unsupported_alloca
     level: strong_vm
-security:
-  fail_on_public_obf_symbol: true

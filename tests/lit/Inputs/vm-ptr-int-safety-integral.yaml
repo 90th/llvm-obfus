@@ -4,3 +4,5 @@ debug_preserve_generated_names: true
 targets:
   - match: integral_vm
     level: vm
+security:
+  allow_unsafe_config: true

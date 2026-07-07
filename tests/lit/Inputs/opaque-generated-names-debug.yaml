@@ -9,3 +9,4 @@ mba:
   depth: 2
 security:
   fail_on_public_obf_symbol: true
+  allow_unsafe_config: true

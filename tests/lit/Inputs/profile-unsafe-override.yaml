@@ -1,0 +1,7 @@
+profile: fortress
+targets:
+  - match: profile_accept
+    level: strong
+security:
+  fail_on_public_obf_symbol: false
+  allow_unsafe_config: true
