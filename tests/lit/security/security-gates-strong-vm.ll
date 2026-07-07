@@ -120,7 +120,7 @@ exit:
 ; EH-PASS: call i32 %{{[^ ]+}}(i32 %0, i64 %{{[^)]+}})
 ; EH-PASS: define internal i32 @{{_[0-9a-f]+}}(i32 %0, i64 %1) {{.*}} personality ptr @__gxx_personality_v0
 
-; OFF: LLVM ERROR: security preflight failure: strong_vm config requires security.fail_on_public_obf_symbol: true
+; OFF: LLVM ERROR: strong_vm invariant violation: function unsupported_alloca was not virtualized
 
 ; UNVIRT: LLVM ERROR: strong_vm invariant violation: function unsupported_alloca was not virtualized
 ; UNVIRT: policy_source=config_rule

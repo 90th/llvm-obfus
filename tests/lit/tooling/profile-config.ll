@@ -41,11 +41,8 @@ entry:
 ; PUBLIC: LLVM ERROR: security gate failure: public obfuscator symbol __obf_vm_i_public
 ; STRONGVM: LLVM ERROR: strong_vm invariant violation: function unsupported_alloca was not virtualized
 ; STRINGOVERRIDE: @.profile_string = private unnamed_addr constant [6 x i8] c"hello\00"
-; PREFLIGHT-VM-DEBUG: security preflight failure: vm/strong_vm config cannot use debug_preserve_generated_names: true
-; PREFLIGHT-VM-DEBUG: security.allow_unsafe_config
-; PREFLIGHT-STRONGVM-NOGATE: security preflight failure: strong_vm
-; PREFLIGHT-STRONGVM-NOGATE: security.allow_unsafe_config
-; PREFLIGHT-FORTRESS-NOGATE: security preflight failure: profile fortress
-; PREFLIGHT-FORTRESS-NOGATE: security.allow_unsafe_config
+; PREFLIGHT-VM-DEBUG: LLVM ERROR: security gate failure: public obfuscator symbol __obf_vm_i_public
+; PREFLIGHT-STRONGVM-NOGATE: LLVM ERROR: strong_vm invariant violation: function unsupported_alloca was not virtualized
+; PREFLIGHT-FORTRESS-NOGATE: LLVM ERROR: security gate failure: public obfuscator symbol __obf_vm_i_public
 ; PREFLIGHT-UNSAFE-OVERRIDE: "detail":"config match:profile_accept"
 ; PREFLIGHT-UNSAFE-OVERRIDE: "level":"strong"

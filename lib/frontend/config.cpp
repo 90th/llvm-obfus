@@ -336,36 +336,21 @@ bool is_high_security_profile(config_profile profile) {
   llvm_unreachable("unknown config profile");
 }
 
-llvm::Error validate_security_preflight(const obfuscation_config& config) {
-  if (config.security.allow_unsafe_config) { return llvm::Error::success(); }
+void enforce_security_preflight(obfuscation_config& config) {
+  if (config.security.allow_unsafe_config) { return; }
 
   if (config.debug_preserve_generated_names && config_selects_vm(config)) {
-    return llvm::createStringError(
-        llvm::inconvertibleErrorCode(),
-        "security preflight failure: vm/strong_vm config cannot use "
-        "debug_preserve_generated_names: true; disable debug_preserve_generated_names or set "
-        "security.allow_unsafe_config: true");
+    config.debug_preserve_generated_names = false;
   }
 
   if (config_selects_strong_vm(config) && !config.security.fail_on_public_obf_symbol) {
-    return llvm::createStringError(
-        llvm::inconvertibleErrorCode(),
-        "security preflight failure: strong_vm config requires "
-        "security.fail_on_public_obf_symbol: true; enable the public-symbol gate or set "
-        "security.allow_unsafe_config: true");
+    config.security.fail_on_public_obf_symbol = true;
   }
 
   if (config.profile.has_value() && is_high_security_profile(*config.profile) &&
       !config.security.fail_on_public_obf_symbol) {
-    return llvm::createStringError(
-        llvm::inconvertibleErrorCode(),
-        "security preflight failure: profile %s requires "
-        "security.fail_on_public_obf_symbol: true; enable the public-symbol gate or set "
-        "security.allow_unsafe_config: true",
-        to_string(*config.profile).str().c_str());
+    config.security.fail_on_public_obf_symbol = true;
   }
-
-  return llvm::Error::success();
 }
 
 }  // namespace
@@ -422,9 +407,7 @@ llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path) {
   }
 
   config = apply_profile_defaults(config, presence);
-  if (llvm::Error preflight_error = validate_security_preflight(config)) {
-    return std::move(preflight_error);
-  }
+  enforce_security_preflight(config);
   return config;
 }
 
