@@ -58,8 +58,7 @@ The design goal is simple: make static recovery materially harder while staying 
 - Public runtime ABI names are generated at build time in `build/include/obf/support/runtime_abi_generated.h`.
 - The default public prefix is `rt_core_`.
 - Final cleanup strips marker attributes, removes annotation metadata, anonymizes local/internal obfuscation artifacts, and strips local SSA names.
-- Security gates can fail the build on leaked public `obf` symbols.
-
+- Security gates can fail the build on leaked public `obf` symbols. **Note:** The `strong_vm` protection level strictly requires `security.fail_on_public_obf_symbol: true` (or `security.allow_unsafe_config: true`) and will abort the build if this gate is missing.
 ## Architecture
 
 ### Frontend
@@ -226,6 +225,18 @@ Useful cache variables:
 
 ## Usage
 
+### Compiler Integration (clang/clang++)
+
+The plugin automatically integrates into the standard LLVM New Pass Manager (NPM) optimization pipeline. You can use it directly with `clang` or `clang++` to obfuscate code during standard compilation. It safely handles both unoptimized (`-O0`) and optimized (`-O1` through `-O3`, `-flto`) builds:
+
+```sh
+clang++ -O3 -fpass-plugin=build/obf_plugin.so -mllvm --obf-config=config.yaml input.cpp -o output
+```
+
+### Manual IR Transforms (opt)
+
+For debugging, testing, or isolated transforms, you can run the passes manually over LLVM IR using `opt`.
+
 Feature report:
 
 - `obf-feature-report` is read-only and emits `obf.feature_report.v3` JSON with per-function policy decisions, per-transform strategy details, and MBA shape counters under the `mba` payload for functions that use MBA rewrites.
@@ -273,7 +284,6 @@ Other standalone passes:
 - Transform stages: `obf-entropy-init`, `obf-vm`, `obf-block-split`, `obf-string-encode`, `obf-constant-encode`, `obf-opaque-gep`, `obf-instruction-substitute`, `obf-control-flatten`, `obf-function-outline`, `obf-opaque-preds`, `obf-bogus-cf`, `obf-indirect-dispatch`, `obf-cfg-state-cleanup`, and `obf-artifact-cleanup`.
 
 `obf-driver` currently loads a config and prints a summary. It is not a full compile driver.
-
 ## Visual Examples (Ghidra)
 
 <details>

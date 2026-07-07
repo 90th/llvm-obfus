@@ -24,6 +24,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Transforms/Utils/Mem2Reg.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
@@ -664,6 +665,28 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
                   }
 
                   return false;
+                });
+
+            pass_builder.registerOptimizerLastEPCallback(
+                [](llvm::ModulePassManager& module_pm, llvm::OptimizationLevel level, llvm::ThinOrFullLTOPhase phase) {
+                  if (level != llvm::OptimizationLevel::O0 && phase != llvm::ThinOrFullLTOPhase::FullLTOPostLink) {
+                    module_pm.addPass(obf::safe_pipeline_pass());
+                  }
+                });
+
+            pass_builder.registerFullLinkTimeOptimizationLastEPCallback(
+                [](llvm::ModulePassManager& module_pm, llvm::OptimizationLevel level) {
+                  module_pm.addPass(obf::safe_pipeline_pass());
+                });
+
+            pass_builder.registerPipelineStartEPCallback(
+                [](llvm::ModulePassManager& module_pm, llvm::OptimizationLevel level) {
+                  if (level == llvm::OptimizationLevel::O0) {
+                    llvm::FunctionPassManager fpm;
+                    fpm.addPass(llvm::PromotePass());
+                    module_pm.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(fpm)));
+                    module_pm.addPass(obf::safe_pipeline_pass());
+                  }
                 });
           }};
 }
