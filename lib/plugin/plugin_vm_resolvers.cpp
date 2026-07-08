@@ -48,6 +48,46 @@ vm_pointer_materialization_shape select_vm_pointer_materialization_shape(
   }
 }
 
+
+namespace {
+
+llvm::Value* build_vm_target_token_mask(llvm::IRBuilder<>& builder,
+                                        llvm::Function& owner,
+                                        llvm::Value* hidden_token,
+                                        llvm::IntegerType* ptr_int_type,
+                                        const llvm::APInt& salt,
+                                        llvm::StringRef name_prefix,
+                                        std::uint64_t token_seed,
+                                        std::uint64_t salt_base,
+                                        std::uint32_t mba_depth) {
+  llvm::Value* token_int = hidden_token;
+  if (token_int->getType() != ptr_int_type) {
+    token_int =
+        builder.CreateZExtOrTrunc(token_int, ptr_int_type, name_prefix.str() + ".token.cast");
+  }
+
+  token_int = mba::entangle_value(
+      builder,
+      token_int,
+      mba::builder_context{.entropy_anchor = mba::get_or_create_entropy_anchor(*owner.getParent()),
+                           .seed_base = token_seed ^ salt.getLimitedValue(),
+                           .depth = mba_depth},
+      salt_base + token_seed,
+      name_prefix.str() + ".token");
+  auto* expected_token_const =
+      llvm::ConstantInt::get(ptr_int_type,
+                             llvm::APInt(ptr_int_type->getBitWidth(),
+                                         token_seed,
+                                         /*isSigned=*/false,
+                                         /*implicitTrunc=*/true));
+  auto* token_delta =
+      builder.CreateXor(token_int, expected_token_const, name_prefix.str() + ".token.delta");
+  auto* salt_const = llvm::ConstantInt::get(ptr_int_type, salt);
+  return builder.CreateXor(token_delta, salt_const, name_prefix.str() + ".token.mask");
+}
+
+}  // namespace
+
 llvm::Value* build_encoded_vm_target_value(llvm::IRBuilder<>& builder,
                                            llvm::Function& owner,
                                            llvm::Function& interface_function,
@@ -78,46 +118,62 @@ llvm::Value* build_encoded_vm_target_value(llvm::IRBuilder<>& builder,
                                      token_seed,
                                      mba_depth);
 
-  llvm::Value* token_int = hidden_token;
-  if (token_int->getType() != ptr_int_type) {
-    token_int = builder.CreateZExtOrTrunc(token_int, ptr_int_type, prefix.str() + ".token.cast");
-  }
-
-  token_int = mba::entangle_value(
+  llvm::Value* token_mask = build_vm_target_token_mask(builder,
+                                                       owner,
+                                                       hidden_token,
+                                                       ptr_int_type,
+                                                       salt,
+                                                       (prefix + ".target").str(),
+                                                       token_seed,
+                                                       token_salt_base,
+                                                       mba_depth);
+  llvm::Value* token_bound_key =
+      builder.CreateXor(resolve_key, token_mask, prefix.str() + ".target.key.bound");
+  return mba::create_xor(
       builder,
-      token_int,
+      target_int,
+      token_bound_key,
       mba::builder_context{.entropy_anchor = mba::get_or_create_entropy_anchor(*owner.getParent()),
-                           .seed_base = token_seed,
+                           .seed_base =
+                               token_seed ^ key.getLimitedValue() ^ salt.getLimitedValue(),
                            .depth = mba_depth},
-      token_salt_base + token_seed,
-      prefix.str() + ".token");
-  auto* salt_const = llvm::ConstantInt::get(ptr_int_type, salt);
-  auto* runtime_key = builder.CreateXor(token_int, salt_const, prefix.str() + ".rkey");
-  auto* mixed = builder.CreateXor(target_int, runtime_key, prefix.str() + ".mixed");
-  auto* unmixed = builder.CreateXor(mixed, runtime_key, prefix.str() + ".unmixed");
-  auto* key_const = llvm::ConstantInt::get(ptr_int_type, key);
-  return builder.CreateXor(unmixed, key_const, prefix.str() + ".resolved");
+      token_salt_base + token_seed + 0x100ULL,
+      prefix.str() + ".resolved");
 }
 
 llvm::Value* decode_encoded_vm_target_value(llvm::IRBuilder<>& builder,
                                             llvm::Function& owner,
                                             llvm::GlobalVariable& decode_key_global,
                                             llvm::Value* encoded_target,
+                                            llvm::Value* hidden_token,
                                             const llvm::APInt& key,
+                                            const llvm::APInt& salt,
                                             llvm::StringRef prefix,
                                             std::uint64_t token_seed,
                                             std::uint64_t decode_salt_base,
                                             std::uint32_t mba_depth) {
   auto* ptr_int_type = llvm::cast<llvm::IntegerType>(decode_key_global.getValueType());
   auto* opaque_key = builder.CreateLoad(ptr_int_type, &decode_key_global, prefix.str() + ".key");
+  llvm::Value* token_mask = build_vm_target_token_mask(builder,
+                                                       owner,
+                                                       hidden_token,
+                                                       ptr_int_type,
+                                                       salt,
+                                                       (prefix + ".decode").str(),
+                                                       token_seed,
+                                                       decode_salt_base,
+                                                       mba_depth);
+  llvm::Value* token_bound_key =
+      builder.CreateXor(opaque_key, token_mask, prefix.str() + ".key.bound");
   return mba::create_xor(
       builder,
       encoded_target,
-      opaque_key,
+      token_bound_key,
       mba::builder_context{.entropy_anchor = mba::get_or_create_entropy_anchor(*owner.getParent()),
-                           .seed_base = token_seed ^ key.getLimitedValue(),
+                           .seed_base =
+                               token_seed ^ key.getLimitedValue() ^ salt.getLimitedValue(),
                            .depth = mba_depth},
-      decode_salt_base + token_seed,
+      decode_salt_base + token_seed + 0x100ULL,
       prefix.str() + ".decoded");
 }
 
