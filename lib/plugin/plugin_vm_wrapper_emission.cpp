@@ -66,12 +66,10 @@ vm_entry_thunk_shape select_strong_vm_entry_thunk_floor_shape(llvm::StringRef so
   std::uint64_t state = mix_generated_name_seed(seed, 0x30f10f5f00dULL);
   state = mix_generated_name_seed(state, stable_hash_string(source_name));
 
-  switch (state % 3U) {
+  switch (state % 2U) {
     case 0:
-      return vm_entry_thunk_shape::split_forward;
-    case 1:
       return vm_entry_thunk_shape::indirect_ptr_forward;
-    case 2:
+    case 1:
     default:
       return vm_entry_thunk_shape::decoy_guarded_forward;
   }
@@ -101,6 +99,11 @@ vm_entry_thunk_shape select_normal_vm_entry_thunk_floor_shape(llvm::StringRef so
   }
 }
 
+bool is_high_hardening_vm_entry_thunk_shape(vm_entry_thunk_shape shape) {
+  return shape == vm_entry_thunk_shape::indirect_ptr_forward ||
+         shape == vm_entry_thunk_shape::decoy_guarded_forward;
+}
+
 vm_entry_thunk_shape upgrade_vm_entry_thunk_shape_for_policy(
     llvm::Module& module,
     const virtualized_function_binding& binding,
@@ -116,7 +119,7 @@ vm_entry_thunk_shape upgrade_vm_entry_thunk_shape_for_policy(
   const bool allow_indirect_shapes = can_emit_indirect_vm_entry_thunk(interface_function);
   const std::uint64_t scope_seed = stable_hash_string(get_vm_entry_thunk_balance_scope_name(module));
 
-  if (level == protection_level::strong_vm && is_weak_vm_entry_thunk_shape(shape)) {
+  if (level == protection_level::strong_vm && !is_high_hardening_vm_entry_thunk_shape(shape)) {
     return select_strong_vm_entry_thunk_floor_shape(source_name, seed, allow_indirect_shapes);
   }
 
@@ -133,10 +136,6 @@ vm_entry_thunk_shape upgrade_vm_entry_thunk_shape_for_policy(
   return shape;
 }
 
-bool is_high_hardening_vm_entry_thunk_shape(vm_entry_thunk_shape shape) {
-  return shape == vm_entry_thunk_shape::indirect_ptr_forward ||
-         shape == vm_entry_thunk_shape::decoy_guarded_forward;
-}
 
 std::uint64_t compute_vm_entry_thunk_balance_rank(const virtualized_function_binding& binding,
                                                   std::uint64_t scope_seed,

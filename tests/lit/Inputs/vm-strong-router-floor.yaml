@@ -1,4 +1,4 @@
-seed: 8080
+seed: 1005
 default_level: none
 targets:
   - match: strong_target
