@@ -5,6 +5,7 @@
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/profile-fast-strong-vm.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=STRONGVM
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/profile-overrides.yaml -passes=obf-string-encode -S %s -o - | %FileCheck %s --check-prefix=STRINGOVERRIDE --implicit-check-not='@__obf_str_'
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/profile-vm-debug-names.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=PREFLIGHT-VM-DEBUG
+; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/profile-vm-debug-names.yaml -passes=obf-vm -disable-output %s 2>&1 | %FileCheck %s --check-prefix=PREFLIGHT-VM-DEBUG
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/profile-strong-vm-no-public-gate.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=PREFLIGHT-STRONGVM-NOGATE
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/profile-fortress-no-public-gate.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=PREFLIGHT-FORTRESS-NOGATE
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/profile-unsafe-override.yaml -passes=obf-feature-report -disable-output %s | %FileCheck %s --check-prefix=PREFLIGHT-UNSAFE-OVERRIDE
@@ -41,8 +42,8 @@ entry:
 ; PUBLIC: LLVM ERROR: security gate failure: public obfuscator symbol __obf_vm_i_public
 ; STRONGVM: LLVM ERROR: strong_vm invariant violation: function unsupported_alloca was not virtualized
 ; STRINGOVERRIDE: @.profile_string = private unnamed_addr constant [6 x i8] c"hello\00"
-; PREFLIGHT-VM-DEBUG: LLVM ERROR: security gate failure: public obfuscator symbol __obf_vm_i_public
-; PREFLIGHT-STRONGVM-NOGATE: LLVM ERROR: strong_vm invariant violation: function unsupported_alloca was not virtualized
-; PREFLIGHT-FORTRESS-NOGATE: LLVM ERROR: security gate failure: public obfuscator symbol __obf_vm_i_public
+; PREFLIGHT-VM-DEBUG: LLVM ERROR: security gate failure: debug names preserved with VM enabled
+; PREFLIGHT-STRONGVM-NOGATE: LLVM ERROR: security gate failure: strong_vm or high-security profile without fail_on_public_obf_symbol
+; PREFLIGHT-FORTRESS-NOGATE: LLVM ERROR: security gate failure: strong_vm or high-security profile without fail_on_public_obf_symbol
 ; PREFLIGHT-UNSAFE-OVERRIDE: "detail":"config match:profile_accept"
 ; PREFLIGHT-UNSAFE-OVERRIDE: "level":"strong"

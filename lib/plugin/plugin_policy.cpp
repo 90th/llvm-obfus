@@ -291,7 +291,7 @@ obfuscation_config load_active_config() {
   }
 
   if (obf_seed_override != 0) { config.seed = obf_seed_override; }
-
+  validate_effective_config(config);
   cached_config = config;
   return *cached_config;
 }

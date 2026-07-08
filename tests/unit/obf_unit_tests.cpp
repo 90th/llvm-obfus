@@ -440,46 +440,6 @@ void TestSeedStability() {
   ExpectTrue(mixed1 != mixed3, "different seeds should produce different mix_seed results");
 }
 
-void TestConfigRemediation() {
-  // Test that strong_vm config forces fail_on_public_obf_symbol
-  {
-    obf::obfuscation_config config;
-    config.default_level = obf::protection_level::strong_vm;
-    config.security.fail_on_public_obf_symbol = false;
-    obf::enforce_security_preflight(config);
-    ExpectTrue(config.security.fail_on_public_obf_symbol, "strong_vm should force public symbol gate");
-  }
-
-  // Test that high-security profiles force fail_on_public_obf_symbol
-  {
-    obf::obfuscation_config config;
-    config.profile = obf::config_profile::fortress;
-    config.security.fail_on_public_obf_symbol = false;
-    obf::enforce_security_preflight(config);
-    ExpectTrue(config.security.fail_on_public_obf_symbol, "fortress profile should force public symbol gate");
-  }
-
-  // Test that vm configs force debug_preserve_generated_names = false
-  {
-    obf::obfuscation_config config;
-    config.default_level = obf::protection_level::vm;
-    config.debug_preserve_generated_names = true;
-    obf::enforce_security_preflight(config);
-    ExpectTrue(!config.debug_preserve_generated_names, "vm level should disable debug generated names");
-  }
-
-  // Test that unsafe_config bypasses remediations
-  {
-    obf::obfuscation_config config;
-    config.profile = obf::config_profile::lab;
-    config.debug_preserve_generated_names = true;
-    config.security.fail_on_public_obf_symbol = false;
-    config.security.allow_unsafe_config = true;
-    obf::enforce_security_preflight(config);
-    ExpectTrue(config.debug_preserve_generated_names, "unsafe mode should skip debug name stripping");
-    ExpectTrue(!config.security.fail_on_public_obf_symbol, "unsafe mode should skip public symbol gate remediation");
-  }
-}
 
 }  // namespace
 
@@ -494,7 +454,6 @@ int main() {
   TestIndirectDispatchConfig();
   TestPolicyPrecedenceAndFloors();
   TestConfigEdgeCases();
-  TestConfigRemediation();
   TestSeedStability();
   TestAuthEncodingBlake2sKnownAnswers();
   TestAuthEncodingBlake2sFailClosed();

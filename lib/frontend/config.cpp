@@ -344,20 +344,16 @@ bool is_high_security_profile(config_profile profile) {
 
 }  // namespace
 
-void enforce_security_preflight(obfuscation_config& config) {
+void validate_effective_config(const obfuscation_config& config) {
   if (config.security.allow_unsafe_config) { return; }
 
   if (config.debug_preserve_generated_names && config_selects_vm(config)) {
-    config.debug_preserve_generated_names = false;
+    llvm::report_fatal_error("security gate failure: debug names preserved with VM enabled");
   }
 
-  if (config_selects_strong_vm(config) && !config.security.fail_on_public_obf_symbol) {
-    config.security.fail_on_public_obf_symbol = true;
-  }
-
-  if (config.profile.has_value() && is_high_security_profile(*config.profile) &&
+  if ((config_selects_strong_vm(config) || (config.profile.has_value() && is_high_security_profile(*config.profile))) &&
       !config.security.fail_on_public_obf_symbol) {
-    config.security.fail_on_public_obf_symbol = true;
+    llvm::report_fatal_error("security gate failure: strong_vm or high-security profile without fail_on_public_obf_symbol");
   }
 }
 
@@ -413,7 +409,6 @@ llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path) {
   }
 
   config = apply_profile_defaults(config, presence);
-  enforce_security_preflight(config);
   return config;
 }
 

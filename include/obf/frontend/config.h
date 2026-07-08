@@ -94,7 +94,7 @@ struct obfuscation_config {
   bool emit_progress_warnings = false;
 };
 
-void enforce_security_preflight(obfuscation_config& config);
+void validate_effective_config(const obfuscation_config& config);
 llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path);
 std::string summarize_config(const obfuscation_config& config);
 llvm::StringRef to_string(config_profile profile);

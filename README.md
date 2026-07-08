@@ -58,7 +58,7 @@ The design goal is simple: make static recovery materially harder while staying 
 - Public runtime ABI names are generated at build time in `build/include/obf/support/runtime_abi_generated.h`.
 - The default public prefix is `rt_core_`.
 - Final cleanup strips marker attributes, removes annotation metadata, anonymizes local/internal obfuscation artifacts, and strips local SSA names.
-- Security gates can fail the build on leaked public `obf` symbols. **Note:** The configuration loader silently auto-remediates missing security gates to prevent accidental leakage unless `security.allow_unsafe_config: true` is set. Specifically, it forces `security.fail_on_public_obf_symbol: true` for `strong_vm` and high-security profiles (`fortress`, `lab`), and forces `debug_preserve_generated_names: false` when VM obfuscation is active.
+- Security gates can fail the build on leaked public `obf` symbols. **Note:** The plugin config preflight will fail the build on weakened security configs unless `security.allow_unsafe_config: true` is set. Specifically, it rejects `strong_vm` and high-security profiles (`fortress`, `lab`) without `security.fail_on_public_obf_symbol: true`, and rejects `debug_preserve_generated_names: true` when VM obfuscation is active.
 ## Architecture
 
 ### Frontend
