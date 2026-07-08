@@ -195,6 +195,28 @@ add_custom_command(
   VERBATIM)
 add_custom_target(obf-entropy-anchor-runtime ALL DEPENDS "${OBF_ENTROPY_ANCHOR_OBJ}")
 add_custom_target(obf-string-auth-runtime ALL DEPENDS "${OBF_STRING_AUTH_RUNTIME_OBJ}")
+set(OBF_RUNTIME_ARCHIVE "${CMAKE_CURRENT_BINARY_DIR}/libobf_runtime.a")
+add_custom_command(
+  OUTPUT "${OBF_RUNTIME_ARCHIVE}"
+  COMMAND "${CMAKE_COMMAND}" -E rm -f "${OBF_RUNTIME_ARCHIVE}"
+  COMMAND "${CMAKE_AR}" qc "${OBF_RUNTIME_ARCHIVE}" "${OBF_ENTROPY_ANCHOR_OBJ}" "${OBF_STRING_AUTH_RUNTIME_OBJ}"
+  COMMAND "${CMAKE_RANLIB}" "${OBF_RUNTIME_ARCHIVE}"
+  DEPENDS "${OBF_ENTROPY_ANCHOR_OBJ}" "${OBF_STRING_AUTH_RUNTIME_OBJ}"
+  VERBATIM)
+add_custom_target(obf-runtime ALL DEPENDS "${OBF_RUNTIME_ARCHIVE}")
+configure_file(
+  tools/obf-clang/obf-clang.py.in
+  "${CMAKE_CURRENT_BINARY_DIR}/obf-clang"
+  @ONLY
+  FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+configure_file(
+  tools/obf-clang/obf-clang.py.in
+  "${CMAKE_CURRENT_BINARY_DIR}/obf-clang++"
+  @ONLY
+  FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+add_custom_target(obf-clang-wrappers ALL
+  DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/obf-clang" "${CMAKE_CURRENT_BINARY_DIR}/obf-clang++")
+add_dependencies(obf-clang-wrappers obf_plugin obf-runtime)
 
 enable_testing()
 

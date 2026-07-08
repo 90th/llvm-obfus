@@ -140,6 +140,7 @@ struct MappingTraits<obf::obfuscation_config> {
     io.mapOptional("indirect_dispatch", config.indirect_dispatch);
     io.mapOptional("security", config.security);
     io.mapOptional("debug_preserve_generated_names", config.debug_preserve_generated_names, false);
+    io.mapOptional("emit_progress_warnings", config.emit_progress_warnings, false);
   }
 };
 
@@ -161,6 +162,7 @@ struct config_parse_presence {
   bool indirect_dispatch = false;
   bool security = false;
   bool debug_preserve_generated_names = false;
+  bool emit_progress_warnings = false;
 };
 
 bool has_top_level_key(llvm::StringRef text, llvm::StringRef key) {
@@ -192,7 +194,8 @@ config_parse_presence collect_presence(llvm::StringRef text) {
           .indirect_dispatch = has_top_level_key(text, "indirect_dispatch"),
           .security = has_top_level_key(text, "security"),
           .debug_preserve_generated_names =
-              has_top_level_key(text, "debug_preserve_generated_names")};
+              has_top_level_key(text, "debug_preserve_generated_names"),
+          .emit_progress_warnings = has_top_level_key(text, "emit_progress_warnings")};
 }
 
 obfuscation_config defaults_for_profile(config_profile profile) {
@@ -282,6 +285,9 @@ obfuscation_config apply_profile_defaults(const obfuscation_config& raw_config,
   if (presence.security) { config.security = raw_config.security; }
   if (presence.debug_preserve_generated_names) {
     config.debug_preserve_generated_names = raw_config.debug_preserve_generated_names;
+  }
+  if (presence.emit_progress_warnings) {
+    config.emit_progress_warnings = raw_config.emit_progress_warnings;
   }
   return config;
 }
@@ -493,6 +499,8 @@ std::string summarize_config(const obfuscation_config& config) {
          << (config.security.allow_unsafe_config ? "true" : "false") << '\n';
   stream << "debug_preserve_generated_names: "
          << (config.debug_preserve_generated_names ? "true" : "false") << '\n';
+  stream << "emit_progress_warnings: "
+         << (config.emit_progress_warnings ? "true" : "false") << '\n';
 
   return output;
 }

@@ -124,8 +124,11 @@ Top-level sections currently supported by the loader:
 - `indirect_dispatch`
 - `security`
 - `debug_preserve_generated_names`
+- `emit_progress_warnings`
 
 `overrides` entries match exact function names; `targets` entries support glob-style wildcard patterns (e.g., `"verify_*"`).
+
+`emit_progress_warnings: true` emits stderr progress messages around long `strong_vm` lowering and hardening phases; default is silent.
 
 ### Profile Defaults
 
@@ -227,17 +230,27 @@ Useful cache variables:
 
 ### Compiler Integration (clang/clang++)
 
-The plugin integrates into the standard LLVM New Pass Manager (NPM) optimization pipeline. It executes securely and passively: obfuscation is only applied when explicitly enabled via the `OBF_CONFIG` or `OBF_ENABLE` environment variables. It safely handles both unoptimized (`-O0`) and optimized (`-O1` through `-O3`, `-flto`) builds:
+The plugin integrates into the standard LLVM New Pass Manager (NPM) optimization pipeline. It executes securely and passively: obfuscation is only applied when explicitly enabled via the `OBF_CONFIG` or `OBF_ENABLE` environment variables. It safely handles both unoptimized (`-O0`) and optimized (`-O1` through `-O3`, `-flto`) builds. The build tree provides `build/obf-clang` and `build/obf-clang++` wrappers that inject the pass plugin and append the runtime archive for link actions:
 
 ```sh
-OBF_CONFIG=config.yaml clang++ -O3 -fpass-plugin=build/obf_plugin.so input.cpp -o output
+OBF_CONFIG=config.yaml build/obf-clang++ -O3 input.cpp -o output
 ```
 
 To enable annotation-driven obfuscation without a config file, set the explicit enable environment variable:
 
 ```sh
-OBF_ENABLE=1 clang++ -O3 -fpass-plugin=build/obf_plugin.so input.cpp -o output
+OBF_ENABLE=1 build/obf-clang++ -O3 input.cpp -o output
 ```
+
+Manual clang fallback:
+
+```sh
+OBF_CONFIG=config.yaml clang++ -O3 \
+  -fpass-plugin=build/obf_plugin.so \
+  input.cpp build/libobf_runtime.a -o output
+```
+
+`build/libobf_runtime.a` contains the entropy anchor and string/constant authentication runtime support. When invoking raw `clang` or `clang++`, place the archive after transformed inputs/objects on the linker command line.
 
 ### Manual IR Transforms (opt)
 
@@ -289,7 +302,8 @@ Other standalone passes:
 - Read-only/reporting: `obf-feature-report`, `obf-audit`.
 - Transform stages: `obf-entropy-init`, `obf-vm`, `obf-block-split`, `obf-string-encode`, `obf-constant-encode`, `obf-opaque-gep`, `obf-instruction-substitute`, `obf-control-flatten`, `obf-function-outline`, `obf-opaque-preds`, `obf-bogus-cf`, `obf-indirect-dispatch`, `obf-cfg-state-cleanup`, and `obf-artifact-cleanup`.
 
-`obf-driver` currently loads a config and prints a summary. It is not a full compile driver.
+`obf-driver` remains a config-summary/debugging utility, while `build/obf-clang` and `build/obf-clang++` are the compile wrappers.
+
 ## Visual Examples (Ghidra)
 
 <details>

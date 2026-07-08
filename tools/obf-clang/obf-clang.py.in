@@ -1,0 +1,74 @@
+#!@Python3_EXECUTABLE@
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+CLANG = r"@OBF_CLANG@"
+CLANGXX = r"@OBF_CLANGXX@"
+PLUGIN = r"@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@"
+RUNTIME_ARCHIVE = r"@OBF_RUNTIME_ARCHIVE@"
+
+_COMPILE_ONLY_ARGS = {"-c", "-S", "-E", "-M", "-MM"}
+
+
+def _fail(message: str) -> int:
+    print(f"obf-clang: {message}", file=sys.stderr)
+    return 2
+
+
+def _parse_args(argv: list[str]) -> tuple[list[str], str | None, int | None]:
+    clang_args: list[str] = []
+    config_path: str | None = None
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--obf-config":
+            if index + 1 >= len(argv) or argv[index + 1] == "":
+                return clang_args, config_path, _fail("--obf-config requires a path")
+            config_path = argv[index + 1]
+            index += 2
+            continue
+        if arg.startswith("--obf-config="):
+            value = arg.split("=", 1)[1]
+            if value == "":
+                return clang_args, config_path, _fail("--obf-config requires a path")
+            config_path = value
+            index += 1
+            continue
+        clang_args.append(arg)
+        index += 1
+    return clang_args, config_path, None
+
+
+def main() -> int:
+    compiler = CLANGXX if "++" in Path(sys.argv[0]).name else CLANG
+    clang_args, config_path, early_exit = _parse_args(sys.argv[1:])
+    if early_exit is not None:
+        return early_exit
+
+    plugin_arg = f"-fpass-plugin={PLUGIN}"
+    final_args = [compiler]
+    if plugin_arg not in clang_args:
+        final_args.append(plugin_arg)
+    final_args.extend(clang_args)
+
+    link_action = not any(arg in _COMPILE_ONLY_ARGS for arg in clang_args)
+    if not Path(PLUGIN).exists():
+        return _fail(f"missing pass plugin: {PLUGIN}")
+    if link_action:
+        if not Path(RUNTIME_ARCHIVE).exists():
+            return _fail(f"missing runtime archive: {RUNTIME_ARCHIVE}")
+        final_args.append(RUNTIME_ARCHIVE)
+
+    env = os.environ.copy()
+    if config_path is not None:
+        env["OBF_CONFIG"] = config_path
+
+    completed = subprocess.run(final_args, env=env)
+    return completed.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

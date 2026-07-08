@@ -1,0 +1,8 @@
+seed: 20260708
+default_level: none
+emit_progress_warnings: true
+targets:
+  - match: progress_strong_vm
+    level: strong_vm
+security:
+  fail_on_public_obf_symbol: true

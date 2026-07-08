@@ -104,6 +104,7 @@ void TestConfigLoader() {
     out << "profile: guarded\n";
     out << "seed: 99\n";
     out << "default_level: light\n";
+    out << "emit_progress_warnings: true\n";
   }
 
   llvm::Expected<obf::obfuscation_config> loaded = obf::load_config_from_file(path.string());
@@ -115,6 +116,10 @@ void TestConfigLoader() {
                "default_level should match parsed yaml value");
     ExpectTrue(loaded->security.fail_on_public_obf_symbol,
                "guarded profile defaults should enforce strong vm symbol gate");
+    ExpectTrue(loaded->emit_progress_warnings, "emit_progress_warnings should parse from yaml");
+    const std::string summary = obf::summarize_config(*loaded);
+    ExpectTrue(summary.find("emit_progress_warnings: true") != std::string::npos,
+               "config summary should report progress warning flag");
   }
 
   std::error_code ec;

@@ -91,6 +91,7 @@ struct obfuscation_config {
   indirect_dispatch_config indirect_dispatch;
   security_gate_config security;
   bool debug_preserve_generated_names = false;
+  bool emit_progress_warnings = false;
 };
 
 void enforce_security_preflight(obfuscation_config& config);

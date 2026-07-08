@@ -518,6 +518,26 @@ class prepare_o0_pass : public llvm::PassInfoMixin<prepare_o0_pass> {
   }
 };
 
+std::size_t count_states_at_level(const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                                  protection_level level) {
+  std::size_t count = 0;
+  for (const function_pipeline_state& state : states) {
+    if (state.function != nullptr && !state.function->isDeclaration() &&
+        state.report.decision.policy.level == level) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+void emit_progress_warning_if_enabled(const obfuscation_config& config,
+                                      llvm::StringRef phase,
+                                      std::size_t count) {
+  if (!config.emit_progress_warnings || count == 0) { return; }
+  llvm::errs() << "llvm-obfus: warning: " << phase << " for " << count
+               << " function(s); this can take a while\n";
+}
+
 class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& mam) {
@@ -536,6 +556,11 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     changed |= rewrite_calls_to_virtualized_functions(module, vm_only, config.mba.depth);
 
     constexpr protection_level strong_vm_level = protection_level::strong_vm;
+    const std::size_t selected_strong_vm_count =
+        count_states_at_level(states, protection_level::strong_vm);
+    emit_progress_warning_if_enabled(config,
+                                     "starting strong_vm lowering",
+                                     selected_strong_vm_count);
     const virtualized_function_map strong_vm_virtualized =
         apply_vm_stage(states, config, &strong_vm_level);
     changed |= !strong_vm_virtualized.empty();
@@ -572,6 +597,9 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     for (const auto& entry : flattened_functions) { block_split_skips.insert(entry.getKey()); }
     changed |= apply_block_split_stage(post_vm_states, config, &block_split_skips);
 
+    emit_progress_warning_if_enabled(config,
+                                     "starting strong_vm hardening",
+                                     strong_vm_virtualized.size());
     changed |= apply_opaque_gep_to_functions(strong_vm_virtualized, config);
     llvm::StringSet<> strong_vm_flattened =
         apply_control_flattening_to_functions(strong_vm_virtualized, config);
