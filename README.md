@@ -58,7 +58,7 @@ The design goal is simple: make static recovery materially harder while staying 
 - Public runtime ABI names are generated at build time in `build/include/obf/support/runtime_abi_generated.h`.
 - The default public prefix is `rt_core_`.
 - Final cleanup strips marker attributes, removes annotation metadata, anonymizes local/internal obfuscation artifacts, and strips local SSA names.
-- Security gates can fail the build on leaked public `obf` symbols. **Note:** The `strong_vm` protection level strictly requires `security.fail_on_public_obf_symbol: true`. If omitted from the configuration, the loader will automatically enable this security gate to prevent accidental leakage.
+- Security gates can fail the build on leaked public `obf` symbols. **Note:** The configuration loader silently auto-remediates missing security gates to prevent accidental leakage unless `security.allow_unsafe_config: true` is set. Specifically, it forces `security.fail_on_public_obf_symbol: true` for `strong_vm` and high-security profiles (`fortress`, `lab`), and forces `debug_preserve_generated_names: false` when VM obfuscation is active.
 ## Architecture
 
 ### Frontend
@@ -227,10 +227,16 @@ Useful cache variables:
 
 ### Compiler Integration (clang/clang++)
 
-The plugin automatically integrates into the standard LLVM New Pass Manager (NPM) optimization pipeline. You can use it directly with `clang` or `clang++` to obfuscate code during standard compilation. It safely handles both unoptimized (`-O0`) and optimized (`-O1` through `-O3`, `-flto`) builds:
+The plugin integrates into the standard LLVM New Pass Manager (NPM) optimization pipeline. It executes securely and passively: obfuscation is only applied when explicitly enabled via the `OBF_CONFIG` or `OBF_ENABLE` environment variables. It safely handles both unoptimized (`-O0`) and optimized (`-O1` through `-O3`, `-flto`) builds:
 
 ```sh
-clang++ -O3 -fpass-plugin=build/obf_plugin.so -mllvm --obf-config=config.yaml input.cpp -o output
+OBF_CONFIG=config.yaml clang++ -O3 -fpass-plugin=build/obf_plugin.so input.cpp -o output
+```
+
+To enable annotation-driven obfuscation without a config file, set the explicit enable environment variable:
+
+```sh
+OBF_ENABLE=1 clang++ -O3 -fpass-plugin=build/obf_plugin.so input.cpp -o output
 ```
 
 ### Manual IR Transforms (opt)

@@ -336,6 +336,8 @@ bool is_high_security_profile(config_profile profile) {
   llvm_unreachable("unknown config profile");
 }
 
+}  // namespace
+
 void enforce_security_preflight(obfuscation_config& config) {
   if (config.security.allow_unsafe_config) { return; }
 
@@ -352,8 +354,6 @@ void enforce_security_preflight(obfuscation_config& config) {
     config.security.fail_on_public_obf_symbol = true;
   }
 }
-
-}  // namespace
 
 llvm::StringRef to_string(config_profile profile) {
   switch (profile) {

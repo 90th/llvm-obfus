@@ -45,6 +45,7 @@ struct function_pipeline_state {
   mba::mba_shape_counts mba_counts;
 };
 
+bool is_obfuscation_enabled();
 obfuscation_config load_active_config();
 
 std::uint64_t get_obf_seed_override();

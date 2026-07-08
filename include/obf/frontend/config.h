@@ -93,6 +93,7 @@ struct obfuscation_config {
   bool debug_preserve_generated_names = false;
 };
 
+void enforce_security_preflight(obfuscation_config& config);
 llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path);
 std::string summarize_config(const obfuscation_config& config);
 llvm::StringRef to_string(config_profile profile);

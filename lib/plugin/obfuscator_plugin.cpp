@@ -495,12 +495,38 @@ class bogus_control_flow_pass : public llvm::PassInfoMixin<bogus_control_flow_pa
   }
 };
 
-class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
+class prepare_o0_pass : public llvm::PassInfoMixin<prepare_o0_pass> {
  public:
-  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& mam) {
     const obfuscation_config config = load_active_config();
     const llvm::SmallVector<function_pipeline_state, 32> states =
         build_pipeline_state(module, config);
+
+    // Run PromotePass (mem2reg) strictly on functions targeted for obfuscation
+    // before running the obfuscation pipeline, preparing raw AST allocas into SSA form.
+    llvm::FunctionPassManager fpm;
+    fpm.addPass(llvm::PromotePass());
+    auto& fam = mam.getResult<llvm::FunctionAnalysisManagerModuleProxy>(module).getManager();
+    bool changed = false;
+    for (const auto& state : states) {
+      if (state.report.decision.policy.level != protection_level::none && state.function != nullptr) {
+        llvm::PreservedAnalyses pa = fpm.run(*state.function, fam);
+        if (!pa.areAllPreserved()) { changed = true; }
+      }
+    }
+    return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
+  }
+};
+
+class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
+ public:
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& mam) {
+    const obfuscation_config config = load_active_config();
+    const llvm::SmallVector<function_pipeline_state, 32> states =
+        build_pipeline_state(module, config);
+
+
+
 
     bool changed = apply_entropy_initialization_stage(module, get_obf_seed_override());
 
@@ -669,6 +695,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
 
             pass_builder.registerOptimizerLastEPCallback(
                 [](llvm::ModulePassManager& module_pm, llvm::OptimizationLevel level, llvm::ThinOrFullLTOPhase phase) {
+                  if (!obf::is_obfuscation_enabled()) { return; }
                   if (level != llvm::OptimizationLevel::O0 && phase != llvm::ThinOrFullLTOPhase::FullLTOPostLink) {
                     module_pm.addPass(obf::safe_pipeline_pass());
                   }
@@ -676,15 +703,15 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
 
             pass_builder.registerFullLinkTimeOptimizationLastEPCallback(
                 [](llvm::ModulePassManager& module_pm, llvm::OptimizationLevel level) {
+                  if (!obf::is_obfuscation_enabled()) { return; }
                   module_pm.addPass(obf::safe_pipeline_pass());
                 });
 
             pass_builder.registerPipelineStartEPCallback(
                 [](llvm::ModulePassManager& module_pm, llvm::OptimizationLevel level) {
+                  if (!obf::is_obfuscation_enabled()) { return; }
                   if (level == llvm::OptimizationLevel::O0) {
-                    llvm::FunctionPassManager fpm;
-                    fpm.addPass(llvm::PromotePass());
-                    module_pm.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(fpm)));
+                    module_pm.addPass(obf::prepare_o0_pass());
                     module_pm.addPass(obf::safe_pipeline_pass());
                   }
                 });

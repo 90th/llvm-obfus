@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <optional>
 #include <string>
+#include <cstdlib>
 
 namespace obf {
 
@@ -244,20 +245,43 @@ llvm::cl::opt<std::string>
                     llvm::cl::desc("Path to llvm-obfus milestone-zero YAML config"),
                     llvm::cl::init(""));
 
+llvm::cl::opt<bool> obf_enable("obf-enable",
+                               llvm::cl::desc("Enable obfuscation pipeline"),
+                               llvm::cl::init(false));
+
+
 llvm::cl::opt<std::uint64_t> obf_seed_override(
     "obf-seed", llvm::cl::desc("Overrides the top-level obfuscation seed"), llvm::cl::init(0));
 
 }  // namespace
 
+bool is_obfuscation_enabled() {
+  if (const char* env = std::getenv("OBF_ENABLE")) {
+    if (llvm::StringRef(env) == "1" || llvm::StringRef(env) == "true") { return true; }
+  }
+  if (const char* env = std::getenv("OBF_CONFIG")) {
+    if (llvm::StringRef(env) != "") { return true; }
+  }
+  return obf_enable || !obf_config_path.empty();
+}
+
+
 obfuscation_config load_active_config() {
   static std::optional<obfuscation_config> cached_config;
   if (cached_config.has_value()) { return *cached_config; }
 
+  std::string config_path = obf_config_path.getValue();
+  if (config_path.empty()) {
+    if (const char* env = std::getenv("OBF_CONFIG")) {
+      config_path = env;
+    }
+  }
+
   obfuscation_config config;
-  if (obf_config_path.empty()) {
+  if (config_path.empty()) {
     config = {};
   } else {
-    llvm::Expected<obfuscation_config> loaded_config = load_config_from_file(obf_config_path);
+    llvm::Expected<obfuscation_config> loaded_config = load_config_from_file(config_path);
     if (!loaded_config) {
       const std::string error_message = llvm::toString(loaded_config.takeError());
       llvm::report_fatal_error(llvm::StringRef(error_message));
