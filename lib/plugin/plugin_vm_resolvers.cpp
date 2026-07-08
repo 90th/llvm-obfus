@@ -32,10 +32,23 @@ vm_seed_resolver_shape select_vm_seed_resolver_shape(protection_level level) {
 }
 
 vm_pointer_materialization_shape select_vm_pointer_materialization_shape(
-    llvm::Function& interface_function, std::uint64_t seed_base, llvm::StringRef prefix) {
+    protection_level level, unsigned bit_width, llvm::Function& interface_function, std::uint64_t seed_base, llvm::StringRef prefix) {
   std::uint64_t selector = stable_hash_string(interface_function.getName());
   selector = mix_vm_handshake_seed(selector, seed_base);
   selector = mix_vm_handshake_seed(selector, stable_hash_string(prefix));
+
+  if (level == protection_level::strong_vm) {
+    if (bit_width < 32) {
+      return vm_pointer_materialization_shape::add_sub_bias;
+    }
+    switch (selector % 2) {
+      case 0:
+        return vm_pointer_materialization_shape::split_xor_chunks;
+      case 1:
+      default:
+        return vm_pointer_materialization_shape::add_sub_bias;
+    }
+  }
 
   switch (selector % 3) {
     case 1:
@@ -89,6 +102,7 @@ llvm::Value* build_vm_target_token_mask(llvm::IRBuilder<>& builder,
 }  // namespace
 
 llvm::Value* build_encoded_vm_target_value(llvm::IRBuilder<>& builder,
+                                           protection_level level,
                                            llvm::Function& owner,
                                            llvm::Function& interface_function,
                                            llvm::Function& implementation_function,
@@ -107,6 +121,7 @@ llvm::Value* build_encoded_vm_target_value(llvm::IRBuilder<>& builder,
       builder.CreateLoad(ptr_int_type, &decode_key_global, prefix.str() + ".target.key");
   llvm::Value* target_int =
       decode_virtualized_target_seed(builder,
+                                     level,
                                      owner,
                                      prefix,
                                      interface_function,
@@ -445,6 +460,7 @@ llvm::APInt derive_vm_pointer_materialization_mask(llvm::Function& interface_fun
 }
 
 llvm::Value* materialize_vm_impl_pointer_int(llvm::IRBuilder<>& builder,
+                                             protection_level level,
                                              llvm::Function& owner,
                                              llvm::Function& interface_function,
                                              llvm::Function& implementation_function,
@@ -457,7 +473,12 @@ llvm::Value* materialize_vm_impl_pointer_int(llvm::IRBuilder<>& builder,
   (void)owner;
   const unsigned bit_width = ptr_int_type->getBitWidth();
   if (shape == vm_pointer_materialization_shape::split_xor_chunks && bit_width < 32) {
-    shape = vm_pointer_materialization_shape::direct_ptrtoint;
+    if (level == protection_level::strong_vm) {
+      llvm_unreachable("strong_vm passed split_xor_chunks on <32 bit width");
+      shape = vm_pointer_materialization_shape::add_sub_bias;
+    } else {
+      shape = vm_pointer_materialization_shape::direct_ptrtoint;
+    }
   }
 
   const llvm::APInt key = derive_vm_target_key(interface_function, ptr_int_type);
@@ -579,6 +600,7 @@ llvm::Value* decode_virtualized_target_seed_shared(llvm::IRBuilder<>& builder,
 }
 
 llvm::Value* decode_virtualized_target_seed_local(llvm::IRBuilder<>& builder,
+                                                  protection_level level,
                                                   llvm::Function& owner,
                                                   llvm::Function& interface_function,
                                                   llvm::Function& implementation_function,
@@ -615,8 +637,9 @@ llvm::Value* decode_virtualized_target_seed_local(llvm::IRBuilder<>& builder,
       owner, (prefix + ".target.local.seed").str(),
       key.getLimitedValue() ^ seed_base ^ 0x63f000ULL, resolve_cfg);
   const vm_pointer_materialization_shape pointer_shape =
-      select_vm_pointer_materialization_shape(interface_function, seed_base, prefix);
+      select_vm_pointer_materialization_shape(level, ptr_int_type->getBitWidth(), interface_function, seed_base, prefix);
   llvm::Value* resolved_target = materialize_vm_impl_pointer_int(builder,
+                                                                 level,
                                                                  owner,
                                                                  interface_function,
                                                                  implementation_function,
@@ -648,6 +671,7 @@ llvm::Value* decode_virtualized_target_seed_local(llvm::IRBuilder<>& builder,
 }
 
 llvm::Value* decode_virtualized_target_seed(llvm::IRBuilder<>& builder,
+                                            protection_level level,
                                             llvm::Function& owner,
                                             llvm::StringRef prefix,
                                             llvm::Function& interface_function,
@@ -660,6 +684,7 @@ llvm::Value* decode_virtualized_target_seed(llvm::IRBuilder<>& builder,
                                             std::uint32_t mba_depth) {
   if (seed_resolver_shape == vm_seed_resolver_shape::local_inline_resolver) {
     return decode_virtualized_target_seed_local(builder,
+                                                level,
                                                 owner,
                                                 interface_function,
                                                 implementation_function,

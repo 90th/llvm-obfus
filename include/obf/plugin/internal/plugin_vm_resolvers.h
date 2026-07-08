@@ -16,9 +16,10 @@ vm_resolver_shape select_vm_resolver_shape(protection_level level);
 vm_seed_resolver_shape select_vm_seed_resolver_shape(protection_level level);
 
 vm_pointer_materialization_shape select_vm_pointer_materialization_shape(
-    llvm::Function& interface_function, std::uint64_t seed_base, llvm::StringRef prefix);
+    protection_level level, unsigned bit_width, llvm::Function& interface_function, std::uint64_t seed_base, llvm::StringRef prefix);
 
 llvm::Value* build_encoded_vm_target_value(llvm::IRBuilder<>& builder,
+                                           protection_level level,
                                            llvm::Function& owner,
                                            llvm::Function& interface_function,
                                            llvm::Function& implementation_function,
@@ -87,6 +88,7 @@ llvm::GlobalVariable* get_or_create_vm_decode_key_global(llvm::Module& module,
                                                          const llvm::APInt& key);
 
 llvm::Value* decode_virtualized_target_seed(llvm::IRBuilder<>& builder,
+                                            protection_level level,
                                             llvm::Function& owner,
                                             llvm::StringRef prefix,
                                             llvm::Function& interface_function,

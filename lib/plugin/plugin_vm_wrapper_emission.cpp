@@ -506,6 +506,11 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
                                   vm_resolver_shape resolver_shape,
                                   vm_seed_resolver_shape seed_resolver_shape,
                                   std::uint32_t mba_depth) {
+  if (binding.state == nullptr) { llvm_unreachable("vm wrapper missing binding state"); }
+  const protection_level level = binding.state->report.decision.policy.level;
+  if (resolver_shape != select_vm_resolver_shape(level)) { llvm_unreachable("Shape mismatch"); }
+  if (seed_resolver_shape != select_vm_seed_resolver_shape(level)) { llvm_unreachable("Shape mismatch"); }
+
   llvm::Module* module = interface_function.getParent();
   if (module == nullptr) { llvm_unreachable("vm wrapper missing parent module"); }
 
@@ -555,6 +560,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
 
   if (resolver_shape == vm_resolver_shape::local_always_decode) {
     llvm::Value* encoded_target = build_encoded_vm_target_value(builder,
+                                                                level,
                                                                 interface_function,
                                                                 interface_function,
                                                                 thunk_function,
@@ -631,6 +637,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
 
   llvm::IRBuilder<> resolve_builder(resolve_bb);
   llvm::Value* new_encoded = build_encoded_vm_target_value(resolve_builder,
+                                                           level,
                                                            interface_function,
                                                            interface_function,
                                                            thunk_function,

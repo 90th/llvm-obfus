@@ -44,6 +44,8 @@ entry:
 ; CHECK-NOT: strong_vm_value.obf.wrapper.encoded
 ; CHECK: %strong_vm_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @[[STRONG_KEY:__obf_vm_k_[A-Za-z0-9_]+]]
 ; CHECK: ptrtoint (ptr @[[STRONG_THUNK:__obf_vm_e_[A-Za-z0-9_]+]] to i{{[0-9]+}})
+; CHECK-NOT: {{.*}}.ptrmat.direct
+; CHECK: {{.*}}.ptrmat.{{split|addsub}}
 ; CHECK: call i32 %strong_vm_value.obf.wrapper.indirect(i32 %x, i64 %strong_vm_value.obf.wrapper.token)
 
 ; CHECK-LABEL: define i32 @main()
@@ -55,6 +57,8 @@ entry:
 ; CHECK-NOT: strong_vm_value.obf.encoded
 ; CHECK: %strong_vm_value.obf.target.key = load i{{[0-9]+}}, ptr @[[STRONG_KEY]]
 ; CHECK: ptrtoint (ptr @[[STRONG_THUNK]] to i{{[0-9]+}})
+; CHECK-NOT: {{.*}}.ptrmat.direct
+; CHECK: {{.*}}.ptrmat.{{split|addsub}}
 ; CHECK: call i32 %strong_vm_value.obf.indirect(i32 12, i64 %strong_vm_value.obf.call.token)
 
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)

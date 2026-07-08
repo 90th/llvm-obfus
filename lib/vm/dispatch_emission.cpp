@@ -295,7 +295,7 @@ llvm::Value* build_dispatch_key(llvm::IRBuilder<>& builder,
   llvm::Value* typed_index = dispatch_index;
   if (typed_index->getType() != context.ptr_int_type) {
     typed_index =
-        builder.CreateZExt(typed_index, context.ptr_int_type, "obf.vm.dispatch.index.cast");
+        builder.CreateZExtOrTrunc(typed_index, context.ptr_int_type, "obf.vm.dispatch.index.cast");
   }
 
   llvm::Value* seed_mix = mba::create_xor(

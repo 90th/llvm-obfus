@@ -48,6 +48,23 @@ entry:
 ; STRUCTURE-DAG: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; STRUCTURE-DAG: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 
-; SHAPES-DAG: ptrmat.direct
-; SHAPES-DAG: ptrmat.split
-; SHAPES-DAG: ptrmat.addsub
+; SHAPES-LABEL: define i32 @strong_target_a(i32 %x)
+; SHAPES: {{.*}}.ptrmat.{{split|addsub}}
+; SHAPES: call i32 %{{[^ ]+}}(i32 %x, i64 %{{[^)]+}})
+; SHAPES-NOT: {{.*}}.ptrmat.direct
+; SHAPES: ret i32
+
+; SHAPES-LABEL: define i32 @strong_target_b(i32 %x)
+; SHAPES: {{.*}}.ptrmat.{{split|addsub}}
+; SHAPES: call i32 %{{[^ ]+}}(i32 %x, i64 %{{[^)]+}})
+; SHAPES-NOT: {{.*}}.ptrmat.direct
+; SHAPES: ret i32
+
+; SHAPES-LABEL: define i32 @strong_target_c(i32 %x)
+; SHAPES: {{.*}}.ptrmat.{{split|addsub}}
+; SHAPES: call i32 %{{[^ ]+}}(i32 %x, i64 %{{[^)]+}})
+; SHAPES-NOT: {{.*}}.ptrmat.direct
+; SHAPES: ret i32
+
+; SHAPES-DAG: .ptrmat.split
+; SHAPES-DAG: .ptrmat.addsub

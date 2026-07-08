@@ -40,6 +40,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
       binding.state == nullptr
           ? vm_seed_resolver_shape::shared_switch_resolver
           : select_vm_seed_resolver_shape(binding.state->report.decision.policy.level);
+  const protection_level level = binding.state ? binding.state->report.decision.policy.level : protection_level::vm;
   auto* ptr_int_type = get_vm_pointer_int_type(function);
   if (ptr_int_type == nullptr) { return false; }
 
@@ -91,6 +92,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
                                                            0x700000ULL +
                                                                static_cast<std::uint64_t>(callsite_index++));
       llvm::Value* encoded_target = build_encoded_vm_target_value(builder,
+                                                                  level,
                                                                   *caller,
                                                                   function,
                                                                   thunk_function,
@@ -193,6 +195,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
 
     llvm::IRBuilder<> resolve_builder(resolve_bb);
     llvm::Value* new_encoded = build_encoded_vm_target_value(resolve_builder,
+                                                             level,
                                                              *caller,
                                                              function,
                                                              thunk_function,
