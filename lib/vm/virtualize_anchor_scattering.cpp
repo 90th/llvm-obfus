@@ -10,19 +10,22 @@
 
 namespace obf::vm {
 
-std::uint64_t derive_vm_opaque_seed(const llvm::Function& function,
+std::uint64_t derive_vm_opaque_seed(std::uint64_t decision_seed,
+                                    const llvm::Function& function,
                                     const bytecode_program& program) {
   std::uint64_t seed = stable_hash_string(function.getName());
   seed ^= static_cast<std::uint64_t>(program.instructions.size()) * 0x9e3779b97f4a7c15ULL;
   seed ^= static_cast<std::uint64_t>(program.slots.size()) << 32;
+  if (decision_seed != 0) { seed = mix_seed(seed, decision_seed); }
   if (seed == 0) { seed = 0x6a09e667f3bcc909ULL; }
 
   return seed;
 }
 
-std::uint64_t derive_vm_return_key(const llvm::Function& function,
+std::uint64_t derive_vm_return_key(std::uint64_t decision_seed,
+                                   const llvm::Function& function,
                                    const bytecode_program& program) {
-  return mix_seed(derive_vm_opaque_seed(function, program), 0xdeadbeefcafebabeULL);
+  return mix_seed(derive_vm_opaque_seed(decision_seed, function, program), 0xdeadbeefcafebabeULL);
 }
 
 llvm::Value* build_hidden_token_seed(llvm::IRBuilder<>& builder,
@@ -104,19 +107,17 @@ std::uint32_t select_bytecode_anchor_decoy_count(std::uint64_t bytecode_size,
                                                  std::uint64_t salt,
                                                  std::uint32_t real_count) {
   if (bytecode_size < 32 || real_count == 0) { return 0; }
-  const std::uint32_t max_decoys = bytecode_size < 128 ? 1U
-                                  : bytecode_size < 512 ? 3U
-                                  :                       8U;
+  const std::uint32_t max_decoys = bytecode_size < 128 ? 1U : bytecode_size < 512 ? 3U : 8U;
   const std::uint64_t selector = mix_seed(bytecode_seed, 0x27200001ULL ^ salt);
   return 1U + static_cast<std::uint32_t>(selector % max_decoys);
 }
 
-llvm::SmallVector<llvm::GlobalVariable*, 8> build_bytecode_anchor_globals(
-    llvm::GlobalVariable* bytecode_global,
-    std::uint64_t bytecode_seed,
-    std::uint64_t salt,
-    std::uint32_t& out_real_count,
-    std::uint32_t& out_decoy_count) {
+llvm::SmallVector<llvm::GlobalVariable*, 8>
+build_bytecode_anchor_globals(llvm::GlobalVariable* bytecode_global,
+                              std::uint64_t bytecode_seed,
+                              std::uint64_t salt,
+                              std::uint32_t& out_real_count,
+                              std::uint32_t& out_decoy_count) {
   llvm::SmallVector<llvm::GlobalVariable*, 8> anchors;
   out_real_count = 0;
   out_decoy_count = 0;
@@ -278,9 +279,10 @@ llvm::Value* build_hidden_token_storage_value(llvm::IRBuilder<>& builder,
   return token;
 }
 
-std::uint64_t derive_vm_bytecode_seed(const llvm::Function& function,
+std::uint64_t derive_vm_bytecode_seed(std::uint64_t decision_seed,
+                                      const llvm::Function& function,
                                       const bytecode_program& program) {
-  std::uint64_t seed = derive_vm_opaque_seed(function, program);
+  std::uint64_t seed = derive_vm_opaque_seed(decision_seed, function, program);
   seed = mix_seed(seed, 0x6eed0e9da4d94a4fULL);
   return seed == 0 ? 0x4f1bbcdc6762d5f1ULL : seed;
 }

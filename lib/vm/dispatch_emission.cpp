@@ -257,9 +257,10 @@ void store_next_route_with_choreography(llvm::IRBuilder<>& builder,
   llvm_unreachable("unknown vm route choreography shape");
 }
 
-std::mt19937 build_opcode_rng(const llvm::Function& function, const bytecode_program& program) {
-  const std::uint64_t seed_base =
-      mix_seed(derive_vm_bytecode_seed(function, program), 0x0f4c0d3aa19b27d5ULL);
+std::mt19937 build_opcode_rng(const llvm::Function& function,
+                              const bytecode_program& program,
+                              std::uint64_t bytecode_seed) {
+  const std::uint64_t seed_base = mix_seed(bytecode_seed, 0x0f4c0d3aa19b27d5ULL);
   std::seed_seq seed_words{static_cast<std::uint32_t>(seed_base),
                            static_cast<std::uint32_t>(seed_base >> 32),
                            static_cast<std::uint32_t>(stable_hash_string(function.getName())),
@@ -324,12 +325,13 @@ llvm::Value* build_dispatch_key(llvm::IRBuilder<>& builder,
       make_vm_dispatch_affine_multiplier(bit_width, affine_seed ^ 0x410a11ceULL);
   const llvm::APInt affine_bias =
       make_vm_dispatch_affine_bias(bit_width, affine_seed ^ 0x510a11ceULL);
-  llvm::Value* affine_mul = mba::create_mul(builder,
-                                            mixed_key,
-                                            llvm::ConstantInt::get(context.ptr_int_type, affine_multiplier),
-                                            context.mba_context,
-                                            salt + 4,
-                                            "obf.vm.dispatch.key.affine.mul");
+  llvm::Value* affine_mul =
+      mba::create_mul(builder,
+                      mixed_key,
+                      llvm::ConstantInt::get(context.ptr_int_type, affine_multiplier),
+                      context.mba_context,
+                      salt + 4,
+                      "obf.vm.dispatch.key.affine.mul");
   return mba::create_add(builder,
                          affine_mul,
                          llvm::ConstantInt::get(context.ptr_int_type, affine_bias),
@@ -374,13 +376,14 @@ llvm::Value* BuildVmDecoySeed(llvm::IRBuilder<>& builder,
                               rewrite_function_context& context,
                               llvm::StringRef name,
                               std::uint64_t salt) {
-  return mba::entangle_value(builder,
-                             builder.CreateLoad(builder.getInt64Ty(),
-                                                mba::get_or_create_entropy_anchor(*context.function.getParent()),
-                                                "obf.vm.decoy.entropy"),
-                             context.mba_context,
-                             salt,
-                             name);
+  return mba::entangle_value(
+      builder,
+      builder.CreateLoad(builder.getInt64Ty(),
+                         mba::get_or_create_entropy_anchor(*context.function.getParent()),
+                         "obf.vm.decoy.entropy"),
+      context.mba_context,
+      salt,
+      name);
 }
 
 llvm::Value* CreateVmDecoyStateFieldPtr(llvm::IRBuilder<>& builder,
@@ -407,7 +410,8 @@ slot_storage BuildVmDecoyStateSlotStorage(llvm::IRBuilder<>& builder,
           state_layout,
           state_storage,
           state_layout.slot_fields[slot_index][cell_index],
-          (name_prefix + ".slot." + llvm::Twine(slot_index) + "." + llvm::Twine(cell_index)).str()));
+          (name_prefix + ".slot." + llvm::Twine(slot_index) + "." + llvm::Twine(cell_index))
+              .str()));
     }
     slots.push_back(std::move(cells));
   }
@@ -428,20 +432,19 @@ llvm::Value* BuildVmDecoyDispatchValue(llvm::IRBuilder<>& builder,
                                        rewrite_function_context& context,
                                        const VmDecoyRoutePlan& plan,
                                        std::uint64_t salt) {
-  llvm::Value* seed = BuildVmDecoySeed(builder, context, "obf.vm.decoy.dispatch.seed", salt ^ 0x21ULL);
-  llvm::Value* seed32 = builder.CreateTrunc(seed, builder.getInt32Ty(), "obf.vm.decoy.dispatch.seed32");
-  llvm::Value* dispatch_const = mba::create_opaque_integer(builder,
-                                                           builder.getInt32Ty(),
-                                                           context.mba_context,
-                                                           llvm::APInt(32, plan.decoy_dispatch_index),
-                                                           salt ^ 0x22ULL,
-                                                           "obf.vm.decoy.dispatch.const");
-  llvm::Value* dispatch_zero = mba::create_xor(builder,
-                                               seed32,
-                                               seed32,
-                                               context.mba_context,
-                                               salt ^ 0x23ULL,
-                                               "obf.vm.decoy.dispatch.zero");
+  llvm::Value* seed =
+      BuildVmDecoySeed(builder, context, "obf.vm.decoy.dispatch.seed", salt ^ 0x21ULL);
+  llvm::Value* seed32 =
+      builder.CreateTrunc(seed, builder.getInt32Ty(), "obf.vm.decoy.dispatch.seed32");
+  llvm::Value* dispatch_const =
+      mba::create_opaque_integer(builder,
+                                 builder.getInt32Ty(),
+                                 context.mba_context,
+                                 llvm::APInt(32, plan.decoy_dispatch_index),
+                                 salt ^ 0x22ULL,
+                                 "obf.vm.decoy.dispatch.const");
+  llvm::Value* dispatch_zero = mba::create_xor(
+      builder, seed32, seed32, context.mba_context, salt ^ 0x23ULL, "obf.vm.decoy.dispatch.zero");
   return mba::create_add(builder,
                          dispatch_const,
                          dispatch_zero,
@@ -454,20 +457,18 @@ llvm::Value* BuildVmDecoyIslandValue(llvm::IRBuilder<>& builder,
                                      rewrite_function_context& context,
                                      const VmDecoyRoutePlan& plan,
                                      std::uint64_t salt) {
-  llvm::Value* seed = BuildVmDecoySeed(builder, context, "obf.vm.decoy.island.seed", salt ^ 0x31ULL);
-  llvm::Value* seed32 = builder.CreateTrunc(seed, builder.getInt32Ty(), "obf.vm.decoy.island.seed32");
+  llvm::Value* seed =
+      BuildVmDecoySeed(builder, context, "obf.vm.decoy.island.seed", salt ^ 0x31ULL);
+  llvm::Value* seed32 =
+      builder.CreateTrunc(seed, builder.getInt32Ty(), "obf.vm.decoy.island.seed32");
   llvm::Value* island_const = mba::create_opaque_integer(builder,
                                                          builder.getInt32Ty(),
                                                          context.mba_context,
                                                          llvm::APInt(32, plan.decoy_island),
                                                          salt ^ 0x32ULL,
                                                          "obf.vm.decoy.island.const");
-  llvm::Value* island_zero = mba::create_xor(builder,
-                                             seed32,
-                                             seed32,
-                                             context.mba_context,
-                                             salt ^ 0x33ULL,
-                                             "obf.vm.decoy.island.zero");
+  llvm::Value* island_zero = mba::create_xor(
+      builder, seed32, seed32, context.mba_context, salt ^ 0x33ULL, "obf.vm.decoy.island.zero");
   return mba::create_add(builder,
                          island_const,
                          island_zero,
@@ -503,12 +504,8 @@ llvm::Value* BuildVmDecoySlotValue(llvm::IRBuilder<>& builder,
                                            context.mba_context,
                                            salt ^ 0x43ULL,
                                            "obf.vm.decoy.slot.zero");
-  return mba::create_add(builder,
-                         slot_value,
-                         slot_zero,
-                         context.mba_context,
-                         salt ^ 0x44ULL,
-                         "obf.vm.decoy.slot");
+  return mba::create_add(
+      builder, slot_value, slot_zero, context.mba_context, salt ^ 0x44ULL, "obf.vm.decoy.slot");
 }
 
 void EmitVmDecoySlotUpdate(llvm::IRBuilder<>& builder,
@@ -521,8 +518,8 @@ void EmitVmDecoySlotUpdate(llvm::IRBuilder<>& builder,
     return;
   }
 
-  llvm::Value* slot_value =
-      BuildVmDecoySlotValue(builder, context, source_slot_mapping, plan.decoy_slot, plan.salt ^ 0x51ULL);
+  llvm::Value* slot_value = BuildVmDecoySlotValue(
+      builder, context, source_slot_mapping, plan.decoy_slot, plan.salt ^ 0x51ULL);
   if (slot_value == nullptr) { return; }
 
   switch (select_slot_update_choreography_shape(context, plan.decoy_slot, plan.salt ^ 0x52ULL)) {
@@ -564,7 +561,8 @@ void EmitVmDecoySlotUpdate(llvm::IRBuilder<>& builder,
           roundtrip_vm_handler_value(builder, slot_value, "vm.island.decoy.slot.select.rt");
       llvm::Value* take_primary = nullptr;
       if (slot_value->getType()->isIntegerTy()) {
-        take_primary = builder.CreateICmpEQ(slot_value, roundtrip, "vm.island.decoy.slot.select.eq");
+        take_primary =
+            builder.CreateICmpEQ(slot_value, roundtrip, "vm.island.decoy.slot.select.eq");
       } else {
         llvm::Value* slot_carrier = materialize_pointer_carrier(builder,
                                                                 slot_value,
@@ -582,19 +580,17 @@ void EmitVmDecoySlotUpdate(llvm::IRBuilder<>& builder,
         take_primary =
             builder.CreateICmpEQ(slot_carrier, roundtrip_carrier, "vm.island.decoy.slot.select.eq");
       }
-      store_slot(builder,
-                 context.slot_allocas,
-                 target_slot_mapping,
-                 context.program,
-                 plan.decoy_slot,
-                 builder.CreateSelect(take_primary,
-                                      slot_value,
-                                      roundtrip,
-                                      "vm.island.decoy.slot.select"),
-                 context.opaque_seed_slot,
-                 context.opaque_seed_base,
-                 context.mba_context,
-                 plan.salt ^ 0x58ULL);
+      store_slot(
+          builder,
+          context.slot_allocas,
+          target_slot_mapping,
+          context.program,
+          plan.decoy_slot,
+          builder.CreateSelect(take_primary, slot_value, roundtrip, "vm.island.decoy.slot.select"),
+          context.opaque_seed_slot,
+          context.opaque_seed_base,
+          context.mba_context,
+          plan.salt ^ 0x58ULL);
       return;
     }
     case vm_slot_update_choreography_shape::split:
@@ -604,23 +600,24 @@ void EmitVmDecoySlotUpdate(llvm::IRBuilder<>& builder,
                  target_slot_mapping,
                  context.program,
                  plan.decoy_slot,
-                 builder.CreateOr(builder.CreateAnd(slot_value,
-                                                   llvm::ConstantInt::get(
-                                                       llvm::cast<llvm::IntegerType>(slot_value->getType()),
-                                                       llvm::APInt(slot_value->getType()->getIntegerBitWidth(),
-                                                                   0x5555555555555555ULL,
-                                                                   false,
-                                                                   true)),
-                                                   "vm.island.decoy.slot.split.low"),
-                                  builder.CreateAnd(slot_value,
-                                                   llvm::ConstantInt::get(
-                                                       llvm::cast<llvm::IntegerType>(slot_value->getType()),
-                                                       ~llvm::APInt(slot_value->getType()->getIntegerBitWidth(),
-                                                                    0x5555555555555555ULL,
-                                                                    false,
-                                                                    true)),
-                                                   "vm.island.decoy.slot.split.high"),
-                                  "vm.island.decoy.slot.split"),
+                 builder.CreateOr(
+                     builder.CreateAnd(slot_value,
+                                       llvm::ConstantInt::get(
+                                           llvm::cast<llvm::IntegerType>(slot_value->getType()),
+                                           llvm::APInt(slot_value->getType()->getIntegerBitWidth(),
+                                                       0x5555555555555555ULL,
+                                                       false,
+                                                       true)),
+                                       "vm.island.decoy.slot.split.low"),
+                     builder.CreateAnd(slot_value,
+                                       llvm::ConstantInt::get(
+                                           llvm::cast<llvm::IntegerType>(slot_value->getType()),
+                                           ~llvm::APInt(slot_value->getType()->getIntegerBitWidth(),
+                                                        0x5555555555555555ULL,
+                                                        false,
+                                                        true)),
+                                       "vm.island.decoy.slot.split.high"),
+                     "vm.island.decoy.slot.split"),
                  context.opaque_seed_slot,
                  context.opaque_seed_base,
                  context.mba_context,
@@ -637,7 +634,8 @@ void EmitVmDecoyRouteMutation(llvm::IRBuilder<>& builder,
     return;
   }
 
-  builder.CreateStore(BuildVmDecoyStateValue(builder, context, plan.salt ^ 0x61ULL), context.state_slot);
+  builder.CreateStore(BuildVmDecoyStateValue(builder, context, plan.salt ^ 0x61ULL),
+                      context.state_slot);
   builder.CreateStore(BuildVmDecoyDispatchValue(builder, context, plan, plan.salt ^ 0x62ULL),
                       context.dispatch_index_slot);
   builder.CreateStore(BuildVmDecoyIslandValue(builder, context, plan, plan.salt ^ 0x63ULL),
@@ -869,12 +867,13 @@ std::uint32_t select_vm_island_count(std::uint64_t seed_base,
 }
 
 opcode_permutation build_opcode_permutation(const llvm::Function& function,
-                                            const bytecode_program& program) {
+                                            const bytecode_program& program,
+                                            std::uint64_t bytecode_seed) {
   opcode_permutation permutation;
   std::array<std::uint8_t, 256> physical_values = {};
   std::iota(physical_values.begin(), physical_values.end(), 0);
 
-  std::mt19937 rng = build_opcode_rng(function, program);
+  std::mt19937 rng = build_opcode_rng(function, program, bytecode_seed);
   std::shuffle(physical_values.begin(), physical_values.end(), rng);
   for (std::size_t logical_index = 0; logical_index < vm_opcode_count; ++logical_index) {
     permutation.physical_for_logical[logical_index] = physical_values[logical_index];
@@ -929,10 +928,10 @@ llvm::Value* emit_opcode_match(llvm::IRBuilder<>& builder,
   const std::uint32_t low_mask = (1U << split_bits) - 1U;
 
   auto build_low_delta = [&]() -> llvm::Value* {
-    llvm::Value* low_actual = builder.CreateAnd(
-        mixed,
-        materialize_opcode_word(builder, context, low_mask, salt ^ 0x0fc01004ULL),
-        "obf.vm.opcode.split.low.actual");
+    llvm::Value* low_actual =
+        builder.CreateAnd(mixed,
+                          materialize_opcode_word(builder, context, low_mask, salt ^ 0x0fc01004ULL),
+                          "obf.vm.opcode.split.low.actual");
     return mba::create_xor(
         builder,
         low_actual,
@@ -957,13 +956,14 @@ llvm::Value* emit_opcode_match(llvm::IRBuilder<>& builder,
                                                "obf.vm.opcode.split.high.source");
     llvm::Value* high_actual = builder.CreateLShr(
         high_source, builder.getInt32(split_bits), "obf.vm.opcode.split.high.actual");
-    return mba::create_xor(builder,
-                           high_actual,
-                           materialize_opcode_word(
-                               builder, context, encoded_opcode >> split_bits, salt ^ 0x0fc01007ULL),
-                           context.mba_context,
-                           salt ^ 0x0fc02007ULL,
-                           "obf.vm.opcode.split.high.delta");
+    return mba::create_xor(
+        builder,
+        high_actual,
+        materialize_opcode_word(
+            builder, context, encoded_opcode >> split_bits, salt ^ 0x0fc01007ULL),
+        context.mba_context,
+        salt ^ 0x0fc02007ULL,
+        "obf.vm.opcode.split.high.delta");
   };
 
   llvm::Value* low_delta = nullptr;
@@ -983,8 +983,8 @@ llvm::Value* emit_opcode_match(llvm::IRBuilder<>& builder,
     llvm::BasicBlock* current_block = builder.GetInsertBlock();
     llvm::Function* owner = current_block == nullptr ? nullptr : current_block->getParent();
     if (owner != nullptr) {
-      llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(
-          owner->getContext(), "obf.vm.opcode.pred.merge", owner);
+      llvm::BasicBlock* merge_block =
+          llvm::BasicBlock::Create(owner->getContext(), "obf.vm.opcode.pred.merge", owner);
       builder.CreateBr(merge_block);
       builder.SetInsertPoint(merge_block);
     }
@@ -1353,7 +1353,8 @@ llvm::BasicBlock* EmitVmInlineDecoyBlock(llvm::Function& function,
                                          llvm::StringRef block_name) {
   if (loop_header == nullptr) { return nullptr; }
 
-  llvm::BasicBlock* decoy_block = llvm::BasicBlock::Create(function.getContext(), block_name, &function);
+  llvm::BasicBlock* decoy_block =
+      llvm::BasicBlock::Create(function.getContext(), block_name, &function);
   llvm::IRBuilder<> builder(decoy_block);
 
   if (context.state_layout == nullptr || context.state_storage == nullptr) {
@@ -1361,23 +1362,29 @@ llvm::BasicBlock* EmitVmInlineDecoyBlock(llvm::Function& function,
     return decoy_block;
   }
 
-  slot_storage decoy_slots = BuildVmDecoyStateSlotStorage(
-      builder, *context.state_layout, context.state_storage, context.program, "vm.island.decoy.state");
-  llvm::Value* decoy_state_slot = CreateVmDecoyStateFieldPtr(builder,
-                                                             *context.state_layout,
-                                                             context.state_storage,
-                                                             context.state_layout->bytecode_state_field,
-                                                             "vm.island.decoy.state.bc");
-  llvm::Value* decoy_dispatch_index_slot = CreateVmDecoyStateFieldPtr(builder,
-                                                                      *context.state_layout,
-                                                                      context.state_storage,
-                                                                      context.state_layout->dispatch_index_field,
-                                                                      "vm.island.decoy.state.dispatch");
-  llvm::Value* decoy_island_id_slot = CreateVmDecoyStateFieldPtr(builder,
-                                                                 *context.state_layout,
-                                                                 context.state_storage,
-                                                                 context.state_layout->island_id_field,
-                                                                 "vm.island.decoy.state.island");
+  slot_storage decoy_slots = BuildVmDecoyStateSlotStorage(builder,
+                                                          *context.state_layout,
+                                                          context.state_storage,
+                                                          context.program,
+                                                          "vm.island.decoy.state");
+  llvm::Value* decoy_state_slot =
+      CreateVmDecoyStateFieldPtr(builder,
+                                 *context.state_layout,
+                                 context.state_storage,
+                                 context.state_layout->bytecode_state_field,
+                                 "vm.island.decoy.state.bc");
+  llvm::Value* decoy_dispatch_index_slot =
+      CreateVmDecoyStateFieldPtr(builder,
+                                 *context.state_layout,
+                                 context.state_storage,
+                                 context.state_layout->dispatch_index_field,
+                                 "vm.island.decoy.state.dispatch");
+  llvm::Value* decoy_island_id_slot =
+      CreateVmDecoyStateFieldPtr(builder,
+                                 *context.state_layout,
+                                 context.state_storage,
+                                 context.state_layout->island_id_field,
+                                 "vm.island.decoy.state.island");
   std::size_t decoy_dispatch_site_counter = context.dispatch_site_counter;
   std::vector<switch_dispatch_bank> decoy_switch_dispatch_banks;
   rewrite_function_context decoy_context{
@@ -1438,15 +1445,19 @@ void EmitVmDecoyHelperBody(llvm::Function& helper,
                            std::uint32_t mba_depth,
                            const VmDecoyRoutePlan& plan) {
   llvm::LLVMContext& context = helper.getContext();
-  llvm::BasicBlock* entry_block = llvm::BasicBlock::Create(context, "vm.island.decoy.entry", &helper);
+  llvm::BasicBlock* entry_block =
+      llvm::BasicBlock::Create(context, "vm.island.decoy.entry", &helper);
   llvm::IRBuilder<> builder(entry_block);
   llvm::Argument* state_arg = &*helper.arg_begin();
   state_arg->setName("vm.island.state");
 
   slot_storage helper_slots = BuildVmDecoyStateSlotStorage(
       builder, state_layout, state_arg, program, "vm.island.decoy.state");
-  llvm::Value* state_slot = CreateVmDecoyStateFieldPtr(
-      builder, state_layout, state_arg, state_layout.bytecode_state_field, "vm.island.decoy.state.bc");
+  llvm::Value* state_slot = CreateVmDecoyStateFieldPtr(builder,
+                                                       state_layout,
+                                                       state_arg,
+                                                       state_layout.bytecode_state_field,
+                                                       "vm.island.decoy.state.bc");
   llvm::Value* dispatch_index_slot = CreateVmDecoyStateFieldPtr(builder,
                                                                 state_layout,
                                                                 state_arg,

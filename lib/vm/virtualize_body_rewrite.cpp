@@ -29,7 +29,6 @@
 
 namespace obf::vm {
 
-
 bool should_preserve_function_attribute(llvm::Attribute attribute) {
   if (attribute.isStringAttribute()) { return true; }
 
@@ -127,9 +126,11 @@ void rewrite_function_body(llvm::Function& function,
   old_blocks.reserve(function.size());
   for (llvm::BasicBlock& block : function) { old_blocks.push_back(&block); }
 
-  const std::uint64_t opaque_seed_base = derive_vm_opaque_seed(function, program);
-  const std::uint64_t bytecode_seed = derive_vm_bytecode_seed(function, program);
-  const opcode_permutation opcode_map = build_opcode_permutation(function, program);
+  const std::uint64_t opaque_seed_base =
+      derive_vm_opaque_seed(options.decision_seed, function, program);
+  const std::uint64_t bytecode_seed =
+      derive_vm_bytecode_seed(options.decision_seed, function, program);
+  const opcode_permutation opcode_map = build_opcode_permutation(function, program, bytecode_seed);
   const vm_dispatcher_shape dispatch_shape = select_dispatcher_shape(
       bytecode_seed, opaque_seed_base ^ 0x26000ULL, program.instructions.size());
   const vm_island_topology island_topology =
@@ -157,31 +158,30 @@ void rewrite_function_body(llvm::Function& function,
   for (llvm::BasicBlock* block : old_blocks) { block->eraseFromParent(); }
 
   auto* entry_block = llvm::BasicBlock::Create(context, "entry.obf.vm", &function);
-  auto* dispatch_loop_block =
-      llvm::BasicBlock::Create(context, "vm.dispatch.loop", &function);
+  auto* dispatch_loop_block = llvm::BasicBlock::Create(context, "vm.dispatch.loop", &function);
   auto* trap_block = llvm::BasicBlock::Create(context, "trap.obf.vm", &function);
   auto* failure_block = llvm::BasicBlock::Create(context, "obf.vm.fail.shared", &function);
 
-    const vm_body_layout_shape body_layout_shape =
-      select_vm_body_layout_shape(function, bytecode_seed, 0x521900ULL, program.instructions.size());
-    const vm_terminal_trap_shape trap_shape =
-      select_vm_terminal_trap_shape(function, bytecode_seed, 0x521910ULL + program.instructions.size());
-    note_vm_function_marker(function, vm_body_layout_shape_marker(body_layout_shape));
-    llvm::SmallVector<std::size_t, 32> instruction_indices;
-    instruction_indices.reserve(program.instructions.size());
-    for (std::size_t instruction_index = 0; instruction_index < program.instructions.size();
+  const vm_body_layout_shape body_layout_shape = select_vm_body_layout_shape(
+      function, bytecode_seed, 0x521900ULL, program.instructions.size());
+  const vm_terminal_trap_shape trap_shape = select_vm_terminal_trap_shape(
+      function, bytecode_seed, 0x521910ULL + program.instructions.size());
+  note_vm_function_marker(function, vm_body_layout_shape_marker(body_layout_shape));
+  llvm::SmallVector<std::size_t, 32> instruction_indices;
+  instruction_indices.reserve(program.instructions.size());
+  for (std::size_t instruction_index = 0; instruction_index < program.instructions.size();
        ++instruction_index) {
     instruction_indices.push_back(instruction_index);
-    }
-    const llvm::SmallVector<std::size_t, 32> instruction_emission_order =
+  }
+  const llvm::SmallVector<std::size_t, 32> instruction_emission_order =
       build_vm_instruction_emission_order(
-        program, instruction_indices, bytecode_seed, body_layout_shape, 0x521920ULL);
+          program, instruction_indices, bytecode_seed, body_layout_shape, 0x521920ULL);
 
-    llvm::SmallVector<llvm::BasicBlock*, 32> instruction_blocks(program.instructions.size(), nullptr);
-    for (std::size_t instruction_index : instruction_emission_order) {
+  llvm::SmallVector<llvm::BasicBlock*, 32> instruction_blocks(program.instructions.size(), nullptr);
+  for (std::size_t instruction_index : instruction_emission_order) {
     instruction_blocks[instruction_index] =
-      llvm::BasicBlock::Create(context, "vm." + std::to_string(instruction_index), &function);
-    }
+        llvm::BasicBlock::Create(context, "vm." + std::to_string(instruction_index), &function);
+  }
 
   llvm::IRBuilder<> entry_builder(entry_block);
   vm_state_layout state_layout = build_vm_state_layout(context, function.getReturnType(), program);
@@ -288,7 +288,8 @@ void rewrite_function_body(llvm::Function& function,
 
   llvm::GlobalVariable* retkey_global = nullptr;
   if (function.getReturnType()->isIntegerTy()) {
-    const std::uint64_t retkey_value = derive_vm_return_key(function, program);
+    const std::uint64_t retkey_value =
+        derive_vm_return_key(options.decision_seed, function, program);
     const std::string retkey_name = "__obf_vm_retkey_" + symbol_tag;
     retkey_global = function.getParent()->getNamedGlobal(retkey_name);
     if (retkey_global == nullptr) {
@@ -329,8 +330,9 @@ void rewrite_function_body(llvm::Function& function,
                                                           0x3100,
                                                           "obf.vm.token.state"),
                                   state_slot);
-  entry_builder.CreateStore(entry_builder.getInt32(dispatch_index_for_instruction[entry_instruction]),
-                            dispatch_index_slot);
+  entry_builder.CreateStore(
+      entry_builder.getInt32(dispatch_index_for_instruction[entry_instruction]),
+      dispatch_index_slot);
   entry_builder.CreateStore(entry_builder.getInt32(program.instructions.empty()
                                                        ? 0
                                                        : island_for_instruction[entry_instruction]),
@@ -410,7 +412,8 @@ void rewrite_function_body(llvm::Function& function,
 
   if (dispatch_backend == dispatch_backend_variant::switch_index && instruction_blocks.size() > 1) {
     const std::uint32_t root_island_count = std::max<std::uint32_t>(1, island_count);
-    for (std::size_t bank_position = 0; bank_position < switch_dispatch_banks.size(); ++bank_position) {
+    for (std::size_t bank_position = 0; bank_position < switch_dispatch_banks.size();
+         ++bank_position) {
       switch_dispatch_bank& bank = switch_dispatch_banks[bank_position];
       if (bank.switch_inst == nullptr) { continue; }
       for (auto case_it = bank.switch_inst->case_begin(); case_it != bank.switch_inst->case_end();
@@ -425,45 +428,45 @@ void rewrite_function_body(llvm::Function& function,
             root_island_count <= 1
                 ? 0
                 : (island_for_instruction[instruction_index] + 1U) % root_island_count;
-        const VmDecoyRoutePlan plan = BuildVmDecoyRoutePlan(program,
-                                                            dispatch_index_for_instruction,
-                                                            island_for_instruction,
-                                                            instruction_indices,
-                                                            static_cast<std::uint32_t>(instruction_index),
-                                                            decoy_island,
-                                                            0x521a000ULL +
-                                                                static_cast<std::uint64_t>(bank_position) * 0x1000ULL +
-                                                                instruction_index);
+        const VmDecoyRoutePlan plan = BuildVmDecoyRoutePlan(
+            program,
+            dispatch_index_for_instruction,
+            island_for_instruction,
+            instruction_indices,
+            static_cast<std::uint32_t>(instruction_index),
+            decoy_island,
+            0x521a000ULL + static_cast<std::uint64_t>(bank_position) * 0x1000ULL +
+                instruction_index);
         llvm::ArrayRef<std::uint32_t> real_slot_mapping(slot_mappings[instruction_index]);
         llvm::ArrayRef<std::uint32_t> decoy_slot_mapping(slot_mappings[plan.decoy_instruction]);
-        auto* guard_block = llvm::BasicBlock::Create(
-            context,
-            "vm.dispatch.root.guard." + std::to_string(bank_position) + "." +
-                std::to_string(instruction_index),
-            &function,
-            real_block);
-        llvm::BasicBlock* decoy_block = EmitVmInlineDecoyBlock(
-            function,
-            rewrite_context,
-            dispatch_loop_block,
-            real_slot_mapping,
-            decoy_slot_mapping,
-            plan,
-            "vm.dispatch.root.decoy." + std::to_string(bank_position) + "." +
-                std::to_string(instruction_index));
+        auto* guard_block =
+            llvm::BasicBlock::Create(context,
+                                     "vm.dispatch.root.guard." + std::to_string(bank_position) +
+                                         "." + std::to_string(instruction_index),
+                                     &function,
+                                     real_block);
+        llvm::BasicBlock* decoy_block =
+            EmitVmInlineDecoyBlock(function,
+                                   rewrite_context,
+                                   dispatch_loop_block,
+                                   real_slot_mapping,
+                                   decoy_slot_mapping,
+                                   plan,
+                                   "vm.dispatch.root.decoy." + std::to_string(bank_position) + "." +
+                                       std::to_string(instruction_index));
         case_it->setSuccessor(guard_block);
 
         llvm::IRBuilder<> guard_builder(guard_block);
-        llvm::Value* opaque_true = mba::build_entropy_true_predicate(guard_builder,
-                                                                     function,
-                                                                     std::max<std::uint32_t>(2,
-                                                                                             options.mba_depth),
-                                                                     plan.salt,
-                                                                     plan.salt ^ 0x11ULL,
-                                                                     plan.salt ^ 0x22ULL,
-                                                                     "obf.vm.decoy.ctx.a",
-                                                                     "obf.vm.decoy.ctx.b",
-                                                                     "obf.vm.decoy.true");
+        llvm::Value* opaque_true =
+            mba::build_entropy_true_predicate(guard_builder,
+                                              function,
+                                              std::max<std::uint32_t>(2, options.mba_depth),
+                                              plan.salt,
+                                              plan.salt ^ 0x11ULL,
+                                              plan.salt ^ 0x22ULL,
+                                              "obf.vm.decoy.ctx.a",
+                                              "obf.vm.decoy.ctx.b",
+                                              "obf.vm.decoy.true");
         guard_builder.CreateCondBr(opaque_true, real_block, decoy_block);
       }
     }
@@ -506,8 +509,8 @@ void rewrite_function_body(llvm::Function& function,
     llvm::BasicBlock* route_block =
         create_handler_success_route(rewrite_context, opcode_block, instruction_index);
     llvm::Value* opcode_match = emit_opcode_match(header_builder,
-                                                   rewrite_context,
-                                                   decoded_opcode,
+                                                  rewrite_context,
+                                                  decoded_opcode,
                                                   instruction.op,
                                                   0x7d000 + instruction_index);
     if (select_handler_variant(instruction.op, opaque_seed_base, 0x7d000 + instruction_index) ==
@@ -546,12 +549,8 @@ void rewrite_function_body(llvm::Function& function,
   llvm::IRBuilder<> failure_builder(failure_block);
   failure_builder.CreateBr(trap_block);
 
-  emit_vm_terminal_trap(function,
-                        trap_block,
-                        mba_context,
-                        0x521930ULL + program.instructions.size(),
-                        trap_shape);
+  emit_vm_terminal_trap(
+      function, trap_block, mba_context, 0x521930ULL + program.instructions.size(), trap_shape);
 }
-
 
 }  // namespace obf::vm

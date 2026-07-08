@@ -112,10 +112,10 @@ build_vm_instruction_emission_order(const bytecode_program& program,
 
   std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
     if (shape == vm_body_layout_shape::family) {
-      const std::uint64_t lhs_family =
-          mix_seed(bytecode_seed, salt ^ (0x51573000ULL + opcode_family(program.instructions[lhs].op)));
-      const std::uint64_t rhs_family =
-          mix_seed(bytecode_seed, salt ^ (0x51573000ULL + opcode_family(program.instructions[rhs].op)));
+      const std::uint64_t lhs_family = mix_seed(
+          bytecode_seed, salt ^ (0x51573000ULL + opcode_family(program.instructions[lhs].op)));
+      const std::uint64_t rhs_family = mix_seed(
+          bytecode_seed, salt ^ (0x51573000ULL + opcode_family(program.instructions[rhs].op)));
       if (lhs_family != rhs_family) { return lhs_family < rhs_family; }
     }
 
@@ -126,11 +126,10 @@ build_vm_instruction_emission_order(const bytecode_program& program,
   return order;
 }
 
-llvm::SmallVector<std::uint32_t, 8>
-build_vm_index_emission_order(std::uint32_t count,
-                              std::uint64_t bytecode_seed,
-                              vm_body_layout_shape shape,
-                              std::uint64_t salt) {
+llvm::SmallVector<std::uint32_t, 8> build_vm_index_emission_order(std::uint32_t count,
+                                                                  std::uint64_t bytecode_seed,
+                                                                  vm_body_layout_shape shape,
+                                                                  std::uint64_t salt) {
   llvm::SmallVector<std::uint32_t, 8> order;
   order.reserve(count);
   for (std::uint32_t index = 0; index < count; ++index) { order.push_back(index); }
@@ -240,8 +239,7 @@ void emit_vm_terminal_trap(llvm::Function& function,
                                                          llvm::APInt(64, 1),
                                                          salt ^ 0x22ULL,
                                                          "vm.trap.gate.rhs");
-      llvm::Value* trap_gate =
-          trap_builder.CreateICmpEQ(gate_lhs, gate_rhs, "vm.trap.gate");
+      llvm::Value* trap_gate = trap_builder.CreateICmpEQ(gate_lhs, gate_rhs, "vm.trap.gate");
       trap_builder.CreateCondBr(trap_gate, trap_body, trap_tail);
 
       llvm::IRBuilder<> tail_builder(trap_tail);
@@ -262,11 +260,11 @@ llvm::BasicBlock* create_handler_success_route(rewrite_function_context& rewrite
                                                std::size_t instruction_index) {
   llvm::Function& function = rewrite_context.function;
   function.addFnAttr("vm.handler.route.trampoline");
-  auto* route_block = llvm::BasicBlock::Create(function.getContext(),
-                                               "obf.vm.route.entry." +
-                                                   std::to_string(instruction_index),
-                                               &function,
-                                               handler_block);
+  auto* route_block =
+      llvm::BasicBlock::Create(function.getContext(),
+                               "obf.vm.route.entry." + std::to_string(instruction_index),
+                               &function,
+                               handler_block);
   llvm::IRBuilder<> route_builder(route_block);
   route_builder.CreateBr(handler_block);
   return route_block;
@@ -291,19 +289,15 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
                                        bool subhelper) {
   llvm::LLVMContext& context = dispatcher.getContext();
   llvm::Module* module = dispatcher.getParent();
-                      const std::uint64_t body_detail =
-                        (static_cast<std::uint64_t>(island_index) << 32) | static_cast<std::uint64_t>(subhelper_index);
-                      const vm_body_layout_shape body_layout_shape =
-                        select_vm_body_layout_shape(dispatcher, bytecode_seed, body_detail, owned_instructions.size());
-                      const vm_status_trap_shape trap_shape =
-                        select_vm_status_trap_shape(dispatcher, bytecode_seed, body_detail);
-                      note_vm_function_marker(dispatcher, vm_body_layout_shape_marker(body_layout_shape));
-                      const llvm::SmallVector<std::size_t, 32> emission_order =
-                        build_vm_instruction_emission_order(program,
-                                          owned_instructions,
-                                          bytecode_seed,
-                                          body_layout_shape,
-                                          0x521050ULL ^ body_detail);
+  const std::uint64_t body_detail = (static_cast<std::uint64_t>(island_index) << 32) |
+                                    static_cast<std::uint64_t>(subhelper_index);
+  const vm_body_layout_shape body_layout_shape = select_vm_body_layout_shape(
+      dispatcher, bytecode_seed, body_detail, owned_instructions.size());
+  const vm_status_trap_shape trap_shape =
+      select_vm_status_trap_shape(dispatcher, bytecode_seed, body_detail);
+  note_vm_function_marker(dispatcher, vm_body_layout_shape_marker(body_layout_shape));
+  const llvm::SmallVector<std::size_t, 32> emission_order = build_vm_instruction_emission_order(
+      program, owned_instructions, bytecode_seed, body_layout_shape, 0x521050ULL ^ body_detail);
   const std::string route_prefix = subhelper ? "vm.island.subhelper." : "vm.island.";
   const std::string entry_name = route_prefix + "entry." + std::to_string(island_index) + "." +
                                  std::to_string(subhelper_index);
@@ -355,8 +349,8 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
                                                state_layout.return_value_field,
                                                "vm.island.state.ret");
   }
-  llvm::AllocaInst* opcode_predicate_slot = entry_builder.CreateAlloca(
-      entry_builder.getInt32Ty(), nullptr, "obf.vm.pred.slot");
+  llvm::AllocaInst* opcode_predicate_slot =
+      entry_builder.CreateAlloca(entry_builder.getInt32Ty(), nullptr, "obf.vm.pred.slot");
 
   llvm::SmallVector<llvm::BasicBlock*, 64> instruction_blocks(program.instructions.size(), nullptr);
   for (std::size_t instruction_index : emission_order) {
@@ -385,27 +379,24 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
   auto* entry_switch =
       dispatch_builder.CreateSwitch(initial_dispatch, failure_block, owned_instructions.size());
 
-  const mba::builder_context mba_context{.entropy_anchor =
-                                             mba::get_or_create_entropy_anchor(*module),
-                                         .seed_base = opaque_seed_base,
-                                         .depth = options.mba_depth,
-                                         .max_ir_instructions_override =
-                                             options.mba_max_ir_instructions,
-                                         .enable_polynomial_override =
-                                             options.mba_enable_polynomial,
-                                         .enable_multiplication_override =
-                                             options.mba_enable_multiplication};
-    std::uint32_t bytecode_anchor_real_count = 0;
-    std::uint32_t bytecode_anchor_decoy_count = 0;
-    llvm::SmallVector<llvm::GlobalVariable*, 8> bytecode_anchor_globals =
+  const mba::builder_context mba_context{
+      .entropy_anchor = mba::get_or_create_entropy_anchor(*module),
+      .seed_base = opaque_seed_base,
+      .depth = options.mba_depth,
+      .max_ir_instructions_override = options.mba_max_ir_instructions,
+      .enable_polynomial_override = options.mba_enable_polynomial,
+      .enable_multiplication_override = options.mba_enable_multiplication};
+  std::uint32_t bytecode_anchor_real_count = 0;
+  std::uint32_t bytecode_anchor_decoy_count = 0;
+  llvm::SmallVector<llvm::GlobalVariable*, 8> bytecode_anchor_globals =
       build_bytecode_anchor_globals(bytecode_global,
-                    bytecode_seed,
-                    0x273000ULL +
-                      static_cast<std::uint64_t>(island_index) * 0x100ULL +
-                      static_cast<std::uint64_t>(subhelper_index),
-                    bytecode_anchor_real_count,
-                    bytecode_anchor_decoy_count);
-    annotate_bytecode_anchor_scattering(
+                                    bytecode_seed,
+                                    0x273000ULL +
+                                        static_cast<std::uint64_t>(island_index) * 0x100ULL +
+                                        static_cast<std::uint64_t>(subhelper_index),
+                                    bytecode_anchor_real_count,
+                                    bytecode_anchor_decoy_count);
+  annotate_bytecode_anchor_scattering(
       dispatcher, bytecode_anchor_real_count, bytecode_anchor_decoy_count);
   std::size_t dispatch_site_counter = 0;
   std::vector<switch_dispatch_bank> switch_dispatch_banks;
@@ -460,23 +451,21 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
     llvm::BasicBlock* real_block = instruction_blocks[instruction_index];
     auto* guard_block = llvm::BasicBlock::Create(
         context,
-        route_prefix + "guard." + std::to_string(island_index) + "." + std::to_string(subhelper_index) +
-            "." + std::to_string(instruction_index),
+        route_prefix + "guard." + std::to_string(island_index) + "." +
+            std::to_string(subhelper_index) + "." + std::to_string(instruction_index),
         &dispatcher,
         real_block);
-    const std::uint32_t decoy_island = island_for_instruction.empty()
-                                           ? island_index
-                                           : (island_index + 1) % island_count;
-    const VmDecoyRoutePlan plan = BuildVmDecoyRoutePlan(program,
-                                                        dispatch_index_for_instruction,
-                                                        island_for_instruction,
-                                                        owned_instructions,
-                                                        static_cast<std::uint32_t>(instruction_index),
-                                                        decoy_island,
-                                                        0x521020ULL +
-                                                            static_cast<std::uint64_t>(island_index) * 0x1000ULL +
-                                                            static_cast<std::uint64_t>(subhelper_index) * 0x100ULL +
-                                                            instruction_index);
+    const std::uint32_t decoy_island =
+        island_for_instruction.empty() ? island_index : (island_index + 1) % island_count;
+    const VmDecoyRoutePlan plan = BuildVmDecoyRoutePlan(
+        program,
+        dispatch_index_for_instruction,
+        island_for_instruction,
+        owned_instructions,
+        static_cast<std::uint32_t>(instruction_index),
+        decoy_island,
+        0x521020ULL + static_cast<std::uint64_t>(island_index) * 0x1000ULL +
+            static_cast<std::uint64_t>(subhelper_index) * 0x100ULL + instruction_index);
     llvm::ArrayRef<std::uint32_t> real_slot_mapping(slot_mappings[instruction_index]);
     llvm::ArrayRef<std::uint32_t> decoy_slot_mapping(slot_mappings[plan.decoy_instruction]);
     llvm::BasicBlock* decoy_block = EmitVmInlineDecoyBlock(
@@ -488,19 +477,20 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
         plan,
         route_prefix + "decoy." + std::to_string(island_index) + "." +
             std::to_string(subhelper_index) + "." + std::to_string(instruction_index));
-    entry_switch->addCase(dispatch_builder.getInt32(dispatch_index_for_instruction[instruction_index]),
-                          guard_block);
+    entry_switch->addCase(
+        dispatch_builder.getInt32(dispatch_index_for_instruction[instruction_index]), guard_block);
 
     llvm::IRBuilder<> guard_builder(guard_block);
-    llvm::Value* opaque_true = mba::build_entropy_true_predicate(guard_builder,
-                                                                 dispatcher,
-                                                                 std::max<std::uint32_t>(2, options.mba_depth),
-                                                                 plan.salt,
-                                                                 plan.salt ^ 0x11ULL,
-                                                                 plan.salt ^ 0x22ULL,
-                                                                 "obf.vm.decoy.helper.ctx.a",
-                                                                 "obf.vm.decoy.helper.ctx.b",
-                                                                 "obf.vm.decoy.helper.true");
+    llvm::Value* opaque_true =
+        mba::build_entropy_true_predicate(guard_builder,
+                                          dispatcher,
+                                          std::max<std::uint32_t>(2, options.mba_depth),
+                                          plan.salt,
+                                          plan.salt ^ 0x11ULL,
+                                          plan.salt ^ 0x22ULL,
+                                          "obf.vm.decoy.helper.ctx.a",
+                                          "obf.vm.decoy.helper.ctx.b",
+                                          "obf.vm.decoy.helper.true");
     guard_builder.CreateCondBr(opaque_true, real_block, decoy_block);
   }
 
@@ -533,8 +523,8 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
     llvm::BasicBlock* route_block =
         create_handler_success_route(rewrite_context, opcode_block, instruction_index);
     llvm::Value* opcode_match = emit_opcode_match(header_builder,
-                                                   rewrite_context,
-                                                   decoded_opcode,
+                                                  rewrite_context,
+                                                  decoded_opcode,
                                                   instruction.op,
                                                   0x7d000 + instruction_index);
     if (select_handler_variant(instruction.op, opaque_seed_base, 0x7d000 + instruction_index) ==
@@ -571,13 +561,13 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
   llvm::IRBuilder<> failure_builder(failure_block);
   failure_builder.CreateBr(trap_block);
 
-    emit_vm_status_trap(dispatcher,
-              trap_block,
-              bytecode_seed,
-              island_index,
-              0x521100ULL + static_cast<std::uint64_t>(island_index) * 0x100ULL +
-                static_cast<std::uint64_t>(subhelper_index),
-              trap_shape);
+  emit_vm_status_trap(dispatcher,
+                      trap_block,
+                      bytecode_seed,
+                      island_index,
+                      0x521100ULL + static_cast<std::uint64_t>(island_index) * 0x100ULL +
+                          static_cast<std::uint64_t>(subhelper_index),
+                      trap_shape);
 }
 
 void emit_split_state_island_router(llvm::Function& helper,
@@ -645,7 +635,7 @@ void emit_split_state_island_router(llvm::Function& helper,
   llvm::IRBuilder<> failure_builder(failure_block);
   failure_builder.CreateBr(trap_block);
 
-    emit_vm_status_trap(
+  emit_vm_status_trap(
       helper, trap_block, bytecode_seed, island_index, 0x521400ULL + island_index, trap_shape);
 }
 
@@ -705,15 +695,15 @@ void emit_state_island_helper(llvm::Function& helper,
       llvm::FunctionType::get(llvm::Type::getInt32Ty(context), {state_pointer_type}, false);
   llvm::SmallVector<llvm::Function*, 8> subhelpers;
   subhelpers.resize(split_plan.instructions.size(), nullptr);
-    const vm_body_layout_shape subhelper_layout_shape = select_vm_body_layout_shape(
+  const vm_body_layout_shape subhelper_layout_shape = select_vm_body_layout_shape(
       helper, bytecode_seed, 0x521240ULL + island_index, split_plan.instructions.size());
-    const llvm::SmallVector<std::uint32_t, 8> subhelper_emission_order =
+  const llvm::SmallVector<std::uint32_t, 8> subhelper_emission_order =
       build_vm_index_emission_order(split_plan.instructions.size(),
-                    bytecode_seed,
-                    subhelper_layout_shape,
-                    0x521250ULL + island_index);
+                                    bytecode_seed,
+                                    subhelper_layout_shape,
+                                    0x521250ULL + island_index);
 
-    for (std::uint32_t subhelper_index : subhelper_emission_order) {
+  for (std::uint32_t subhelper_index : subhelper_emission_order) {
     llvm::Function* subhelper = llvm::Function::Create(
         helper_type,
         llvm::GlobalValue::InternalLinkage,
@@ -855,7 +845,8 @@ void rewrite_function_body_state_islands(llvm::Function& function,
 
   llvm::GlobalVariable* retkey_global = nullptr;
   if (function.getReturnType()->isIntegerTy()) {
-    const std::uint64_t retkey_value = derive_vm_return_key(function, program);
+    const std::uint64_t retkey_value =
+        derive_vm_return_key(options.decision_seed, function, program);
     const std::string retkey_name = "__obf_vm_retkey_" + symbol_tag.str();
     retkey_global = module->getNamedGlobal(retkey_name);
     if (retkey_global == nullptr) {
@@ -886,16 +877,13 @@ void rewrite_function_body_state_islands(llvm::Function& function,
   llvm::ArrayRef<std::uint32_t> entry_slot_mapping = entry_identity_mapping;
   if (!slot_mappings.empty()) { entry_slot_mapping = slot_mappings[entry_instruction]; }
 
-  const mba::builder_context mba_context{.entropy_anchor =
-                                             mba::get_or_create_entropy_anchor(*module),
-                                         .seed_base = opaque_seed_base,
-                                         .depth = options.mba_depth,
-                                         .max_ir_instructions_override =
-                                             options.mba_max_ir_instructions,
-                                         .enable_polynomial_override =
-                                             options.mba_enable_polynomial,
-                                         .enable_multiplication_override =
-                                             options.mba_enable_multiplication};
+  const mba::builder_context mba_context{
+      .entropy_anchor = mba::get_or_create_entropy_anchor(*module),
+      .seed_base = opaque_seed_base,
+      .depth = options.mba_depth,
+      .max_ir_instructions_override = options.mba_max_ir_instructions,
+      .enable_polynomial_override = options.mba_enable_polynomial,
+      .enable_multiplication_override = options.mba_enable_multiplication};
   entry_builder.CreateStore(build_hidden_token_seed(entry_builder,
                                                     hidden_token_arg,
                                                     program.instructions.empty()
@@ -927,24 +915,21 @@ void rewrite_function_body_state_islands(llvm::Function& function,
     ++argument_index;
   }
 
-    const vm_body_layout_shape root_layout_shape =
+  const vm_body_layout_shape root_layout_shape =
       select_vm_body_layout_shape(function, bytecode_seed, 0x521600ULL, island_count);
-    const vm_terminal_trap_shape trap_shape =
+  const vm_terminal_trap_shape trap_shape =
       select_vm_terminal_trap_shape(function, bytecode_seed, 0x521610ULL + island_count);
-    note_vm_function_marker(function, vm_body_layout_shape_marker(root_layout_shape));
-    llvm::SmallVector<llvm::Function*, 8> helpers;
-    llvm::SmallVector<llvm::Function*, 8> decoy_helpers;
-    helpers.resize(island_count, nullptr);
-    decoy_helpers.resize(island_count, nullptr);
+  note_vm_function_marker(function, vm_body_layout_shape_marker(root_layout_shape));
+  llvm::SmallVector<llvm::Function*, 8> helpers;
+  llvm::SmallVector<llvm::Function*, 8> decoy_helpers;
+  helpers.resize(island_count, nullptr);
+  decoy_helpers.resize(island_count, nullptr);
   auto* state_pointer_type = llvm::PointerType::get(context, 0);
   auto* helper_type =
       llvm::FunctionType::get(entry_builder.getInt32Ty(), {state_pointer_type}, false);
-    const llvm::SmallVector<std::uint32_t, 8> helper_emission_order =
-      build_vm_index_emission_order(island_count,
-                    bytecode_seed,
-                    root_layout_shape,
-                    0x521620ULL + island_count);
-    for (std::uint32_t island_index : helper_emission_order) {
+  const llvm::SmallVector<std::uint32_t, 8> helper_emission_order = build_vm_index_emission_order(
+      island_count, bytecode_seed, root_layout_shape, 0x521620ULL + island_count);
+  for (std::uint32_t island_index : helper_emission_order) {
     llvm::Function* helper =
         llvm::Function::Create(helper_type,
                                llvm::GlobalValue::InternalLinkage,
@@ -963,11 +948,11 @@ void rewrite_function_body_state_islands(llvm::Function& function,
     helper->addFnAttr("vm.island.table.shard");
     helpers[island_index] = helper;
 
-    llvm::Function* decoy_helper = llvm::Function::Create(helper_type,
-                                                          llvm::GlobalValue::InternalLinkage,
-                                                          MakeVmIslandDecoyHelperName(
-                                                              *module, bytecode_seed, island_index),
-                                                          module);
+    llvm::Function* decoy_helper =
+        llvm::Function::Create(helper_type,
+                               llvm::GlobalValue::InternalLinkage,
+                               MakeVmIslandDecoyHelperName(*module, bytecode_seed, island_index),
+                               module);
     decoy_helper->setDSOLocal(true);
     decoy_helper->addFnAttr(llvm::Attribute::NoInline);
     decoy_helper->addFnAttr("instcombine-no-verify-fixpoint");
@@ -1005,9 +990,8 @@ void rewrite_function_body_state_islands(llvm::Function& function,
 
     const llvm::SmallVector<std::size_t, 32> owned_instructions =
         collect_island_instruction_indices(program, island_for_instruction, island_index);
-    const std::uint32_t entry_instruction = owned_instructions.empty()
-                                                ? 0
-                                                : static_cast<std::uint32_t>(owned_instructions.front());
+    const std::uint32_t entry_instruction =
+        owned_instructions.empty() ? 0 : static_cast<std::uint32_t>(owned_instructions.front());
     const std::uint32_t decoy_island = (island_index + 1) % helpers.size();
     const VmDecoyRoutePlan plan = BuildVmDecoyRoutePlan(program,
                                                         dispatch_index_for_instruction,
@@ -1018,15 +1002,16 @@ void rewrite_function_body_state_islands(llvm::Function& function,
                                                         0x521680ULL + island_index);
 
     llvm::IRBuilder<> guard_builder(guard_block);
-    llvm::Value* opaque_true = mba::build_entropy_true_predicate(guard_builder,
-                                                                 function,
-                                                                 std::max<std::uint32_t>(2, options.mba_depth),
-                                                                 plan.salt,
-                                                                 plan.salt ^ 0x11ULL,
-                                                                 plan.salt ^ 0x22ULL,
-                                                                 "obf.vm.decoy.root.ctx.a",
-                                                                 "obf.vm.decoy.root.ctx.b",
-                                                                 "obf.vm.decoy.root.true");
+    llvm::Value* opaque_true =
+        mba::build_entropy_true_predicate(guard_builder,
+                                          function,
+                                          std::max<std::uint32_t>(2, options.mba_depth),
+                                          plan.salt,
+                                          plan.salt ^ 0x11ULL,
+                                          plan.salt ^ 0x22ULL,
+                                          "obf.vm.decoy.root.ctx.a",
+                                          "obf.vm.decoy.root.ctx.b",
+                                          "obf.vm.decoy.root.true");
     guard_builder.CreateCondBr(opaque_true, call_block, decoy_call_block);
 
     llvm::IRBuilder<> call_builder(call_block);
@@ -1038,10 +1023,11 @@ void rewrite_function_body_state_islands(llvm::Function& function,
     status_phi->addIncoming(status, call_block);
 
     llvm::IRBuilder<> decoy_call_builder(decoy_call_block);
-    auto* decoy_status = decoy_call_builder.CreateCall(decoy_helpers[island_index]->getFunctionType(),
-                                                       decoy_helpers[island_index],
-                                                       {state_storage},
-                                                       "vm.island.decoy.status");
+    auto* decoy_status =
+        decoy_call_builder.CreateCall(decoy_helpers[island_index]->getFunctionType(),
+                                      decoy_helpers[island_index],
+                                      {state_storage},
+                                      "vm.island.decoy.status");
     decoy_call_builder.CreateBr(route_block);
     status_phi->addIncoming(decoy_status, decoy_call_block);
   }
@@ -1079,9 +1065,8 @@ void rewrite_function_body_state_islands(llvm::Function& function,
 
     const llvm::SmallVector<std::size_t, 32> owned_instructions =
         collect_island_instruction_indices(program, island_for_instruction, island_index);
-    const std::uint32_t entry_instruction = owned_instructions.empty()
-                                                ? 0
-                                                : static_cast<std::uint32_t>(owned_instructions.front());
+    const std::uint32_t entry_instruction =
+        owned_instructions.empty() ? 0 : static_cast<std::uint32_t>(owned_instructions.front());
     const std::uint32_t decoy_island = (island_index + 1) % helpers.size();
     EmitVmDecoyHelperBody(*decoy_helpers[island_index],
                           program,
@@ -1108,6 +1093,5 @@ void rewrite_function_body_state_islands(llvm::Function& function,
   function.addFnAttr("vm.island.root.small");
   function.addFnAttr("vm.island.state");
 }
-
 
 }  // namespace obf::vm

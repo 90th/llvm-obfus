@@ -17,6 +17,7 @@ struct virtualization_options {
   std::optional<std::uint32_t> mba_max_ir_instructions;
   std::optional<bool> mba_enable_polynomial;
   std::optional<bool> mba_enable_multiplication;
+  std::uint64_t decision_seed = 0;
   bool hidden_token_handshake = false;
   bool prefer_island_helpers = false;
   std::vector<std::uint64_t> valid_hidden_tokens;

@@ -40,20 +40,24 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
       binding.state == nullptr
           ? vm_seed_resolver_shape::shared_switch_resolver
           : select_vm_seed_resolver_shape(binding.state->report.decision.policy.level);
-  const protection_level level = binding.state ? binding.state->report.decision.policy.level : protection_level::vm;
+  const protection_level level =
+      binding.state ? binding.state->report.decision.policy.level : protection_level::vm;
+  const std::uint64_t decision_seed = binding.state ? binding.state->report.decision.seed : 0;
   auto* ptr_int_type = get_vm_pointer_int_type(function);
   if (ptr_int_type == nullptr) { return false; }
 
   llvm::GlobalVariable* target_global = nullptr;
   if (resolver_shape == vm_resolver_shape::cached_sentinel_global) {
-    target_global = get_or_create_vm_target_global(function, binding.target_cache_global_name);
+    target_global =
+        get_or_create_vm_target_global(function, decision_seed, binding.target_cache_global_name);
     if (target_global == nullptr) { return false; }
   }
 
-  const llvm::APInt key = derive_vm_target_key(function, ptr_int_type);
+  const llvm::APInt key = derive_vm_target_key(decision_seed, function, ptr_int_type);
   const llvm::APInt sentinel = derive_vm_target_sentinel(key);
   llvm::GlobalVariable* target_seed_global =
       get_or_create_vm_target_seed_global(function,
+                                          decision_seed,
                                           thunk_function,
                                           binding.target_seed_global_name,
                                           binding.seed_case_function_name,
@@ -64,9 +68,9 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
   llvm::GlobalVariable* decode_key_global = get_or_create_vm_decode_key_global(
       *module, ptr_int_type, binding.decode_key_global_name, key);
 
-  const std::uint64_t raw_salt = stable_hash_string(function.getName()) * 0x9E3779B97F4A7C15ULL;
+  const std::uint64_t target_salt = derive_vm_target_salt(decision_seed, function.getName());
   const llvm::APInt salt(ptr_int_type->getBitWidth(),
-                         raw_salt == 0 ? 0xC6EF3720ULL : raw_salt,
+                         target_salt,
                          /*isSigned=*/false,
                          /*implicitTrunc=*/true);
 
@@ -84,39 +88,42 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
 
     if (resolver_shape == vm_resolver_shape::local_always_decode) {
       llvm::IRBuilder<> builder(call);
-      llvm::Value* hidden_token = build_hidden_token_value(builder,
-                                                           *caller,
-                                                           (function.getName() + ".obf.call").str(),
-                                                           site.hidden_token,
-                                                           mba_depth,
-                                                           0x700000ULL +
-                                                               static_cast<std::uint64_t>(callsite_index++));
-      llvm::Value* encoded_target = build_encoded_vm_target_value(builder,
-                                                                  level,
-                                                                  *caller,
-                                                                  function,
-                                                                  thunk_function,
-                                                                  *target_seed_global,
-                                                                  *decode_key_global,
-                                                                  hidden_token,
-                                                                  key,
-                                                                  salt,
-                                                                  (function.getName() + ".obf").str(),
-                                                                  seed_resolver_shape,
-                                                                  site.hidden_token,
-                                                                  0x710000ULL,
-                                                                  mba_depth);
-      llvm::Value* decoded_target = decode_encoded_vm_target_value(builder,
-                                                                   *caller,
-                                                                   *decode_key_global,
-                                                                   encoded_target,
-                                                                   hidden_token,
-                                                                   key,
-                                                                   salt,
-                                                                   (function.getName() + ".obf").str(),
-                                                                   site.hidden_token,
-                                                                   0x720000ULL,
-                                                                   mba_depth);
+      llvm::Value* hidden_token =
+          build_hidden_token_value(builder,
+                                   *caller,
+                                   (function.getName() + ".obf.call").str(),
+                                   site.hidden_token,
+                                   mba_depth,
+                                   0x700000ULL + static_cast<std::uint64_t>(callsite_index++));
+      llvm::Value* encoded_target =
+          build_encoded_vm_target_value(builder,
+                                        decision_seed,
+                                        level,
+                                        *caller,
+                                        function,
+                                        thunk_function,
+                                        *target_seed_global,
+                                        *decode_key_global,
+                                        hidden_token,
+                                        key,
+                                        salt,
+                                        (function.getName() + ".obf").str(),
+                                        seed_resolver_shape,
+                                        site.hidden_token,
+                                        0x710000ULL,
+                                        mba_depth);
+      llvm::Value* decoded_target =
+          decode_encoded_vm_target_value(builder,
+                                         *caller,
+                                         *decode_key_global,
+                                         encoded_target,
+                                         hidden_token,
+                                         key,
+                                         salt,
+                                         (function.getName() + ".obf").str(),
+                                         site.hidden_token,
+                                         0x720000ULL,
+                                         mba_depth);
       llvm::Value* indirect_target = builder.CreateIntToPtr(decoded_target,
                                                             call->getCalledOperand()->getType(),
                                                             function.getName() + ".obf.indirect");
@@ -138,26 +145,25 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
       }
       arguments.push_back(hidden_token);
 
-      auto* rewritten_call = builder.CreateCall(thunk_function.getFunctionType(),
-                                                indirect_target,
-                                                arguments,
-                                                call->getType()->isVoidTy()
-                                                    ? ""
-                                                    : function.getName() + ".obf.callsite");
+      auto* rewritten_call = builder.CreateCall(
+          thunk_function.getFunctionType(),
+          indirect_target,
+          arguments,
+          call->getType()->isVoidTy() ? "" : function.getName() + ".obf.callsite");
       rewritten_call->setCallingConv(call->getCallingConv());
       rewritten_call->setAttributes(build_vm_safe_callsite_attributes(thunk_function));
 
       llvm::Type* call_ret_type = rewritten_call->getType();
       if (call_ret_type->isIntegerTy()) {
-        llvm::Value* decoded_ret = decode_virtualized_integer_return(builder,
-                                                                     *caller,
-                                                                     function.getName(),
-                                                                     make_vm_retkey_global_name(
-                                                                         binding.vm_symbol_tag),
-                                                                     rewritten_call,
-                                                                     hidden_token,
-                                                                     site.hidden_token,
-                                                                     mba_depth);
+        llvm::Value* decoded_ret =
+            decode_virtualized_integer_return(builder,
+                                              *caller,
+                                              function.getName(),
+                                              make_vm_retkey_global_name(binding.vm_symbol_tag),
+                                              rewritten_call,
+                                              hidden_token,
+                                              site.hidden_token,
+                                              mba_depth);
 
         for (llvm::Use* use : original_uses) { use->set(decoded_ret); }
       } else {
@@ -179,13 +185,13 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
         module->getContext(), (function.getName() + ".obf.resolve").str(), caller, call_bb);
 
     llvm::IRBuilder<> entry_builder(orig_bb);
-    llvm::Value* hidden_token = build_hidden_token_value(entry_builder,
-                                                         *caller,
-                                                         (function.getName() + ".obf.call").str(),
-                                                         site.hidden_token,
-                                                         mba_depth,
-                                                         0x700000ULL +
-                                                             static_cast<std::uint64_t>(callsite_index++));
+    llvm::Value* hidden_token =
+        build_hidden_token_value(entry_builder,
+                                 *caller,
+                                 (function.getName() + ".obf.call").str(),
+                                 site.hidden_token,
+                                 mba_depth,
+                                 0x700000ULL + static_cast<std::uint64_t>(callsite_index++));
     auto* encoded_check =
         entry_builder.CreateLoad(ptr_int_type, target_global, function.getName() + ".obf.check");
     auto* sentinel_const = llvm::ConstantInt::get(ptr_int_type, sentinel);
@@ -195,6 +201,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
 
     llvm::IRBuilder<> resolve_builder(resolve_bb);
     llvm::Value* new_encoded = build_encoded_vm_target_value(resolve_builder,
+                                                             decision_seed,
                                                              level,
                                                              *caller,
                                                              function,
@@ -218,17 +225,18 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
     encoded_phi->addIncoming(encoded_check, orig_bb);
     encoded_phi->addIncoming(new_encoded, resolve_bb);
 
-    llvm::Value* decoded_target = decode_encoded_vm_target_value(call_builder,
-                                                                 *caller,
-                                                                 *decode_key_global,
-                                                                 encoded_phi,
-                                                                 hidden_token,
-                                                                 key,
-                                                                 salt,
-                                                                 (function.getName() + ".obf").str(),
-                                                                 site.hidden_token,
-                                                                 0x720000ULL,
-                                                                 mba_depth);
+    llvm::Value* decoded_target =
+        decode_encoded_vm_target_value(call_builder,
+                                       *caller,
+                                       *decode_key_global,
+                                       encoded_phi,
+                                       hidden_token,
+                                       key,
+                                       salt,
+                                       (function.getName() + ".obf").str(),
+                                       site.hidden_token,
+                                       0x720000ULL,
+                                       mba_depth);
     llvm::Value* indirect_target = call_builder.CreateIntToPtr(
         decoded_target, call->getCalledOperand()->getType(), function.getName() + ".obf.indirect");
 
@@ -249,27 +257,26 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
     }
     arguments.push_back(hidden_token);
 
-    auto* rewritten_call = call_builder.CreateCall(thunk_function.getFunctionType(),
-                                                   indirect_target,
-                                                   arguments,
-                                                   call->getType()->isVoidTy()
-                                                       ? ""
-                                                       : function.getName() + ".obf.callsite");
+    auto* rewritten_call = call_builder.CreateCall(
+        thunk_function.getFunctionType(),
+        indirect_target,
+        arguments,
+        call->getType()->isVoidTy() ? "" : function.getName() + ".obf.callsite");
     rewritten_call->setCallingConv(call->getCallingConv());
     rewritten_call->setAttributes(build_vm_safe_callsite_attributes(thunk_function));
 
     llvm::Type* call_ret_type = rewritten_call->getType();
     if (call_ret_type->isIntegerTy()) {
       llvm::IRBuilder<> decode_builder(call);
-      llvm::Value* decoded_ret = decode_virtualized_integer_return(decode_builder,
-                                                                   *caller,
-                                                                   function.getName(),
-                                                                   make_vm_retkey_global_name(
-                                                                       binding.vm_symbol_tag),
-                                                                   rewritten_call,
-                                                                   hidden_token,
-                                                                   site.hidden_token,
-                                                                   mba_depth);
+      llvm::Value* decoded_ret =
+          decode_virtualized_integer_return(decode_builder,
+                                            *caller,
+                                            function.getName(),
+                                            make_vm_retkey_global_name(binding.vm_symbol_tag),
+                                            rewritten_call,
+                                            hidden_token,
+                                            site.hidden_token,
+                                            mba_depth);
 
       for (llvm::Use* use : original_uses) { use->set(decoded_ret); }
     } else {

@@ -33,7 +33,8 @@ namespace obf::vm {
 
 // opcode_to_index moved to vm_types.h
 
-std::uint64_t derive_vm_bytecode_seed(const llvm::Function& function,
+std::uint64_t derive_vm_bytecode_seed(std::uint64_t decision_seed,
+                                      const llvm::Function& function,
                                       const bytecode_program& program);
 
 llvm::FastMathFlags decode_fast_math_flags(std::uint32_t flags);
@@ -106,7 +107,8 @@ std::uint32_t select_vm_island_count(std::uint64_t seed_base,
                                      std::size_t instruction_count,
                                      vm_island_topology topology);
 opcode_permutation build_opcode_permutation(const llvm::Function& function,
-                                            const bytecode_program& program);
+                                            const bytecode_program& program,
+                                            std::uint64_t bytecode_seed);
 std::uint8_t get_physical_opcode(const opcode_permutation& permutation, opcode logical_opcode);
 llvm::Value* emit_opcode_match(llvm::IRBuilder<>& builder,
                                rewrite_function_context& context,
@@ -275,11 +277,11 @@ llvm::Value* apply_vm_island_status_choreography(llvm::IRBuilder<>& builder,
                                                  std::uint32_t detail,
                                                  std::uint64_t salt);
 llvm::Value* apply_vm_helper_dispatch_choreography(llvm::IRBuilder<>& builder,
-                                                    llvm::Function& function,
-                                                    std::uint64_t bytecode_seed,
-                                                    llvm::Value* dispatch_value,
-                                                    std::size_t dispatch_case_count,
-                                                    std::uint64_t salt);
+                                                   llvm::Function& function,
+                                                   std::uint64_t bytecode_seed,
+                                                   llvm::Value* dispatch_value,
+                                                   std::size_t dispatch_case_count,
+                                                   std::uint64_t salt);
 llvm::BasicBlock* EmitVmInlineDecoyBlock(llvm::Function& function,
                                          rewrite_function_context& context,
                                          llvm::BasicBlock* loop_header,

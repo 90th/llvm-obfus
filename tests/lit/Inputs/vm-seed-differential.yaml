@@ -1,0 +1,7 @@
+default_level: none
+debug_preserve_generated_names: true
+targets:
+  - match: fold_value
+    level: vm
+security:
+  allow_unsafe_config: true

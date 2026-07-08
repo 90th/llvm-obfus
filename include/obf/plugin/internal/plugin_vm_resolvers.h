@@ -15,10 +15,15 @@ vm_resolver_shape select_vm_resolver_shape(protection_level level);
 
 vm_seed_resolver_shape select_vm_seed_resolver_shape(protection_level level);
 
-vm_pointer_materialization_shape select_vm_pointer_materialization_shape(
-    protection_level level, unsigned bit_width, llvm::Function& interface_function, std::uint64_t seed_base, llvm::StringRef prefix);
+vm_pointer_materialization_shape
+select_vm_pointer_materialization_shape(protection_level level,
+                                        unsigned bit_width,
+                                        llvm::Function& interface_function,
+                                        std::uint64_t seed_base,
+                                        llvm::StringRef prefix);
 
 llvm::Value* build_encoded_vm_target_value(llvm::IRBuilder<>& builder,
+                                           std::uint64_t decision_seed,
                                            protection_level level,
                                            llvm::Function& owner,
                                            llvm::Function& interface_function,
@@ -46,18 +51,25 @@ llvm::Value* decode_encoded_vm_target_value(llvm::IRBuilder<>& builder,
                                             std::uint64_t decode_salt_base,
                                             std::uint32_t mba_depth);
 
-llvm::APInt derive_vm_target_key(const llvm::Function& function, llvm::IntegerType* ptr_int_type);
+llvm::APInt derive_vm_target_key(std::uint64_t decision_seed,
+                                 const llvm::Function& function,
+                                 llvm::IntegerType* ptr_int_type);
 
 llvm::APInt derive_vm_target_sentinel(const llvm::APInt& key);
 
-llvm::APInt derive_vm_target_seed_mask(const llvm::Function& function,
+llvm::APInt derive_vm_target_seed_mask(std::uint64_t decision_seed,
+                                       const llvm::Function& function,
                                        llvm::IntegerType* ptr_int_type);
 
+std::uint64_t derive_vm_target_salt(std::uint64_t decision_seed, llvm::StringRef function_name);
+
 llvm::GlobalVariable* get_or_create_vm_target_global(llvm::Function& function,
+                                                     std::uint64_t decision_seed,
                                                      llvm::StringRef global_name);
 
 llvm::GlobalVariable*
 get_or_create_vm_target_seed_global(llvm::Function& interface_function,
+                                    std::uint64_t decision_seed,
                                     llvm::Function& implementation_function,
                                     llvm::StringRef global_name,
                                     llvm::StringRef seed_case_function_name,
@@ -71,12 +83,14 @@ llvm::Function* get_or_create_vm_target_seed_resolver(llvm::Module& module,
                                                       llvm::IntegerType* ptr_int_type);
 
 llvm::Function* get_or_create_vm_target_seed_case_resolver(llvm::Function& interface_function,
+                                                           std::uint64_t decision_seed,
                                                            llvm::Function& implementation_function,
                                                            llvm::StringRef resolver_name,
                                                            llvm::IntegerType* ptr_int_type,
                                                            std::uint32_t mba_depth);
 
 void ensure_vm_target_seed_resolver_case(llvm::Function& interface_function,
+                                         std::uint64_t decision_seed,
                                          llvm::Function& implementation_function,
                                          llvm::StringRef resolver_name,
                                          llvm::IntegerType* ptr_int_type,
@@ -88,6 +102,7 @@ llvm::GlobalVariable* get_or_create_vm_decode_key_global(llvm::Module& module,
                                                          const llvm::APInt& key);
 
 llvm::Value* decode_virtualized_target_seed(llvm::IRBuilder<>& builder,
+                                            std::uint64_t decision_seed,
                                             protection_level level,
                                             llvm::Function& owner,
                                             llvm::StringRef prefix,
@@ -108,6 +123,6 @@ llvm::Value* decode_virtualized_integer_return(llvm::IRBuilder<>& builder,
                                                llvm::Value* hidden_token,
                                                std::uint64_t token_seed,
                                                std::uint32_t mba_depth);
-}
+}  // namespace obf
 
 #endif

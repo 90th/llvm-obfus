@@ -102,10 +102,9 @@ entry:
 ; INST: %fold_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; INST: %fold_value.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %fold_value.obf.wrapper.target.key, i{{[0-9]+}} %fold_value.obf.wrapper.target.base)
-; INST: %obf.mba.xor.affine.or
+; INST: %fold_value.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %fold_value.obf.wrapper.target.key, i{{[0-9]+}} %fold_value.obf.wrapper.target.seed.base)
 ; INST: %fold_value.obf.wrapper.real.int = {{(add|sub) i[0-9]+}}
-; INST: %fold_value.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %obf.mba.xor.affine.{{.*}}.dec{{[0-9]*}} to ptr
+; INST: %fold_value.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %obf.mba.{{.*}} to ptr
 ; INST: call i32 %fold_value.obf.wrapper.indirect(i32 %value, i64 {{(%fold_value\.obf\.wrapper\.token|-?[0-9]+)}})
 ; INST-LABEL: define i32 @main()
 ; INST: %fold_value.obf.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}

@@ -50,17 +50,16 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
       if (binding.implementation_function == nullptr) { continue; }
       binding.state = target_candidate.state;
 
-      vm::virtualization_options vm_options{.mba_depth = config.mba.depth,
-                                            .mba_max_ir_instructions =
-                                                config.mba.max_ir_instructions,
-                                            .mba_enable_polynomial =
-                                                config.mba.enable_polynomial,
-                                            .mba_enable_multiplication =
-                                                config.mba.enable_multiplication,
-                                            .hidden_token_handshake = true,
-                                            .prefer_island_helpers = true,
-                                            .valid_hidden_tokens = {},
-                                            .symbol_tag = binding.vm_symbol_tag};
+      vm::virtualization_options vm_options{
+          .mba_depth = config.mba.depth,
+          .mba_max_ir_instructions = config.mba.max_ir_instructions,
+          .mba_enable_polynomial = config.mba.enable_polynomial,
+          .mba_enable_multiplication = config.mba.enable_multiplication,
+          .decision_seed = target_candidate.state->report.decision.seed,
+          .hidden_token_handshake = true,
+          .prefer_island_helpers = true,
+          .valid_hidden_tokens = {},
+          .symbol_tag = binding.vm_symbol_tag};
       vm_options.valid_hidden_tokens.push_back(binding.wrapper_token);
       for (const virtualized_call_site& site : binding.call_sites) {
         vm_options.valid_hidden_tokens.push_back(site.hidden_token);
@@ -86,7 +85,8 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
       llvm::SmallVector<vm_entry_thunk_shape, 8> entry_thunk_shapes;
       entry_thunk_shapes.reserve(successful_bindings.size());
       for (virtualized_function_binding* binding : successful_bindings) {
-        if (binding == nullptr || binding->interface_function == nullptr || binding->state == nullptr) {
+        if (binding == nullptr || binding->interface_function == nullptr ||
+            binding->state == nullptr) {
           entry_thunk_shapes.push_back(vm_entry_thunk_shape::direct_forward);
           continue;
         }

@@ -18,11 +18,12 @@ struct obfuscation_config;
 
 std::uint64_t mix_vm_handshake_seed(std::uint64_t seed, std::uint64_t salt);
 
-std::uint64_t derive_vm_hidden_token(llvm::StringRef callee_name,
+std::uint64_t derive_vm_hidden_token(std::uint64_t decision_seed,
+                                     llvm::StringRef callee_name,
                                      llvm::StringRef caller_name,
                                      std::uint64_t ordinal);
 
-std::uint64_t derive_vm_wrapper_token(llvm::StringRef function_name);
+std::uint64_t derive_vm_wrapper_token(std::uint64_t decision_seed, llvm::StringRef function_name);
 
 std::string make_debug_vm_name(llvm::StringRef prefix, llvm::StringRef source_name);
 
@@ -69,6 +70,6 @@ llvm::Function* clone_vm_implementation(llvm::Function& interface_function,
 virtualized_function_binding
 prepare_virtualized_function_binding(const function_pipeline_state& state,
                                      const obfuscation_config& config);
-}
+}  // namespace obf
 
 #endif

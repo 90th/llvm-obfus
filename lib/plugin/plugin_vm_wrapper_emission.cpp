@@ -85,8 +85,7 @@ vm_entry_thunk_shape select_normal_vm_entry_thunk_floor_shape(llvm::StringRef so
   std::uint64_t state = mix_generated_name_seed(seed, 0x305f00d5f00dULL);
   state = mix_generated_name_seed(state, stable_hash_string(source_name));
   state = mix_generated_name_seed(state, scope_seed ^ 0x57c4f9e21ULL);
-  state =
-      mix_generated_name_seed(state, static_cast<std::uint64_t>(binding_index) ^ 0x1b6e5d43ULL);
+  state = mix_generated_name_seed(state, static_cast<std::uint64_t>(binding_index) ^ 0x1b6e5d43ULL);
 
   switch (state % 3U) {
     case 0:
@@ -104,12 +103,12 @@ bool is_high_hardening_vm_entry_thunk_shape(vm_entry_thunk_shape shape) {
          shape == vm_entry_thunk_shape::decoy_guarded_forward;
 }
 
-vm_entry_thunk_shape upgrade_vm_entry_thunk_shape_for_policy(
-    llvm::Module& module,
-    const virtualized_function_binding& binding,
-    std::size_t binding_index,
-    std::size_t routed_binding_count,
-    vm_entry_thunk_shape shape) {
+vm_entry_thunk_shape
+upgrade_vm_entry_thunk_shape_for_policy(llvm::Module& module,
+                                        const virtualized_function_binding& binding,
+                                        std::size_t binding_index,
+                                        std::size_t routed_binding_count,
+                                        vm_entry_thunk_shape shape) {
   if (binding.interface_function == nullptr || binding.state == nullptr) { return shape; }
 
   llvm::Function& interface_function = *binding.interface_function;
@@ -117,7 +116,8 @@ vm_entry_thunk_shape upgrade_vm_entry_thunk_shape_for_policy(
   const std::uint64_t seed = binding.state->report.decision.seed;
   const llvm::StringRef source_name = interface_function.getName();
   const bool allow_indirect_shapes = can_emit_indirect_vm_entry_thunk(interface_function);
-  const std::uint64_t scope_seed = stable_hash_string(get_vm_entry_thunk_balance_scope_name(module));
+  const std::uint64_t scope_seed =
+      stable_hash_string(get_vm_entry_thunk_balance_scope_name(module));
 
   if (level == protection_level::strong_vm && !is_high_hardening_vm_entry_thunk_shape(shape)) {
     return select_strong_vm_entry_thunk_floor_shape(source_name, seed, allow_indirect_shapes);
@@ -135,7 +135,6 @@ vm_entry_thunk_shape upgrade_vm_entry_thunk_shape_for_policy(
 
   return shape;
 }
-
 
 std::uint64_t compute_vm_entry_thunk_balance_rank(const virtualized_function_binding& binding,
                                                   std::uint64_t scope_seed,
@@ -170,8 +169,7 @@ llvm::StringRef vm_entry_thunk_shape_marker(vm_entry_thunk_shape shape) {
 
 }  // namespace
 
-vm_entry_thunk_shape select_vm_entry_thunk_shape(llvm::StringRef source_name,
-                                                 std::uint64_t seed) {
+vm_entry_thunk_shape select_vm_entry_thunk_shape(llvm::StringRef source_name, std::uint64_t seed) {
   std::uint64_t state = mix_generated_name_seed(seed, 0xe17e7f00dULL);
   state = mix_generated_name_seed(state, stable_hash_string(source_name));
   return static_cast<vm_entry_thunk_shape>(state % 5U);
@@ -186,13 +184,14 @@ void rebalance_vm_entry_thunk_shapes(llvm::Module& module,
     const virtualized_function_binding* binding = bindings[index];
     if (binding == nullptr) { continue; }
 
-    shapes[index] =
-        upgrade_vm_entry_thunk_shape_for_policy(module, *binding, index, bindings.size(), shapes[index]);
+    shapes[index] = upgrade_vm_entry_thunk_shape_for_policy(
+        module, *binding, index, bindings.size(), shapes[index]);
   }
 
   if (bindings.size() < 2) { return; }
 
-  const std::uint64_t scope_seed = stable_hash_string(get_vm_entry_thunk_balance_scope_name(module));
+  const std::uint64_t scope_seed =
+      stable_hash_string(get_vm_entry_thunk_balance_scope_name(module));
 
   const auto candidate_priority = [&](std::size_t index) {
     const virtualized_function_binding* binding = bindings[index];
@@ -216,41 +215,40 @@ void rebalance_vm_entry_thunk_shapes(llvm::Module& module,
       return is_high_hardening_vm_entry_thunk_shape(shape);
     });
   };
-  const auto assign_shape = [&](vm_entry_thunk_shape target_shape,
-                                std::uint64_t salt,
-                                auto&& eligible) {
-    llvm::SmallVector<std::size_t, 8> order;
-    order.reserve(bindings.size());
-    for (std::size_t index = 0; index < bindings.size(); ++index) { order.push_back(index); }
+  const auto assign_shape =
+      [&](vm_entry_thunk_shape target_shape, std::uint64_t salt, auto&& eligible) {
+        llvm::SmallVector<std::size_t, 8> order;
+        order.reserve(bindings.size());
+        for (std::size_t index = 0; index < bindings.size(); ++index) { order.push_back(index); }
 
-    std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
-      const int lhs_priority = candidate_priority(lhs);
-      const int rhs_priority = candidate_priority(rhs);
-      if (lhs_priority != rhs_priority) { return lhs_priority < rhs_priority; }
+        std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+          const int lhs_priority = candidate_priority(lhs);
+          const int rhs_priority = candidate_priority(rhs);
+          if (lhs_priority != rhs_priority) { return lhs_priority < rhs_priority; }
 
-      const std::uint64_t lhs_rank =
-          compute_vm_entry_thunk_balance_rank(*bindings[lhs], scope_seed, salt);
-      const std::uint64_t rhs_rank =
-          compute_vm_entry_thunk_balance_rank(*bindings[rhs], scope_seed, salt);
-      if (lhs_rank != rhs_rank) { return lhs_rank < rhs_rank; }
+          const std::uint64_t lhs_rank =
+              compute_vm_entry_thunk_balance_rank(*bindings[lhs], scope_seed, salt);
+          const std::uint64_t rhs_rank =
+              compute_vm_entry_thunk_balance_rank(*bindings[rhs], scope_seed, salt);
+          if (lhs_rank != rhs_rank) { return lhs_rank < rhs_rank; }
 
-      llvm::Function* lhs_function = bindings[lhs]->interface_function;
-      llvm::Function* rhs_function = bindings[rhs]->interface_function;
-      const llvm::StringRef lhs_name = lhs_function == nullptr ? llvm::StringRef{}
-                                                               : lhs_function->getName();
-      const llvm::StringRef rhs_name = rhs_function == nullptr ? llvm::StringRef{}
-                                                               : rhs_function->getName();
-      return lhs_name < rhs_name;
-    });
+          llvm::Function* lhs_function = bindings[lhs]->interface_function;
+          llvm::Function* rhs_function = bindings[rhs]->interface_function;
+          const llvm::StringRef lhs_name =
+              lhs_function == nullptr ? llvm::StringRef{} : lhs_function->getName();
+          const llvm::StringRef rhs_name =
+              rhs_function == nullptr ? llvm::StringRef{} : rhs_function->getName();
+          return lhs_name < rhs_name;
+        });
 
-    for (std::size_t index : order) {
-      if (!eligible(shapes[index])) { continue; }
-      shapes[index] = target_shape;
-      return true;
-    }
+        for (std::size_t index : order) {
+          if (!eligible(shapes[index])) { continue; }
+          shapes[index] = target_shape;
+          return true;
+        }
 
-    return false;
-  };
+        return false;
+      };
 
   if (!has_high_hardening()) {
     const bool prefer_decoy = (mix_generated_name_seed(scope_seed, bindings.size()) & 1ULL) != 0;
@@ -266,9 +264,9 @@ void rebalance_vm_entry_thunk_shapes(llvm::Module& module,
 
   if (!has_shape(vm_entry_thunk_shape::indirect_ptr_forward)) {
     const bool assigned = assign_shape(
-        vm_entry_thunk_shape::indirect_ptr_forward,
-        0x5a2d96e31ULL,
-        [](vm_entry_thunk_shape shape) { return !is_high_hardening_vm_entry_thunk_shape(shape); });
+        vm_entry_thunk_shape::indirect_ptr_forward, 0x5a2d96e31ULL, [](vm_entry_thunk_shape shape) {
+          return !is_high_hardening_vm_entry_thunk_shape(shape);
+        });
     if (!assigned && count_shape(vm_entry_thunk_shape::decoy_guarded_forward) > 1) {
       assign_shape(vm_entry_thunk_shape::indirect_ptr_forward,
                    0x9d1163b51ULL,
@@ -337,8 +335,8 @@ llvm::CallInst* emit_vm_entry_thunk_indirect_call(llvm::IRBuilder<>& builder,
   const std::string ptr_name = (name_prefix + ".ptr").str();
   const std::string call_name = (name_prefix + ".call").str();
   auto* impl_raw = builder.CreatePtrToInt(&implementation_function, ptr_int_type, raw_name);
-  auto* impl_opaque = mba::entangle_value(
-      builder, impl_raw, iptr_context, iptr_seed ^ 0x3e9c710fULL, opaque_name);
+  auto* impl_opaque =
+      mba::entangle_value(builder, impl_raw, iptr_context, iptr_seed ^ 0x3e9c710fULL, opaque_name);
   auto* impl_ptr = builder.CreateIntToPtr(impl_opaque, implementation_function.getType(), ptr_name);
   const bool returns_void = implementation_function.getReturnType()->isVoidTy();
   auto* indirect_call = builder.CreateCall(implementation_function.getFunctionType(),
@@ -399,9 +397,8 @@ llvm::Function* create_vm_entry_thunk(llvm::Function& interface_function,
   if (shape == vm_entry_thunk_shape::neutral_forward && !forward_args.empty() &&
       forward_args.back()->getType()->isIntegerTy(64)) {
     auto* token_type = llvm::cast<llvm::IntegerType>(forward_args.back()->getType());
-    forward_args.back() = builder.CreateXor(forward_args.back(),
-                                            llvm::ConstantInt::get(token_type, 0),
-                                            "obf.vm.entry.thunk.neutral");
+    forward_args.back() = builder.CreateXor(
+        forward_args.back(), llvm::ConstantInt::get(token_type, 0), "obf.vm.entry.thunk.neutral");
   }
 
   if (shape == vm_entry_thunk_shape::indirect_ptr_forward) {
@@ -508,8 +505,11 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
                                   std::uint32_t mba_depth) {
   if (binding.state == nullptr) { llvm_unreachable("vm wrapper missing binding state"); }
   const protection_level level = binding.state->report.decision.policy.level;
+  const std::uint64_t decision_seed = binding.state->report.decision.seed;
   if (resolver_shape != select_vm_resolver_shape(level)) { llvm_unreachable("Shape mismatch"); }
-  if (seed_resolver_shape != select_vm_seed_resolver_shape(level)) { llvm_unreachable("Shape mismatch"); }
+  if (seed_resolver_shape != select_vm_seed_resolver_shape(level)) {
+    llvm_unreachable("Shape mismatch");
+  }
 
   llvm::Module* module = interface_function.getParent();
   if (module == nullptr) { llvm_unreachable("vm wrapper missing parent module"); }
@@ -521,15 +521,16 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
 
   llvm::GlobalVariable* target_global = nullptr;
   if (resolver_shape == vm_resolver_shape::cached_sentinel_global) {
-    target_global =
-        get_or_create_vm_target_global(interface_function, binding.target_cache_global_name);
+    target_global = get_or_create_vm_target_global(
+        interface_function, decision_seed, binding.target_cache_global_name);
     if (target_global == nullptr) { llvm_unreachable("vm target cache global creation failed"); }
   }
 
-  const llvm::APInt key = derive_vm_target_key(interface_function, ptr_int_type);
+  const llvm::APInt key = derive_vm_target_key(decision_seed, interface_function, ptr_int_type);
   const llvm::APInt sentinel = derive_vm_target_sentinel(key);
   llvm::GlobalVariable* target_seed_global =
       get_or_create_vm_target_seed_global(interface_function,
+                                          decision_seed,
                                           thunk_function,
                                           binding.target_seed_global_name,
                                           binding.seed_case_function_name,
@@ -541,10 +542,10 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
   llvm::GlobalVariable* decode_key_global = get_or_create_vm_decode_key_global(
       *module, ptr_int_type, binding.decode_key_global_name, key);
 
-  const std::uint64_t raw_salt =
-      stable_hash_string(interface_function.getName()) * 0x9E3779B97F4A7C15ULL;
+  const std::uint64_t target_salt =
+      derive_vm_target_salt(decision_seed, interface_function.getName());
   const llvm::APInt salt(ptr_int_type->getBitWidth(),
-                         raw_salt == 0 ? 0xC6EF3720ULL : raw_salt,
+                         target_salt,
                          /*isSigned=*/false,
                          /*implicitTrunc=*/true);
 
@@ -560,6 +561,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
 
   if (resolver_shape == vm_resolver_shape::local_always_decode) {
     llvm::Value* encoded_target = build_encoded_vm_target_value(builder,
+                                                                decision_seed,
                                                                 level,
                                                                 interface_function,
                                                                 interface_function,
@@ -593,12 +595,11 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
     for (llvm::Argument& argument : interface_function.args()) { arguments.push_back(&argument); }
     arguments.push_back(hidden_token);
 
-    auto* call = builder.CreateCall(thunk_function.getFunctionType(),
-                                    indirect_target,
-                                    arguments,
-                                    interface_function.getReturnType()->isVoidTy()
-                                        ? ""
-                                        : wrapper_prefix + ".call");
+    auto* call = builder.CreateCall(
+        thunk_function.getFunctionType(),
+        indirect_target,
+        arguments,
+        interface_function.getReturnType()->isVoidTy() ? "" : wrapper_prefix + ".call");
     call->setCallingConv(interface_function.getCallingConv());
     call->setAttributes(build_vm_safe_callsite_attributes(thunk_function));
     if (interface_function.getReturnType()->isVoidTy()) {
@@ -606,14 +607,15 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
     } else {
       llvm::Value* wrapper_ret = call;
       if (interface_function.getReturnType()->isIntegerTy()) {
-        wrapper_ret = decode_virtualized_integer_return(builder,
-                                                        interface_function,
-                                                        interface_function.getName(),
-                                                        make_vm_retkey_global_name(binding.vm_symbol_tag),
-                                                        call,
-                                                        hidden_token,
-                                                        wrapper_token,
-                                                        mba_depth);
+        wrapper_ret =
+            decode_virtualized_integer_return(builder,
+                                              interface_function,
+                                              interface_function.getName(),
+                                              make_vm_retkey_global_name(binding.vm_symbol_tag),
+                                              call,
+                                              hidden_token,
+                                              wrapper_token,
+                                              mba_depth);
       }
       builder.CreateRet(wrapper_ret);
     }
@@ -637,6 +639,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
 
   llvm::IRBuilder<> resolve_builder(resolve_bb);
   llvm::Value* new_encoded = build_encoded_vm_target_value(resolve_builder,
+                                                           decision_seed,
                                                            level,
                                                            interface_function,
                                                            interface_function,
@@ -678,12 +681,11 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
   for (llvm::Argument& argument : interface_function.args()) { arguments.push_back(&argument); }
   arguments.push_back(hidden_token);
 
-  auto* call = call_builder.CreateCall(thunk_function.getFunctionType(),
-                                       indirect_target,
-                                       arguments,
-                                       interface_function.getReturnType()->isVoidTy()
-                                           ? ""
-                                           : wrapper_prefix + ".call");
+  auto* call = call_builder.CreateCall(
+      thunk_function.getFunctionType(),
+      indirect_target,
+      arguments,
+      interface_function.getReturnType()->isVoidTy() ? "" : wrapper_prefix + ".call");
   call->setCallingConv(interface_function.getCallingConv());
   call->setAttributes(build_vm_safe_callsite_attributes(thunk_function));
   if (interface_function.getReturnType()->isVoidTy()) {
@@ -691,14 +693,15 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
   } else {
     llvm::Value* wrapper_ret = call;
     if (interface_function.getReturnType()->isIntegerTy()) {
-      wrapper_ret = decode_virtualized_integer_return(call_builder,
-                                                      interface_function,
-                                                      interface_function.getName(),
-                                                      make_vm_retkey_global_name(binding.vm_symbol_tag),
-                                                      call,
-                                                      hidden_token,
-                                                      wrapper_token,
-                                                      mba_depth);
+      wrapper_ret =
+          decode_virtualized_integer_return(call_builder,
+                                            interface_function,
+                                            interface_function.getName(),
+                                            make_vm_retkey_global_name(binding.vm_symbol_tag),
+                                            call,
+                                            hidden_token,
+                                            wrapper_token,
+                                            mba_depth);
     }
     call_builder.CreateRet(wrapper_ret);
   }

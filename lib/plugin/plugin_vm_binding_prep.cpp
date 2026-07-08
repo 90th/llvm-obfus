@@ -90,17 +90,19 @@ std::uint64_t mix_vm_handshake_seed(std::uint64_t seed, std::uint64_t salt) {
   return seed;
 }
 
-std::uint64_t derive_vm_hidden_token(llvm::StringRef callee_name,
+std::uint64_t derive_vm_hidden_token(std::uint64_t decision_seed,
+                                     llvm::StringRef callee_name,
                                      llvm::StringRef caller_name,
                                      std::uint64_t ordinal) {
   std::uint64_t seed = stable_hash_string(callee_name);
   seed = mix_vm_handshake_seed(seed, stable_hash_string(caller_name));
   seed = mix_vm_handshake_seed(seed, ordinal + 1);
+  if (decision_seed != 0) { seed = mix_vm_handshake_seed(seed, decision_seed); }
   return seed == 0 ? 0xa55aa55aa55aa55aULL : seed;
 }
 
-std::uint64_t derive_vm_wrapper_token(llvm::StringRef function_name) {
-  return derive_vm_hidden_token(function_name, function_name, 0x51f15eedULL);
+std::uint64_t derive_vm_wrapper_token(std::uint64_t decision_seed, llvm::StringRef function_name) {
+  return derive_vm_hidden_token(decision_seed, function_name, function_name, 0x51f15eedULL);
 }
 
 std::string make_debug_vm_name(llvm::StringRef prefix, llvm::StringRef source_name) {
@@ -143,9 +145,12 @@ std::string make_vm_entry_thunk_name(llvm::Module& module,
                                      bool preserve_generated_names,
                                      llvm::StringRef source_name,
                                      std::uint64_t seed) {
-  return make_vm_generated_symbol_name(
-      module, preserve_generated_names, "__obf_vm_e", source_name, seed ^ 0xe4754ULL,
-      "__obf_vm_entry_");
+  return make_vm_generated_symbol_name(module,
+                                       preserve_generated_names,
+                                       "__obf_vm_e",
+                                       source_name,
+                                       seed ^ 0xe4754ULL,
+                                       "__obf_vm_entry_");
 }
 
 llvm::Value* build_hidden_token_value(llvm::IRBuilder<>& builder,
@@ -288,7 +293,8 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
   binding.interface_function = interface_function;
   binding.implementation_function = implementation_function;
   binding.state = &state;
-  binding.wrapper_token = derive_vm_wrapper_token(interface_function->getName());
+  binding.wrapper_token =
+      derive_vm_wrapper_token(state.report.decision.seed, interface_function->getName());
 
   std::uint64_t callsite_ordinal = 0;
   for (llvm::CallBase* call : direct_call_sites) {
@@ -297,8 +303,10 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
 
     binding.call_sites.push_back(
         {.call = call,
-         .hidden_token = derive_vm_hidden_token(
-             interface_function->getName(), caller->getName(), callsite_ordinal++)});
+         .hidden_token = derive_vm_hidden_token(state.report.decision.seed,
+                                                interface_function->getName(),
+                                                caller->getName(),
+                                                callsite_ordinal++)});
   }
 
   return binding;

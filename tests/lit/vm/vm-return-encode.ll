@@ -79,7 +79,7 @@ entry:
 ; CHECK: call i1 %encode_i1.obf.wrapper.indirect(i32 %x, i64 %encode_i1.obf.wrapper.token)
 ; CHECK: %encode_i1.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i1.obf.retkey.cast = trunc i64 %encode_i1.obf.retkey.bound to i1
-; CHECK: %encode_i1.obf.retdec = {{(add|sub) i1}}
+; CHECK: %encode_i1.obf.retdec = {{(add|sub|xor) i1}}
 ; CHECK-LABEL: define i64 @encode_i64(i64 %x)
 ; CHECK: %encode_i64.obf.wrapper.token = {{(add|sub|xor) i64}}
 ; CHECK: %encode_i64.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
@@ -108,7 +108,7 @@ entry:
 ; CHECK: %encode_i1.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i1.obf.retkey.bound = {{(add|sub) i64}}
 ; CHECK: %encode_i1.obf.retkey.cast = trunc i64 %encode_i1.obf.retkey.bound to i1
-; CHECK: %encode_i1.obf.retdec = {{(add|sub) i1}}
+; CHECK: %encode_i1.obf.retdec = {{(add|sub|xor) i1}}
 ; i64 decode:
 ; CHECK: %encode_i64.obf.call.token = {{(add|sub|xor) i64}}
 ; CHECK: call i64 %encode_i64.obf.indirect(i64 0, i64 %encode_i64.obf.call.token)
