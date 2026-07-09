@@ -297,11 +297,73 @@ void TestAuthEncodingDerivationAndTagging() {
       obf::auth::DeriveLabeledKey(site_key, obf::auth::kDomainEnc);
   const obf::auth::Blake2sDigest mac_key =
       obf::auth::DeriveLabeledKey(site_key, obf::auth::kDomainMac);
+  const std::uint64_t string_binding =
+      obf::auth::DeriveStringBindingId(0x111ULL, 0x222ULL, 0x333ULL);
+  const std::uint64_t same_string_binding =
+      obf::auth::DeriveStringBindingId(0x111ULL, 0x222ULL, 0x333ULL);
+  const std::uint64_t other_string_binding =
+      obf::auth::DeriveStringBindingId(0x111ULL, 0x222ULL, 0x334ULL);
+  const std::uint64_t pool_binding = obf::auth::DeriveConstantPoolBindingId(0x111ULL, 0x333ULL);
+  const std::uint64_t destination_cookie = obf::auth::DeriveReferenceCookie(
+      mac_key,
+      obf::auth::AuthDescriptorKind::string,
+      string_binding,
+      obf::auth::AuthReferenceRole::destination);
+  const std::uint64_t ciphertext_cookie = obf::auth::DeriveReferenceCookie(
+      mac_key,
+      obf::auth::AuthDescriptorKind::string,
+      string_binding,
+      obf::auth::AuthReferenceRole::ciphertext);
+  const std::uint64_t pool_destination_cookie = obf::auth::DeriveReferenceCookie(
+      mac_key,
+      obf::auth::AuthDescriptorKind::constant_pool,
+      string_binding,
+      obf::auth::AuthReferenceRole::destination);
+  const std::uint64_t build_key_cookie =
+      obf::auth::DeriveBuildKeyCookie(build_key, obf::auth::AuthDescriptorKind::string, string_binding);
+  const std::uint64_t cold_status = obf::auth::DeriveCacheStatus(
+      mac_key,
+      obf::auth::AuthDescriptorKind::string,
+      string_binding,
+      obf::auth::CacheStatusKind::cold);
+  const std::uint64_t decoding_status = obf::auth::DeriveCacheStatus(
+      mac_key,
+      obf::auth::AuthDescriptorKind::string,
+      string_binding,
+      obf::auth::CacheStatusKind::decoding);
+  const std::uint64_t decoded_status = obf::auth::DeriveCacheStatus(
+      mac_key,
+      obf::auth::AuthDescriptorKind::string,
+      string_binding,
+      obf::auth::CacheStatusKind::decoded);
+  const std::uint64_t pool_cold_status = obf::auth::DeriveCacheStatus(
+      mac_key,
+      obf::auth::AuthDescriptorKind::constant_pool,
+      pool_binding,
+      obf::auth::CacheStatusKind::cold);
 
   ExpectTrue(function_key != other_function_key,
              "function key derivation should separate function identifiers");
   ExpectTrue(site_key != other_site_key, "site key derivation should separate site identifiers");
   ExpectTrue(enc_key != mac_key, "enc and mac labels should derive different keys");
+  ExpectTrue(string_binding == same_string_binding,
+             "string binding derivation should be deterministic");
+  ExpectTrue(string_binding != other_string_binding,
+             "string binding derivation should separate site identifiers");
+  ExpectTrue(string_binding != pool_binding,
+             "string and constant-pool binding derivations should remain domain separated");
+  ExpectTrue(destination_cookie != ciphertext_cookie,
+             "reference cookies should separate descriptor roles");
+  ExpectTrue(destination_cookie != pool_destination_cookie,
+             "reference cookies should separate descriptor kinds");
+  ExpectTrue(build_key_cookie != 0, "build-key cookie derivation should never return zero");
+  ExpectTrue(cold_status != 0 && decoding_status != 0 && decoded_status != 0,
+             "cache status derivation should never return zero");
+  ExpectTrue(cold_status != decoding_status && cold_status != decoded_status &&
+                 decoding_status != decoded_status,
+             "cache status derivation should return pairwise distinct tokens");
+  ExpectTrue(cold_status != pool_cold_status,
+             "cache status derivation should separate descriptor kinds and bindings");
 
   const obf::auth::StringNonce nonce = obf::auth::DeriveStringNonce(site_key);
   const std::array<std::uint8_t, 7> plaintext = {'s', 'e', 'c', 'r', 'e', 't', 0};
@@ -316,6 +378,15 @@ void TestAuthEncodingDerivationAndTagging() {
   metadata.module_id = 0x111ULL;
   metadata.function_id = 0x222ULL;
   metadata.site_id = 0x333ULL;
+  metadata.binding_id = string_binding;
+  metadata.destination_cookie = destination_cookie;
+  metadata.ciphertext_cookie = ciphertext_cookie;
+  metadata.build_key_cookie = build_key_cookie;
+  metadata.state_cookie = obf::auth::DeriveReferenceCookie(
+      mac_key,
+      obf::auth::AuthDescriptorKind::string,
+      string_binding,
+      obf::auth::AuthReferenceRole::state);
   metadata.nonce = nonce;
 
   const obf::auth::StringTag tag = obf::auth::ComputeStringTag(mac_key, metadata, ciphertext);
@@ -323,7 +394,43 @@ void TestAuthEncodingDerivationAndTagging() {
   tampered[0] ^= 0x40U;
   const obf::auth::StringTag tampered_tag =
       obf::auth::ComputeStringTag(mac_key, metadata, tampered);
+  obf::auth::StringAuthMetadata rebound = metadata;
+  rebound.binding_id ^= 0x55ULL;
+  const obf::auth::StringTag rebound_tag = obf::auth::ComputeStringTag(mac_key, rebound, ciphertext);
   ExpectTrue(tag != tampered_tag, "string tag should change when ciphertext changes");
+  ExpectTrue(tag != rebound_tag, "string tag should change when binding inputs change");
+
+  obf::auth::ConstantPoolAuthMetadata pool_metadata;
+  pool_metadata.length = plaintext.size();
+  pool_metadata.module_id = 0x111ULL;
+  pool_metadata.pool_id = 0x777ULL;
+  pool_metadata.binding_id = obf::auth::DeriveConstantPoolBindingId(0x111ULL, 0x777ULL);
+  pool_metadata.destination_cookie = obf::auth::DeriveReferenceCookie(
+      mac_key,
+      obf::auth::AuthDescriptorKind::constant_pool,
+      pool_metadata.binding_id,
+      obf::auth::AuthReferenceRole::destination);
+  pool_metadata.ciphertext_cookie = obf::auth::DeriveReferenceCookie(
+      mac_key,
+      obf::auth::AuthDescriptorKind::constant_pool,
+      pool_metadata.binding_id,
+      obf::auth::AuthReferenceRole::ciphertext);
+  pool_metadata.build_key_cookie = obf::auth::DeriveBuildKeyCookie(
+      build_key, obf::auth::AuthDescriptorKind::constant_pool, pool_metadata.binding_id);
+  pool_metadata.state_cookie = obf::auth::DeriveReferenceCookie(
+      mac_key,
+      obf::auth::AuthDescriptorKind::constant_pool,
+      pool_metadata.binding_id,
+      obf::auth::AuthReferenceRole::state);
+  pool_metadata.nonce = nonce;
+  const obf::auth::StringTag pool_tag =
+      obf::auth::ComputeConstantPoolTag(mac_key, pool_metadata, ciphertext);
+  obf::auth::ConstantPoolAuthMetadata pool_tampered = pool_metadata;
+  pool_tampered.state_cookie ^= 0x33ULL;
+  const obf::auth::StringTag pool_tampered_tag =
+      obf::auth::ComputeConstantPoolTag(mac_key, pool_tampered, ciphertext);
+  ExpectTrue(pool_tag != pool_tampered_tag,
+             "constant-pool tag should change when cookie inputs change");
 }
 
 void TestAuthEncodingConstantTimeEqual() {

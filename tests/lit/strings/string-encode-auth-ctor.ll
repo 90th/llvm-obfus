@@ -27,7 +27,11 @@ entry:
 ; IR: @.secret = private unnamed_addr global [7 x i8] zeroinitializer
 ; IR-NOT: c"secret\00"
 ; IR: @__obf_string_ct__secret = internal constant [7 x i8]
+; IR: @__obf_string_destination_ref__secret = internal constant { i64, ptr }
+; IR: @__obf_string_ciphertext_ref__secret = internal constant { i64, ptr }
+; IR: @__obf_string_build_key_ref__secret = internal constant { i64, ptr }
+; IR: @__obf_string_state_ref__secret = internal global { i64, i64 }
 ; IR: @__obf_string_desc__secret = internal constant
 ; IR: @llvm.global_ctors = appending global
 ; IR: define internal void @__obf_decode__secret() {
-; IR: call ptr @rt_core_sd1(ptr @__obf_string_desc__secret, i64 7)
+; IR: call ptr @rt_core_sd2(ptr @__obf_string_desc__secret, i64 7, i64

@@ -22,10 +22,14 @@ entry:
 
 ; TABLE: @__obf_const_pool_
 ; TABLE: @__obf_const_desc_
+; TABLE: @__obf_const_destination_ref_
+; TABLE: @__obf_const_ciphertext_ref_
+; TABLE: @__obf_const_build_key_ref_
+; TABLE: @__obf_const_state_ref_
 ; TABLE-LABEL: define i32 @table_user(i32 %idx) {
 ; TABLE: %obf.const.pool.base = call ptr @__obf_const_pool_decode_
 ; TABLE: %slot = getelementptr inbounds [3 x i32], ptr %obf.const.pool.base, i64 0, i64 %wide
 ; TABLE: %value = load i32, ptr %slot, align 4
 ; TABLE-LABEL: define internal ptr @__obf_const_pool_decode_
-; TABLE: call ptr @rt_core_cpd1
+; TABLE: call ptr @rt_core_cpd2(ptr @__obf_const_desc_
 ; TABLE-NOT: %obf.const.mask =

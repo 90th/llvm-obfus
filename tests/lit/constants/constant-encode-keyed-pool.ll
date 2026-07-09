@@ -20,9 +20,13 @@ entry:
 
 ; CHECK: @__obf_const_pool_
 ; CHECK: @__obf_const_desc_
+; CHECK: @__obf_const_destination_ref_
+; CHECK: @__obf_const_ciphertext_ref_
+; CHECK: @__obf_const_build_key_ref_
+; CHECK: @__obf_const_state_ref_
 ; CHECK-LABEL: define i32 @repeated(i32 %x) {
 ; CHECK: %obf.const.pool.base = call ptr @__obf_const_pool_decode_
 ; CHECK: %obf.const.pool.load = load i32, ptr %obf.const.pool.ptr
 ; CHECK-LABEL: define internal ptr @__obf_const_pool_decode_
-; CHECK: call ptr @rt_core_cpd1
+; CHECK: call ptr @rt_core_cpd2(ptr @__obf_const_desc_
 ; CHECK-NOT: %obf.const.mask =

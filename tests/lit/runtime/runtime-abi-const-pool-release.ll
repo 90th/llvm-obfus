@@ -19,6 +19,7 @@ entry:
   ret i32 %ret
 }
 
-; CHECK: call ptr @rt_core_cpd1
+; CHECK: call ptr @rt_core_cpd2
 ; CHECK-NOT: obf_constant_pool_decode_v1
+; CHECK-NOT: obf_constant_pool_decode_v2
 ; CHECK-NOT: release marker stripping failure: external
