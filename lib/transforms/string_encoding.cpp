@@ -1262,7 +1262,7 @@ llvm::GlobalVariable* create_authenticated_state_reference_global(
   llvm::StructType* reference_type = get_authenticated_state_reference_type(context);
   const std::string name = make_string_generated_name(module,
                                                       plan,
-                                                      "__obf_str_state_ref",
+                                                      "__obf_string_state_ref",
                                                       "__obf_string_state_ref_",
                                                       "",
                                                       0x57a7eULL,

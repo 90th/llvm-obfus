@@ -79,7 +79,30 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 include(AddLLVM)
+include(CheckCSourceCompiles)
 include(HandleLLVMOptions)
+
+if(NOT MSVC)
+  set(_obf_saved_required_libraries "${CMAKE_REQUIRED_LIBRARIES}")
+  set(CMAKE_REQUIRED_LIBRARIES "")
+  check_c_source_compiles(
+    "#include <stdint.h>
+int main(void) {
+  _Alignas(8) uint64_t value = 0;
+  uint64_t expected = 0;
+  (void)__atomic_compare_exchange_n(
+      &value, &expected, 1ULL, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+  return 0;
+}
+"
+    OBF_HAS_DIRECT_U64_ATOMICS)
+  set(CMAKE_REQUIRED_LIBRARIES "${_obf_saved_required_libraries}")
+  unset(_obf_saved_required_libraries)
+  if(NOT OBF_HAS_DIRECT_U64_ATOMICS)
+    message(FATAL_ERROR
+      "Target toolchain must provide direct aligned uint64_t __atomic_compare_exchange_n support")
+  endif()
+endif()
 
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 
