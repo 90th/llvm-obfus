@@ -18,7 +18,7 @@ def main() -> int:
 
     if mode == "state":
         call_re = re.compile(
-            rf"^(?P<prefix>.*?call\s+ptr\s+@[^(]+\(\s*ptr @{re.escape(symbol)},\s*i32\s+(?P<cfg>[+-]?\d+),\s*i32\s+(?P<expected>[+-]?\d+),\s*i64\s+(?P<trusted>[+-]?\d+)\s*\)(?P<suffix>.*))$"
+            rf"^(?P<prefix>.*?call\s+ptr\s+@[^(]+\(\s*ptr @{re.escape(symbol)},\s*i32\s+(?P<cfg>(?:%[-A-Za-z$._0-9]+|[+-]?\d+))\s*,\s*i32\s+(?P<expected>[+-]?\d+),\s*i64\s+(?P<trusted>[+-]?\d+)\s*\)(?P<suffix>.*))$"
         )
         matches = []
         for index, line in enumerate(lines):
