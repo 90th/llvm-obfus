@@ -18,6 +18,7 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Casting.h"
@@ -1379,11 +1380,18 @@ llvm::Function* create_authenticated_lazy_helper(llvm::Module& module, llvm::Str
   trusted_length->setName("trusted_length");
 
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", helper);
+  llvm::BasicBlock* state_check = llvm::BasicBlock::Create(context, "state_check", helper);
+  llvm::BasicBlock* state_mismatch = llvm::BasicBlock::Create(context, "state_mismatch", helper);
   llvm::BasicBlock* fast_path = llvm::BasicBlock::Create(context, "fast_path", helper);
   llvm::BasicBlock* slow_path = llvm::BasicBlock::Create(context, "slow_path", helper);
   llvm::BasicBlock* merge = llvm::BasicBlock::Create(context, "merge", helper);
 
   llvm::IRBuilder<> builder(entry);
+  llvm::Value* cfg_match =
+      builder.CreateICmpEQ(cfg_state, expected_state, "obf.str.cfg.match");
+  builder.CreateCondBr(cfg_match, state_check, state_mismatch);
+
+  builder.SetInsertPoint(state_check);
   llvm::Value* state_ptr_addr =
       builder.CreateStructGEP(descriptor_type, descriptor, 3, "obf.str.state.addr");
   llvm::Value* state_ptr = builder.CreateLoad(ptr_type, state_ptr_addr, "obf.str.state.ptr");
@@ -1391,6 +1399,10 @@ llvm::Function* create_authenticated_lazy_helper(llvm::Module& module, llvm::Str
   llvm::Value* is_decoded = builder.CreateICmpEQ(
       state, llvm::ConstantInt::get(i32_type, auth::kStringStateDecoded), "obf.str.is_decoded");
   builder.CreateCondBr(is_decoded, fast_path, slow_path);
+
+  builder.SetInsertPoint(state_mismatch);
+  builder.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(&module, llvm::Intrinsic::trap));
+  builder.CreateUnreachable();
 
   builder.SetInsertPoint(fast_path);
   llvm::Value* destination_addr =
