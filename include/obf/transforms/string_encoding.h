@@ -34,12 +34,12 @@ enum class string_strategy_kind {
 enum class string_helper_shape {
   none,
   ctor_unrolled_v0,
-  ctor_auth_runtime_v1,
+  ctor_auth_runtime_v2,
   lazy_flag_unrolled_v0,
   lazy_flag_reverse_v1,
   lazy_counter_chunked_v2,
   lazy_cached_pointer_v3,
-  lazy_auth_runtime_v1,
+  lazy_auth_runtime_v2,
 };
 
 enum class string_key_schedule_kind {

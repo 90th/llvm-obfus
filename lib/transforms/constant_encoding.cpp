@@ -61,7 +61,15 @@ struct keyed_pool_plan {
 struct keyed_pool_payload {
   auth::ConstantPoolAuthMetadata metadata;
   auth::StringTag tag{};
+  std::uint64_t cold_status = 0;
   llvm::SmallVector<std::uint8_t, 64> ciphertext;
+};
+
+struct keyed_pool_reference_globals {
+  llvm::GlobalVariable* destination_ref = nullptr;
+  llvm::GlobalVariable* ciphertext_ref = nullptr;
+  llvm::GlobalVariable* build_key_ref = nullptr;
+  llvm::GlobalVariable* state_ref = nullptr;
 };
 
 struct keyed_pool_table_summary {
@@ -440,33 +448,37 @@ std::uint64_t derive_keyed_pool_module_id(const llvm::Module& module) {
 }
 
 llvm::StructType* get_keyed_pool_descriptor_type(llvm::LLVMContext& context) {
-  llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
-  llvm::Type* i32_ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
   llvm::Type* i32_type = llvm::Type::getInt32Ty(context);
+  llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
   llvm::ArrayType* nonce_type =
       llvm::ArrayType::get(llvm::Type::getInt8Ty(context), auth::kStringNonceBytes);
   llvm::ArrayType* tag_type =
       llvm::ArrayType::get(llvm::Type::getInt8Ty(context), auth::kStringTagBytes);
-  return llvm::StructType::get(ptr_type,
-                               ptr_type,
-                               ptr_type,
-                               i32_ptr_type,
-                               i64_type,
-                               i64_type,
-                               i64_type,
+  return llvm::StructType::get(i32_type,
                                i32_type,
-                               i32_type,
+                               i64_type,
+                               i64_type,
+                               i64_type,
+                               i64_type,
+                               i64_type,
+                               i64_type,
+                               i64_type,
+                               i64_type,
                                nonce_type,
-                               tag_type);
+                               tag_type,
+                               ptr_type,
+                               ptr_type,
+                               ptr_type,
+                               ptr_type);
 }
 
 llvm::FunctionCallee get_keyed_pool_runtime_decoder(llvm::Module& module) {
   llvm::LLVMContext& context = module.getContext();
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
-  llvm::FunctionType* type = llvm::FunctionType::get(ptr_type, {ptr_type, i64_type}, false);
-  return module.getOrInsertFunction(auth::kRuntimeConstantPoolDecodeSymbolV1, type);
+  llvm::FunctionType* type = llvm::FunctionType::get(ptr_type, {ptr_type, i64_type, i64_type}, false);
+  return module.getOrInsertFunction(auth::kRuntimeConstantPoolDecodeSymbolV2, type);
 }
 
 llvm::GlobalVariable* create_keyed_pool_ciphertext_global(llvm::Module& module,
@@ -518,42 +530,143 @@ llvm::GlobalVariable* create_keyed_pool_destination_global(llvm::Module& module,
   return destination;
 }
 
-llvm::GlobalVariable* create_keyed_pool_state_global(llvm::Module& module,
-                                                     std::uint64_t seed,
-                                                     std::uint64_t pool_id) {
-  const std::string name =
-      make_unique_obf_symbol_name(module, "__obf_const_state", "pool", seed ^ pool_id ^ 0x57a7eULL);
+llvm::StructType* get_authenticated_buffer_reference_type(llvm::LLVMContext& context) {
+  return llvm::StructType::get(llvm::Type::getInt64Ty(context),
+                               llvm::PointerType::getUnqual(context));
+}
+
+llvm::StructType* get_authenticated_state_reference_type(llvm::LLVMContext& context) {
+  return llvm::StructType::get(llvm::Type::getInt64Ty(context),
+                               llvm::Type::getInt64Ty(context));
+}
+
+llvm::GlobalVariable* create_keyed_pool_buffer_reference_global(llvm::Module& module,
+                                                                llvm::GlobalVariable& target,
+                                                                std::uint64_t cookie,
+                                                                llvm::StringRef role,
+                                                                llvm::StringRef source,
+                                                                std::uint64_t seed) {
+  llvm::LLVMContext& context = module.getContext();
+  llvm::StructType* reference_type = get_authenticated_buffer_reference_type(context);
+  llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
+  const std::string name = make_unique_obf_symbol_name(module, role, source, seed);
+  llvm::Constant* fields[] = {
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), cookie),
+      llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(&target, ptr_type),
+  };
   return new llvm::GlobalVariable(module,
-                                  llvm::Type::getInt32Ty(module.getContext()),
-                                  false,
+                                  reference_type,
+                                  true,
                                   llvm::GlobalValue::InternalLinkage,
-                                  llvm::ConstantInt::get(llvm::Type::getInt32Ty(module.getContext()), 0),
+                                  llvm::ConstantStruct::get(reference_type, fields),
                                   name);
 }
 
+llvm::GlobalVariable* create_keyed_pool_state_reference_global(llvm::Module& module,
+                                                               std::uint64_t cookie,
+                                                               std::uint64_t cold_status,
+                                                               std::uint64_t seed,
+                                                               std::uint64_t pool_id) {
+  llvm::LLVMContext& context = module.getContext();
+  llvm::StructType* reference_type = get_authenticated_state_reference_type(context);
+  const std::string name = make_unique_obf_symbol_name(
+      module, "__obf_const_state_ref_", "pool", seed ^ pool_id ^ 0x57a80ULL);
+  llvm::Constant* fields[] = {
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), cookie),
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), cold_status),
+  };
+  auto* global = new llvm::GlobalVariable(module,
+                                          reference_type,
+                                          false,
+                                          llvm::GlobalValue::InternalLinkage,
+                                          llvm::ConstantStruct::get(reference_type, fields),
+                                          name);
+  global->setAlignment(llvm::Align(8));
+  return global;
+}
+
+keyed_pool_reference_globals create_keyed_pool_reference_globals(llvm::Module& module,
+                                                                 const keyed_pool_payload& payload,
+                                                                 llvm::GlobalVariable& destination,
+                                                                 llvm::GlobalVariable& ciphertext,
+                                                                 llvm::GlobalVariable& build_key,
+                                                                 std::uint64_t seed,
+                                                                 std::uint64_t pool_id) {
+  keyed_pool_reference_globals refs;
+  refs.destination_ref = create_keyed_pool_buffer_reference_global(module,
+                                                                   destination,
+                                                                   payload.metadata.destination_cookie,
+                                                                   "__obf_const_destination_ref",
+                                                                   "pool",
+                                                                   seed ^ pool_id ^ 0xd35dULL);
+  refs.ciphertext_ref = create_keyed_pool_buffer_reference_global(module,
+                                                                  ciphertext,
+                                                                  payload.metadata.ciphertext_cookie,
+                                                                  "__obf_const_ciphertext_ref",
+                                                                  "pool",
+                                                                  seed ^ pool_id ^ 0xc17fULL);
+  refs.build_key_ref = create_keyed_pool_buffer_reference_global(module,
+                                                                 build_key,
+                                                                 payload.metadata.build_key_cookie,
+                                                                 "__obf_const_build_key_ref",
+                                                                 "pool",
+                                                                 seed ^ pool_id ^ 0xb618ULL);
+  refs.state_ref = create_keyed_pool_state_reference_global(
+      module, payload.metadata.state_cookie, payload.cold_status, seed, pool_id);
+  return refs;
+}
+
 llvm::GlobalVariable* create_keyed_pool_descriptor_global(llvm::Module& module,
+                                                           const keyed_pool_payload& payload,
+                                                           const keyed_pool_reference_globals& refs,
+                                                           std::uint64_t seed,
+                                                           std::uint64_t pool_id);
+
+llvm::GlobalVariable* create_keyed_pool_descriptor_bundle(llvm::Module& module,
+                                                          const keyed_pool_plan& plan,
                                                           const keyed_pool_payload& payload,
-                                                          llvm::GlobalVariable& destination,
-                                                          llvm::GlobalVariable& ciphertext,
-                                                          llvm::GlobalVariable& build_key,
-                                                          llvm::GlobalVariable& state,
-                                                          std::uint64_t seed,
-                                                          std::uint64_t pool_id) {
+                                                          std::uint64_t seed) {
+  llvm::GlobalVariable* ciphertext =
+      create_keyed_pool_ciphertext_global(module, plan, payload, seed);
+  llvm::GlobalVariable* build_key = create_keyed_pool_build_key_global(module, seed, plan.pool_id);
+  llvm::GlobalVariable* destination =
+      create_keyed_pool_destination_global(module, payload, plan.alignment, seed, plan.pool_id);
+  const keyed_pool_reference_globals refs = create_keyed_pool_reference_globals(
+      module, payload, *destination, *ciphertext, *build_key, seed, plan.pool_id);
+  return create_keyed_pool_descriptor_global(module, payload, refs, seed, plan.pool_id);
+}
+
+llvm::GlobalVariable* create_keyed_pool_descriptor_global(llvm::Module& module,
+                                                           const keyed_pool_payload& payload,
+                                                           const keyed_pool_reference_globals& refs,
+                                                           std::uint64_t seed,
+                                                           std::uint64_t pool_id) {
   llvm::LLVMContext& context = module.getContext();
   llvm::StructType* descriptor_type = get_keyed_pool_descriptor_type(context);
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
-  llvm::SmallVector<llvm::Constant*, 11> fields;
-  fields.push_back(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(&destination, ptr_type));
-  fields.push_back(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(&ciphertext, ptr_type));
-  fields.push_back(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(&build_key, ptr_type));
-  fields.push_back(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(&state, ptr_type));
+  llvm::SmallVector<llvm::Constant*, 16> fields;
+  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.version));
+  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.flags));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.length));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.module_id));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.pool_id));
-  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.version));
-  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.flags));
+  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.binding_id));
+  fields.push_back(
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.destination_cookie));
+  fields.push_back(
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.ciphertext_cookie));
+  fields.push_back(
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.build_key_cookie));
+  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.state_cookie));
   fields.push_back(support::create_byte_array_constant(context, payload.metadata.nonce));
   fields.push_back(support::create_byte_array_constant(context, payload.tag));
+  fields.push_back(
+      llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(refs.destination_ref, ptr_type));
+  fields.push_back(
+      llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(refs.ciphertext_ref, ptr_type));
+  fields.push_back(
+      llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(refs.build_key_ref, ptr_type));
+  fields.push_back(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(refs.state_ref, ptr_type));
   const std::string name =
       make_unique_obf_symbol_name(module, "__obf_const_desc", "pool", seed ^ pool_id ^ 0xd35cULL);
   return new llvm::GlobalVariable(module,
@@ -566,8 +679,8 @@ llvm::GlobalVariable* create_keyed_pool_descriptor_global(llvm::Module& module,
 
 llvm::Function* create_keyed_pool_helper(llvm::Module& module,
                                          llvm::GlobalVariable& descriptor,
-                                         llvm::GlobalVariable& destination,
                                          std::uint64_t trusted_length,
+                                         std::uint64_t binding_id,
                                          std::uint64_t seed) {
   const std::string name =
       make_unique_obf_symbol_name(module, "__obf_const_pool_decode", "pool", seed ^ trusted_length);
@@ -575,47 +688,21 @@ llvm::Function* create_keyed_pool_helper(llvm::Module& module,
 
   llvm::LLVMContext& context = module.getContext();
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
-  llvm::Type* i32_type = llvm::Type::getInt32Ty(context);
   llvm::FunctionType* type = llvm::FunctionType::get(ptr_type, false);
   llvm::Function* helper =
       llvm::Function::Create(type, llvm::GlobalValue::InternalLinkage, name, module);
 
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", helper);
-  llvm::BasicBlock* fast_path = llvm::BasicBlock::Create(context, "fast_path", helper);
-  llvm::BasicBlock* slow_path = llvm::BasicBlock::Create(context, "slow_path", helper);
-  llvm::BasicBlock* merge = llvm::BasicBlock::Create(context, "merge", helper);
 
   llvm::IRBuilder<> builder(entry);
-  llvm::StructType* descriptor_type = get_keyed_pool_descriptor_type(context);
   llvm::Value* descriptor_ptr =
       builder.CreatePointerCast(&descriptor, llvm::PointerType::getUnqual(context));
-  llvm::Value* state_addr = builder.CreateStructGEP(descriptor_type, descriptor_ptr, 3,
-                                                    "obf.const.pool.state.addr");
-  llvm::Value* state_ptr = builder.CreateLoad(ptr_type, state_addr, "obf.const.pool.state.ptr");
-  llvm::Value* loaded_state = builder.CreateLoad(i32_type, state_ptr, "obf.const.pool.state");
-  llvm::Value* is_decoded = builder.CreateICmpEQ(
-      loaded_state,
-      llvm::ConstantInt::get(i32_type, auth::kConstantPoolStateDecoded),
-      "obf.const.pool.decoded");
-  builder.CreateCondBr(is_decoded, fast_path, slow_path);
-
-  builder.SetInsertPoint(fast_path);
-  llvm::Value* destination_ptr =
-      builder.CreatePointerCast(&destination, llvm::PointerType::getUnqual(context));
-  builder.CreateBr(merge);
-
-  builder.SetInsertPoint(slow_path);
   llvm::Value* decoded = builder.CreateCall(
       get_keyed_pool_runtime_decoder(module),
       {builder.CreatePointerCast(descriptor_ptr, ptr_type),
-       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), trusted_length)});
-  builder.CreateBr(merge);
-
-  builder.SetInsertPoint(merge);
-  llvm::PHINode* result = builder.CreatePHI(ptr_type, 2, "obf.const.pool.result");
-  result->addIncoming(destination_ptr, fast_path);
-  result->addIncoming(decoded, slow_path);
-  builder.CreateRet(result);
+       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), trusted_length),
+       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), binding_id)});
+  builder.CreateRet(decoded);
   return helper;
 }
 
@@ -665,12 +752,30 @@ keyed_pool_payload build_keyed_pool_payload(llvm::ArrayRef<keyed_pool_entry> ent
       auth::DeriveSiteKey(function_key, auth::kDomainConstant, pool_id);
   const auth::Blake2sDigest enc_key = auth::DeriveLabeledKey(pool_key, auth::kDomainEnc);
   const auth::Blake2sDigest mac_key = auth::DeriveLabeledKey(pool_key, auth::kDomainMac);
+  const std::uint64_t binding_id = auth::DeriveConstantPoolBindingId(module_id, pool_id);
 
-  payload.metadata.version = auth::kConstantPoolDescriptorVersionV1;
+  payload.metadata.version = auth::kConstantPoolDescriptorVersionV2;
   payload.metadata.flags = auth::kConstantPoolAuthFlagTrapOnFailure;
   payload.metadata.length = plaintext.size();
   payload.metadata.module_id = module_id;
   payload.metadata.pool_id = pool_id;
+  payload.metadata.binding_id = binding_id;
+  payload.metadata.destination_cookie = auth::DeriveReferenceCookie(mac_key,
+                                                                   auth::AuthDescriptorKind::constant_pool,
+                                                                   binding_id,
+                                                                   auth::AuthReferenceRole::destination);
+  payload.metadata.ciphertext_cookie = auth::DeriveReferenceCookie(mac_key,
+                                                                  auth::AuthDescriptorKind::constant_pool,
+                                                                  binding_id,
+                                                                  auth::AuthReferenceRole::ciphertext);
+  payload.metadata.build_key_cookie =
+      auth::DeriveBuildKeyCookie(build_key, auth::AuthDescriptorKind::constant_pool, binding_id);
+  payload.metadata.state_cookie = auth::DeriveReferenceCookie(mac_key,
+                                                              auth::AuthDescriptorKind::constant_pool,
+                                                              binding_id,
+                                                              auth::AuthReferenceRole::state);
+  payload.cold_status = auth::DeriveCacheStatus(
+      mac_key, auth::AuthDescriptorKind::constant_pool, binding_id, auth::CacheStatusKind::cold);
   payload.metadata.nonce = auth::DeriveStringNonce(pool_key);
 
   payload.ciphertext.resize(plaintext.size());
@@ -1050,17 +1155,13 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
     keyed_pool_plan& plan = *planned;
     const keyed_pool_payload payload =
         build_keyed_pool_payload(plan.entries, plan.byte_length, plan.pool_id, module_id, seed);
-    llvm::GlobalVariable* ciphertext =
-        create_keyed_pool_ciphertext_global(module, plan, payload, seed);
-    llvm::GlobalVariable* build_key =
-        create_keyed_pool_build_key_global(module, seed, plan.pool_id);
-    llvm::GlobalVariable* destination =
-        create_keyed_pool_destination_global(module, payload, plan.alignment, seed, plan.pool_id);
-    llvm::GlobalVariable* state = create_keyed_pool_state_global(module, seed, plan.pool_id);
-    llvm::GlobalVariable* descriptor = create_keyed_pool_descriptor_global(
-        module, payload, *destination, *ciphertext, *build_key, *state, seed, plan.pool_id);
-    llvm::Function* helper =
-        create_keyed_pool_helper(module, *descriptor, *destination, payload.metadata.length, seed ^ plan.pool_id);
+    llvm::GlobalVariable* descriptor =
+        create_keyed_pool_descriptor_bundle(module, plan, payload, seed);
+    llvm::Function* helper = create_keyed_pool_helper(module,
+                                                      *descriptor,
+                                                      payload.metadata.length,
+                                                      payload.metadata.binding_id,
+                                                      seed ^ plan.pool_id);
 
     for (const keyed_pool_use& use : plan.uses) {
       const keyed_pool_entry* entry = nullptr;
@@ -1091,17 +1192,13 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
 
     const keyed_pool_payload payload =
         build_keyed_pool_payload(plan.entries, plan.byte_length, plan.pool_id, module_id, seed);
-    llvm::GlobalVariable* ciphertext =
-        create_keyed_pool_ciphertext_global(module, payload_plan, payload, seed);
-    llvm::GlobalVariable* build_key =
-        create_keyed_pool_build_key_global(module, seed, plan.pool_id);
-    llvm::GlobalVariable* destination =
-        create_keyed_pool_destination_global(module, payload, plan.alignment, seed, plan.pool_id);
-    llvm::GlobalVariable* state = create_keyed_pool_state_global(module, seed, plan.pool_id);
-    llvm::GlobalVariable* descriptor = create_keyed_pool_descriptor_global(
-        module, payload, *destination, *ciphertext, *build_key, *state, seed, plan.pool_id);
-    llvm::Function* helper = create_keyed_pool_helper(
-        module, *descriptor, *destination, payload.metadata.length, seed ^ plan.pool_id);
+    llvm::GlobalVariable* descriptor =
+        create_keyed_pool_descriptor_bundle(module, payload_plan, payload, seed);
+    llvm::Function* helper = create_keyed_pool_helper(module,
+                                                      *descriptor,
+                                                      payload.metadata.length,
+                                                      payload.metadata.binding_id,
+                                                      seed ^ plan.pool_id);
 
     for (const keyed_pool_table_use& use : plan.uses) {
       if (use.instruction == nullptr) { continue; }
