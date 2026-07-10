@@ -134,6 +134,23 @@ enum {
 #define OBF_MAX_SIZE(lhs, rhs) ((lhs) < (rhs) ? (rhs) : (lhs))
 #define OBF_ROUND_UP_SIZE(value, alignment) \
   (((value) + (alignment) - 1) / (alignment) * (alignment))
+#if defined(__clang__) || defined(__GNUC__)
+#define OBF_NOINLINE __attribute__((noinline, used))
+#define OBF_NORETURN __attribute__((noreturn))
+#else
+#define OBF_NOINLINE
+#define OBF_NORETURN
+#endif
+
+static OBF_NOINLINE void ObfSecureZeroize(void *buffer, size_t size) {
+  volatile uint8_t *bytes = (volatile uint8_t *)buffer;
+  while (size != 0) {
+    *bytes = 0;
+    ++bytes;
+    --size;
+  }
+}
+
 
 _Static_assert(offsetof(struct ObfAuthenticatedBufferReferenceV3, cookie) == 0,
                "buffer reference cookie offset");
@@ -359,6 +376,8 @@ static void ObfBlake2sCompress(struct ObfBlake2sState *state, const uint8_t bloc
   for (index = 0; index < 8; ++index) {
     state->h[index] ^= v[index] ^ v[index + 8];
   }
+  ObfSecureZeroize(m, sizeof(m));
+  ObfSecureZeroize(v, sizeof(v));
 }
 
 static int ObfBlake2sInit(struct ObfBlake2sState *state,
@@ -370,7 +389,7 @@ static int ObfBlake2sInit(struct ObfBlake2sState *state,
     return 0;
   }
 
-  memset(state, 0, sizeof(*state));
+  ObfSecureZeroize(state, sizeof(*state));
   state->outlen = output_size;
   for (index = 0; index < 8; ++index) {
     state->h[index] = kObfBlake2sIv[index];
@@ -402,7 +421,7 @@ static void ObfBlake2sUpdate(struct ObfBlake2sState *state,
   if (state->buflen == kObfBlake2sBlockBytes) {
     ObfBlake2sIncrement(state, kObfBlake2sBlockBytes);
     ObfBlake2sCompress(state, state->buf);
-    memset(state->buf, 0, sizeof(state->buf));
+    ObfSecureZeroize(state->buf, sizeof(state->buf));
     state->buflen = 0;
   }
 
@@ -417,7 +436,7 @@ static void ObfBlake2sUpdate(struct ObfBlake2sState *state,
     if (state->buflen == kObfBlake2sBlockBytes && offset < input_size) {
       ObfBlake2sIncrement(state, kObfBlake2sBlockBytes);
       ObfBlake2sCompress(state, state->buf);
-      memset(state->buf, 0, sizeof(state->buf));
+      ObfSecureZeroize(state->buf, sizeof(state->buf));
       state->buflen = 0;
     }
   }
@@ -434,18 +453,21 @@ static void ObfBlake2sFinal(struct ObfBlake2sState *state, uint8_t output[32]) {
   for (index = 0; index < 8; ++index) {
     ObfStore32(state->h[index], output + (index * 4));
   }
+  ObfSecureZeroize(state, sizeof(*state));
 }
 
 static void ObfBlake2sUpdateU32(struct ObfBlake2sState *state, uint32_t value) {
   uint8_t bytes[4];
   ObfStore32(value, bytes);
   ObfBlake2sUpdate(state, bytes, sizeof(bytes));
+  ObfSecureZeroize(bytes, sizeof(bytes));
 }
 
 static void ObfBlake2sUpdateU64(struct ObfBlake2sState *state, uint64_t value) {
   uint8_t bytes[8];
   ObfStore64(value, bytes);
   ObfBlake2sUpdate(state, bytes, sizeof(bytes));
+  ObfSecureZeroize(bytes, sizeof(bytes));
 }
 
 static void ObfBlake2sUpdateDomain(struct ObfBlake2sState *state,
@@ -463,7 +485,10 @@ static uint64_t ObfFinalizeDerivedWord(struct ObfBlake2sState *state,
                                        uint64_t binding_id,
                                        uint64_t selector) {
   uint8_t digest[32];
-  const uint64_t value = (ObfBlake2sFinal(state, digest), ObfLoad64(digest));
+  uint64_t value;
+  ObfBlake2sFinal(state, digest);
+  value = ObfLoad64(digest);
+  ObfSecureZeroize(digest, sizeof(digest));
   return value == 0 ? ObfMakeDerivedNonzeroFallback(binding_id, selector) : value;
 }
 
@@ -627,6 +652,7 @@ static void ObfComputeStringTag(uint8_t output[16],
   ObfBlake2sUpdate(&state, ciphertext, ciphertext_size);
   ObfBlake2sFinal(&state, digest);
   memcpy(output, digest, 16);
+  ObfSecureZeroize(digest, sizeof(digest));
 }
 
 static void ObfComputeConstantPoolTag(
@@ -658,6 +684,7 @@ static void ObfComputeConstantPoolTag(
   ObfBlake2sUpdate(&state, ciphertext, ciphertext_size);
   ObfBlake2sFinal(&state, digest);
   memcpy(output, digest, 16);
+  ObfSecureZeroize(digest, sizeof(digest));
 }
 
 static int ObfConstantTimeEqual(const uint8_t *lhs, const uint8_t *rhs, size_t size) {
@@ -669,13 +696,18 @@ static int ObfConstantTimeEqual(const uint8_t *lhs, const uint8_t *rhs, size_t s
   return diff == 0;
 }
 
-static void ObfTrap(void) {
+static OBF_NORETURN void ObfTrap(void) {
 #if defined(__clang__) || defined(__GNUC__)
   __builtin_trap();
   __builtin_unreachable();
 #else
   abort();
 #endif
+}
+
+static OBF_NORETURN void ObfTrapAfterZeroize(void *buffer, size_t size) {
+  ObfSecureZeroize(buffer, size);
+  ObfTrap();
 }
 
 static void ObfDecodePayload(uint8_t *destination,
@@ -695,6 +727,7 @@ static void ObfDecodePayload(uint8_t *destination,
       destination[offset + index] = (uint8_t)(ciphertext[offset + index] ^ block[index]);
     }
     offset += block_size;
+    ObfSecureZeroize(block, sizeof(block));
   }
 }
 
@@ -720,35 +753,36 @@ static uint64_t ObfDeriveRuntimeStateTokenKeyed(const uint8_t *mac_key,
   return ObfFinalizeDerivedWord(&state, binding_id, phase);
 }
 
-static void ObfDeriveRelocationStatuses(struct ObfCacheStatusSet *statuses,
-                                        const uint8_t *mac_key,
-                                        uint32_t descriptor_kind,
-                                        uint64_t binding_id,
-                                        const void *descriptor,
-                                        const void *topology,
-                                        const void *state_ref) {
+static int ObfDeriveRelocationStatuses(struct ObfCacheStatusSet *statuses,
+                                       const uint8_t *mac_key,
+                                       uint32_t descriptor_kind,
+                                       uint64_t binding_id,
+                                       const void *descriptor,
+                                       const void *topology,
+                                       const void *state_ref) {
   statuses->decoding = ObfDeriveRuntimeStateTokenKeyed(mac_key,
-                                                        descriptor_kind,
-                                                        binding_id,
-                                                        descriptor,
-                                                        topology,
-                                                        state_ref,
-                                                        kObfCacheStatusDecoding);
-  statuses->decoded = ObfDeriveRuntimeStateTokenKeyed(mac_key,
                                                        descriptor_kind,
                                                        binding_id,
                                                        descriptor,
                                                        topology,
                                                        state_ref,
-                                                       kObfCacheStatusDecoded);
+                                                       kObfCacheStatusDecoding);
+  statuses->decoded = ObfDeriveRuntimeStateTokenKeyed(mac_key,
+                                                      descriptor_kind,
+                                                      binding_id,
+                                                      descriptor,
+                                                      topology,
+                                                      state_ref,
+                                                      kObfCacheStatusDecoded);
   if (statuses->decoding == 0 || statuses->decoded == 0 ||
       statuses->decoding == statuses->cold || statuses->decoded == statuses->cold ||
       statuses->decoding == statuses->decoded) {
-    ObfTrap();
+    return 0;
   }
+  return 1;
 }
 
-static void ObfValidateStringDescriptor(
+static int ObfValidateStringDescriptor(
     struct ObfStringValidationContext *context,
     const struct ObfStringRuntimeDescriptorV3 *descriptor,
     uint64_t trusted_length,
@@ -767,14 +801,14 @@ static void ObfValidateStringDescriptor(
       topology->ciphertext_ref == NULL || topology->ciphertext_target == NULL ||
       topology->build_key_ref == NULL || topology->build_key_target == NULL ||
       topology->state_ref == NULL) {
-    ObfTrap();
+    goto failure;
   }
   if (topology->descriptor != descriptor) {
-    ObfTrap();
+    goto failure;
   }
   if (descriptor->destination == NULL || descriptor->ciphertext == NULL ||
       descriptor->build_key == NULL || descriptor->state == NULL) {
-    ObfTrap();
+    goto failure;
   }
   if (descriptor->destination != topology->destination_ref ||
       descriptor->ciphertext != topology->ciphertext_ref ||
@@ -783,7 +817,7 @@ static void ObfValidateStringDescriptor(
       descriptor->destination->target != topology->destination_target ||
       descriptor->ciphertext->target != topology->ciphertext_target ||
       descriptor->build_key->target != topology->build_key_target) {
-    ObfTrap();
+    goto failure;
   }
   if (descriptor->destination_capacity != topology->destination_capacity ||
       descriptor->ciphertext_capacity != topology->ciphertext_capacity ||
@@ -791,18 +825,18 @@ static void ObfValidateStringDescriptor(
       trusted_length > topology->destination_capacity ||
       trusted_length > topology->ciphertext_capacity ||
       topology->build_key_capacity != kObfBuildKeyBytes) {
-    ObfTrap();
+    goto failure;
   }
   if (descriptor->version != kObfStringDescriptorVersionV3 ||
       descriptor->flags != kObfStringAuthFlagTrapOnFailure ||
       descriptor->length != trusted_length || trusted_length > (uint64_t)SIZE_MAX) {
-    ObfTrap();
+    goto failure;
   }
 
   derived_binding =
       ObfDeriveStringBindingId(descriptor->module_id, descriptor->function_id, descriptor->site_id);
   if (descriptor->binding_id != trusted_binding || descriptor->binding_id != derived_binding) {
-    ObfTrap();
+    goto failure;
   }
 
   context->destination = descriptor->destination->target;
@@ -845,7 +879,7 @@ static void ObfValidateStringDescriptor(
       descriptor->build_key_cookie != expected_build_key_cookie ||
       descriptor->build_key->cookie != expected_build_key_cookie ||
       descriptor->state_cookie != state_cookie || descriptor->state->cookie != state_cookie) {
-    ObfTrap();
+    goto failure;
   }
   context->statuses.cold = ObfDeriveCacheColdStatus(context->mac_key,
                                                     kObfAuthDescriptorKindString,
@@ -853,9 +887,27 @@ static void ObfValidateStringDescriptor(
                                                     descriptor->destination_capacity,
                                                     descriptor->ciphertext_capacity,
                                                     descriptor->build_key_capacity);
+  ObfSecureZeroize(function_key, sizeof(function_key));
+  ObfSecureZeroize(site_key, sizeof(site_key));
+  ObfSecureZeroize(&derived_binding, sizeof(derived_binding));
+  ObfSecureZeroize(&expected_build_key_cookie, sizeof(expected_build_key_cookie));
+  ObfSecureZeroize(&destination_cookie, sizeof(destination_cookie));
+  ObfSecureZeroize(&ciphertext_cookie, sizeof(ciphertext_cookie));
+  ObfSecureZeroize(&state_cookie, sizeof(state_cookie));
+  return 1;
+
+failure:
+  ObfSecureZeroize(function_key, sizeof(function_key));
+  ObfSecureZeroize(site_key, sizeof(site_key));
+  ObfSecureZeroize(&derived_binding, sizeof(derived_binding));
+  ObfSecureZeroize(&expected_build_key_cookie, sizeof(expected_build_key_cookie));
+  ObfSecureZeroize(&destination_cookie, sizeof(destination_cookie));
+  ObfSecureZeroize(&ciphertext_cookie, sizeof(ciphertext_cookie));
+  ObfSecureZeroize(&state_cookie, sizeof(state_cookie));
+  return 0;
 }
 
-static void ObfValidateConstantPoolDescriptor(
+static int ObfValidateConstantPoolDescriptor(
     struct ObfConstantPoolValidationContext *context,
     const struct ObfConstantPoolRuntimeDescriptorV3 *descriptor,
     uint64_t trusted_length,
@@ -874,14 +926,14 @@ static void ObfValidateConstantPoolDescriptor(
       topology->ciphertext_ref == NULL || topology->ciphertext_target == NULL ||
       topology->build_key_ref == NULL || topology->build_key_target == NULL ||
       topology->state_ref == NULL) {
-    ObfTrap();
+    goto failure;
   }
   if (topology->descriptor != descriptor) {
-    ObfTrap();
+    goto failure;
   }
   if (descriptor->destination == NULL || descriptor->ciphertext == NULL ||
       descriptor->build_key == NULL || descriptor->state == NULL) {
-    ObfTrap();
+    goto failure;
   }
   if (descriptor->destination != topology->destination_ref ||
       descriptor->ciphertext != topology->ciphertext_ref ||
@@ -890,7 +942,7 @@ static void ObfValidateConstantPoolDescriptor(
       descriptor->destination->target != topology->destination_target ||
       descriptor->ciphertext->target != topology->ciphertext_target ||
       descriptor->build_key->target != topology->build_key_target) {
-    ObfTrap();
+    goto failure;
   }
   if (descriptor->destination_capacity != topology->destination_capacity ||
       descriptor->ciphertext_capacity != topology->ciphertext_capacity ||
@@ -898,17 +950,17 @@ static void ObfValidateConstantPoolDescriptor(
       trusted_length > topology->destination_capacity ||
       trusted_length > topology->ciphertext_capacity ||
       topology->build_key_capacity != kObfBuildKeyBytes) {
-    ObfTrap();
+    goto failure;
   }
   if (descriptor->version != kObfConstantPoolDescriptorVersionV3 ||
       descriptor->flags != kObfConstantPoolAuthFlagTrapOnFailure ||
       descriptor->length != trusted_length || trusted_length > (uint64_t)SIZE_MAX) {
-    ObfTrap();
+    goto failure;
   }
 
   derived_binding = ObfDeriveConstantPoolBindingId(descriptor->module_id, descriptor->pool_id);
   if (descriptor->binding_id != trusted_binding || descriptor->binding_id != derived_binding) {
-    ObfTrap();
+    goto failure;
   }
 
   context->destination = descriptor->destination->target;
@@ -950,7 +1002,7 @@ static void ObfValidateConstantPoolDescriptor(
       descriptor->build_key_cookie != expected_build_key_cookie ||
       descriptor->build_key->cookie != expected_build_key_cookie ||
       descriptor->state_cookie != state_cookie || descriptor->state->cookie != state_cookie) {
-    ObfTrap();
+    goto failure;
   }
   context->statuses.cold = ObfDeriveCacheColdStatus(context->mac_key,
                                                     kObfAuthDescriptorKindConstantPool,
@@ -958,6 +1010,24 @@ static void ObfValidateConstantPoolDescriptor(
                                                     descriptor->destination_capacity,
                                                     descriptor->ciphertext_capacity,
                                                     descriptor->build_key_capacity);
+  ObfSecureZeroize(function_key, sizeof(function_key));
+  ObfSecureZeroize(pool_key, sizeof(pool_key));
+  ObfSecureZeroize(&derived_binding, sizeof(derived_binding));
+  ObfSecureZeroize(&expected_build_key_cookie, sizeof(expected_build_key_cookie));
+  ObfSecureZeroize(&destination_cookie, sizeof(destination_cookie));
+  ObfSecureZeroize(&ciphertext_cookie, sizeof(ciphertext_cookie));
+  ObfSecureZeroize(&state_cookie, sizeof(state_cookie));
+  return 1;
+
+failure:
+  ObfSecureZeroize(function_key, sizeof(function_key));
+  ObfSecureZeroize(pool_key, sizeof(pool_key));
+  ObfSecureZeroize(&derived_binding, sizeof(derived_binding));
+  ObfSecureZeroize(&expected_build_key_cookie, sizeof(expected_build_key_cookie));
+  ObfSecureZeroize(&destination_cookie, sizeof(destination_cookie));
+  ObfSecureZeroize(&ciphertext_cookie, sizeof(ciphertext_cookie));
+  ObfSecureZeroize(&state_cookie, sizeof(state_cookie));
+  return 0;
 }
 
 static uint64_t ObfComputeDecodedCompletion(const uint8_t *mac_key,
@@ -987,6 +1057,7 @@ static uint64_t ObfComputeDecodedCompletion(const uint8_t *mac_key,
                                             const uint8_t nonce[16]) {
   struct ObfBlake2sState state;
   uint8_t digest[32];
+  uint64_t value;
   ObfBlake2sInit(&state, 32, mac_key, 32);
   ObfBlake2sUpdateDomain(&state,
                          kObfDomainDecodedCompletionV3,
@@ -1015,27 +1086,31 @@ static uint64_t ObfComputeDecodedCompletion(const uint8_t *mac_key,
   ObfBlake2sUpdateU64(&state, (uint64_t)(uintptr_t)state_ref);
   ObfBlake2sUpdate(&state, destination, length);
   ObfBlake2sFinal(&state, digest);
-  return ObfNormalizeDerivedWord(ObfLoad64(digest), binding_id, (uint64_t)length);
+  value = ObfNormalizeDerivedWord(ObfLoad64(digest), binding_id, (uint64_t)length);
+  ObfSecureZeroize(digest, sizeof(digest));
+  return value;
 }
 
-static void ObfVerifyStringTag(const struct ObfStringValidationContext *context,
-                               const struct ObfStringRuntimeDescriptorV3 *descriptor) {
+static int ObfVerifyStringTag(const struct ObfStringValidationContext *context,
+                              const struct ObfStringRuntimeDescriptorV3 *descriptor) {
   uint8_t tag[16];
-  ObfComputeStringTag(tag, context->mac_key, descriptor, context->ciphertext, context->length);
-  if (!ObfConstantTimeEqual(tag, descriptor->tag, sizeof(tag))) {
-    ObfTrap();
-  }
+  const int valid =
+      (ObfComputeStringTag(tag, context->mac_key, descriptor, context->ciphertext, context->length),
+       ObfConstantTimeEqual(tag, descriptor->tag, sizeof(tag)));
+  ObfSecureZeroize(tag, sizeof(tag));
+  return valid;
 }
 
-static void ObfVerifyConstantPoolTag(
+static int ObfVerifyConstantPoolTag(
     const struct ObfConstantPoolValidationContext *context,
     const struct ObfConstantPoolRuntimeDescriptorV3 *descriptor) {
   uint8_t tag[16];
-  ObfComputeConstantPoolTag(
-      tag, context->mac_key, descriptor, context->ciphertext, context->length);
-  if (!ObfConstantTimeEqual(tag, descriptor->tag, sizeof(tag))) {
-    ObfTrap();
-  }
+  const int valid =
+      (ObfComputeConstantPoolTag(
+           tag, context->mac_key, descriptor, context->ciphertext, context->length),
+       ObfConstantTimeEqual(tag, descriptor->tag, sizeof(tag)));
+  ObfSecureZeroize(tag, sizeof(tag));
+  return valid;
 }
 
 static uint64_t ObfStringCompletion(const struct ObfStringValidationContext *context,
@@ -1107,21 +1182,25 @@ static uint8_t *ObfWaitForStringDecode(
   for (poll = 0; poll < kObfDecodePollLimit; ++poll) {
     const uint64_t status = ObfAtomicLoadU64Acquire(&descriptor->state->status);
     const uint64_t completion = ObfAtomicLoadU64Acquire(&descriptor->state->completion);
-    ObfVerifyStringTag(context, descriptor);
+    if (!ObfVerifyStringTag(context, descriptor)) {
+      ObfTrapAfterZeroize(context, sizeof(*context));
+    }
     if (status == context->statuses.decoded) {
       const uint64_t expected_completion = ObfStringCompletion(context, descriptor, topology);
       if (completion != expected_completion) {
-        ObfTrap();
+        ObfTrapAfterZeroize(context, sizeof(*context));
       }
-      return context->destination;
+      uint8_t *destination = context->destination;
+      ObfSecureZeroize(context, sizeof(*context));
+      return destination;
     }
     if ((status == context->statuses.cold && completion == context->statuses.decoding) ||
         (status == context->statuses.decoding && completion == context->statuses.decoding)) {
       continue;
     }
-    ObfTrap();
+    ObfTrapAfterZeroize(context, sizeof(*context));
   }
-  ObfTrap();
+  ObfTrapAfterZeroize(context, sizeof(*context));
   return NULL;
 }
 
@@ -1133,21 +1212,25 @@ static uint8_t *ObfWaitForConstantPoolDecode(
   for (poll = 0; poll < kObfDecodePollLimit; ++poll) {
     const uint64_t status = ObfAtomicLoadU64Acquire(&descriptor->state->status);
     const uint64_t completion = ObfAtomicLoadU64Acquire(&descriptor->state->completion);
-    ObfVerifyConstantPoolTag(context, descriptor);
+    if (!ObfVerifyConstantPoolTag(context, descriptor)) {
+      ObfTrapAfterZeroize(context, sizeof(*context));
+    }
     if (status == context->statuses.decoded) {
       const uint64_t expected_completion = ObfConstantPoolCompletion(context, descriptor, topology);
       if (completion != expected_completion) {
-        ObfTrap();
+        ObfTrapAfterZeroize(context, sizeof(*context));
       }
-      return context->destination;
+      uint8_t *destination = context->destination;
+      ObfSecureZeroize(context, sizeof(*context));
+      return destination;
     }
     if ((status == context->statuses.cold && completion == context->statuses.decoding) ||
         (status == context->statuses.decoding && completion == context->statuses.decoding)) {
       continue;
     }
-    ObfTrap();
+    ObfTrapAfterZeroize(context, sizeof(*context));
   }
-  ObfTrap();
+  ObfTrapAfterZeroize(context, sizeof(*context));
   return NULL;
 }
 
@@ -1158,42 +1241,58 @@ uint8_t *OBF_RT_STRING_AUTH_DECODE_V3(
     uint64_t trusted_binding,
     const struct ObfAuthenticatedDecodeTopologyV3 *trusted_topology) {
   struct ObfStringValidationContext context;
-  ObfValidateStringDescriptor(
-      &context, descriptor, trusted_length, trusted_binding, trusted_topology);
-  ObfVerifyStringTag(&context, descriptor);
-  ObfDeriveRelocationStatuses(&context.statuses,
-                              context.mac_key,
-                              kObfAuthDescriptorKindString,
-                              descriptor->binding_id,
-                              descriptor,
-                              trusted_topology,
-                              descriptor->state);
+  if (!ObfValidateStringDescriptor(
+          &context, descriptor, trusted_length, trusted_binding, trusted_topology)) {
+    ObfTrapAfterZeroize(&context, sizeof(context));
+  }
+  if (!ObfVerifyStringTag(&context, descriptor)) {
+    ObfTrapAfterZeroize(&context, sizeof(context));
+  }
+  if (!ObfDeriveRelocationStatuses(&context.statuses,
+                                   context.mac_key,
+                                   kObfAuthDescriptorKindString,
+                                   descriptor->binding_id,
+                                   descriptor,
+                                   trusted_topology,
+                                   descriptor->state)) {
+    ObfTrapAfterZeroize(&context, sizeof(context));
+  }
 
   for (uint32_t poll = 0; poll < kObfDecodePollLimit; ++poll) {
-    ObfVerifyStringTag(&context, descriptor);
+    if (!ObfVerifyStringTag(&context, descriptor)) {
+      ObfTrapAfterZeroize(&context, sizeof(context));
+    }
     const uint64_t status = ObfAtomicLoadU64Acquire(&descriptor->state->status);
     const uint64_t completion = ObfAtomicLoadU64Acquire(&descriptor->state->completion);
     if (status == context.statuses.decoded) {
       const uint64_t expected_completion = ObfStringCompletion(&context, descriptor, trusted_topology);
-      ObfVerifyStringTag(&context, descriptor);
-      if (completion != expected_completion) {
-        ObfTrap();
+      if (!ObfVerifyStringTag(&context, descriptor)) {
+        ObfTrapAfterZeroize(&context, sizeof(context));
       }
-      return context.destination;
+      if (completion != expected_completion) {
+        ObfTrapAfterZeroize(&context, sizeof(context));
+      }
+      uint8_t *destination = context.destination;
+      ObfSecureZeroize(&context, sizeof(context));
+      return destination;
     }
     if (status == context.statuses.cold && completion == context.statuses.cold) {
       uint64_t expected = context.statuses.cold;
       if (ObfAtomicCompareExchangeU64AcqRelRelaxed(
               &descriptor->state->completion, &expected, context.statuses.decoding)) {
         ObfAtomicStoreU64Release(&descriptor->state->status, context.statuses.decoding);
-        ObfVerifyStringTag(&context, descriptor);
+        if (!ObfVerifyStringTag(&context, descriptor)) {
+          ObfTrapAfterZeroize(&context, sizeof(context));
+        }
         ObfDecodePayload(
             context.destination, context.ciphertext, context.enc_key, descriptor->nonce, context.length);
         const uint64_t decoded_completion =
             ObfStringCompletion(&context, descriptor, trusted_topology);
         ObfAtomicStoreU64Release(&descriptor->state->completion, decoded_completion);
         ObfAtomicStoreU64Release(&descriptor->state->status, context.statuses.decoded);
-        return context.destination;
+        uint8_t *destination = context.destination;
+        ObfSecureZeroize(&context, sizeof(context));
+        return destination;
       }
       continue;
     }
@@ -1201,9 +1300,9 @@ uint8_t *OBF_RT_STRING_AUTH_DECODE_V3(
         (status == context.statuses.decoding && completion == context.statuses.decoding)) {
       return ObfWaitForStringDecode(&context, descriptor, trusted_topology);
     }
-    ObfTrap();
+    ObfTrapAfterZeroize(&context, sizeof(context));
   }
-  ObfTrap();
+  ObfTrapAfterZeroize(&context, sizeof(context));
   return NULL;
 }
 
@@ -1214,43 +1313,59 @@ uint8_t *OBF_RT_CONSTANT_POOL_DECODE_V3(
     uint64_t trusted_binding,
     const struct ObfAuthenticatedDecodeTopologyV3 *trusted_topology) {
   struct ObfConstantPoolValidationContext context;
-  ObfValidateConstantPoolDescriptor(
-      &context, descriptor, trusted_length, trusted_binding, trusted_topology);
-  ObfVerifyConstantPoolTag(&context, descriptor);
-  ObfDeriveRelocationStatuses(&context.statuses,
-                              context.mac_key,
-                              kObfAuthDescriptorKindConstantPool,
-                              descriptor->binding_id,
-                              descriptor,
-                              trusted_topology,
-                              descriptor->state);
+  if (!ObfValidateConstantPoolDescriptor(
+          &context, descriptor, trusted_length, trusted_binding, trusted_topology)) {
+    ObfTrapAfterZeroize(&context, sizeof(context));
+  }
+  if (!ObfVerifyConstantPoolTag(&context, descriptor)) {
+    ObfTrapAfterZeroize(&context, sizeof(context));
+  }
+  if (!ObfDeriveRelocationStatuses(&context.statuses,
+                                   context.mac_key,
+                                   kObfAuthDescriptorKindConstantPool,
+                                   descriptor->binding_id,
+                                   descriptor,
+                                   trusted_topology,
+                                   descriptor->state)) {
+    ObfTrapAfterZeroize(&context, sizeof(context));
+  }
 
   for (uint32_t poll = 0; poll < kObfDecodePollLimit; ++poll) {
-    ObfVerifyConstantPoolTag(&context, descriptor);
+    if (!ObfVerifyConstantPoolTag(&context, descriptor)) {
+      ObfTrapAfterZeroize(&context, sizeof(context));
+    }
     const uint64_t status = ObfAtomicLoadU64Acquire(&descriptor->state->status);
     const uint64_t completion = ObfAtomicLoadU64Acquire(&descriptor->state->completion);
     if (status == context.statuses.decoded) {
       const uint64_t expected_completion =
           ObfConstantPoolCompletion(&context, descriptor, trusted_topology);
-      ObfVerifyConstantPoolTag(&context, descriptor);
-      if (completion != expected_completion) {
-        ObfTrap();
+      if (!ObfVerifyConstantPoolTag(&context, descriptor)) {
+        ObfTrapAfterZeroize(&context, sizeof(context));
       }
-      return context.destination;
+      if (completion != expected_completion) {
+        ObfTrapAfterZeroize(&context, sizeof(context));
+      }
+      uint8_t *destination = context.destination;
+      ObfSecureZeroize(&context, sizeof(context));
+      return destination;
     }
     if (status == context.statuses.cold && completion == context.statuses.cold) {
       uint64_t expected = context.statuses.cold;
       if (ObfAtomicCompareExchangeU64AcqRelRelaxed(
               &descriptor->state->completion, &expected, context.statuses.decoding)) {
         ObfAtomicStoreU64Release(&descriptor->state->status, context.statuses.decoding);
-        ObfVerifyConstantPoolTag(&context, descriptor);
+        if (!ObfVerifyConstantPoolTag(&context, descriptor)) {
+          ObfTrapAfterZeroize(&context, sizeof(context));
+        }
         ObfDecodePayload(
             context.destination, context.ciphertext, context.enc_key, descriptor->nonce, context.length);
         const uint64_t decoded_completion =
             ObfConstantPoolCompletion(&context, descriptor, trusted_topology);
         ObfAtomicStoreU64Release(&descriptor->state->completion, decoded_completion);
         ObfAtomicStoreU64Release(&descriptor->state->status, context.statuses.decoded);
-        return context.destination;
+        uint8_t *destination = context.destination;
+        ObfSecureZeroize(&context, sizeof(context));
+        return destination;
       }
       continue;
     }
@@ -1258,7 +1373,8 @@ uint8_t *OBF_RT_CONSTANT_POOL_DECODE_V3(
         (status == context.statuses.decoding && completion == context.statuses.decoding)) {
       return ObfWaitForConstantPoolDecode(&context, descriptor, trusted_topology);
     }
+    ObfTrapAfterZeroize(&context, sizeof(context));
   }
-  ObfTrap();
+  ObfTrapAfterZeroize(&context, sizeof(context));
   return NULL;
 }

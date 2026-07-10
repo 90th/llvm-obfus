@@ -44,5 +44,6 @@ config.substitutions.append(
 )
 config.substitutions.append(("%obf_clangxx", "@CMAKE_CURRENT_BINARY_DIR@/obf-clang++"))
 config.substitutions.append(("%obf_clang", "@CMAKE_CURRENT_BINARY_DIR@/obf-clang"))
+config.substitutions.append(("%raw_clang", "@OBF_CLANG@"))
 config.substitutions.append(("%obf_runtime", "@CMAKE_CURRENT_BINARY_DIR@/libobf_runtime.a"))
 config.substitutions.append(("%obf_build_include", "@CMAKE_CURRENT_BINARY_DIR@/include"))
