@@ -28,7 +28,7 @@ for path in possible_paths:
 
 if found_lli:
     config.substitutions.append(
-        ("%lli", f"{found_lli} --extra-object=@CMAKE_CURRENT_BINARY_DIR@/obf_entropy_anchor.o --extra-object=@CMAKE_CURRENT_BINARY_DIR@/obf_string_auth_runtime.o")
+        ("%lli", f"{found_lli} --jit-kind=mcjit --extra-object=@CMAKE_CURRENT_BINARY_DIR@/obf_entropy_anchor.o --extra-object=@CMAKE_CURRENT_BINARY_DIR@/obf_string_auth_runtime.o")
     )
 else:
     # lli not found - provide a dummy that will cause graceful test failure
