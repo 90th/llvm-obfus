@@ -28,7 +28,7 @@ fallback:
   ret i32 %fallback_result
 }
 
-; CHECK: define internal ptr @[[AUTH_HELPER:[A-Za-z0-9_.$-]+]](ptr [[DESC:%[-A-Za-z$._0-9]+]], i32 [[CFG:%[-A-Za-z$._0-9]+]], i32 [[EXPECTED:%[-A-Za-z$._0-9]+]], i64 [[LENGTH:%[-A-Za-z$._0-9]+]], i64 [[BINDING:%[-A-Za-z$._0-9]+]]) {
+; CHECK: define internal ptr @[[AUTH_HELPER:[A-Za-z0-9_.$-]+]](ptr [[DESC:%[-A-Za-z$._0-9]+]], i32 [[CFG:%[-A-Za-z$._0-9]+]], i32 [[EXPECTED:%[-A-Za-z$._0-9]+]], i64 [[LENGTH:%[-A-Za-z$._0-9]+]], i64 [[BINDING:%[-A-Za-z$._0-9]+]], ptr [[TOPOLOGY:%[-A-Za-z$._0-9]+]]) {
 ; CHECK: [[MATCH:%[-A-Za-z$._0-9]+]] = icmp eq i32 [[CFG]], [[EXPECTED]]
 ; CHECK: br i1 [[MATCH]], label %[[MATCH_LABEL:[-A-Za-z$._0-9]+]], label %[[MISMATCH_LABEL:[-A-Za-z$._0-9]+]]
 ; CHECK: [[MISMATCH_LABEL]]:
@@ -36,4 +36,4 @@ fallback:
 ; CHECK: unreachable
 ; CHECK: [[MATCH_LABEL]]:
 ; CHECK-NOT: phi ptr
-; CHECK: call ptr @rt_core_sd2(ptr [[DESC]], i64 [[LENGTH]], i64 [[BINDING]])
+; CHECK: call ptr @rt_core_sd3(ptr [[DESC]], i64 [[LENGTH]], i64 [[BINDING]], ptr [[TOPOLOGY]])

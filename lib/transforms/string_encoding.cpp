@@ -91,7 +91,7 @@ struct string_strategy_plan {
 };
 
 struct authenticated_string_payload {
-  auth::StringAuthMetadata metadata;
+  auth::StringAuthMetadataV3 metadata;
   auth::StringTag tag{};
   std::uint64_t cold_status = 0;
   llvm::SmallVector<std::uint8_t, 32> ciphertext;
@@ -102,6 +102,11 @@ struct authenticated_reference_globals {
   llvm::GlobalVariable* ciphertext_ref = nullptr;
   llvm::GlobalVariable* build_key_ref = nullptr;
   llvm::GlobalVariable* state_ref = nullptr;
+};
+
+struct authenticated_descriptor_bundle {
+  llvm::GlobalVariable* descriptor = nullptr;
+  llvm::GlobalVariable* topology = nullptr;
 };
 
 bool is_authenticated_key_schedule(string_key_schedule_kind schedule) {
@@ -744,8 +749,8 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable& global,
 
 string_key_schedule_kind select_key_schedule(string_helper_shape shape) {
   switch (shape) {
-    case string_helper_shape::ctor_auth_runtime_v2:
-    case string_helper_shape::lazy_auth_runtime_v2:
+    case string_helper_shape::ctor_auth_runtime_v3:
+    case string_helper_shape::lazy_auth_runtime_v3:
       return string_key_schedule_kind::blake2s_keyed_auth_v3;
     case string_helper_shape::lazy_flag_unrolled_v0:
     case string_helper_shape::lazy_flag_reverse_v1:
@@ -832,7 +837,7 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     plan.result.applied = true;
     plan.result.mode = string_encoding_mode::global_ctor;
     plan.result.strategy_kind = string_strategy_kind::helper_global_ctor;
-    plan.result.helper_shape = authenticated_mode ? string_helper_shape::ctor_auth_runtime_v2
+    plan.result.helper_shape = authenticated_mode ? string_helper_shape::ctor_auth_runtime_v3
                                                   : string_helper_shape::ctor_unrolled_v0;
     plan.result.key_schedule = select_key_schedule(plan.result.helper_shape);
     plan.result.detail = "ctor fallback due to unprotected use";
@@ -854,7 +859,7 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     plan.result.strategy_kind = string_strategy_kind::helper_global_ctor;
     plan.result.helper_shape =
         (authenticated_mode || use_authenticated_vm_forwarded_pointer_fallback)
-            ? string_helper_shape::ctor_auth_runtime_v2
+            ? string_helper_shape::ctor_auth_runtime_v3
             : string_helper_shape::ctor_unrolled_v0;
     plan.result.key_schedule = select_key_schedule(plan.result.helper_shape);
     plan.result.detail = use_authenticated_vm_forwarded_pointer_fallback
@@ -877,7 +882,7 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     plan.result.applied = true;
     plan.result.mode = string_encoding_mode::lazy_decode;
     plan.result.strategy_kind = string_strategy_kind::helper_lazy_decode;
-    plan.result.helper_shape = authenticated_mode ? string_helper_shape::lazy_auth_runtime_v2
+    plan.result.helper_shape = authenticated_mode ? string_helper_shape::lazy_auth_runtime_v3
                                                   : string_helper_shape::lazy_flag_unrolled_v0;
     plan.result.key_schedule = select_key_schedule(plan.result.helper_shape);
     plan.isolate_lazy_helper = candidate.has_high_security_use;
@@ -911,7 +916,7 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
   plan.result.applied = true;
   plan.result.mode = string_encoding_mode::global_ctor;
   plan.result.strategy_kind = string_strategy_kind::helper_global_ctor;
-  plan.result.helper_shape = authenticated_mode ? string_helper_shape::ctor_auth_runtime_v2
+  plan.result.helper_shape = authenticated_mode ? string_helper_shape::ctor_auth_runtime_v3
                                                 : string_helper_shape::ctor_unrolled_v0;
   plan.result.key_schedule = select_key_schedule(plan.result.helper_shape);
   plan.result.detail = candidate.summary.has_lazy_blockers
@@ -1146,24 +1151,41 @@ authenticated_string_payload build_authenticated_payload(const llvm::GlobalVaria
   const auth::Blake2sDigest mac_key = auth::DeriveLabeledKey(site_key, auth::kDomainMac);
   const std::uint64_t binding_id =
       auth::DeriveStringBindingId(plan.module_id, plan.function_id, plan.site_id);
-
-  payload.metadata.version = auth::kStringDescriptorVersionV2;
+  payload.metadata.version = auth::kStringDescriptorVersionV3;
   payload.metadata.flags = auth::kStringAuthFlagTrapOnFailure;
   payload.metadata.length = data->getNumElements();
   payload.metadata.module_id = plan.module_id;
   payload.metadata.function_id = plan.function_id;
   payload.metadata.site_id = plan.site_id;
   payload.metadata.binding_id = binding_id;
-  payload.metadata.destination_cookie = auth::DeriveReferenceCookie(
-      mac_key, auth::AuthDescriptorKind::string, binding_id, auth::AuthReferenceRole::destination);
-  payload.metadata.ciphertext_cookie = auth::DeriveReferenceCookie(
-      mac_key, auth::AuthDescriptorKind::string, binding_id, auth::AuthReferenceRole::ciphertext);
-  payload.metadata.build_key_cookie =
-      auth::DeriveBuildKeyCookie(build_key, auth::AuthDescriptorKind::string, binding_id);
-  payload.metadata.state_cookie = auth::DeriveReferenceCookie(
-      mac_key, auth::AuthDescriptorKind::string, binding_id, auth::AuthReferenceRole::state);
-  payload.cold_status = auth::DeriveCacheStatus(
-      mac_key, auth::AuthDescriptorKind::string, binding_id, auth::CacheStatusKind::cold);
+  payload.metadata.destination_capacity = data->getNumElements();
+  payload.metadata.ciphertext_capacity = data->getNumElements();
+  payload.metadata.build_key_capacity = auth::kBuildKeyBytes;
+  payload.metadata.destination_cookie = auth::DeriveReferenceCookieV3(
+      mac_key,
+      auth::AuthDescriptorKind::string,
+      binding_id,
+      auth::AuthReferenceRole::destination,
+      payload.metadata.destination_capacity);
+  payload.metadata.ciphertext_cookie = auth::DeriveReferenceCookieV3(
+      mac_key,
+      auth::AuthDescriptorKind::string,
+      binding_id,
+      auth::AuthReferenceRole::ciphertext,
+      payload.metadata.ciphertext_capacity);
+  payload.metadata.build_key_cookie = auth::DeriveBuildKeyCookieV3(
+      build_key,
+      auth::AuthDescriptorKind::string,
+      binding_id,
+      payload.metadata.build_key_capacity);
+  payload.metadata.state_cookie = auth::DeriveReferenceCookieV3(
+      mac_key, auth::AuthDescriptorKind::string, binding_id, auth::AuthReferenceRole::state, 0);
+  payload.cold_status = auth::DeriveCacheColdStatusV3(mac_key,
+                                                       auth::AuthDescriptorKind::string,
+                                                       binding_id,
+                                                       payload.metadata.destination_capacity,
+                                                       payload.metadata.ciphertext_capacity,
+                                                       payload.metadata.build_key_capacity);
   payload.metadata.nonce = auth::DeriveStringNonce(site_key);
 
   llvm::SmallVector<std::uint8_t, 32> plaintext;
@@ -1223,6 +1245,7 @@ llvm::StructType* get_authenticated_buffer_reference_type(llvm::LLVMContext& con
 
 llvm::StructType* get_authenticated_state_reference_type(llvm::LLVMContext& context) {
   return llvm::StructType::get(llvm::Type::getInt64Ty(context),
+                               llvm::Type::getInt64Ty(context),
                                llvm::Type::getInt64Ty(context));
 }
 
@@ -1269,6 +1292,7 @@ llvm::GlobalVariable* create_authenticated_state_reference_global(
                                                       options);
   llvm::Constant* fields[] = {
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), cookie),
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), cold_status),
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), cold_status),
   };
   auto* global = new llvm::GlobalVariable(module,
@@ -1323,10 +1347,15 @@ llvm::StructType* get_authenticated_descriptor_type(llvm::LLVMContext& context) 
   llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
   llvm::Type* i32_type = llvm::Type::getInt32Ty(context);
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
-  llvm::ArrayType* nonce_type = llvm::ArrayType::get(llvm::Type::getInt8Ty(context), auth::kStringNonceBytes);
-  llvm::ArrayType* tag_type = llvm::ArrayType::get(llvm::Type::getInt8Ty(context), auth::kStringTagBytes);
+  llvm::ArrayType* nonce_type =
+      llvm::ArrayType::get(llvm::Type::getInt8Ty(context), auth::kStringNonceBytes);
+  llvm::ArrayType* tag_type =
+      llvm::ArrayType::get(llvm::Type::getInt8Ty(context), auth::kStringTagBytes);
   return llvm::StructType::get(i32_type,
                                i32_type,
+                               i64_type,
+                               i64_type,
+                               i64_type,
                                i64_type,
                                i64_type,
                                i64_type,
@@ -1352,7 +1381,7 @@ llvm::Constant* create_authenticated_descriptor_initializer(
   llvm::StructType* descriptor_type = get_authenticated_descriptor_type(context);
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
 
-  llvm::SmallVector<llvm::Constant*, 16> fields;
+  llvm::SmallVector<llvm::Constant*, 20> fields;
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.version));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.flags));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.length));
@@ -1367,6 +1396,12 @@ llvm::Constant* create_authenticated_descriptor_initializer(
   fields.push_back(
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.build_key_cookie));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.state_cookie));
+  fields.push_back(
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.destination_capacity));
+  fields.push_back(
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.ciphertext_capacity));
+  fields.push_back(
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.build_key_capacity));
   fields.push_back(support::create_byte_array_constant(context, payload.metadata.nonce));
   fields.push_back(support::create_byte_array_constant(context, payload.tag));
   fields.push_back(
@@ -1394,18 +1429,77 @@ llvm::GlobalVariable* create_authenticated_descriptor_global(
       "",
       plan.seed ^ 0xd35cULL,
       options);
+  return new llvm::GlobalVariable(
+      module,
+      descriptor_type,
+      true,
+      llvm::GlobalValue::InternalLinkage,
+      create_authenticated_descriptor_initializer(module.getContext(), plan, payload, refs),
+      name);
+}
+
+llvm::StructType* get_authenticated_topology_type(llvm::LLVMContext& context) {
+  llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
+  llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
+  return llvm::StructType::get(ptr_type,
+                               ptr_type,
+                               ptr_type,
+                               i64_type,
+                               ptr_type,
+                               ptr_type,
+                               i64_type,
+                               ptr_type,
+                               ptr_type,
+                               i64_type,
+                               ptr_type);
+}
+
+llvm::GlobalVariable* create_authenticated_topology_global(
+    llvm::Module& module,
+    const string_strategy_plan& plan,
+    const authenticated_string_payload& payload,
+    llvm::GlobalVariable& descriptor,
+    const authenticated_reference_globals& refs,
+    llvm::GlobalVariable& destination,
+    llvm::GlobalVariable& ciphertext,
+    llvm::GlobalVariable& build_key,
+    const string_encoding_options& options) {
+  llvm::LLVMContext& context = module.getContext();
+  llvm::StructType* topology_type = get_authenticated_topology_type(context);
+  llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
+  llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
+  auto ptr = [&](llvm::GlobalVariable& global) -> llvm::Constant* {
+    return llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(&global, ptr_type);
+  };
+  llvm::SmallVector<llvm::Constant*, 11> fields;
+  fields.push_back(ptr(descriptor));
+  fields.push_back(ptr(*refs.destination_ref));
+  fields.push_back(ptr(destination));
+  fields.push_back(llvm::ConstantInt::get(i64_type, payload.metadata.destination_capacity));
+  fields.push_back(ptr(*refs.ciphertext_ref));
+  fields.push_back(ptr(ciphertext));
+  fields.push_back(llvm::ConstantInt::get(i64_type, payload.metadata.ciphertext_capacity));
+  fields.push_back(ptr(*refs.build_key_ref));
+  fields.push_back(ptr(build_key));
+  fields.push_back(llvm::ConstantInt::get(i64_type, payload.metadata.build_key_capacity));
+  fields.push_back(ptr(*refs.state_ref));
+  const std::string name = make_string_generated_name(
+      module,
+      plan,
+      "__obf_str_topology",
+      "__obf_string_topology_",
+      "",
+      plan.seed ^ 0xd35fULL,
+      options);
   return new llvm::GlobalVariable(module,
-                                  descriptor_type,
+                                  topology_type,
                                   true,
                                   llvm::GlobalValue::InternalLinkage,
-                                  create_authenticated_descriptor_initializer(module.getContext(),
-                                                                             plan,
-                                                                             payload,
-                                                                             refs),
+                                  llvm::ConstantStruct::get(topology_type, fields),
                                   name);
 }
 
-llvm::GlobalVariable* create_authenticated_descriptor_bundle(
+authenticated_descriptor_bundle create_authenticated_descriptor_bundle(
     llvm::Module& module,
     const string_strategy_plan& plan,
     const authenticated_string_payload& payload,
@@ -1417,7 +1511,18 @@ llvm::GlobalVariable* create_authenticated_descriptor_bundle(
       create_authenticated_build_key_global(module, plan, build_seed, options);
   const authenticated_reference_globals refs = create_authenticated_reference_globals(
       module, plan, payload, *plan.global, *ciphertext, *build_key, options);
-  return create_authenticated_descriptor_global(module, plan, payload, refs, options);
+  authenticated_descriptor_bundle bundle;
+  bundle.descriptor = create_authenticated_descriptor_global(module, plan, payload, refs, options);
+  bundle.topology = create_authenticated_topology_global(module,
+                                                          plan,
+                                                          payload,
+                                                          *bundle.descriptor,
+                                                          refs,
+                                                          *plan.global,
+                                                          *ciphertext,
+                                                          *build_key,
+                                                          options);
+  return bundle;
 }
 
 void prepare_authenticated_destination_global(llvm::GlobalVariable& global) {
@@ -1477,8 +1582,9 @@ llvm::FunctionCallee get_authenticated_runtime_decoder(llvm::Module& module) {
   llvm::LLVMContext& context = module.getContext();
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
-  llvm::FunctionType* type = llvm::FunctionType::get(ptr_type, {ptr_type, i64_type, i64_type}, false);
-  return module.getOrInsertFunction(auth::kRuntimeStringDecodeSymbolV2, type);
+  llvm::FunctionType* type =
+      llvm::FunctionType::get(ptr_type, {ptr_type, i64_type, i64_type, ptr_type}, false);
+  return module.getOrInsertFunction(auth::kRuntimeStringDecodeSymbolV3, type);
 }
 
 llvm::Function* create_authenticated_lazy_helper(llvm::Module& module, llvm::StringRef name) {
@@ -1488,8 +1594,8 @@ llvm::Function* create_authenticated_lazy_helper(llvm::Module& module, llvm::Str
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type* i32_type = llvm::Type::getInt32Ty(context);
   llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
-  llvm::FunctionType* type =
-      llvm::FunctionType::get(ptr_type, {ptr_type, i32_type, i32_type, i64_type, i64_type}, false);
+  llvm::FunctionType* type = llvm::FunctionType::get(
+      ptr_type, {ptr_type, i32_type, i32_type, i64_type, i64_type, ptr_type}, false);
   llvm::Function* helper =
       llvm::Function::Create(type, llvm::GlobalValue::InternalLinkage, name, module);
 
@@ -1504,6 +1610,8 @@ llvm::Function* create_authenticated_lazy_helper(llvm::Module& module, llvm::Str
   trusted_length->setName("trusted_length");
   llvm::Argument* trusted_binding = &*arg_it++;
   trusted_binding->setName("trusted_binding");
+  llvm::Argument* trusted_topology = &*arg_it++;
+  trusted_topology->setName("trusted_topology");
 
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", helper);
   llvm::BasicBlock* state_mismatch = llvm::BasicBlock::Create(context, "state_mismatch", helper);
@@ -1519,15 +1627,18 @@ llvm::Function* create_authenticated_lazy_helper(llvm::Module& module, llvm::Str
   builder.CreateUnreachable();
 
   builder.SetInsertPoint(decode);
-  llvm::Value* decoded = builder.CreateCall(
-      get_authenticated_runtime_decoder(module), {descriptor, trusted_length, trusted_binding});
+  llvm::Value* decoded = builder.CreateCall(get_authenticated_runtime_decoder(module),
+                                             {descriptor,
+                                              trusted_length,
+                                              trusted_binding,
+                                              trusted_topology});
   builder.CreateRet(decoded);
   return helper;
 }
-
 llvm::Function* create_authenticated_ctor_decoder(llvm::Module& module,
                                                   const string_strategy_plan& plan,
                                                   llvm::Constant* descriptor_ptr,
+                                                  llvm::Constant* topology_ptr,
                                                   std::uint64_t trusted_length,
                                                   std::uint64_t trusted_binding,
                                                   const string_encoding_options& options) {
@@ -1539,11 +1650,15 @@ llvm::Function* create_authenticated_ctor_decoder(llvm::Module& module,
       llvm::Function::Create(type, llvm::GlobalValue::InternalLinkage, decoder_name, module);
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", decoder);
   llvm::IRBuilder<> builder(entry);
-  llvm::Value* runtime_desc = builder.CreatePointerCast(descriptor_ptr, llvm::PointerType::getUnqual(context));
+  llvm::Value* runtime_desc =
+      builder.CreatePointerCast(descriptor_ptr, llvm::PointerType::getUnqual(context));
+  llvm::Value* runtime_topology =
+      builder.CreatePointerCast(topology_ptr, llvm::PointerType::getUnqual(context));
   builder.CreateCall(get_authenticated_runtime_decoder(module),
                      {runtime_desc,
                       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), trusted_length),
-                      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), trusted_binding)});
+                      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), trusted_binding),
+                      runtime_topology});
   builder.CreateRetVoid();
   return decoder;
 }
@@ -1894,8 +2009,8 @@ llvm::GlobalVariable* create_lazy_state_global(llvm::Module& module,
 
 llvm::Function* get_or_create_lazy_family_helper(llvm::Module& module, string_helper_shape shape) {
   switch (shape) {
-    case string_helper_shape::lazy_auth_runtime_v2:
-      return create_authenticated_lazy_helper(module, "__obf_family_auth_v2");
+    case string_helper_shape::lazy_auth_runtime_v3:
+      return create_authenticated_lazy_helper(module, "__obf_family_auth_v3");
     case string_helper_shape::lazy_flag_reverse_v1:
       return get_or_create_flag_family_helper(module, true);
     case string_helper_shape::lazy_cached_pointer_v3:
@@ -1919,7 +2034,7 @@ llvm::Function* create_isolated_lazy_helper(llvm::Module& module,
                                  plan.seed ^ static_cast<std::uint64_t>(plan.result.helper_shape),
                                  options);
   switch (plan.result.helper_shape) {
-    case string_helper_shape::lazy_auth_runtime_v2:
+    case string_helper_shape::lazy_auth_runtime_v3:
       return create_authenticated_lazy_helper(module, helper_name);
     case string_helper_shape::lazy_flag_reverse_v1:
       return create_flag_family_helper(module, helper_name, true);
@@ -1935,7 +2050,8 @@ void rewrite_lazy_uses(llvm::Function& family_helper,
                        llvm::Constant* descriptor_ptr,
                        llvm::ArrayRef<classified_string_use> uses,
                        std::optional<std::uint64_t> authenticated_length = std::nullopt,
-                       std::optional<std::uint64_t> authenticated_binding = std::nullopt) {
+                       std::optional<std::uint64_t> authenticated_binding = std::nullopt,
+                       llvm::Constant* authenticated_topology = nullptr) {
   llvm::Module* module = family_helper.getParent();
   if (module == nullptr) { return; }
 
@@ -1952,7 +2068,7 @@ void rewrite_lazy_uses(llvm::Function& family_helper,
       llvm::IRBuilder<> builder(insert_before);
       llvm::Value* cfg_state = create_cfg_state_placeholder_call(builder, *module, false);
       llvm::Value* expected_state = create_cfg_state_placeholder_call(builder, *module, true);
-      llvm::SmallVector<llvm::Value*, 5> args = {descriptor_ptr, cfg_state, expected_state};
+      llvm::SmallVector<llvm::Value*, 6> args = {descriptor_ptr, cfg_state, expected_state};
       if (authenticated_length.has_value()) {
         args.push_back(
             llvm::ConstantInt::get(llvm::Type::getInt64Ty(builder.getContext()), *authenticated_length));
@@ -1960,6 +2076,7 @@ void rewrite_lazy_uses(llvm::Function& family_helper,
           args.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(builder.getContext()),
                                                 *authenticated_binding));
         }
+        if (authenticated_topology != nullptr) { args.push_back(authenticated_topology); }
       }
       llvm::CallInst* decoded_ptr = builder.CreateCall(&family_helper, args);
       phi->setIncomingValue(use.operand_index, decoded_ptr);
@@ -1969,13 +2086,14 @@ void rewrite_lazy_uses(llvm::Function& family_helper,
     llvm::IRBuilder<> builder(use.instruction);
     llvm::Value* cfg_state = create_cfg_state_placeholder_call(builder, *module, false);
     llvm::Value* expected_state = create_cfg_state_placeholder_call(builder, *module, true);
-    llvm::SmallVector<llvm::Value*, 5> args = {descriptor_ptr, cfg_state, expected_state};
+    llvm::SmallVector<llvm::Value*, 6> args = {descriptor_ptr, cfg_state, expected_state};
     if (authenticated_length.has_value()) {
       args.push_back(
           llvm::ConstantInt::get(llvm::Type::getInt64Ty(builder.getContext()), *authenticated_length));
       if (authenticated_binding.has_value()) {
         args.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(builder.getContext()),
                                               *authenticated_binding));
+      if (authenticated_topology != nullptr) { args.push_back(authenticated_topology); }
       }
     }
     llvm::CallInst* decoded_ptr = builder.CreateCall(&family_helper, args);
@@ -2129,6 +2247,7 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
 
   std::vector<string_encoding_result> results;
   results.reserve(plans.size());
+  std::vector<llvm::Constant*> topology_ptrs(plans.size(), nullptr);
 
   std::vector<llvm::GlobalVariable*> state_globals(plans.size(), nullptr);
   std::vector<llvm::Constant*> descriptor_ptrs(plans.size(), nullptr);
@@ -2147,9 +2266,11 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
             build_authenticated_payload(*plan.global, plan, module_seed));
         if (plan.result.mode == string_encoding_mode::lazy_decode) {
           prepare_authenticated_destination_global(*plan.global);
-          llvm::GlobalVariable* descriptor = create_authenticated_descriptor_bundle(
-              module, plan, *authenticated_payloads[index], module_seed, options);
-          descriptor_ptrs[index] = descriptor;
+          const authenticated_descriptor_bundle bundle =
+              create_authenticated_descriptor_bundle(
+                  module, plan, *authenticated_payloads[index], module_seed, options);
+          descriptor_ptrs[index] = bundle.descriptor;
+          topology_ptrs[index] = bundle.topology;
         }
         continue;
       }
@@ -2228,19 +2349,22 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
                             descriptor_ptrs[plan_index],
                             plan.lazy_uses,
                             authenticated_payloads[plan_index]->metadata.length,
-                            authenticated_payloads[plan_index]->metadata.binding_id);
+                            authenticated_payloads[plan_index]->metadata.binding_id,
+                            topology_ptrs[plan_index]);
         } else if (plan.result.mode == string_encoding_mode::global_ctor) {
           prepare_authenticated_destination_global(*plan.global);
           if (!authenticated_payloads[plan_index].has_value()) {
             authenticated_payloads[plan_index].emplace(
                 build_authenticated_payload(*plan.global, plan, module_seed));
           }
-          llvm::GlobalVariable* descriptor = create_authenticated_descriptor_bundle(
-              module, plan, *authenticated_payloads[plan_index], module_seed, options);
+          const authenticated_descriptor_bundle bundle =
+              create_authenticated_descriptor_bundle(
+                  module, plan, *authenticated_payloads[plan_index], module_seed, options);
           llvm::Function* decoder =
               create_authenticated_ctor_decoder(module,
                                                plan,
-                                               descriptor,
+                                               bundle.descriptor,
+                                               bundle.topology,
                                                authenticated_payloads[plan_index]->metadata.length,
                                                authenticated_payloads[plan_index]->metadata.binding_id,
                                                options);
@@ -2307,8 +2431,8 @@ std::string to_string(string_helper_shape shape) {
       return "none";
     case string_helper_shape::ctor_unrolled_v0:
       return "ctor_unrolled_v0";
-    case string_helper_shape::ctor_auth_runtime_v2:
-      return "ctor_auth_runtime_v2";
+    case string_helper_shape::ctor_auth_runtime_v3:
+      return "ctor_auth_runtime_v3";
     case string_helper_shape::lazy_flag_unrolled_v0:
       return "lazy_flag_unrolled_v0";
     case string_helper_shape::lazy_flag_reverse_v1:
@@ -2317,8 +2441,8 @@ std::string to_string(string_helper_shape shape) {
       return "lazy_counter_chunked_v2";
     case string_helper_shape::lazy_cached_pointer_v3:
       return "lazy_cached_pointer_v3";
-    case string_helper_shape::lazy_auth_runtime_v2:
-      return "lazy_auth_runtime_v2";
+    case string_helper_shape::lazy_auth_runtime_v3:
+      return "lazy_auth_runtime_v3";
   }
 
   return "none";

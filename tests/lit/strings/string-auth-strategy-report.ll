@@ -16,4 +16,4 @@ entry:
   ret i32 %result
 }
 
-; CHECK: .secret|applied|1|lazy_decode: 1 lazy use(s)|helper_lazy_decode|lazy_auth_runtime_v2|blake2s_keyed_auth_v3
+; CHECK: .secret|applied|1|lazy_decode: 1 lazy use(s)|helper_lazy_decode|lazy_auth_runtime_v3|blake2s_keyed_auth_v3

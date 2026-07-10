@@ -13,7 +13,7 @@ entry:
   ret i32 %ret
 }
 
-; CHECK: call ptr @rt_core_sd2
+; CHECK: call ptr @rt_core_sd3
 ; CHECK-NOT: obf_string_auth_decode_v1
 ; CHECK-NOT: obf_string_auth_decode_v2
 ; CHECK-NOT: release marker stripping failure: external

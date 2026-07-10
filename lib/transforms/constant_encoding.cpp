@@ -59,7 +59,7 @@ struct keyed_pool_plan {
 };
 
 struct keyed_pool_payload {
-  auth::ConstantPoolAuthMetadata metadata;
+  auth::ConstantPoolAuthMetadataV3 metadata;
   auth::StringTag tag{};
   std::uint64_t cold_status = 0;
   llvm::SmallVector<std::uint8_t, 64> ciphertext;
@@ -70,6 +70,11 @@ struct keyed_pool_reference_globals {
   llvm::GlobalVariable* ciphertext_ref = nullptr;
   llvm::GlobalVariable* build_key_ref = nullptr;
   llvm::GlobalVariable* state_ref = nullptr;
+};
+
+struct keyed_pool_descriptor_bundle {
+  llvm::GlobalVariable* descriptor = nullptr;
+  llvm::GlobalVariable* topology = nullptr;
 };
 
 struct keyed_pool_table_summary {
@@ -465,6 +470,9 @@ llvm::StructType* get_keyed_pool_descriptor_type(llvm::LLVMContext& context) {
                                i64_type,
                                i64_type,
                                i64_type,
+                               i64_type,
+                               i64_type,
+                               i64_type,
                                nonce_type,
                                tag_type,
                                ptr_type,
@@ -473,12 +481,29 @@ llvm::StructType* get_keyed_pool_descriptor_type(llvm::LLVMContext& context) {
                                ptr_type);
 }
 
+llvm::StructType* get_keyed_pool_topology_type(llvm::LLVMContext& context) {
+  llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
+  llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
+  return llvm::StructType::get(ptr_type,
+                               ptr_type,
+                               ptr_type,
+                               i64_type,
+                               ptr_type,
+                               ptr_type,
+                               i64_type,
+                               ptr_type,
+                               ptr_type,
+                               i64_type,
+                               ptr_type);
+}
+
 llvm::FunctionCallee get_keyed_pool_runtime_decoder(llvm::Module& module) {
   llvm::LLVMContext& context = module.getContext();
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
   llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
-  llvm::FunctionType* type = llvm::FunctionType::get(ptr_type, {ptr_type, i64_type, i64_type}, false);
-  return module.getOrInsertFunction(auth::kRuntimeConstantPoolDecodeSymbolV2, type);
+  llvm::FunctionType* type =
+      llvm::FunctionType::get(ptr_type, {ptr_type, i64_type, i64_type, ptr_type}, false);
+  return module.getOrInsertFunction(auth::kRuntimeConstantPoolDecodeSymbolV3, type);
 }
 
 llvm::GlobalVariable* create_keyed_pool_ciphertext_global(llvm::Module& module,
@@ -537,6 +562,7 @@ llvm::StructType* get_authenticated_buffer_reference_type(llvm::LLVMContext& con
 
 llvm::StructType* get_authenticated_state_reference_type(llvm::LLVMContext& context) {
   return llvm::StructType::get(llvm::Type::getInt64Ty(context),
+                               llvm::Type::getInt64Ty(context),
                                llvm::Type::getInt64Ty(context));
 }
 
@@ -561,7 +587,6 @@ llvm::GlobalVariable* create_keyed_pool_buffer_reference_global(llvm::Module& mo
                                   llvm::ConstantStruct::get(reference_type, fields),
                                   name);
 }
-
 llvm::GlobalVariable* create_keyed_pool_state_reference_global(llvm::Module& module,
                                                                std::uint64_t cookie,
                                                                std::uint64_t cold_status,
@@ -573,6 +598,7 @@ llvm::GlobalVariable* create_keyed_pool_state_reference_global(llvm::Module& mod
       module, "__obf_const_state_ref_", "pool", seed ^ pool_id ^ 0x57a80ULL);
   llvm::Constant* fields[] = {
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), cookie),
+      llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), cold_status),
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), cold_status),
   };
   auto* global = new llvm::GlobalVariable(module,
@@ -622,10 +648,10 @@ llvm::GlobalVariable* create_keyed_pool_descriptor_global(llvm::Module& module,
                                                            std::uint64_t seed,
                                                            std::uint64_t pool_id);
 
-llvm::GlobalVariable* create_keyed_pool_descriptor_bundle(llvm::Module& module,
-                                                          const keyed_pool_plan& plan,
-                                                          const keyed_pool_payload& payload,
-                                                          std::uint64_t seed) {
+keyed_pool_descriptor_bundle create_keyed_pool_descriptor_bundle(llvm::Module& module,
+                                                                 const keyed_pool_plan& plan,
+                                                                 const keyed_pool_payload& payload,
+                                                                 std::uint64_t seed) {
   llvm::GlobalVariable* ciphertext =
       create_keyed_pool_ciphertext_global(module, plan, payload, seed);
   llvm::GlobalVariable* build_key = create_keyed_pool_build_key_global(module, seed, plan.pool_id);
@@ -633,7 +659,41 @@ llvm::GlobalVariable* create_keyed_pool_descriptor_bundle(llvm::Module& module,
       create_keyed_pool_destination_global(module, payload, plan.alignment, seed, plan.pool_id);
   const keyed_pool_reference_globals refs = create_keyed_pool_reference_globals(
       module, payload, *destination, *ciphertext, *build_key, seed, plan.pool_id);
-  return create_keyed_pool_descriptor_global(module, payload, refs, seed, plan.pool_id);
+  keyed_pool_descriptor_bundle bundle;
+  bundle.descriptor =
+      create_keyed_pool_descriptor_global(module, payload, refs, seed, plan.pool_id);
+
+  llvm::LLVMContext& context = module.getContext();
+  llvm::StructType* topology_type = get_keyed_pool_topology_type(context);
+  llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
+  llvm::SmallVector<llvm::Constant*, 11> fields;
+  fields.push_back(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(
+      bundle.descriptor, ptr_type));
+  fields.push_back(
+      llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(refs.destination_ref, ptr_type));
+  fields.push_back(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(destination, ptr_type));
+  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context),
+                                          payload.metadata.destination_capacity));
+  fields.push_back(
+      llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(refs.ciphertext_ref, ptr_type));
+  fields.push_back(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(ciphertext, ptr_type));
+  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context),
+                                          payload.metadata.ciphertext_capacity));
+  fields.push_back(
+      llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(refs.build_key_ref, ptr_type));
+  fields.push_back(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(build_key, ptr_type));
+  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context),
+                                          payload.metadata.build_key_capacity));
+  fields.push_back(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(refs.state_ref, ptr_type));
+  const std::string topology_name =
+      make_unique_obf_symbol_name(module, "__obf_const_topology", "pool", seed ^ plan.pool_id);
+  bundle.topology = new llvm::GlobalVariable(module,
+                                             topology_type,
+                                             true,
+                                             llvm::GlobalValue::InternalLinkage,
+                                             llvm::ConstantStruct::get(topology_type, fields),
+                                             topology_name);
+  return bundle;
 }
 
 llvm::GlobalVariable* create_keyed_pool_descriptor_global(llvm::Module& module,
@@ -644,7 +704,7 @@ llvm::GlobalVariable* create_keyed_pool_descriptor_global(llvm::Module& module,
   llvm::LLVMContext& context = module.getContext();
   llvm::StructType* descriptor_type = get_keyed_pool_descriptor_type(context);
   llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
-  llvm::SmallVector<llvm::Constant*, 16> fields;
+  llvm::SmallVector<llvm::Constant*, 19> fields;
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.version));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.flags));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.length));
@@ -658,6 +718,12 @@ llvm::GlobalVariable* create_keyed_pool_descriptor_global(llvm::Module& module,
   fields.push_back(
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.build_key_cookie));
   fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), payload.metadata.state_cookie));
+  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context),
+                                          payload.metadata.destination_capacity));
+  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context),
+                                          payload.metadata.ciphertext_capacity));
+  fields.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context),
+                                          payload.metadata.build_key_capacity));
   fields.push_back(support::create_byte_array_constant(context, payload.metadata.nonce));
   fields.push_back(support::create_byte_array_constant(context, payload.tag));
   fields.push_back(
@@ -679,6 +745,7 @@ llvm::GlobalVariable* create_keyed_pool_descriptor_global(llvm::Module& module,
 
 llvm::Function* create_keyed_pool_helper(llvm::Module& module,
                                          llvm::GlobalVariable& descriptor,
+                                         llvm::GlobalVariable& topology,
                                          std::uint64_t trusted_length,
                                          std::uint64_t binding_id,
                                          std::uint64_t seed) {
@@ -697,11 +764,14 @@ llvm::Function* create_keyed_pool_helper(llvm::Module& module,
   llvm::IRBuilder<> builder(entry);
   llvm::Value* descriptor_ptr =
       builder.CreatePointerCast(&descriptor, llvm::PointerType::getUnqual(context));
+  llvm::Value* topology_ptr =
+      builder.CreatePointerCast(&topology, llvm::PointerType::getUnqual(context));
   llvm::Value* decoded = builder.CreateCall(
       get_keyed_pool_runtime_decoder(module),
       {builder.CreatePointerCast(descriptor_ptr, ptr_type),
        llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), trusted_length),
-       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), binding_id)});
+       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), binding_id),
+       builder.CreatePointerCast(topology_ptr, ptr_type)});
   builder.CreateRet(decoded);
   return helper;
 }
@@ -754,28 +824,40 @@ keyed_pool_payload build_keyed_pool_payload(llvm::ArrayRef<keyed_pool_entry> ent
   const auth::Blake2sDigest mac_key = auth::DeriveLabeledKey(pool_key, auth::kDomainMac);
   const std::uint64_t binding_id = auth::DeriveConstantPoolBindingId(module_id, pool_id);
 
-  payload.metadata.version = auth::kConstantPoolDescriptorVersionV2;
+  payload.metadata.version = auth::kConstantPoolDescriptorVersionV3;
   payload.metadata.flags = auth::kConstantPoolAuthFlagTrapOnFailure;
   payload.metadata.length = plaintext.size();
   payload.metadata.module_id = module_id;
   payload.metadata.pool_id = pool_id;
   payload.metadata.binding_id = binding_id;
-  payload.metadata.destination_cookie = auth::DeriveReferenceCookie(mac_key,
-                                                                   auth::AuthDescriptorKind::constant_pool,
-                                                                   binding_id,
-                                                                   auth::AuthReferenceRole::destination);
-  payload.metadata.ciphertext_cookie = auth::DeriveReferenceCookie(mac_key,
-                                                                  auth::AuthDescriptorKind::constant_pool,
-                                                                  binding_id,
-                                                                  auth::AuthReferenceRole::ciphertext);
-  payload.metadata.build_key_cookie =
-      auth::DeriveBuildKeyCookie(build_key, auth::AuthDescriptorKind::constant_pool, binding_id);
-  payload.metadata.state_cookie = auth::DeriveReferenceCookie(mac_key,
-                                                              auth::AuthDescriptorKind::constant_pool,
-                                                              binding_id,
-                                                              auth::AuthReferenceRole::state);
-  payload.cold_status = auth::DeriveCacheStatus(
-      mac_key, auth::AuthDescriptorKind::constant_pool, binding_id, auth::CacheStatusKind::cold);
+  payload.metadata.destination_capacity = plaintext.size();
+  payload.metadata.ciphertext_capacity = plaintext.size();
+  payload.metadata.build_key_capacity = auth::kBuildKeyBytes;
+  payload.metadata.destination_cookie = auth::DeriveReferenceCookieV3(
+      mac_key,
+      auth::AuthDescriptorKind::constant_pool,
+      binding_id,
+      auth::AuthReferenceRole::destination,
+      payload.metadata.destination_capacity);
+  payload.metadata.ciphertext_cookie = auth::DeriveReferenceCookieV3(
+      mac_key,
+      auth::AuthDescriptorKind::constant_pool,
+      binding_id,
+      auth::AuthReferenceRole::ciphertext,
+      payload.metadata.ciphertext_capacity);
+  payload.metadata.build_key_cookie = auth::DeriveBuildKeyCookieV3(
+      build_key,
+      auth::AuthDescriptorKind::constant_pool,
+      binding_id,
+      payload.metadata.build_key_capacity);
+  payload.metadata.state_cookie = auth::DeriveReferenceCookieV3(
+      mac_key, auth::AuthDescriptorKind::constant_pool, binding_id, auth::AuthReferenceRole::state, 0);
+  payload.cold_status = auth::DeriveCacheColdStatusV3(mac_key,
+                                                      auth::AuthDescriptorKind::constant_pool,
+                                                      binding_id,
+                                                      payload.metadata.destination_capacity,
+                                                      payload.metadata.ciphertext_capacity,
+                                                      payload.metadata.build_key_capacity);
   payload.metadata.nonce = auth::DeriveStringNonce(pool_key);
 
   payload.ciphertext.resize(plaintext.size());
@@ -1155,10 +1237,11 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
     keyed_pool_plan& plan = *planned;
     const keyed_pool_payload payload =
         build_keyed_pool_payload(plan.entries, plan.byte_length, plan.pool_id, module_id, seed);
-    llvm::GlobalVariable* descriptor =
+    const keyed_pool_descriptor_bundle bundle =
         create_keyed_pool_descriptor_bundle(module, plan, payload, seed);
     llvm::Function* helper = create_keyed_pool_helper(module,
-                                                      *descriptor,
+                                                      *bundle.descriptor,
+                                                      *bundle.topology,
                                                       payload.metadata.length,
                                                       payload.metadata.binding_id,
                                                       seed ^ plan.pool_id);
@@ -1191,11 +1274,16 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
     payload_plan.pool_id = plan.pool_id;
 
     const keyed_pool_payload payload =
-        build_keyed_pool_payload(plan.entries, plan.byte_length, plan.pool_id, module_id, seed);
-    llvm::GlobalVariable* descriptor =
+        build_keyed_pool_payload(payload_plan.entries,
+                                 payload_plan.byte_length,
+                                 payload_plan.pool_id,
+                                 module_id,
+                                 seed);
+    const keyed_pool_descriptor_bundle bundle =
         create_keyed_pool_descriptor_bundle(module, payload_plan, payload, seed);
     llvm::Function* helper = create_keyed_pool_helper(module,
-                                                      *descriptor,
+                                                      *bundle.descriptor,
+                                                      *bundle.topology,
                                                       payload.metadata.length,
                                                       payload.metadata.binding_id,
                                                       seed ^ plan.pool_id);

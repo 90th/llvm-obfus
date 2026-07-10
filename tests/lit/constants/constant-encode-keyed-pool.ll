@@ -23,10 +23,11 @@ entry:
 ; CHECK-DAG: @__obf_const_ciphertext_ref_
 ; CHECK-DAG: @__obf_const_build_key_ref_
 ; CHECK-DAG: @__obf_const_state_ref_
-; CHECK-DAG: @__obf_const_desc_{{.*}} = internal constant { i32, i32, i64, i64, i64, i64, i64, i64, i64, i64, [16 x i8], [16 x i8], ptr, ptr, ptr, ptr } { i32 2, i32 1
+; CHECK-DAG: @__obf_const_desc_{{.*}} = internal constant { i32, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, [16 x i8], [16 x i8], ptr, ptr, ptr, ptr } { i32 3, i32 1
+; CHECK-DAG: @__obf_const_topology_{{.*}} = internal constant { ptr, ptr, ptr, i64, ptr, ptr, i64, ptr, ptr, i64, ptr }
 ; CHECK-LABEL: define i32 @repeated(i32 %x) {
 ; CHECK: %obf.const.pool.base = call ptr @__obf_const_pool_decode_
 ; CHECK: %obf.const.pool.load = load i32, ptr %obf.const.pool.ptr
 ; CHECK-LABEL: define internal ptr @__obf_const_pool_decode_
-; CHECK: call ptr @rt_core_cpd2(ptr @__obf_const_desc_{{.*}}, i64 {{-?[0-9]+}}, i64 {{-?[0-9]+}})
+; CHECK: call ptr @rt_core_cpd3(ptr @__obf_const_desc_{{.*}}, i64 {{-?[0-9]+}}, i64 {{-?[0-9]+}}, ptr @__obf_const_topology_{{.*}})
 ; CHECK-NOT: %obf.const.mask =

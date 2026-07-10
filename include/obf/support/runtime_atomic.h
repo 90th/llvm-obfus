@@ -87,3 +87,19 @@ static inline int ObfAtomicCompareExchangeU64AcquireRelaxed(uint64_t* value,
       value, expected, desired, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
 #endif
 }
+static inline int ObfAtomicCompareExchangeU64AcqRelRelaxed(uint64_t* value,
+                                                           uint64_t* expected,
+                                                           uint64_t desired) {
+#if defined(_MSC_VER)
+  const __int64 observed = _InterlockedCompareExchange64(
+      (volatile __int64*)value, (__int64)desired, (__int64)(*expected));
+  if ((uint64_t)observed == *expected) {
+    return 1;
+  }
+  *expected = (uint64_t)observed;
+  return 0;
+#else
+  return __atomic_compare_exchange_n(
+      value, expected, desired, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+#endif
+}

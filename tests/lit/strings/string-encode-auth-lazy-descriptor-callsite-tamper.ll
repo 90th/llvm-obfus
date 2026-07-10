@@ -26,4 +26,4 @@ entry:
 
 ; IR: @__obf_string_desc__secret_a = internal constant
 ; IR: @__obf_string_desc__secret_b = internal constant
-; IR: call ptr @__obf_family_auth_v2(ptr @__obf_string_desc__secret_a, i32 0, i32 0, i64 7, i64
+; IR: call ptr @__obf_family_auth_v3(ptr @__obf_string_desc__secret_a, i32 0, i32 0, i64 7, i64

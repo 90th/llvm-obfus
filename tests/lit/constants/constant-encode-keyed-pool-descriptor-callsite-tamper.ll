@@ -23,4 +23,4 @@ entry:
 
 ; IR: @__obf_const_desc_
 ; IR: @__obf_const_desc_
-; IR: call ptr @rt_core_cpd2(ptr @__obf_const_desc_
+; IR: call ptr @rt_core_cpd3(ptr @__obf_const_desc_

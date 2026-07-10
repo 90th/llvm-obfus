@@ -18,59 +18,15 @@ inline constexpr std::size_t kBlake2sOutBytes = 32;
 inline constexpr std::size_t kBuildKeyBytes = 32;
 inline constexpr std::size_t kStringNonceBytes = 16;
 inline constexpr std::size_t kStringTagBytes = 16;
-inline constexpr std::uint32_t kStringDescriptorVersionV2 = 2;
+inline constexpr std::uint32_t kStringDescriptorVersionV3 = 3;
 inline constexpr std::uint32_t kStringAuthFlagTrapOnFailure = 1U;
-inline constexpr std::uint32_t kConstantPoolDescriptorVersionV2 = 2;
+inline constexpr std::uint32_t kConstantPoolDescriptorVersionV3 = 3;
 inline constexpr std::uint32_t kConstantPoolAuthFlagTrapOnFailure = 1U;
 
 using Blake2sDigest = std::array<std::uint8_t, kBlake2sOutBytes>;
 using BuildKey = std::array<std::uint8_t, kBuildKeyBytes>;
 using StringNonce = std::array<std::uint8_t, kStringNonceBytes>;
 using StringTag = std::array<std::uint8_t, kStringTagBytes>;
-
-enum class AuthDescriptorKind : std::uint32_t {
-  string = 1,
-  constant_pool = 2,
-};
-
-enum class AuthReferenceRole : std::uint32_t {
-  destination = 1,
-  ciphertext = 2,
-  build_key = 3,
-  state = 4,
-};
-
-enum class CacheStatusKind : std::uint32_t {
-  cold = 0,
-  decoding = 1,
-  decoded = 2,
-};
-
-struct AuthenticatedBufferReferenceV2 {
-  std::uint64_t cookie = 0;
-  std::uint8_t* target = nullptr;
-};
-
-struct AuthenticatedStateReferenceV2 {
-  std::uint64_t cookie = 0;
-  std::uint64_t status = 0;
-};
-
-struct StringAuthMetadata {
-  std::uint32_t version = kStringDescriptorVersionV2;
-  std::uint32_t flags = kStringAuthFlagTrapOnFailure;
-  std::uint64_t length = 0;
-  std::uint64_t module_id = 0;
-  std::uint64_t function_id = 0;
-  std::uint64_t site_id = 0;
-  std::uint64_t binding_id = 0;
-  std::uint64_t destination_cookie = 0;
-  std::uint64_t ciphertext_cookie = 0;
-  std::uint64_t build_key_cookie = 0;
-  std::uint64_t state_cookie = 0;
-  StringNonce nonce{};
-};
-
 struct Blake2sState {
   std::array<std::uint32_t, 8> h{};
   std::array<std::uint32_t, 2> t{};
@@ -104,34 +60,51 @@ inline constexpr std::array<std::array<std::uint8_t, 16>, 10> kBlake2sSigma = {{
     {{10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0}},
 }};
 
-inline constexpr std::array<std::uint8_t, 2> kDomainFunction = {'f', 'n'};
-inline constexpr std::array<std::uint8_t, 5> kDomainBuild = {'b', 'u', 'i', 'l', 'd'};
-inline constexpr std::array<std::uint8_t, 6> kDomainString = {'s', 't', 'r', 'i', 'n', 'g'};
-inline constexpr std::array<std::uint8_t, 5> kDomainConstant = {'c', 'o', 'n', 's', 't'};
-inline constexpr std::array<std::uint8_t, 3> kDomainEnc = {'e', 'n', 'c'};
-inline constexpr std::array<std::uint8_t, 3> kDomainMac = {'m', 'a', 'c'};
-inline constexpr std::array<std::uint8_t, 5> kDomainNonce = {'n', 'o', 'n', 'c', 'e'};
-inline constexpr std::array<std::uint8_t, 6> kDomainStream = {'s', 't', 'r', 'e', 'a', 'm'};
-inline constexpr std::array<std::uint8_t, 10> kDomainStringTag = {
-    's', 't', 'r', 'i', 'n', 'g', '_', 't', 'a', 'g'};
-inline constexpr std::array<std::uint8_t, 14> kDomainConstantPoolTag = {
-    'c', 'o', 'n', 's', 't', '_', 'p', 'o', 'o', 'l', '_', 't', 'a', 'g'};
-inline constexpr std::array<std::uint8_t, 17> kDomainStringBindingV2 = {
-    's', 't', 'r', 'i', 'n', 'g', '_', 'b', 'i', 'n', 'd', 'i', 'n', 'g', '_', 'v', '2'};
-inline constexpr std::array<std::uint8_t, 19> kDomainConstantBindingV2 = {
-    'c', 'o', 'n', 's', 't', 'a', 'n', 't', '_', 'b', 'i', 'n', 'd', 'i', 'n', 'g', '_', 'v', '2'};
-inline constexpr std::array<std::uint8_t, 19> kDomainReferenceCookieV2 = {
-    'r', 'e', 'f', 'e', 'r', 'e', 'n', 'c', 'e', '_', 'c', 'o', 'o', 'k', 'i', 'e', '_', 'v', '2'};
-inline constexpr std::array<std::uint8_t, 19> kDomainBuildKeyCookieV2 = {
-    'b', 'u', 'i', 'l', 'd', '_', 'k', 'e', 'y', '_', 'c', 'o', 'o', 'k', 'i', 'e', '_', 'v', '2'};
-inline constexpr std::array<std::uint8_t, 15> kDomainCacheStatusV2 = {
-    'c', 'a', 'c', 'h', 'e', '_', 's', 't', 'a', 't', 'u', 's', '_', 'v', '2'};
-inline constexpr std::string_view kRuntimeStringDecodeSymbolV2 = OBF_RT_STRING_AUTH_DECODE_V2_STR;
-inline constexpr std::string_view kRuntimeConstantPoolDecodeSymbolV2 =
-    OBF_RT_CONSTANT_POOL_DECODE_V2_STR;
+enum class AuthDescriptorKind : std::uint32_t {
+  string = 1,
+  constant_pool = 2,
+};
 
-struct StringRuntimeDescriptorV2 {
-  std::uint32_t version = kStringDescriptorVersionV2;
+enum class AuthReferenceRole : std::uint32_t {
+  destination = 1,
+  ciphertext = 2,
+  build_key = 3,
+  state = 4,
+};
+
+enum class CacheStatusKind : std::uint32_t {
+  cold = 0,
+  decoding = 1,
+  decoded = 2,
+};
+
+struct AuthenticatedBufferReferenceV3 {
+  std::uint64_t cookie = 0;
+  std::uint8_t* target = nullptr;
+};
+
+struct AuthenticatedStateReferenceV3 {
+  std::uint64_t cookie = 0;
+  std::uint64_t status = 0;
+  std::uint64_t completion = 0;
+};
+
+struct AuthenticatedDecodeTopologyV3 {
+  const void* descriptor = nullptr;
+  const AuthenticatedBufferReferenceV3* destination_ref = nullptr;
+  const std::uint8_t* destination_target = nullptr;
+  std::uint64_t destination_capacity = 0;
+  const AuthenticatedBufferReferenceV3* ciphertext_ref = nullptr;
+  const std::uint8_t* ciphertext_target = nullptr;
+  std::uint64_t ciphertext_capacity = 0;
+  const AuthenticatedBufferReferenceV3* build_key_ref = nullptr;
+  const std::uint8_t* build_key_target = nullptr;
+  std::uint64_t build_key_capacity = 0;
+  AuthenticatedStateReferenceV3* state_ref = nullptr;
+};
+
+struct StringAuthMetadataV3 {
+  std::uint32_t version = kStringDescriptorVersionV3;
   std::uint32_t flags = kStringAuthFlagTrapOnFailure;
   std::uint64_t length = 0;
   std::uint64_t module_id = 0;
@@ -142,16 +115,37 @@ struct StringRuntimeDescriptorV2 {
   std::uint64_t ciphertext_cookie = 0;
   std::uint64_t build_key_cookie = 0;
   std::uint64_t state_cookie = 0;
+  std::uint64_t destination_capacity = 0;
+  std::uint64_t ciphertext_capacity = 0;
+  std::uint64_t build_key_capacity = 0;
   StringNonce nonce{};
-  StringTag tag{};
-  AuthenticatedBufferReferenceV2* destination = nullptr;
-  const AuthenticatedBufferReferenceV2* ciphertext = nullptr;
-  const AuthenticatedBufferReferenceV2* build_key = nullptr;
-  AuthenticatedStateReferenceV2* state = nullptr;
 };
 
-struct ConstantPoolAuthMetadata {
-  std::uint32_t version = kConstantPoolDescriptorVersionV2;
+struct StringRuntimeDescriptorV3 {
+  std::uint32_t version = kStringDescriptorVersionV3;
+  std::uint32_t flags = kStringAuthFlagTrapOnFailure;
+  std::uint64_t length = 0;
+  std::uint64_t module_id = 0;
+  std::uint64_t function_id = 0;
+  std::uint64_t site_id = 0;
+  std::uint64_t binding_id = 0;
+  std::uint64_t destination_cookie = 0;
+  std::uint64_t ciphertext_cookie = 0;
+  std::uint64_t build_key_cookie = 0;
+  std::uint64_t state_cookie = 0;
+  std::uint64_t destination_capacity = 0;
+  std::uint64_t ciphertext_capacity = 0;
+  std::uint64_t build_key_capacity = 0;
+  StringNonce nonce{};
+  StringTag tag{};
+  AuthenticatedBufferReferenceV3* destination = nullptr;
+  const AuthenticatedBufferReferenceV3* ciphertext = nullptr;
+  const AuthenticatedBufferReferenceV3* build_key = nullptr;
+  AuthenticatedStateReferenceV3* state = nullptr;
+};
+
+struct ConstantPoolAuthMetadataV3 {
+  std::uint32_t version = kConstantPoolDescriptorVersionV3;
   std::uint32_t flags = kConstantPoolAuthFlagTrapOnFailure;
   std::uint64_t length = 0;
   std::uint64_t module_id = 0;
@@ -161,11 +155,14 @@ struct ConstantPoolAuthMetadata {
   std::uint64_t ciphertext_cookie = 0;
   std::uint64_t build_key_cookie = 0;
   std::uint64_t state_cookie = 0;
+  std::uint64_t destination_capacity = 0;
+  std::uint64_t ciphertext_capacity = 0;
+  std::uint64_t build_key_capacity = 0;
   StringNonce nonce{};
 };
 
-struct ConstantPoolRuntimeDescriptorV2 {
-  std::uint32_t version = kConstantPoolDescriptorVersionV2;
+struct ConstantPoolRuntimeDescriptorV3 {
+  std::uint32_t version = kConstantPoolDescriptorVersionV3;
   std::uint32_t flags = kConstantPoolAuthFlagTrapOnFailure;
   std::uint64_t length = 0;
   std::uint64_t module_id = 0;
@@ -175,12 +172,15 @@ struct ConstantPoolRuntimeDescriptorV2 {
   std::uint64_t ciphertext_cookie = 0;
   std::uint64_t build_key_cookie = 0;
   std::uint64_t state_cookie = 0;
+  std::uint64_t destination_capacity = 0;
+  std::uint64_t ciphertext_capacity = 0;
+  std::uint64_t build_key_capacity = 0;
   StringNonce nonce{};
   StringTag tag{};
-  AuthenticatedBufferReferenceV2* destination = nullptr;
-  const AuthenticatedBufferReferenceV2* ciphertext = nullptr;
-  const AuthenticatedBufferReferenceV2* build_key = nullptr;
-  AuthenticatedStateReferenceV2* state = nullptr;
+  AuthenticatedBufferReferenceV3* destination = nullptr;
+  const AuthenticatedBufferReferenceV3* ciphertext = nullptr;
+  const AuthenticatedBufferReferenceV3* build_key = nullptr;
+  AuthenticatedStateReferenceV3* state = nullptr;
 };
 
 constexpr std::size_t MaxSize(std::size_t lhs, std::size_t rhs) {
@@ -196,113 +196,173 @@ constexpr std::uint64_t MakeDerivedNonzeroFallback(std::uint64_t binding_id,
   return (0x9e3779b97f4a7c15ULL ^ binding_id ^ (selector << 32)) | 1ULL;
 }
 
-static_assert(std::is_standard_layout_v<AuthenticatedBufferReferenceV2>);
-static_assert(std::is_standard_layout_v<AuthenticatedStateReferenceV2>);
-static_assert(std::is_standard_layout_v<StringRuntimeDescriptorV2>);
-static_assert(std::is_standard_layout_v<ConstantPoolRuntimeDescriptorV2>);
-static_assert(offsetof(AuthenticatedBufferReferenceV2, cookie) == 0);
-static_assert(offsetof(AuthenticatedBufferReferenceV2, target) ==
+static_assert(std::is_standard_layout_v<AuthenticatedBufferReferenceV3>);
+static_assert(std::is_standard_layout_v<AuthenticatedStateReferenceV3>);
+static_assert(std::is_standard_layout_v<AuthenticatedDecodeTopologyV3>);
+static_assert(std::is_standard_layout_v<StringRuntimeDescriptorV3>);
+static_assert(std::is_standard_layout_v<ConstantPoolRuntimeDescriptorV3>);
+static_assert(offsetof(AuthenticatedBufferReferenceV3, cookie) == 0);
+static_assert(offsetof(AuthenticatedBufferReferenceV3, target) ==
               RoundUpSize(sizeof(std::uint64_t), alignof(std::uint8_t*)));
-static_assert(sizeof(AuthenticatedBufferReferenceV2) ==
-              RoundUpSize(offsetof(AuthenticatedBufferReferenceV2, target) +
-                              sizeof(AuthenticatedBufferReferenceV2::target),
-                          alignof(AuthenticatedBufferReferenceV2)));
-static_assert(alignof(AuthenticatedBufferReferenceV2) ==
+static_assert(sizeof(AuthenticatedBufferReferenceV3) ==
+              RoundUpSize(offsetof(AuthenticatedBufferReferenceV3, target) +
+                              sizeof(AuthenticatedBufferReferenceV3::target),
+                          alignof(AuthenticatedBufferReferenceV3)));
+static_assert(alignof(AuthenticatedBufferReferenceV3) ==
               MaxSize(alignof(std::uint64_t), alignof(std::uint8_t*)));
-static_assert(offsetof(AuthenticatedStateReferenceV2, cookie) == 0);
-static_assert(offsetof(AuthenticatedStateReferenceV2, status) ==
-              RoundUpSize(sizeof(std::uint64_t), alignof(std::uint64_t)));
-static_assert(sizeof(AuthenticatedStateReferenceV2) ==
-              RoundUpSize(offsetof(AuthenticatedStateReferenceV2, status) +
-                              sizeof(AuthenticatedStateReferenceV2::status),
-                          alignof(AuthenticatedStateReferenceV2)));
-static_assert(alignof(AuthenticatedStateReferenceV2) == alignof(std::uint64_t));
-static_assert(offsetof(StringRuntimeDescriptorV2, version) == 0);
-static_assert(offsetof(StringRuntimeDescriptorV2, flags) == sizeof(std::uint32_t));
-static_assert(offsetof(StringRuntimeDescriptorV2, length) == sizeof(std::uint64_t));
-static_assert(offsetof(StringRuntimeDescriptorV2, module_id) ==
-              offsetof(StringRuntimeDescriptorV2, length) + sizeof(StringRuntimeDescriptorV2::length));
-static_assert(offsetof(StringRuntimeDescriptorV2, function_id) ==
-              offsetof(StringRuntimeDescriptorV2, module_id) + sizeof(StringRuntimeDescriptorV2::module_id));
-static_assert(offsetof(StringRuntimeDescriptorV2, site_id) ==
-              offsetof(StringRuntimeDescriptorV2, function_id) + sizeof(StringRuntimeDescriptorV2::function_id));
-static_assert(offsetof(StringRuntimeDescriptorV2, binding_id) ==
-              offsetof(StringRuntimeDescriptorV2, site_id) + sizeof(StringRuntimeDescriptorV2::site_id));
-static_assert(offsetof(StringRuntimeDescriptorV2, destination_cookie) ==
-              offsetof(StringRuntimeDescriptorV2, binding_id) +
-                  sizeof(StringRuntimeDescriptorV2::binding_id));
-static_assert(offsetof(StringRuntimeDescriptorV2, ciphertext_cookie) ==
-              offsetof(StringRuntimeDescriptorV2, destination_cookie) +
-                  sizeof(StringRuntimeDescriptorV2::destination_cookie));
-static_assert(offsetof(StringRuntimeDescriptorV2, build_key_cookie) ==
-              offsetof(StringRuntimeDescriptorV2, ciphertext_cookie) +
-                  sizeof(StringRuntimeDescriptorV2::ciphertext_cookie));
-static_assert(offsetof(StringRuntimeDescriptorV2, state_cookie) ==
-              offsetof(StringRuntimeDescriptorV2, build_key_cookie) +
-                  sizeof(StringRuntimeDescriptorV2::build_key_cookie));
-static_assert(offsetof(StringRuntimeDescriptorV2, nonce) ==
-              offsetof(StringRuntimeDescriptorV2, state_cookie) +
-                  sizeof(StringRuntimeDescriptorV2::state_cookie));
-static_assert(offsetof(StringRuntimeDescriptorV2, tag) ==
-              offsetof(StringRuntimeDescriptorV2, nonce) + sizeof(StringRuntimeDescriptorV2::nonce));
-static_assert(offsetof(StringRuntimeDescriptorV2, destination) ==
-              offsetof(StringRuntimeDescriptorV2, tag) + sizeof(StringRuntimeDescriptorV2::tag));
-static_assert(offsetof(StringRuntimeDescriptorV2, destination) % alignof(AuthenticatedBufferReferenceV2*) ==
-              0);
-static_assert(offsetof(StringRuntimeDescriptorV2, ciphertext) ==
-              offsetof(StringRuntimeDescriptorV2, destination) +
-                  sizeof(StringRuntimeDescriptorV2::destination));
-static_assert(offsetof(StringRuntimeDescriptorV2, build_key) ==
-              offsetof(StringRuntimeDescriptorV2, ciphertext) +
-                  sizeof(StringRuntimeDescriptorV2::ciphertext));
-static_assert(offsetof(StringRuntimeDescriptorV2, state) ==
-              offsetof(StringRuntimeDescriptorV2, build_key) +
-                  sizeof(StringRuntimeDescriptorV2::build_key));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, version) == 0);
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, flags) == sizeof(std::uint32_t));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, length) == sizeof(std::uint64_t));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, module_id) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, length) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::length));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, pool_id) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, module_id) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::module_id));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, binding_id) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, pool_id) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::pool_id));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, destination_cookie) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, binding_id) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::binding_id));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, ciphertext_cookie) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, destination_cookie) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::destination_cookie));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, build_key_cookie) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, ciphertext_cookie) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::ciphertext_cookie));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, state_cookie) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, build_key_cookie) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::build_key_cookie));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, nonce) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, state_cookie) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::state_cookie));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, tag) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, nonce) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::nonce));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, destination) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, tag) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::tag));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, destination) %
-                  alignof(AuthenticatedBufferReferenceV2*) ==
-              0);
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, ciphertext) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, destination) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::destination));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, build_key) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, ciphertext) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::ciphertext));
-static_assert(offsetof(ConstantPoolRuntimeDescriptorV2, state) ==
-              offsetof(ConstantPoolRuntimeDescriptorV2, build_key) +
-                  sizeof(ConstantPoolRuntimeDescriptorV2::build_key));
+static_assert(offsetof(AuthenticatedStateReferenceV3, cookie) == 0);
+static_assert(offsetof(AuthenticatedStateReferenceV3, status) == sizeof(std::uint64_t));
+static_assert(offsetof(AuthenticatedStateReferenceV3, completion) == 2 * sizeof(std::uint64_t));
+static_assert(sizeof(AuthenticatedStateReferenceV3) == 3 * sizeof(std::uint64_t));
+static_assert(alignof(AuthenticatedStateReferenceV3) == alignof(std::uint64_t));
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, descriptor) == 0);
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, destination_ref) ==
+              sizeof(void*));
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, destination_target) ==
+              2 * sizeof(void*));
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, destination_capacity) ==
+              3 * sizeof(void*));
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, ciphertext_ref) ==
+              3 * sizeof(void*) + sizeof(std::uint64_t));
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, ciphertext_target) ==
+              4 * sizeof(void*) + sizeof(std::uint64_t));
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, ciphertext_capacity) ==
+              5 * sizeof(void*) + sizeof(std::uint64_t));
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, build_key_ref) ==
+              5 * sizeof(void*) + 2 * sizeof(std::uint64_t));
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, build_key_target) ==
+              6 * sizeof(void*) + 2 * sizeof(std::uint64_t));
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, build_key_capacity) ==
+              7 * sizeof(void*) + 2 * sizeof(std::uint64_t));
+static_assert(offsetof(AuthenticatedDecodeTopologyV3, state_ref) ==
+              7 * sizeof(void*) + 3 * sizeof(std::uint64_t));
+
+static_assert(offsetof(StringRuntimeDescriptorV3, destination_capacity) ==
+              offsetof(StringRuntimeDescriptorV3, state_cookie) +
+                  sizeof(StringRuntimeDescriptorV3::state_cookie));
+static_assert(offsetof(StringRuntimeDescriptorV3, ciphertext_capacity) ==
+              offsetof(StringRuntimeDescriptorV3, destination_capacity) +
+                  sizeof(StringRuntimeDescriptorV3::destination_capacity));
+static_assert(offsetof(StringRuntimeDescriptorV3, build_key_capacity) ==
+              offsetof(StringRuntimeDescriptorV3, ciphertext_capacity) +
+                  sizeof(StringRuntimeDescriptorV3::ciphertext_capacity));
+static_assert(offsetof(StringRuntimeDescriptorV3, nonce) ==
+              offsetof(StringRuntimeDescriptorV3, build_key_capacity) +
+                  sizeof(StringRuntimeDescriptorV3::build_key_capacity));
+static_assert(offsetof(StringRuntimeDescriptorV3, tag) ==
+              offsetof(StringRuntimeDescriptorV3, nonce) + sizeof(StringRuntimeDescriptorV3::nonce));
+static_assert(offsetof(StringRuntimeDescriptorV3, destination) ==
+              offsetof(StringRuntimeDescriptorV3, tag) + sizeof(StringRuntimeDescriptorV3::tag));
+static_assert(offsetof(StringRuntimeDescriptorV3, ciphertext) ==
+              offsetof(StringRuntimeDescriptorV3, destination) +
+                  sizeof(StringRuntimeDescriptorV3::destination));
+static_assert(offsetof(StringRuntimeDescriptorV3, build_key) ==
+              offsetof(StringRuntimeDescriptorV3, ciphertext) +
+                  sizeof(StringRuntimeDescriptorV3::ciphertext));
+static_assert(offsetof(StringRuntimeDescriptorV3, state) ==
+              offsetof(StringRuntimeDescriptorV3, build_key) +
+                  sizeof(StringRuntimeDescriptorV3::build_key));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, destination_capacity) ==
+              offsetof(ConstantPoolRuntimeDescriptorV3, state_cookie) +
+                  sizeof(ConstantPoolRuntimeDescriptorV3::state_cookie));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, ciphertext_capacity) ==
+              offsetof(ConstantPoolRuntimeDescriptorV3, destination_capacity) +
+                  sizeof(ConstantPoolRuntimeDescriptorV3::destination_capacity));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, build_key_capacity) ==
+              offsetof(ConstantPoolRuntimeDescriptorV3, ciphertext_capacity) +
+                  sizeof(ConstantPoolRuntimeDescriptorV3::ciphertext_capacity));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, nonce) ==
+              offsetof(ConstantPoolRuntimeDescriptorV3, build_key_capacity) +
+                  sizeof(ConstantPoolRuntimeDescriptorV3::build_key_capacity));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, tag) ==
+              offsetof(ConstantPoolRuntimeDescriptorV3, nonce) + sizeof(ConstantPoolRuntimeDescriptorV3::nonce));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, destination) ==
+              offsetof(ConstantPoolRuntimeDescriptorV3, tag) + sizeof(ConstantPoolRuntimeDescriptorV3::tag));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, ciphertext) ==
+              offsetof(ConstantPoolRuntimeDescriptorV3, destination) +
+                  sizeof(ConstantPoolRuntimeDescriptorV3::destination));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, build_key) ==
+              offsetof(ConstantPoolRuntimeDescriptorV3, ciphertext) +
+                  sizeof(ConstantPoolRuntimeDescriptorV3::ciphertext));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, state) ==
+              offsetof(ConstantPoolRuntimeDescriptorV3, build_key) +
+                  sizeof(ConstantPoolRuntimeDescriptorV3::build_key));
+static_assert(sizeof(AuthenticatedDecodeTopologyV3) == 8 * sizeof(void*) + 3 * sizeof(std::uint64_t));
+static_assert(alignof(AuthenticatedDecodeTopologyV3) ==
+              MaxSize(alignof(void*), alignof(std::uint64_t)));
+static_assert(offsetof(StringRuntimeDescriptorV3, version) == 0);
+static_assert(offsetof(StringRuntimeDescriptorV3, flags) == sizeof(std::uint32_t));
+static_assert(offsetof(StringRuntimeDescriptorV3, length) == 8);
+static_assert(offsetof(StringRuntimeDescriptorV3, module_id) == 16);
+static_assert(offsetof(StringRuntimeDescriptorV3, function_id) == 24);
+static_assert(offsetof(StringRuntimeDescriptorV3, site_id) == 32);
+static_assert(offsetof(StringRuntimeDescriptorV3, binding_id) == 40);
+static_assert(offsetof(StringRuntimeDescriptorV3, destination_cookie) == 48);
+static_assert(offsetof(StringRuntimeDescriptorV3, ciphertext_cookie) == 56);
+static_assert(offsetof(StringRuntimeDescriptorV3, build_key_cookie) == 64);
+static_assert(offsetof(StringRuntimeDescriptorV3, state_cookie) == 72);
+static_assert(offsetof(StringRuntimeDescriptorV3, destination_capacity) == 80);
+static_assert(offsetof(StringRuntimeDescriptorV3, ciphertext_capacity) == 88);
+static_assert(offsetof(StringRuntimeDescriptorV3, build_key_capacity) == 96);
+static_assert(offsetof(StringRuntimeDescriptorV3, nonce) == 104);
+static_assert(offsetof(StringRuntimeDescriptorV3, tag) == 120);
+static_assert(offsetof(StringRuntimeDescriptorV3, destination) == 136);
+static_assert(offsetof(StringRuntimeDescriptorV3, ciphertext) == 144);
+static_assert(offsetof(StringRuntimeDescriptorV3, build_key) == 152);
+static_assert(offsetof(StringRuntimeDescriptorV3, state) == 160);
+static_assert(sizeof(StringRuntimeDescriptorV3) == 168);
+static_assert(alignof(StringRuntimeDescriptorV3) == alignof(std::uint64_t));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, version) == 0);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, flags) == sizeof(std::uint32_t));
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, length) == 8);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, module_id) == 16);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, pool_id) == 24);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, binding_id) == 32);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, destination_cookie) == 40);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, ciphertext_cookie) == 48);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, build_key_cookie) == 56);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, state_cookie) == 64);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, destination_capacity) == 72);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, ciphertext_capacity) == 80);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, build_key_capacity) == 88);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, nonce) == 96);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, tag) == 112);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, destination) == 128);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, ciphertext) == 136);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, build_key) == 144);
+static_assert(offsetof(ConstantPoolRuntimeDescriptorV3, state) == 152);
+static_assert(sizeof(ConstantPoolRuntimeDescriptorV3) == 160);
+static_assert(alignof(ConstantPoolRuntimeDescriptorV3) == alignof(std::uint64_t));
+
+inline constexpr std::array<std::uint8_t, 2> kDomainFunction = {'f', 'n'};
+inline constexpr std::array<std::uint8_t, 5> kDomainBuild = {'b', 'u', 'i', 'l', 'd'};
+inline constexpr std::array<std::uint8_t, 6> kDomainString = {'s', 't', 'r', 'i', 'n', 'g'};
+inline constexpr std::array<std::uint8_t, 5> kDomainConstant = {'c', 'o', 'n', 's', 't'};
+inline constexpr std::array<std::uint8_t, 3> kDomainEnc = {'e', 'n', 'c'};
+inline constexpr std::array<std::uint8_t, 3> kDomainMac = {'m', 'a', 'c'};
+inline constexpr std::array<std::uint8_t, 5> kDomainNonce = {'n', 'o', 'n', 'c', 'e'};
+inline constexpr std::array<std::uint8_t, 6> kDomainStream = {'s', 't', 'r', 'e', 'a', 'm'};
+inline constexpr std::array<std::uint8_t, 13> kDomainStringTagV3 = {
+    's', 't', 'r', 'i', 'n', 'g', '_', 't', 'a', 'g', '_', 'v', '3'};
+inline constexpr std::array<std::uint8_t, 17> kDomainConstantPoolTagV3 = {
+    'c', 'o', 'n', 's', 't', '_', 'p', 'o', 'o', 'l', '_', 't', 'a', 'g', '_', 'v', '3'};
+inline constexpr std::array<std::uint8_t, 17> kDomainStringBindingV3 = {
+    's', 't', 'r', 'i', 'n', 'g', '_', 'b', 'i', 'n', 'd', 'i', 'n', 'g', '_', 'v', '3'};
+inline constexpr std::array<std::uint8_t, 19> kDomainConstantBindingV3 = {
+    'c', 'o', 'n', 's', 't', 'a', 'n', 't', '_', 'b', 'i', 'n', 'd', 'i', 'n', 'g', '_', 'v', '3'};
+inline constexpr std::array<std::uint8_t, 19> kDomainReferenceCookieV3 = {
+    'r', 'e', 'f', 'e', 'r', 'e', 'n', 'c', 'e', '_', 'c', 'o', 'o', 'k', 'i', 'e', '_', 'v', '3'};
+inline constexpr std::array<std::uint8_t, 19> kDomainBuildKeyCookieV3 = {
+    'b', 'u', 'i', 'l', 'd', '_', 'k', 'e', 'y', '_', 'c', 'o', 'o', 'k', 'i', 'e', '_', 'v', '3'};
+inline constexpr std::array<std::uint8_t, 15> kDomainCacheStatusV3 = {
+    'c', 'a', 'c', 'h', 'e', '_', 's', 't', 'a', 't', 'u', 's', '_', 'v', '3'};
+inline constexpr std::array<std::uint8_t, 22> kDomainRuntimeStateTokenV3 = {
+    'r', 'u', 'n', 't', 'i', 'm', 'e', '_', 's', 't', 'a', 't', 'e', '_', 't', 'o', 'k', 'e', 'n', '_', 'v', '3'};
+inline constexpr std::array<std::uint8_t, 21> kDomainDecodedCompletionV3 = {
+    'd', 'e', 'c', 'o', 'd', 'e', 'd', '_', 'c', 'o', 'm', 'p', 'l', 'e', 't', 'i', 'o', 'n', '_', 'v', '3'};
+inline constexpr std::string_view kRuntimeStringDecodeSymbolV3 = OBF_RT_STRING_AUTH_DECODE_V3_STR;
+inline constexpr std::string_view kRuntimeConstantPoolDecodeSymbolV3 =
+    OBF_RT_CONSTANT_POOL_DECODE_V3_STR;
 
 inline std::uint32_t Load32(std::span<const std::uint8_t> input, std::size_t offset) {
   return static_cast<std::uint32_t>(input[offset]) |
@@ -503,7 +563,7 @@ inline std::uint64_t DeriveStringBindingId(std::uint64_t module_id,
                                            std::uint64_t site_id) {
   Blake2sState state;
   Blake2sInit(state, kBlake2sOutBytes);
-  Blake2sUpdateDomain(state, kDomainStringBindingV2);
+  Blake2sUpdateDomain(state, kDomainStringBindingV3);
   Blake2sUpdateU64(state, module_id);
   Blake2sUpdateU64(state, function_id);
   Blake2sUpdateU64(state, site_id);
@@ -514,89 +574,60 @@ inline std::uint64_t DeriveConstantPoolBindingId(std::uint64_t module_id,
                                                  std::uint64_t pool_id) {
   Blake2sState state;
   Blake2sInit(state, kBlake2sOutBytes);
-  Blake2sUpdateDomain(state, kDomainConstantBindingV2);
+  Blake2sUpdateDomain(state, kDomainConstantBindingV3);
   Blake2sUpdateU64(state, module_id);
   Blake2sUpdateU64(state, pool_id);
   return FinalizeDerivedWord(state, module_id, pool_id);
 }
 
-inline std::uint64_t DeriveReferenceCookie(std::span<const std::uint8_t> mac_key,
-                                           AuthDescriptorKind descriptor_kind,
-                                           std::uint64_t binding_id,
-                                           AuthReferenceRole role) {
+inline std::uint64_t DeriveReferenceCookieV3(std::span<const std::uint8_t> mac_key,
+                                             AuthDescriptorKind descriptor_kind,
+                                             std::uint64_t binding_id,
+                                             AuthReferenceRole role,
+                                             std::uint64_t capacity) {
   Blake2sState state;
   Blake2sInit(state, kBlake2sOutBytes, mac_key);
-  Blake2sUpdateDomain(state, kDomainReferenceCookieV2);
+  Blake2sUpdateDomain(state, kDomainReferenceCookieV3);
   Blake2sUpdateU32(state, static_cast<std::uint32_t>(descriptor_kind));
   Blake2sUpdateU64(state, binding_id);
   Blake2sUpdateU32(state, static_cast<std::uint32_t>(role));
-  return FinalizeDerivedWord(state, binding_id, static_cast<std::uint32_t>(role));
+  Blake2sUpdateU64(state, capacity);
+  return FinalizeDerivedWord(state, binding_id ^ capacity,
+                             static_cast<std::uint32_t>(role));
 }
 
-inline std::uint64_t DeriveBuildKeyCookie(std::span<const std::uint8_t> build_key,
-                                          AuthDescriptorKind descriptor_kind,
-                                          std::uint64_t binding_id) {
+inline std::uint64_t DeriveBuildKeyCookieV3(std::span<const std::uint8_t> build_key,
+                                            AuthDescriptorKind descriptor_kind,
+                                            std::uint64_t binding_id,
+                                            std::uint64_t capacity) {
   Blake2sState state;
   Blake2sInit(state, kBlake2sOutBytes, build_key);
-  Blake2sUpdateDomain(state, kDomainBuildKeyCookieV2);
+  Blake2sUpdateDomain(state, kDomainBuildKeyCookieV3);
   Blake2sUpdateU32(state, static_cast<std::uint32_t>(descriptor_kind));
   Blake2sUpdateU64(state, binding_id);
   Blake2sUpdateU32(state, static_cast<std::uint32_t>(AuthReferenceRole::build_key));
-  return FinalizeDerivedWord(state,
-                             binding_id,
+  Blake2sUpdateU64(state, capacity);
+  return FinalizeDerivedWord(state, binding_id ^ capacity,
                              static_cast<std::uint32_t>(AuthReferenceRole::build_key));
 }
 
-inline std::array<std::uint64_t, 3> DeriveCacheStatuses(std::span<const std::uint8_t> mac_key,
-                                                        AuthDescriptorKind descriptor_kind,
-                                                        std::uint64_t binding_id) {
+inline std::uint64_t DeriveCacheColdStatusV3(std::span<const std::uint8_t> mac_key,
+                                             AuthDescriptorKind descriptor_kind,
+                                             std::uint64_t binding_id,
+                                             std::uint64_t destination_capacity,
+                                             std::uint64_t ciphertext_capacity,
+                                             std::uint64_t build_key_capacity) {
   Blake2sState state;
   Blake2sInit(state, kBlake2sOutBytes, mac_key);
-  Blake2sUpdateDomain(state, kDomainCacheStatusV2);
+  Blake2sUpdateDomain(state, kDomainCacheStatusV3);
   Blake2sUpdateU32(state, static_cast<std::uint32_t>(descriptor_kind));
   Blake2sUpdateU64(state, binding_id);
-  Blake2sUpdateU32(state, 0);
-
-  std::array<std::uint64_t, 3> tokens{};
-  tokens[static_cast<std::size_t>(CacheStatusKind::cold)] =
-      FinalizeDerivedWord(state, binding_id, static_cast<std::uint32_t>(CacheStatusKind::cold));
-  tokens[static_cast<std::size_t>(CacheStatusKind::decoding)] = NormalizeDerivedWord(
-      tokens[static_cast<std::size_t>(CacheStatusKind::cold)] ^ 0x6a09e667f3bcc909ULL,
-      binding_id,
-      static_cast<std::uint32_t>(CacheStatusKind::decoding));
-  tokens[static_cast<std::size_t>(CacheStatusKind::decoded)] = NormalizeDerivedWord(
-      tokens[static_cast<std::size_t>(CacheStatusKind::cold)] ^ 0xbb67ae8584caa73bULL,
-      binding_id,
-      static_cast<std::uint32_t>(CacheStatusKind::decoded));
-
-  if (tokens[static_cast<std::size_t>(CacheStatusKind::decoding)] ==
-      tokens[static_cast<std::size_t>(CacheStatusKind::cold)]) {
-    tokens[static_cast<std::size_t>(CacheStatusKind::decoding)] ^= 0x3c6ef372fe94f82bULL;
-    tokens[static_cast<std::size_t>(CacheStatusKind::decoding)] = NormalizeDerivedWord(
-        tokens[static_cast<std::size_t>(CacheStatusKind::decoding)],
-        binding_id,
-        static_cast<std::uint32_t>(CacheStatusKind::decoding));
-  }
-
-  if (tokens[static_cast<std::size_t>(CacheStatusKind::decoded)] ==
-          tokens[static_cast<std::size_t>(CacheStatusKind::cold)] ||
-      tokens[static_cast<std::size_t>(CacheStatusKind::decoded)] ==
-          tokens[static_cast<std::size_t>(CacheStatusKind::decoding)]) {
-    tokens[static_cast<std::size_t>(CacheStatusKind::decoded)] ^= 0x3c6ef372fe94f82bULL;
-    tokens[static_cast<std::size_t>(CacheStatusKind::decoded)] = NormalizeDerivedWord(
-        tokens[static_cast<std::size_t>(CacheStatusKind::decoded)],
-        binding_id,
-        static_cast<std::uint32_t>(CacheStatusKind::decoded));
-  }
-
-  return tokens;
-}
-
-inline std::uint64_t DeriveCacheStatus(std::span<const std::uint8_t> mac_key,
-                                       AuthDescriptorKind descriptor_kind,
-                                       std::uint64_t binding_id,
-                                       CacheStatusKind status) {
-  return DeriveCacheStatuses(mac_key, descriptor_kind, binding_id)[static_cast<std::size_t>(status)];
+  Blake2sUpdateU64(state, destination_capacity);
+  Blake2sUpdateU64(state, ciphertext_capacity);
+  Blake2sUpdateU64(state, build_key_capacity);
+  Blake2sUpdateU32(state, static_cast<std::uint32_t>(CacheStatusKind::cold));
+  return FinalizeDerivedWord(state, binding_id ^ destination_capacity,
+                             static_cast<std::uint32_t>(CacheStatusKind::cold));
 }
 
 inline Blake2sDigest Prf(std::span<const std::uint8_t> key, std::span<const std::uint8_t> data) {
@@ -675,11 +706,11 @@ inline void XorStringPayload(std::span<std::uint8_t> output,
 }
 
 inline StringTag ComputeStringTag(std::span<const std::uint8_t> mac_key,
-                                  const StringAuthMetadata& metadata,
+                                  const StringAuthMetadataV3& metadata,
                                   std::span<const std::uint8_t> ciphertext) {
   Blake2sState state;
   Blake2sInit(state, kBlake2sOutBytes, mac_key);
-  Blake2sUpdateDomain(state, kDomainStringTag);
+  Blake2sUpdateDomain(state, kDomainStringTagV3);
   Blake2sUpdateU32(state, metadata.version);
   Blake2sUpdateU32(state, metadata.flags);
   Blake2sUpdateU64(state, metadata.length);
@@ -691,6 +722,9 @@ inline StringTag ComputeStringTag(std::span<const std::uint8_t> mac_key,
   Blake2sUpdateU64(state, metadata.ciphertext_cookie);
   Blake2sUpdateU64(state, metadata.build_key_cookie);
   Blake2sUpdateU64(state, metadata.state_cookie);
+  Blake2sUpdateU64(state, metadata.destination_capacity);
+  Blake2sUpdateU64(state, metadata.ciphertext_capacity);
+  Blake2sUpdateU64(state, metadata.build_key_capacity);
   Blake2sUpdate(state, metadata.nonce);
   Blake2sUpdate(state, ciphertext);
   const Blake2sDigest digest = Blake2sFinal(state);
@@ -701,11 +735,11 @@ inline StringTag ComputeStringTag(std::span<const std::uint8_t> mac_key,
 }
 
 inline StringTag ComputeConstantPoolTag(std::span<const std::uint8_t> mac_key,
-                                        const ConstantPoolAuthMetadata& metadata,
+                                        const ConstantPoolAuthMetadataV3& metadata,
                                         std::span<const std::uint8_t> ciphertext) {
   Blake2sState state;
   Blake2sInit(state, kBlake2sOutBytes, mac_key);
-  Blake2sUpdateDomain(state, kDomainConstantPoolTag);
+  Blake2sUpdateDomain(state, kDomainConstantPoolTagV3);
   Blake2sUpdateU32(state, metadata.version);
   Blake2sUpdateU32(state, metadata.flags);
   Blake2sUpdateU64(state, metadata.length);
@@ -716,6 +750,9 @@ inline StringTag ComputeConstantPoolTag(std::span<const std::uint8_t> mac_key,
   Blake2sUpdateU64(state, metadata.ciphertext_cookie);
   Blake2sUpdateU64(state, metadata.build_key_cookie);
   Blake2sUpdateU64(state, metadata.state_cookie);
+  Blake2sUpdateU64(state, metadata.destination_capacity);
+  Blake2sUpdateU64(state, metadata.ciphertext_capacity);
+  Blake2sUpdateU64(state, metadata.build_key_capacity);
   Blake2sUpdate(state, metadata.nonce);
   Blake2sUpdate(state, ciphertext);
   const Blake2sDigest digest = Blake2sFinal(state);

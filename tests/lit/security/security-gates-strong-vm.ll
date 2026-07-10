@@ -130,7 +130,7 @@ exit:
 ; STRING: private unnamed_addr global [6 x i8] zeroinitializer
 ; STRING: private unnamed_addr constant [1 x ptr] [ptr
 ; STRING: define internal void @{{.*}}() {
-; STRING: call ptr @rt_core_sd2(
+; STRING: call ptr @rt_core_sd3(
 
 ; VARARGS-PLAIN: LLVM ERROR: strong_vm invariant violation: function has_varargs was not virtualized
 ; VARARGS-PLAIN: reason_tag=varargs_unsupported

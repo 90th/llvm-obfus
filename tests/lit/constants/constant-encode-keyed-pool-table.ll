@@ -25,11 +25,12 @@ entry:
 ; TABLE-DAG: @__obf_const_ciphertext_ref_
 ; TABLE-DAG: @__obf_const_build_key_ref_
 ; TABLE-DAG: @__obf_const_state_ref_
-; TABLE-DAG: @__obf_const_desc_{{.*}} = internal constant { i32, i32, i64, i64, i64, i64, i64, i64, i64, i64, [16 x i8], [16 x i8], ptr, ptr, ptr, ptr } { i32 2, i32 1
+; TABLE-DAG: @__obf_const_desc_{{.*}} = internal constant { i32, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, [16 x i8], [16 x i8], ptr, ptr, ptr, ptr } { i32 3, i32 1
+; TABLE-DAG: @__obf_const_topology_{{.*}} = internal constant { ptr, ptr, ptr, i64, ptr, ptr, i64, ptr, ptr, i64, ptr }
 ; TABLE-LABEL: define i32 @table_user(i32 %idx) {
 ; TABLE: %obf.const.pool.base = call ptr @__obf_const_pool_decode_
 ; TABLE: %slot = getelementptr inbounds [3 x i32], ptr %obf.const.pool.base, i64 0, i64 %wide
 ; TABLE: %value = load i32, ptr %slot, align 4
 ; TABLE-LABEL: define internal ptr @__obf_const_pool_decode_
-; TABLE: call ptr @rt_core_cpd2(ptr @__obf_const_desc_{{.*}}, i64 {{-?[0-9]+}}, i64 {{-?[0-9]+}})
+; TABLE: call ptr @rt_core_cpd3(ptr @__obf_const_desc_{{.*}}, i64 {{-?[0-9]+}}, i64 {{-?[0-9]+}}, ptr @__obf_const_topology_{{.*}})
 ; TABLE-NOT: %obf.const.mask =
