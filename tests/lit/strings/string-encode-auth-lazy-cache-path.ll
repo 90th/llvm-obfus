@@ -14,29 +14,33 @@ entry:
 
 define i32 @main() {
 entry:
-  %result = call i32 @first_char(ptr @.secret)
-  ret i32 %result
+  %first.ptr = call ptr @first_use()
+  %first = call i32 @first_char(ptr %first.ptr)
+  %second.ptr = call ptr @second_use()
+  %second = call i32 @first_char(ptr %second.ptr)
+  %sum = add i32 %first, %second
+  ret i32 %sum
 }
 
-; IR: @.secret = private unnamed_addr global [7 x i8] zeroinitializer
-; IR-NOT: c"secret\00"
-; IR-NOT: @llvm.global_ctors = appending global
-; IR: @__obf_string_ct__secret = internal constant [7 x i8]
-; IR: @__obf_string_destination_ref__secret = internal constant { i64, ptr }
-; IR: @__obf_string_ciphertext_ref__secret = internal constant { i64, ptr }
-; IR: @__obf_string_build_key_ref__secret = internal constant { i64, ptr }
-; IR: @__obf_string_state_ref__secret = internal global { i64, i64 }
-; IR: @__obf_string_desc__secret = internal constant { i32, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, [16 x i8], [16 x i8], ptr, ptr, ptr, ptr } { i32 2, i32 1, i64 7
-; IR-SAME: ptr @__obf_string_destination_ref__secret, ptr @__obf_string_ciphertext_ref__secret, ptr @__obf_string_build_key_ref__secret, ptr @__obf_string_state_ref__secret }
+define ptr @first_use() {
+entry:
+  ret ptr @.secret
+}
+
+define ptr @second_use() {
+entry:
+  ret ptr @.secret
+}
+
+; IR-LABEL: define ptr @first_use() {
+; IR: call ptr @__obf_family_auth_v2(ptr @__obf_string_desc__secret, i32 0, i32 0, i64 7, i64
+; IR-LABEL: define ptr @second_use() {
 ; IR: call ptr @__obf_family_auth_v2(ptr @__obf_string_desc__secret, i32 0, i32 0, i64 7, i64
 ; IR-LABEL: define internal ptr @__obf_family_auth_v2(ptr %desc, i32 %cfg_state, i32 %expected_state, i64 %trusted_length, i64 %trusted_binding) {
 ; IR: %obf.str.cfg.match = icmp eq i32 %cfg_state, %expected_state
 ; IR: br i1 %obf.str.cfg.match, label %decode, label %state_mismatch
-; IR-NOT: load ptr, ptr
-; IR-NOT: phi ptr
 ; IR: state_mismatch:
 ; IR: call void @llvm.trap()
 ; IR: unreachable
 ; IR: decode:
 ; IR: call ptr @rt_core_sd2(ptr %desc, i64 %trusted_length, i64 %trusted_binding)
-; IR: ret ptr

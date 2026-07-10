@@ -35,4 +35,5 @@ fallback:
 ; CHECK: call void @llvm.trap()
 ; CHECK: unreachable
 ; CHECK: [[MATCH_LABEL]]:
+; CHECK-NOT: phi ptr
 ; CHECK: call ptr @rt_core_sd2(ptr [[DESC]], i64 [[LENGTH]], i64 [[BINDING]])

@@ -176,8 +176,10 @@ def mutate_cache_status_line(line: str) -> str:
     if match is None:
         raise SystemExit("failed to locate state-reference status field")
     status = parse_u64(match.group("status"))
-    mutated = (status ^ 0x6A09E667F3BCC909) & MASK64
-    if mutated == 0:
+    mutated = (status ^ 0x3C6EF372FE94F82B) & MASK64
+    if mutated in (0, status):
+        mutated = (status ^ 0x510E527FADE682D1) & MASK64
+    if mutated in (0, status):
         mutated = 1
     return f"{match.group('prefix')}{to_i64_string(mutated)}{match.group('suffix')}"
 

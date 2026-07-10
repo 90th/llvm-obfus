@@ -18,15 +18,15 @@ entry:
   ret i32 %ret
 }
 
-; CHECK: @__obf_const_pool_
-; CHECK: @__obf_const_desc_
-; CHECK: @__obf_const_destination_ref_
-; CHECK: @__obf_const_ciphertext_ref_
-; CHECK: @__obf_const_build_key_ref_
-; CHECK: @__obf_const_state_ref_
+; CHECK-DAG: @__obf_const_pool_
+; CHECK-DAG: @__obf_const_destination_ref_
+; CHECK-DAG: @__obf_const_ciphertext_ref_
+; CHECK-DAG: @__obf_const_build_key_ref_
+; CHECK-DAG: @__obf_const_state_ref_
+; CHECK-DAG: @__obf_const_desc_{{.*}} = internal constant { i32, i32, i64, i64, i64, i64, i64, i64, i64, i64, [16 x i8], [16 x i8], ptr, ptr, ptr, ptr } { i32 2, i32 1
 ; CHECK-LABEL: define i32 @repeated(i32 %x) {
 ; CHECK: %obf.const.pool.base = call ptr @__obf_const_pool_decode_
 ; CHECK: %obf.const.pool.load = load i32, ptr %obf.const.pool.ptr
 ; CHECK-LABEL: define internal ptr @__obf_const_pool_decode_
-; CHECK: call ptr @rt_core_cpd2(ptr @__obf_const_desc_
+; CHECK: call ptr @rt_core_cpd2(ptr @__obf_const_desc_{{.*}}, i64 {{-?[0-9]+}}, i64 {{-?[0-9]+}})
 ; CHECK-NOT: %obf.const.mask =

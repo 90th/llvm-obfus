@@ -34,6 +34,8 @@ right:
 ; CHECK: define internal ptr @[[STRHELPER]](ptr %desc, i32 %cfg_state, i32 %expected_state, i64 %trusted_length, i64 %trusted_binding) {
 ; CHECK: %obf.str.cfg.match = icmp eq i32 %cfg_state, %expected_state
 ; CHECK: br i1 %obf.str.cfg.match, label %decode, label %state_mismatch
+; CHECK-NOT: load ptr, ptr
+; CHECK-NOT: phi ptr
 ; CHECK: state_mismatch:
 ; CHECK: call void @llvm.trap()
 ; CHECK: unreachable

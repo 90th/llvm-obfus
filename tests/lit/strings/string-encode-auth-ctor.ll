@@ -31,7 +31,8 @@ entry:
 ; IR: @__obf_string_ciphertext_ref__secret = internal constant { i64, ptr }
 ; IR: @__obf_string_build_key_ref__secret = internal constant { i64, ptr }
 ; IR: @__obf_string_state_ref__secret = internal global { i64, i64 }
-; IR: @__obf_string_desc__secret = internal constant
+; IR: @__obf_string_desc__secret = internal constant { i32, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, [16 x i8], [16 x i8], ptr, ptr, ptr, ptr } { i32 2, i32 1, i64 7
+; IR-SAME: ptr @__obf_string_destination_ref__secret, ptr @__obf_string_ciphertext_ref__secret, ptr @__obf_string_build_key_ref__secret, ptr @__obf_string_state_ref__secret }
 ; IR: @llvm.global_ctors = appending global
 ; IR: define internal void @__obf_decode__secret() {
 ; IR: call ptr @rt_core_sd2(ptr @__obf_string_desc__secret, i64 7, i64
