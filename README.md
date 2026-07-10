@@ -34,6 +34,7 @@ The design goal is simple: make static recovery materially harder while staying 
 - `authenticated_mode` enables the keyed and integrity-checked runtime decode path.
 - The runtime support lives in `runtime/string_auth_runtime.c` and handles keyed string and constant-pool recovery.
 - Lazy decode, eager decode, constructor fallback, and forwarded-pointer cases are handled in the transform.
+- Short compare-only, non-escaping authenticated strings decode through `rt_core_sd3` into per-use stack scratch and are volatile-zeroed after the compare; escaping/shared/forwarded/weakly proven uses retain lazy/ctor stable storage.
 
 ### Constant Pooling
 
@@ -384,7 +385,7 @@ cmake --build build --target obf-benchmarks obf-seed-diversity obf-unit-tests ob
 ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests"
 ```
 
-The lit suite covers 120 tests across MBA engine shapes, opaque predicates, bogus control flow, control flattening, opaque GEP, constant encoding (inline and keyed-pool), string encoding (lazy, eager, auth), indirect dispatch, VM lowering, VM handler and dispatcher polymorphism, seed determinism, safe pipeline ordering, security gates, and artifact cleanup. Every test passes `opt -passes=verify`, FileCheck, and `lli` execution validation. An InstCombine collapse audit confirms runtime entropy anchors prevent the simplifier from folding polynomial zeros or opaque predicates.
+The lit suite covers 160 tests across MBA engine shapes, opaque predicates, bogus control flow, control flattening, opaque GEP, constant encoding (inline and keyed-pool), string encoding (lazy, eager, auth), indirect dispatch, VM lowering, VM handler and dispatcher polymorphism, seed determinism, safe pipeline ordering, security gates, and artifact cleanup. Every test passes `opt -passes=verify`, FileCheck, and `lli` execution validation. An InstCombine collapse audit confirms runtime entropy anchors prevent the simplifier from folding polynomial zeros or opaque predicates.
 
 ## Repository Layout
 

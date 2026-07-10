@@ -40,6 +40,7 @@ enum class string_helper_shape {
   lazy_counter_chunked_v2,
   lazy_cached_pointer_v3,
   lazy_auth_runtime_v3,
+  authenticated_ephemeral_stack_decode,
 };
 
 enum class string_key_schedule_kind {

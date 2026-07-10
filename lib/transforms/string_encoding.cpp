@@ -395,7 +395,9 @@ classified_string_use classify_instruction_use(llvm::Instruction& instruction,
     use.kind = is_compare_like_call(*call) ? string_use_kind::compare_call_operand
                                            : string_use_kind::call_argument;
     use.rewriteable = !call->isInlineAsm();
-    use.inline_candidate = use.kind == string_use_kind::compare_call_operand;
+    use.inline_candidate = use.kind == string_use_kind::compare_call_operand &&
+                           !call->isInlineAsm() && !instruction.isTerminator() &&
+                           instruction.getNextNode() != nullptr;
     return use;
   }
 
@@ -751,6 +753,7 @@ string_key_schedule_kind select_key_schedule(string_helper_shape shape) {
   switch (shape) {
     case string_helper_shape::ctor_auth_runtime_v3:
     case string_helper_shape::lazy_auth_runtime_v3:
+    case string_helper_shape::authenticated_ephemeral_stack_decode:
       return string_key_schedule_kind::blake2s_keyed_auth_v3;
     case string_helper_shape::lazy_flag_unrolled_v0:
     case string_helper_shape::lazy_flag_reverse_v1:
@@ -792,6 +795,19 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     plan.inline_uses = candidate.summary.protected_uses;
   };
 
+  const auto select_authenticated_ephemeral_stack_decode = [&]() {
+    plan.result.applied = true;
+    plan.result.mode = string_encoding_mode::inline_stack_decode;
+    plan.result.strategy_kind = string_strategy_kind::inline_stack_decode;
+    plan.result.helper_shape = string_helper_shape::authenticated_ephemeral_stack_decode;
+    plan.result.key_schedule = string_key_schedule_kind::blake2s_keyed_auth_v3;
+    plan.result.merge_group = -1;
+    plan.result.rewritten_use_count = candidate.summary.protected_uses.size();
+    plan.result.detail =
+        std::to_string(plan.result.rewritten_use_count) + " authenticated ephemeral stack decode use(s)";
+    plan.inline_uses = candidate.summary.protected_uses;
+  };
+
   const auto skip_strong_vm_global_plaintext = [&](llvm::StringRef detail) {
     plan.result.detail = detail.str();
     plan.result.fallback_reason = "strong_vm_no_global_plaintext";
@@ -814,9 +830,13 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
       is_strong_vm_candidate && candidate.summary.has_forwarded_pointer_load &&
       ((candidate.global != nullptr && has_generated_vm_forwarding_use(*candidate.global)) ||
        has_generated_vm_owner(candidate));
-  if (!authenticated_mode && is_strong_vm_candidate &&
+  if (is_strong_vm_candidate &&
       should_inline_stack_decode(*candidate.global, candidate.summary)) {
-    select_inline_stack_decode();
+    if (authenticated_mode) {
+      select_authenticated_ephemeral_stack_decode();
+    } else {
+      select_inline_stack_decode();
+    }
     return plan;
   }
 
@@ -869,8 +889,12 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     return plan;
   }
 
-  if (!authenticated_mode && should_inline_stack_decode(*candidate.global, candidate.summary)) {
-    select_inline_stack_decode();
+  if (should_inline_stack_decode(*candidate.global, candidate.summary)) {
+    if (authenticated_mode) {
+      select_authenticated_ephemeral_stack_decode();
+    } else {
+      select_inline_stack_decode();
+    }
     return plan;
   }
 
@@ -2138,17 +2162,17 @@ void emit_stack_decode_stores(llvm::IRBuilder<>& builder,
   }
 }
 
-void emit_stack_zero_stores(llvm::IRBuilder<>& builder, llvm::AllocaInst& buffer) {
+void emit_volatile_zero_stores(llvm::IRBuilder<>& builder, llvm::AllocaInst& buffer) {
+  llvm::Module* module = builder.GetInsertBlock()->getModule();
+  const llvm::DataLayout& dl = module->getDataLayout();
+  std::uint64_t size = dl.getTypeAllocSize(buffer.getAllocatedType());
   llvm::LLVMContext& context = builder.getContext();
-  llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
   llvm::Type* i8_type = llvm::Type::getInt8Ty(context);
-  const auto* array_type = llvm::cast<llvm::ArrayType>(buffer.getAllocatedType());
-  for (std::size_t index = 0; index < array_type->getNumElements(); ++index) {
+  llvm::Value* ptr = builder.CreatePointerCast(&buffer, llvm::PointerType::getUnqual(context));
+  for (std::uint64_t i = 0; i < size; ++i) {
     llvm::Value* dst = builder.CreateInBoundsGEP(
-        buffer.getAllocatedType(),
-        &buffer,
-        {llvm::ConstantInt::get(i64_type, 0), llvm::ConstantInt::get(i64_type, index)});
-    builder.CreateStore(llvm::ConstantInt::get(i8_type, 0), dst);
+        i8_type, ptr, llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), i));
+    builder.CreateStore(llvm::ConstantInt::get(i8_type, 0), dst)->setVolatile(true);
   }
 }
 
@@ -2192,11 +2216,204 @@ void rewrite_inline_stack_uses(llvm::GlobalVariable& global,
 
     if (llvm::Instruction* next = use.instruction->getNextNode()) {
       llvm::IRBuilder<> after_builder(next);
-      emit_stack_zero_stores(after_builder, *buffer);
+      emit_volatile_zero_stores(after_builder, *buffer);
     }
   }
 }
 
+
+void rewrite_authenticated_inline_stack_uses(llvm::GlobalVariable& global,
+                                             const string_strategy_plan& plan,
+                                             const authenticated_string_payload& payload,
+                                             llvm::GlobalVariable& ciphertext,
+                                             llvm::GlobalVariable& build_key) {
+  if (plan.inline_uses.empty()) { return; }
+
+  llvm::LLVMContext& context = global.getContext();
+  llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
+  llvm::Type* ptr_type = llvm::PointerType::getUnqual(context);
+  llvm::Type* i8_type = llvm::Type::getInt8Ty(context);
+
+  llvm::ArrayType* scratch_type = llvm::ArrayType::get(i8_type, payload.metadata.length);
+  llvm::StructType* dest_ref_type = llvm::StructType::get(i64_type, ptr_type);
+  llvm::StructType* cipher_ref_type = llvm::StructType::get(i64_type, ptr_type);
+  llvm::StructType* build_key_ref_type = llvm::StructType::get(i64_type, ptr_type);
+  llvm::StructType* state_ref_type = llvm::StructType::get(i64_type, i64_type, i64_type);
+  llvm::StructType* desc_type = get_authenticated_descriptor_type(context);
+  llvm::StructType* topo_type = get_authenticated_topology_type(context);
+
+  for (const classified_string_use& use : plan.inline_uses) {
+    if (use.instruction == nullptr) { continue; }
+    llvm::Instruction* next = use.instruction->getNextNode();
+    if (next == nullptr || use.instruction->isTerminator() || llvm::isa<llvm::InvokeInst>(use.instruction)) { continue; }
+
+    llvm::Function* function = use.instruction->getFunction();
+    if (function == nullptr) { continue; }
+    llvm::Module* module = function->getParent();
+    if (module == nullptr) { continue; }
+
+    llvm::AllocaInst* scratch = create_entry_buffer(*function, scratch_type, "obf.auth.scratch");
+    llvm::AllocaInst* dest_ref = create_entry_buffer(*function, dest_ref_type, "obf.auth.dref");
+    llvm::AllocaInst* cipher_ref = create_entry_buffer(*function, cipher_ref_type, "obf.auth.cref");
+    llvm::AllocaInst* build_ref = create_entry_buffer(*function, build_key_ref_type, "obf.auth.bref");
+    llvm::AllocaInst* state_ref = create_entry_buffer(*function, state_ref_type, "obf.auth.sref");
+    llvm::AllocaInst* desc = create_entry_buffer(*function, desc_type, "obf.auth.desc");
+    llvm::AllocaInst* topo = create_entry_buffer(*function, topo_type, "obf.auth.topo");
+
+    llvm::IRBuilder<> before_builder(use.instruction);
+
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.destination_cookie),
+        before_builder.CreateStructGEP(dest_ref_type, dest_ref, 0));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(scratch, ptr_type),
+        before_builder.CreateStructGEP(dest_ref_type, dest_ref, 1));
+
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.ciphertext_cookie),
+        before_builder.CreateStructGEP(cipher_ref_type, cipher_ref, 0));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(&ciphertext, ptr_type),
+        before_builder.CreateStructGEP(cipher_ref_type, cipher_ref, 1));
+
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.build_key_cookie),
+        before_builder.CreateStructGEP(build_key_ref_type, build_ref, 0));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(&build_key, ptr_type),
+        before_builder.CreateStructGEP(build_key_ref_type, build_ref, 1));
+
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.state_cookie),
+        before_builder.CreateStructGEP(state_ref_type, state_ref, 0));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.cold_status),
+        before_builder.CreateStructGEP(state_ref_type, state_ref, 1));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.cold_status),
+        before_builder.CreateStructGEP(state_ref_type, state_ref, 2));
+
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.version),
+        before_builder.CreateStructGEP(desc_type, desc, 0));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), payload.metadata.flags),
+        before_builder.CreateStructGEP(desc_type, desc, 1));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.length),
+        before_builder.CreateStructGEP(desc_type, desc, 2));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.module_id),
+        before_builder.CreateStructGEP(desc_type, desc, 3));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.function_id),
+        before_builder.CreateStructGEP(desc_type, desc, 4));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.site_id),
+        before_builder.CreateStructGEP(desc_type, desc, 5));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.binding_id),
+        before_builder.CreateStructGEP(desc_type, desc, 6));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.destination_cookie),
+        before_builder.CreateStructGEP(desc_type, desc, 7));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.ciphertext_cookie),
+        before_builder.CreateStructGEP(desc_type, desc, 8));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.build_key_cookie),
+        before_builder.CreateStructGEP(desc_type, desc, 9));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.state_cookie),
+        before_builder.CreateStructGEP(desc_type, desc, 10));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.destination_capacity),
+        before_builder.CreateStructGEP(desc_type, desc, 11));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.ciphertext_capacity),
+        before_builder.CreateStructGEP(desc_type, desc, 12));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.build_key_capacity),
+        before_builder.CreateStructGEP(desc_type, desc, 13));
+    before_builder.CreateStore(
+        support::create_byte_array_constant(context, payload.metadata.nonce),
+        before_builder.CreateStructGEP(desc_type, desc, 14));
+    before_builder.CreateStore(
+        support::create_byte_array_constant(context, payload.tag),
+        before_builder.CreateStructGEP(desc_type, desc, 15));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(dest_ref, ptr_type),
+        before_builder.CreateStructGEP(desc_type, desc, 16));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(cipher_ref, ptr_type),
+        before_builder.CreateStructGEP(desc_type, desc, 17));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(build_ref, ptr_type),
+        before_builder.CreateStructGEP(desc_type, desc, 18));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(state_ref, ptr_type),
+        before_builder.CreateStructGEP(desc_type, desc, 19));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(desc, ptr_type),
+        before_builder.CreateStructGEP(topo_type, topo, 0));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(dest_ref, ptr_type),
+        before_builder.CreateStructGEP(topo_type, topo, 1));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(scratch, ptr_type),
+        before_builder.CreateStructGEP(topo_type, topo, 2));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.destination_capacity),
+        before_builder.CreateStructGEP(topo_type, topo, 3));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(cipher_ref, ptr_type),
+        before_builder.CreateStructGEP(topo_type, topo, 4));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(&ciphertext, ptr_type),
+        before_builder.CreateStructGEP(topo_type, topo, 5));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.ciphertext_capacity),
+        before_builder.CreateStructGEP(topo_type, topo, 6));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(build_ref, ptr_type),
+        before_builder.CreateStructGEP(topo_type, topo, 7));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(&build_key, ptr_type),
+        before_builder.CreateStructGEP(topo_type, topo, 8));
+    before_builder.CreateStore(
+        llvm::ConstantInt::get(i64_type, payload.metadata.build_key_capacity),
+        before_builder.CreateStructGEP(topo_type, topo, 9));
+    before_builder.CreateStore(
+        before_builder.CreatePointerCast(state_ref, ptr_type),
+        before_builder.CreateStructGEP(topo_type, topo, 10));
+
+    llvm::Value* decoded_ptr = before_builder.CreateCall(
+        get_authenticated_runtime_decoder(*module),
+        {before_builder.CreatePointerCast(desc, ptr_type),
+         llvm::ConstantInt::get(i64_type, payload.metadata.length),
+         llvm::ConstantInt::get(i64_type, payload.metadata.binding_id),
+         before_builder.CreatePointerCast(topo, ptr_type)});
+
+    use.instruction->setOperand(use.operand_index, decoded_ptr);
+
+    if (llvm::Instruction* next = use.instruction->getNextNode()) {
+      llvm::IRBuilder<> after_builder(next);
+      emit_volatile_zero_stores(after_builder, *scratch);
+      emit_volatile_zero_stores(after_builder, *dest_ref);
+      emit_volatile_zero_stores(after_builder, *cipher_ref);
+      emit_volatile_zero_stores(after_builder, *build_ref);
+      emit_volatile_zero_stores(after_builder, *state_ref);
+      emit_volatile_zero_stores(after_builder, *desc);
+      emit_volatile_zero_stores(after_builder, *topo);
+    }
+  }
+
+  if (!global.use_empty()) {
+    llvm::report_fatal_error(
+        "authenticated ephemeral string rewrite left an unexpected plaintext use");
+  }
+  global.eraseFromParent();
+}
 llvm::SmallVector<llvm::GlobalVariable*, 16> discover_string_candidates(llvm::Module& module) {
   llvm::SmallVector<llvm::GlobalVariable*, 16> globals;
   for (llvm::GlobalVariable& global : module.globals()) {
@@ -2369,6 +2586,16 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
                                                authenticated_payloads[plan_index]->metadata.binding_id,
                                                options);
           llvm::appendToGlobalCtors(module, decoder, options.ctor_priority);
+        } else if (plan.result.mode == string_encoding_mode::inline_stack_decode) {
+          if (!authenticated_payloads[plan_index].has_value()) {
+            authenticated_payloads[plan_index].emplace(
+                build_authenticated_payload(*plan.global, plan, module_seed));
+          }
+          llvm::GlobalVariable* ciphertext =
+              create_authenticated_ciphertext_global(module, plan, *authenticated_payloads[plan_index], options);
+          llvm::GlobalVariable* build_key =
+              create_authenticated_build_key_global(module, plan, module_seed, options);
+          rewrite_authenticated_inline_stack_uses(*plan.global, plan, *authenticated_payloads[plan_index], *ciphertext, *build_key);
         }
       } else {
         encode_global_initializer(*plan.global, plan.seed);
@@ -2443,6 +2670,8 @@ std::string to_string(string_helper_shape shape) {
       return "lazy_cached_pointer_v3";
     case string_helper_shape::lazy_auth_runtime_v3:
       return "lazy_auth_runtime_v3";
+    case string_helper_shape::authenticated_ephemeral_stack_decode:
+      return "authenticated_ephemeral_stack_decode";
   }
 
   return "none";
