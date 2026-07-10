@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 CONFIG_BASELINE_IR = ROOT / "build/benchmarks/config_demo/config_demo.baseline.ll"
 CONFIG_PRIMARY_OBF_IR_CANDIDATES = (
     ROOT / "build/diversity/config_demo/10101/marker-probe.ll",
