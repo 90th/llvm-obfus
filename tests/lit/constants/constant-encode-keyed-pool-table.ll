@@ -3,19 +3,28 @@
 ; RUN: %lli %t
 
 @lut = private constant [3 x i32] [i32 7, i32 11, i32 13], align 4
+define i32 @read_table(ptr %base, i64 %idx) {
+entry:
+  %slot = getelementptr inbounds [3 x i32], ptr %base, i64 0, i64 %idx
+  %value = load i32, ptr %slot, align 4
+  ret i32 %value
+}
+
 
 define i32 @table_user(i32 %idx) {
 entry:
   %wide = sext i32 %idx to i64
   %slot = getelementptr inbounds [3 x i32], ptr @lut, i64 0, i64 %wide
   %value = load i32, ptr %slot, align 4
-  ret i32 %value
+  %indirect = call i32 @read_table(ptr @lut, i64 %wide)
+  %sum = add i32 %value, %indirect
+  ret i32 %sum
 }
 
 define i32 @main() {
 entry:
   %value = call i32 @table_user(i32 1)
-  %ok = icmp eq i32 %value, 11
+  %ok = icmp eq i32 %value, 22
   %ret = select i1 %ok, i32 0, i32 1
   ret i32 %ret
 }
@@ -28,9 +37,14 @@ entry:
 ; TABLE-DAG: @__obf_const_desc_{{.*}} = internal constant { i32, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, [16 x i8], [16 x i8], ptr, ptr, ptr, ptr } { i32 3, i32 1
 ; TABLE-DAG: @__obf_const_topology_{{.*}} = internal constant { ptr, ptr, ptr, i64, ptr, ptr, i64, ptr, ptr, i64, ptr }
 ; TABLE-LABEL: define i32 @table_user(i32 %idx) {
-; TABLE: %obf.const.pool.base = call ptr @__obf_const_pool_decode_
-; TABLE: %slot = getelementptr inbounds [3 x i32], ptr %obf.const.pool.base, i64 0, i64 %wide
+; TABLE: [[DIRECT:%obf.const.pool.base[0-9]*]] = call ptr @[[DECODER:__obf_const_pool_decode_[^(]+]]()
+; TABLE: %slot = getelementptr inbounds [3 x i32], ptr [[DIRECT]], i64 0, i64 %wide
 ; TABLE: %value = load i32, ptr %slot, align 4
-; TABLE-LABEL: define internal ptr @__obf_const_pool_decode_
-; TABLE: call ptr @rt_core_cpd3(ptr @__obf_const_desc_{{.*}}, i64 {{-?[0-9]+}}, i64 {{-?[0-9]+}}, ptr @__obf_const_topology_{{.*}})
+; TABLE: [[INDIRECT:%obf.const.pool.base[0-9]*]] = call ptr @[[DECODER]]()
+; TABLE: %indirect = call i32 @read_table(ptr [[INDIRECT]], i64 %wide)
+; TABLE: %sum = add i32 %value, %indirect
+; TABLE-COUNT-1: define internal ptr @[[DECODER]]()
+; TABLE-COUNT-1: call ptr @rt_core_cpd3(ptr @__obf_const_desc_{{.*}}, i64 12, i64 {{-?[0-9]+}}, ptr @__obf_const_topology_{{.*}})
+; TABLE-NOT: call ptr @rt_core_cpd3({{.*}}i64 4,
+; TABLE-NOT: call ptr @rt_core_cpd3({{.*}}i64 8,
 ; TABLE-NOT: %obf.const.mask =

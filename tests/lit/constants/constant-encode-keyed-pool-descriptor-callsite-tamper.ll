@@ -2,7 +2,7 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/constant-encode-keyed-pool.yaml -passes=obf-constant-encode -S %s -o %t
 ; RUN: %opt -passes=verify -disable-output %t
 ; RUN: %lli %t
-; RUN: set -- $(%python -c "import pathlib,re; text = pathlib.Path(r'%t').read_text(encoding='utf-8'); syms = re.findall(r'@(__obf_const_desc_[A-Za-z$._0-9]+) = ', text); assert len(syms) == 2, syms; print(syms[0], syms[1])") && %python %S/../Inputs/tamper_string_auth_ir.py %t "$1" descriptor-callsite "$2"
+; RUN: set -- $(%python -c "import pathlib,re; text = pathlib.Path(r'%t').read_text(encoding='utf-8'); syms = re.findall(r'@(__obf_const_desc_[A-Za-z$._0-9]+) = ', text); assert len(syms) >= 2, syms; print(syms[0], syms[1])") && %python %S/../Inputs/tamper_string_auth_ir.py %t "$1" descriptor-callsite "$2"
 ; RUN: not --crash %lli %t
 
 define i32 @repeated(i32 %x) {

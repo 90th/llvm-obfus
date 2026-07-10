@@ -10,6 +10,7 @@
 #include "obf/transforms/mba.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
@@ -933,59 +934,64 @@ std::size_t apply_mba_inline_uses(llvm::ArrayRef<planned_constant_use> uses,
   return encoded_count;
 }
 
-std::optional<keyed_pool_plan> build_keyed_pool_plan_for_function(
+llvm::SmallVector<keyed_pool_plan, 8> build_scalar_keyed_pool_plans_for_function(
     llvm::Function& function,
     keyed_pool_plan& source,
     const constant_encoding_options& options,
-    std::uint64_t seed) {
-  if (source.uses.size() < 2) { return std::nullopt; }
+    std::uint64_t seed,
+    llvm::DenseSet<std::uint64_t>& used_pool_ids) {
+  if (source.uses.size() < 2) { return {}; }
 
-  llvm::DenseMap<llvm::Function*, std::size_t> per_function_counts;
-  keyed_pool_plan plan;
+  llvm::SmallVector<keyed_pool_use, 8> retained_uses;
   for (const keyed_pool_use& use : source.uses) {
     if (use.function != &function) { continue; }
-
-    std::size_t& function_count = per_function_counts[use.function];
-    if (function_count >= options.max_constants_per_function) { continue; }
-    ++function_count;
-    plan.uses.push_back(use);
+    if (retained_uses.size() >= options.max_constants_per_function) { continue; }
+    retained_uses.push_back(use);
   }
 
-  if (plan.uses.size() < 2) { return std::nullopt; }
+  if (retained_uses.size() < 2) { return {}; }
 
-  llvm::SmallVector<std::pair<llvm::IntegerType*, llvm::APInt>, 8> unique_values;
-  for (const keyed_pool_use& use : plan.uses) {
-    const auto existing = llvm::find_if(unique_values, [&](const auto& candidate) {
-      return candidate.first == use.type && candidate.second == use.value;
-    });
-    if (existing == unique_values.end()) { unique_values.push_back({use.type, use.value}); }
-  }
-
-  plan.entries.clear();
-  plan.byte_length = 0;
-  plan.alignment = llvm::Align(1);
   llvm::Module* parent_module = function.getParent();
-  if (parent_module == nullptr) { return std::nullopt; }
+  if (parent_module == nullptr) { return {}; }
   const llvm::DataLayout& data_layout = parent_module->getDataLayout();
-  for (const auto& unique_value : unique_values) {
-    const llvm::Align entry_alignment =
-        get_integer_type_alignment(data_layout, *unique_value.first);
-    plan.alignment = std::max(plan.alignment, entry_alignment);
-    const std::size_t offset = align_pool_offset(plan.byte_length, entry_alignment);
-    const std::size_t width = get_storage_bytes(unique_value.second);
-    plan.entries.push_back({.type = unique_value.first,
-                            .value = unique_value.second,
-                            .offset = offset,
-                            .alignment = entry_alignment});
-    plan.byte_length = offset + width;
+
+  llvm::SmallVector<keyed_pool_plan, 8> plans;
+  for (const keyed_pool_use& use : retained_uses) {
+    const auto existing = llvm::find_if(plans, [&](const keyed_pool_plan& plan) {
+      return plan.entries.front().type == use.type && plan.entries.front().value == use.value;
+    });
+    if (existing != plans.end()) {
+      existing->uses.push_back(use);
+      continue;
+    }
+
+    const llvm::Align alignment = get_integer_type_alignment(data_layout, *use.type);
+    keyed_pool_plan plan;
+    plan.entries.push_back(
+        {.type = use.type, .value = use.value, .offset = 0, .alignment = alignment});
+    plan.uses.push_back(use);
+    plan.byte_length = get_storage_bytes(use.value);
+    plan.alignment = alignment;
+    plans.push_back(std::move(plan));
   }
 
-  if (plan.entries.empty()) { return std::nullopt; }
+  const std::uint64_t function_hash =
+      stable_hash_string(function.getName(), 0x66756e635f7031ULL);
+  for (std::size_t index = 0; index < plans.size(); ++index) {
+    keyed_pool_plan& plan = plans[index];
+    std::uint64_t discriminator = index + 1;
+    while (true) {
+      const std::uint64_t candidate = derive_keyed_pool_id_from_entries(
+          plan.entries, mix_seed(seed ^ function_hash, discriminator));
+      if (used_pool_ids.insert(candidate).second) {
+        plan.pool_id = candidate;
+        break;
+      }
+      ++discriminator;
+    }
+  }
 
-  plan.pool_id = derive_keyed_pool_id_from_entries(
-      plan.entries,
-      seed ^ stable_hash_string(function.getName(), 0x66756e635f7031ULL));
-  return plan;
+  return plans;
 }
 
 bool should_use_keyed_pool_for_site(const planned_constant_use& use,
@@ -1223,44 +1229,40 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
         build_keyed_pool_table_plan(global, get_seed, options, seed);
     if (plan.has_value()) { table_plans.push_back(std::move(*plan)); }
   }
+  llvm::DenseSet<std::uint64_t> used_pool_ids;
+  for (const keyed_pool_table_plan& plan : table_plans) {
+    used_pool_ids.insert(plan.pool_id);
+  }
 
   std::size_t encoded_count = 0;
   const std::uint64_t module_id = derive_keyed_pool_module_id(module);
 
   encoded_count += apply_mba_inline_uses(uses, options, seed);
 
-  for (auto& entry : plans) {
-    std::optional<keyed_pool_plan> planned =
-        build_keyed_pool_plan_for_function(*entry.first, entry.second, options, seed);
-    if (!planned.has_value()) { continue; }
+  for (auto& source : plans) {
+    llvm::SmallVector<keyed_pool_plan, 8> scalar_plans =
+        build_scalar_keyed_pool_plans_for_function(
+            *source.first, source.second, options, seed, used_pool_ids);
+    for (keyed_pool_plan& plan : scalar_plans) {
+      const keyed_pool_payload payload =
+          build_keyed_pool_payload(plan.entries, plan.byte_length, plan.pool_id, module_id, seed);
+      const keyed_pool_descriptor_bundle bundle =
+          create_keyed_pool_descriptor_bundle(module, plan, payload, seed);
+      llvm::Function* helper = create_keyed_pool_helper(module,
+                                                        *bundle.descriptor,
+                                                        *bundle.topology,
+                                                        payload.metadata.length,
+                                                        payload.metadata.binding_id,
+                                                        seed ^ plan.pool_id);
 
-    keyed_pool_plan& plan = *planned;
-    const keyed_pool_payload payload =
-        build_keyed_pool_payload(plan.entries, plan.byte_length, plan.pool_id, module_id, seed);
-    const keyed_pool_descriptor_bundle bundle =
-        create_keyed_pool_descriptor_bundle(module, plan, payload, seed);
-    llvm::Function* helper = create_keyed_pool_helper(module,
-                                                      *bundle.descriptor,
-                                                      *bundle.topology,
-                                                      payload.metadata.length,
-                                                      payload.metadata.binding_id,
-                                                      seed ^ plan.pool_id);
-
-    for (const keyed_pool_use& use : plan.uses) {
-      const keyed_pool_entry* entry = nullptr;
-      for (const keyed_pool_entry& candidate : plan.entries) {
-        if (candidate.type == use.type && candidate.value == use.value) {
-          entry = &candidate;
-          break;
-        }
+      const keyed_pool_entry& entry = plan.entries.front();
+      for (const keyed_pool_use& use : plan.uses) {
+        llvm::IRBuilder<> builder(use.instruction);
+        llvm::Value* decoded =
+            build_integer_from_pool_entry(builder, *helper, use.type, 0, entry.alignment);
+        use.instruction->setOperand(use.operand_index, decoded);
+        ++encoded_count;
       }
-      if (entry == nullptr) { continue; }
-
-      llvm::IRBuilder<> builder(use.instruction);
-      llvm::Value* decoded =
-          build_integer_from_pool_entry(builder, *helper, use.type, entry->offset, entry->alignment);
-      use.instruction->setOperand(use.operand_index, decoded);
-      ++encoded_count;
     }
   }
 

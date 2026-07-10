@@ -42,11 +42,26 @@ def resolve_descriptor_symbol(lines: list[str], symbol: str, path: pathlib.Path)
     symbols = descriptor_symbols(lines)
     if not symbols:
         raise SystemExit(f"auto descriptor selection found no descriptor lines in {path}")
-    if len(symbols) != 1:
+    if len(symbols) == 1:
+        return symbols[0]
+
+    text = "".join(lines)
+    repeated_descriptors = []
+    for helper, descriptor in re.findall(
+        rf"define internal ptr @(?P<helper>__obf_(?:const|string)_pool_decode_{SYMBOL_CHARS})\(\) \{{.*?"
+        rf"call ptr @rt_core_cpd3\(ptr @(?P<descriptor>{SYMBOL_CHARS}),",
+        text,
+        re.DOTALL,
+    ):
+        call_count = len(re.findall(rf"call ptr @{re.escape(helper)}\(\)", text))
+        if call_count > 1:
+            repeated_descriptors.append(descriptor)
+    if len(repeated_descriptors) != 1:
         raise SystemExit(
-            f"auto descriptor selection expected exactly one descriptor line in {path}, found {len(symbols)}"
+            f"auto descriptor selection expected one repeatedly called decoder in {path}, "
+            f"found {len(repeated_descriptors)} among {len(symbols)} descriptors"
         )
-    return symbols[0]
+    return repeated_descriptors[0]
 
 
 def find_symbol_line(lines: list[str], symbol: str, path: pathlib.Path) -> int:
