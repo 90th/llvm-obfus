@@ -1,6 +1,14 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/control-flatten.yaml -passes=obf-control-flatten -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/control-flatten.yaml -passes=obf-control-flatten -S %s -o %t
-; RUN: %lli %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/control-flatten.yaml --obf-seed=1 -passes=obf-control-flatten -S %s -o %t.seed1.first
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/control-flatten.yaml --obf-seed=1 -passes=obf-control-flatten -S %s -o %t.seed1.second
+; RUN: cmp %t.seed1.first %t.seed1.second
+; RUN: %FileCheck %s < %t.seed1.first
+; RUN: %FileCheck %s --check-prefix=NO-CANONICAL < %t.seed1.first
+; RUN: %opt -passes=verify -disable-output %t.seed1.first
+; RUN: %lli %t.seed1.first
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/control-flatten.yaml --obf-seed=3 -passes=obf-control-flatten -S %s -o %t.seed3
+; RUN: %python -c "import pathlib,sys; sys.exit(0 if pathlib.Path(sys.argv[1]).read_text()!=pathlib.Path(sys.argv[2]).read_text() else 1)" %t.seed1.first %t.seed3
+; RUN: %opt -passes=verify -disable-output %t.seed3
+; RUN: %lli %t.seed3
 
 define i1 @verify_like(ptr %p, i64 %n) {
 entry:
@@ -49,13 +57,17 @@ entry:
 ; CHECK-NOT: %obf.state = alloca i32
 ; CHECK: obf.flat.dispatch:
 ; CHECK: %obf.state = phi i32
-; CHECK-SAME: %obf.flat.state.next
+; CHECK-DAG: obf.flat.state.next.add
+; CHECK-DAG: obf.flat.state.next.sub
+; CHECK-DAG: obf.flat.state.next.xor
 ; CHECK: %obf.flat.val = phi i64
 ; CHECK-NOT: switch i32 %obf.state
-; CHECK-DAG: %obf.flat.dispatch.eq = icmp eq i32 %obf.state,
-; CHECK-DAG: br i1 %obf.flat.dispatch.eq, label %{{[^,]+}}, label %obf.flat.dispatch.split0
-; CHECK-DAG: %obf.flat.dispatch.ult = icmp ult i32 %obf.state,
-; CHECK-DAG: br i1 %obf.flat.dispatch.ult, label %obf.flat.dispatch.left0, label %obf.flat.dispatch.right0
+; CHECK-DAG: obf.flat.dispatch.eq.xor
+; CHECK-DAG: obf.flat.dispatch.eq.affine
+; CHECK-DAG: obf.flat.dispatch.order.sign
+; CHECK-DAG: obf.flat.dispatch.order.borrow
+; CHECK-DAG: br i1 %obf.flat.dispatch.eq.{{xor|affine}}, label %{{[^,]+}}, label %obf.flat.dispatch.split0
+; CHECK-DAG: br i1 %obf.flat.dispatch.order.{{sign|borrow}}, label %obf.flat.dispatch.left0, label %obf.flat.dispatch.right0
 ; CHECK-DAG: %ptr = getelementptr inbounds i8, ptr %p, i64 %obf.flat.val
 ; CHECK-DAG: %obf.entropy.pair{{[0-9]*}} = load { i64, i64 }, ptr %obf.entropy.cache
 ; CHECK-DAG: %obf.entropy.a.mix{{[^ ]*}} =
@@ -66,3 +78,7 @@ entry:
 ; CHECK-DAG: obf.flat.decoy.loop{{[0-9]*}}:
 ; CHECK-DAG: obf.flat.decoy.trap{{[0-9]*}}:
 ; CHECK-DAG: call void @llvm.trap()
+
+; NO-CANONICAL-LABEL: define i1 @verify_like
+; NO-CANONICAL-NOT: icmp ult i32 %obf.state
+; NO-CANONICAL-LABEL: define i32 @main

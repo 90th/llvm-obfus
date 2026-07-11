@@ -1,5 +1,6 @@
 #include "obf/transforms/control_flattening.h"
 
+#include "obf/support/affine_helpers.h"
 #include "obf/support/decoy_trap.h"
 #include "obf/support/flattening_metadata.h"
 #include "obf/support/ir_name.h"
@@ -44,6 +45,36 @@ struct transition_edge {
   llvm::Value* next_state = nullptr;
 };
 
+enum class state_encoding_family : std::uint8_t { add_zero, sub_zero, xor_zero };
+
+struct state_encoding_decision {
+  state_encoding_family family;
+  std::uint64_t salt_base;
+};
+
+state_encoding_decision choose_state_encoding_decision(std::uint64_t function_seed,
+                                                       std::size_t site_ordinal) {
+  const std::size_t family_index = ((function_seed % 3U) + (site_ordinal % 3U)) % 3U;
+  state_encoding_family family = state_encoding_family::add_zero;
+  switch (family_index) {
+    case 0:
+      family = state_encoding_family::add_zero;
+      break;
+    case 1:
+      family = state_encoding_family::sub_zero;
+      break;
+    case 2:
+      family = state_encoding_family::xor_zero;
+      break;
+  }
+
+  return {
+      .family = family,
+      .salt_base = mix_seed(
+          function_seed, (static_cast<std::uint64_t>(site_ordinal) + 1U) * 0x9e3779b97f4a7c15ULL),
+  };
+}
+
 struct decoy_state {
   std::uint32_t id = 0;
   llvm::BasicBlock* entry = nullptr;
@@ -56,6 +87,15 @@ struct dispatch_case {
 
 struct dispatch_tree_state {
   std::size_t next_ordinal = 0;
+};
+
+enum class dispatch_equality_family : std::uint8_t { xor_mask, affine };
+enum class dispatch_order_family : std::uint8_t { sign_mask, subtract_borrow };
+
+struct dispatch_node_decision {
+  dispatch_equality_family equality_family;
+  dispatch_order_family order_family;
+  std::uint64_t salt_base;
 };
 
 struct dispatch_tree_context {
@@ -153,9 +193,8 @@ void hoist_entry_allocas_to_setup(llvm::BasicBlock& entry, llvm::BasicBlock& set
 }
 
 llvm::Value* encode_state_id(llvm::IRBuilder<>& builder,
-                             llvm::Function& function,
                              const mba::builder_context& base_context,
-                             std::uint64_t salt,
+                             const state_encoding_decision& decision,
                              std::uint32_t state_id) {
   mba::builder_context context = base_context;
   context.depth = std::max<std::uint32_t>(context.depth, 2);
@@ -164,25 +203,37 @@ llvm::Value* encode_state_id(llvm::IRBuilder<>& builder,
                                  builder.getInt32Ty(),
                                  context,
                                  llvm::APInt(32, static_cast<std::uint64_t>(state_id)),
-                                 salt,
+                                 decision.salt_base,
                                  "obf.flat.state.opaque");
   llvm::Value* encoded_zero = mba::create_opaque_integer(builder,
                                                          builder.getInt32Ty(),
                                                          context,
                                                          llvm::APInt(32, 0),
-                                                         salt ^ 0x9e3779b9ULL,
+                                                         decision.salt_base ^ 0x9e3779b9ULL,
                                                          "obf.flat.state.zero");
-  return mba::create_add(
-      builder, encoded_state, encoded_zero, context, salt ^ 0xa55aa55aULL, "obf.flat.state.next");
+  const std::uint64_t operation_salt = decision.salt_base ^ 0xa55aa55aULL;
+  switch (decision.family) {
+    case state_encoding_family::add_zero:
+      return mba::create_add(
+          builder, encoded_state, encoded_zero, context, operation_salt, "obf.flat.state.next.add");
+    case state_encoding_family::sub_zero:
+      return mba::create_sub(
+          builder, encoded_state, encoded_zero, context, operation_salt, "obf.flat.state.next.sub");
+    case state_encoding_family::xor_zero:
+      return mba::create_xor(
+          builder, encoded_state, encoded_zero, context, operation_salt, "obf.flat.state.next.xor");
+  }
+
+  llvm_unreachable("unknown state encoding family");
 }
 
 llvm::Value* build_true_opaque_predicate(llvm::IRBuilder<>& builder,
-                                          llvm::Function& function,
-                                          std::uint32_t mba_depth,
-                                          std::uint64_t salt_base,
-                                          std::optional<std::uint32_t> max_ir,
-                                          std::optional<bool> poly,
-                                          std::optional<bool> mul) {
+                                         llvm::Function& function,
+                                         std::uint32_t mba_depth,
+                                         std::uint64_t salt_base,
+                                         std::optional<std::uint32_t> max_ir,
+                                         std::optional<bool> poly,
+                                         std::optional<bool> mul) {
   return mba::build_entropy_true_predicate(builder,
                                            function,
                                            mba_depth,
@@ -228,20 +279,20 @@ llvm::BasicBlock* create_decoy_trap(llvm::Function& function,
       loop_builder.CreatePHI(loop_builder.getInt32Ty(), 2, "obf.flat.decoy.iter");
   llvm::PHINode* state =
       loop_builder.CreatePHI(loop_builder.getInt64Ty(), 2, "obf.flat.decoy.state");
-  auto loop_state = support::build_decoy_loop_core(loop_builder, state, iteration, "obf.flat.decoy");
-  llvm::Value* predicate =
-      build_true_opaque_predicate(loop_builder, function, mba_depth, salt_base + 0x71ULL,
-                                  max_ir, poly, mul);
-    const std::uint32_t decoy_iteration_limit =
-      256U + static_cast<std::uint32_t>(
-           mix_seed(salt_base, stable_hash_string(function.getName()) ^ function.size()) %
-           1024ULL);
+  auto loop_state =
+      support::build_decoy_loop_core(loop_builder, state, iteration, "obf.flat.decoy");
+  llvm::Value* predicate = build_true_opaque_predicate(
+      loop_builder, function, mba_depth, salt_base + 0x71ULL, max_ir, poly, mul);
+  const std::uint32_t decoy_iteration_limit =
+      256U +
+      static_cast<std::uint32_t>(
+          mix_seed(salt_base, stable_hash_string(function.getName()) ^ function.size()) % 1024ULL);
   llvm::Value* below_limit = loop_builder.CreateICmpULT(
       iteration,
       llvm::ConstantInt::get(loop_builder.getInt32Ty(), decoy_iteration_limit),
       "obf.flat.decoy.below_limit");
-  llvm::Value* continue_loop = loop_builder.CreateAnd(
-      predicate, below_limit, "obf.flat.decoy.cont");
+  llvm::Value* continue_loop =
+      loop_builder.CreateAnd(predicate, below_limit, "obf.flat.decoy.cont");
   loop_builder.CreateCondBr(continue_loop, loop, trap);
   flattening::tag_block(*loop, flattening::block_role::decoy);
 
@@ -324,10 +375,10 @@ void bind_cfg_state_placeholders(llvm::ArrayRef<llvm::BasicBlock*> blocks,
   }
 }
 
-std::vector<dispatch_case> build_dispatch_cases(
-    llvm::ArrayRef<llvm::BasicBlock*> blocks,
-    const llvm::DenseMap<llvm::BasicBlock*, std::uint32_t>& state_ids,
-    llvm::ArrayRef<decoy_state> decoy_states) {
+std::vector<dispatch_case>
+build_dispatch_cases(llvm::ArrayRef<llvm::BasicBlock*> blocks,
+                     const llvm::DenseMap<llvm::BasicBlock*, std::uint32_t>& state_ids,
+                     llvm::ArrayRef<decoy_state> decoy_states) {
   std::vector<dispatch_case> cases;
   cases.reserve(blocks.size() + decoy_states.size());
   for (llvm::BasicBlock* block : blocks) {
@@ -359,17 +410,100 @@ std::uint64_t build_dispatch_tree_salt(const mba::builder_context& mba_context,
   return salt;
 }
 
-llvm::Value* materialize_dispatch_state_constant(llvm::IRBuilder<>& builder,
-                                                 const mba::builder_context& mba_context,
-                                                 std::uint32_t state_id,
-                                                 std::uint64_t salt,
-                                                 llvm::StringRef name) {
-  return mba::create_opaque_integer(builder,
-                                    builder.getInt32Ty(),
-                                    mba_context,
-                                    llvm::APInt(32, static_cast<std::uint64_t>(state_id)),
-                                    salt,
-                                    name);
+dispatch_node_decision choose_dispatch_node_decision(const mba::builder_context& mba_context,
+                                                     std::size_t depth,
+                                                     std::size_t ordinal) {
+  const bool odd_node = (ordinal & 1U) != 0;
+  const bool affine = ((mba_context.seed_base & 1U) != 0) ^ odd_node;
+  const bool subtract_borrow = (((mba_context.seed_base >> 1U) & 1U) != 0) ^ odd_node;
+  return {
+      .equality_family =
+          affine ? dispatch_equality_family::affine : dispatch_equality_family::xor_mask,
+      .order_family = subtract_borrow ? dispatch_order_family::subtract_borrow
+                                      : dispatch_order_family::sign_mask,
+      .salt_base = build_dispatch_tree_salt(mba_context, depth, ordinal, 0x1f4a7401ULL),
+  };
+}
+
+llvm::Value* build_dispatch_equality(llvm::IRBuilder<>& builder,
+                                     const dispatch_tree_context& context,
+                                     std::uint32_t state_id,
+                                     const dispatch_node_decision& decision) {
+  llvm::Value* pivot =
+      mba::create_opaque_integer(builder,
+                                 builder.getInt32Ty(),
+                                 context.mba_context,
+                                 llvm::APInt(32, static_cast<std::uint64_t>(state_id)),
+                                 decision.salt_base ^ 0x65717069766f74ULL,
+                                 "obf.flat.dispatch.eq.pivot");
+
+  switch (decision.equality_family) {
+    case dispatch_equality_family::xor_mask: {
+      const std::uint32_t mask =
+          static_cast<std::uint32_t>(mix_seed(decision.salt_base, 0x65716d61736b76ULL)) | 1U;
+      llvm::Value* opaque_mask =
+          mba::create_opaque_integer(builder,
+                                     builder.getInt32Ty(),
+                                     context.mba_context,
+                                     llvm::APInt(32, mask),
+                                     decision.salt_base ^ 0x65716d61736b73ULL,
+                                     "obf.flat.dispatch.eq.mask");
+      llvm::Value* encoded_state =
+          builder.CreateXor(context.state_value, opaque_mask, "obf.flat.dispatch.eq.state.xor");
+      llvm::Value* encoded_pivot =
+          builder.CreateXor(pivot, opaque_mask, "obf.flat.dispatch.eq.pivot.xor");
+      return builder.CreateICmpEQ(encoded_state, encoded_pivot, "obf.flat.dispatch.eq.xor");
+    }
+    case dispatch_equality_family::affine: {
+      const llvm::APInt multiplier =
+          support::make_odd_affine_multiplier(32, mix_seed(decision.salt_base, 0x65716d756cULL));
+      const llvm::APInt bias =
+          support::make_affine_bias(32, mix_seed(decision.salt_base, 0x657162696173ULL));
+      llvm::Value* encoded_state = support::build_affine_encode(
+          builder, context.state_value, multiplier, bias, "obf.flat.dispatch.eq.state.affine");
+      llvm::Value* encoded_pivot = support::build_affine_encode(
+          builder, pivot, multiplier, bias, "obf.flat.dispatch.eq.pivot.affine");
+      return builder.CreateICmpEQ(encoded_state, encoded_pivot, "obf.flat.dispatch.eq.affine");
+    }
+  }
+
+  llvm_unreachable("unknown dispatch equality family");
+}
+
+llvm::Value* build_dispatch_order(llvm::IRBuilder<>& builder,
+                                  const dispatch_tree_context& context,
+                                  std::uint32_t state_id,
+                                  const dispatch_node_decision& decision) {
+  llvm::Value* pivot =
+      mba::create_opaque_integer(builder,
+                                 builder.getInt32Ty(),
+                                 context.mba_context,
+                                 llvm::APInt(32, static_cast<std::uint64_t>(state_id)),
+                                 decision.salt_base ^ 0x6f72647069766f74ULL,
+                                 "obf.flat.dispatch.order.pivot");
+
+  switch (decision.order_family) {
+    case dispatch_order_family::sign_mask: {
+      llvm::Value* sign_mask = mba::create_opaque_integer(builder,
+                                                          builder.getInt32Ty(),
+                                                          context.mba_context,
+                                                          llvm::APInt(32, 0x80000000U),
+                                                          decision.salt_base ^ 0x6f72647369676eULL,
+                                                          "obf.flat.dispatch.order.sign.mask");
+      llvm::Value* signed_state =
+          builder.CreateXor(context.state_value, sign_mask, "obf.flat.dispatch.order.state.sign");
+      llvm::Value* signed_pivot =
+          builder.CreateXor(pivot, sign_mask, "obf.flat.dispatch.order.pivot.sign");
+      return builder.CreateICmpSLT(signed_state, signed_pivot, "obf.flat.dispatch.order.sign");
+    }
+    case dispatch_order_family::subtract_borrow: {
+      llvm::Value* delta =
+          builder.CreateSub(context.state_value, pivot, "obf.flat.dispatch.order.delta");
+      return builder.CreateICmpUGT(delta, context.state_value, "obf.flat.dispatch.order.borrow");
+    }
+  }
+
+  llvm_unreachable("unknown dispatch order family");
 }
 
 void emit_dispatch_subtree(llvm::BasicBlock& block,
@@ -385,14 +519,9 @@ void emit_dispatch_leaf(llvm::BasicBlock& block,
                         std::size_t ordinal,
                         flattening::block_role role) {
   llvm::IRBuilder<> builder(&block);
-  llvm::Value* compare_state = materialize_dispatch_state_constant(
-      builder,
-      context.mba_context,
-      single_case.state_id,
-      build_dispatch_tree_salt(context.mba_context, depth, ordinal, 0x1f4a7101ULL),
-      "obf.flat.dispatch.leaf.state");
-  llvm::Value* is_match =
-      builder.CreateICmpEQ(context.state_value, compare_state, "obf.flat.dispatch.eq");
+  const dispatch_node_decision decision =
+      choose_dispatch_node_decision(context.mba_context, depth, ordinal);
+  llvm::Value* is_match = build_dispatch_equality(builder, context, single_case.state_id, decision);
   builder.CreateCondBr(is_match, single_case.target, context.default_target);
   flattening::tag_block(block, role);
 }
@@ -416,11 +545,12 @@ void emit_dispatch_subtree(llvm::BasicBlock& block,
   }
 
   std::vector<dispatch_case> ordered_cases = cases;
-  std::sort(ordered_cases.begin(), ordered_cases.end(), [](const dispatch_case& lhs,
-                                                           const dispatch_case& rhs) {
-    if (lhs.state_id != rhs.state_id) { return lhs.state_id < rhs.state_id; }
-    return lhs.target < rhs.target;
-  });
+  std::sort(ordered_cases.begin(),
+            ordered_cases.end(),
+            [](const dispatch_case& lhs, const dispatch_case& rhs) {
+              if (lhs.state_id != rhs.state_id) { return lhs.state_id < rhs.state_id; }
+              return lhs.target < rhs.target;
+            });
   const dispatch_case pivot = ordered_cases[ordered_cases.size() / 2];
 
   std::vector<dispatch_case> left_cases;
@@ -435,53 +565,44 @@ void emit_dispatch_subtree(llvm::BasicBlock& block,
     }
   }
 
-  llvm::BasicBlock* split_block = llvm::BasicBlock::Create(
-      context.function.getContext(),
-      obf::support::scoped_ir_name("obf.flat.dispatch", "split", ordinal),
-      &context.function);
-  llvm::BasicBlock* left_entry = left_cases.empty()
-                                     ? nullptr
-                                     : llvm::BasicBlock::Create(context.function.getContext(),
-                                                               obf::support::scoped_ir_name("obf.flat.dispatch",
-                                                                                            "left",
-                                                                                            ordinal),
-                                                               &context.function);
-  llvm::BasicBlock* right_entry = right_cases.empty()
-                                      ? nullptr
-                                      : llvm::BasicBlock::Create(context.function.getContext(),
-                                                                obf::support::scoped_ir_name("obf.flat.dispatch",
-                                                                                             "right",
-                                                                                             ordinal),
-                                                                &context.function);
+  llvm::BasicBlock* split_block =
+      llvm::BasicBlock::Create(context.function.getContext(),
+                               obf::support::scoped_ir_name("obf.flat.dispatch", "split", ordinal),
+                               &context.function);
+  llvm::BasicBlock* left_entry =
+      left_cases.empty() ? nullptr
+                         : llvm::BasicBlock::Create(
+                               context.function.getContext(),
+                               obf::support::scoped_ir_name("obf.flat.dispatch", "left", ordinal),
+                               &context.function);
+  llvm::BasicBlock* right_entry =
+      right_cases.empty() ? nullptr
+                          : llvm::BasicBlock::Create(
+                                context.function.getContext(),
+                                obf::support::scoped_ir_name("obf.flat.dispatch", "right", ordinal),
+                                &context.function);
 
+  const dispatch_node_decision decision =
+      choose_dispatch_node_decision(context.mba_context, depth, ordinal);
   llvm::IRBuilder<> equality_builder(&block);
-  llvm::Value* equality_state = materialize_dispatch_state_constant(
-      equality_builder,
-      context.mba_context,
-      pivot.state_id,
-      build_dispatch_tree_salt(context.mba_context, depth, ordinal, 0x1f4a7201ULL),
-      "obf.flat.dispatch.node.eq.state");
   llvm::Value* is_equal =
-      equality_builder.CreateICmpEQ(context.state_value, equality_state, "obf.flat.dispatch.eq");
+      build_dispatch_equality(equality_builder, context, pivot.state_id, decision);
   equality_builder.CreateCondBr(is_equal, pivot.target, split_block);
 
   llvm::IRBuilder<> split_builder(split_block);
-  llvm::Value* magnitude_state = materialize_dispatch_state_constant(
-      split_builder,
-      context.mba_context,
-      pivot.state_id,
-      build_dispatch_tree_salt(context.mba_context, depth, ordinal, 0x1f4a7301ULL),
-      "obf.flat.dispatch.node.ult.state");
-  llvm::Value* is_less = split_builder.CreateICmpULT(
-      context.state_value, magnitude_state, "obf.flat.dispatch.ult");
+  llvm::Value* is_less = build_dispatch_order(split_builder, context, pivot.state_id, decision);
   split_builder.CreateCondBr(is_less,
                              left_entry != nullptr ? left_entry : context.default_target,
                              right_entry != nullptr ? right_entry : context.default_target);
   flattening::tag_block(*split_block, flattening::block_role::dispatch_split);
 
-  if (left_entry != nullptr) { emit_dispatch_subtree(*left_entry, context, left_cases, depth + 1, flattening::block_role::dispatch_left); }
+  if (left_entry != nullptr) {
+    emit_dispatch_subtree(
+        *left_entry, context, left_cases, depth + 1, flattening::block_role::dispatch_left);
+  }
   if (right_entry != nullptr) {
-    emit_dispatch_subtree(*right_entry, context, right_cases, depth + 1, flattening::block_role::dispatch_right);
+    emit_dispatch_subtree(
+        *right_entry, context, right_cases, depth + 1, flattening::block_role::dispatch_right);
   }
   flattening::tag_block(block, role);
 }
@@ -611,19 +732,23 @@ control_flattening_result run_control_flattening(llvm::Function& function,
     }
   }
 
-  auto mba_context = obf::support::make_mba_context(
-      function, "obf.flat", 0x2f4d8f13ULL,
-      {options.mba_depth, options.mba_max_ir_instructions, options.mba_enable_polynomial, options.mba_enable_multiplication});
+  auto mba_context = obf::support::make_mba_context(function,
+                                                    "obf.flat",
+                                                    0x2f4d8f13ULL,
+                                                    {options.mba_depth,
+                                                     options.mba_max_ir_instructions,
+                                                     options.mba_enable_polynomial,
+                                                     options.mba_enable_multiplication});
   mba_context.seed_base = mix_seed(mba_context.seed_base, options.seed);
 
   for (std::size_t decoy_index = 0; decoy_index < decoy_count; ++decoy_index) {
-    llvm::BasicBlock* decoy_entry = create_decoy_trap(
-        function,
-        options.mba_depth,
-        mix_seed(options.seed, static_cast<std::uint64_t>(decoy_index + 1)),
-        options.mba_max_ir_instructions,
-        options.mba_enable_polynomial,
-        options.mba_enable_multiplication);
+    llvm::BasicBlock* decoy_entry =
+        create_decoy_trap(function,
+                          options.mba_depth,
+                          mix_seed(options.seed, static_cast<std::uint64_t>(decoy_index + 1)),
+                          options.mba_max_ir_instructions,
+                          options.mba_enable_polynomial,
+                          options.mba_enable_multiplication);
     if (decoy_entry == nullptr) { continue; }
 
     decoy_states.push_back(
@@ -632,7 +757,7 @@ control_flattening_result run_control_flattening(llvm::Function& function,
 
   std::vector<transition_edge> transition_edges;
   transition_edges.reserve(blocks.size() * 2);
-  std::uint64_t transition_salt = 0x6137c4d9ULL;
+  std::size_t state_encoding_ordinal = 0;
   for (llvm::BasicBlock* block : blocks) {
     llvm::Instruction* terminator = block->getTerminator();
     if (llvm::isa<llvm::ReturnInst>(terminator) || llvm::isa<llvm::UnreachableInst>(terminator)) {
@@ -647,12 +772,10 @@ control_flattening_result run_control_flattening(llvm::Function& function,
       llvm::BasicBlock* edge_block =
           llvm::BasicBlock::Create(context, "obf.flat.edge", &function, dispatch);
       llvm::IRBuilder<> edge_builder(edge_block);
+      const state_encoding_decision encoding_decision =
+          choose_state_encoding_decision(mba_context.seed_base, state_encoding_ordinal++);
       llvm::Value* next_state =
-          encode_state_id(edge_builder,
-                          function,
-                          mba_context,
-                          transition_salt + static_cast<std::uint64_t>(transition_edges.size() + 1),
-                          state_ids[successor]);
+          encode_state_id(edge_builder, mba_context, encoding_decision, state_ids[successor]);
       edge_builder.CreateBr(dispatch);
       flattening::tag_block(*edge_block, flattening::block_role::edge);
       block_edges.push_back(
@@ -671,9 +794,11 @@ control_flattening_result run_control_flattening(llvm::Function& function,
   }
 
   setup_builder.SetInsertPoint(setup->getTerminator());
+  const state_encoding_decision setup_encoding_decision =
+      choose_state_encoding_decision(mba_context.seed_base, state_encoding_ordinal++);
   state_phi->addIncoming(
       encode_state_id(
-          setup_builder, function, mba_context, 0x13579bdfULL, state_ids[original_entry]),
+          setup_builder, mba_context, setup_encoding_decision, state_ids[original_entry]),
       setup);
   for (const carried_value& carried : carried_values) {
     carried.dispatcher_phi->addIncoming(llvm::PoisonValue::get(carried.original->getType()), setup);
@@ -690,8 +815,7 @@ control_flattening_result run_control_flattening(llvm::Function& function,
 
   for (llvm::PHINode* phi : original_phis) { phi->eraseFromParent(); }
 
-  std::vector<dispatch_case> dispatch_cases =
-      build_dispatch_cases(blocks, state_ids, decoy_states);
+  std::vector<dispatch_case> dispatch_cases = build_dispatch_cases(blocks, state_ids, decoy_states);
   shuffle_dispatch_cases(dispatch_cases, state_rng);
   dispatch_tree_state tree_state;
   const dispatch_tree_context tree_context{
@@ -701,7 +825,8 @@ control_flattening_result run_control_flattening(llvm::Function& function,
       .mba_context = mba_context,
       .tree_state = tree_state,
   };
-  emit_dispatch_subtree(*dispatch, tree_context, dispatch_cases, 0, flattening::block_role::root_dispatch);
+  emit_dispatch_subtree(
+      *dispatch, tree_context, dispatch_cases, 0, flattening::block_role::root_dispatch);
 
   flattening::tag_function(function);
 

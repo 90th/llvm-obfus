@@ -63,8 +63,8 @@ done:
 
 ; FLAT-LABEL: define i32 @flatten_me(i32 %x)
 ; FLAT-NOT: switch i32 %obf.state
-; FLAT-DAG: %obf.flat.dispatch.eq = icmp eq i32 %obf.state,
-; FLAT-DAG: %obf.flat.dispatch.ult = icmp ult i32 %obf.state,
+; FLAT-DAG: obf.flat.dispatch.eq.{{xor|affine}}
+; FLAT-DAG: obf.flat.dispatch.order.{{sign|borrow}}
 ; FLAT-DAG: label %obf.flat.decoy{{[0-9]*}}
 ; FLAT-DAG: obf.flat.decoy{{[0-9]*}}:
 ; FLAT-DAG: obf.flat.decoy.loop{{[0-9]*}}:
