@@ -1,6 +1,7 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-resolver-shapes.yaml -passes=obf-vm -S %s -o - | %FileCheck %s --implicit-check-not='@__obf_vm_target_strong_vm_value'
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-resolver-shapes.yaml -passes=obf-vm -S %s -o %t
 ; RUN: %lli %t
+; RUN: %FileCheck %s --check-prefix=TOKENBIND --input-file=%t
 
 define i32 @normal_vm_value(i32 %x) {
 entry:
@@ -65,3 +66,24 @@ entry:
 ; CHECK: indirectbr ptr
 ; CHECK: define internal i32 @[[STRONG_THUNK]](i32 {{.*}}, i64 %obf.hidden_token)
 ; CHECK-NOT: indirectbr ptr
+
+; Rank 2 regression guard: the VM target/decode key must be XOR-bound by a
+; token-derived mask on both the encode and decode paths and then feed the
+; resolve combine, so the pre-fix static-XOR cancellation (mixed/unmixed, see
+; commit 30d6bc1) cannot silently return. target.token/decode.token are the
+; entangled VM hidden token (built by build_vm_target_token_mask); this pins the
+; token -> mask -> key.bound binding wiring. The entangle family varies per run,
+; so the token is matched only as an obf.entangle.* output, not by family.
+; TOKENBIND-LABEL: define i32 @strong_vm_value(i32 %x)
+; encode: entangled token -> delta -> mask -> target.key.bound -> resolve combine
+; TOKENBIND: %strong_vm_value.obf.wrapper.target.token = {{.*}}%obf.entangle.
+; TOKENBIND: %strong_vm_value.obf.wrapper.target.token.delta = xor i64 %strong_vm_value.obf.wrapper.target.token,
+; TOKENBIND: %strong_vm_value.obf.wrapper.target.token.mask = xor i64 %strong_vm_value.obf.wrapper.target.token.delta,
+; TOKENBIND: %strong_vm_value.obf.wrapper.target.key.bound = xor i64 %strong_vm_value.obf.wrapper.target.key, %strong_vm_value.obf.wrapper.target.token.mask
+; TOKENBIND: i64 {{.*}}%strong_vm_value.obf.wrapper.target.key.bound
+; decode: entangled token -> delta -> mask -> key.bound -> resolve combine
+; TOKENBIND: %strong_vm_value.obf.wrapper.decode.token = {{.*}}%obf.entangle.
+; TOKENBIND: %strong_vm_value.obf.wrapper.decode.token.delta = xor i64 %strong_vm_value.obf.wrapper.decode.token,
+; TOKENBIND: %strong_vm_value.obf.wrapper.decode.token.mask = xor i64 %strong_vm_value.obf.wrapper.decode.token.delta,
+; TOKENBIND: %strong_vm_value.obf.wrapper.key.bound = xor i64 %strong_vm_value.obf.wrapper.key, %strong_vm_value.obf.wrapper.decode.token.mask
+; TOKENBIND: i64 {{.*}}%strong_vm_value.obf.wrapper.key.bound
