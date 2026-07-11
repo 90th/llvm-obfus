@@ -341,6 +341,11 @@ block_split_options build_block_split_options(const obfuscation_config& config,
     options.max_splits_per_function = std::min<std::size_t>(options.max_splits_per_function, 1);
   }
 
+  options.mba_depth = config.mba.depth;
+  options.mba_max_ir_instructions = config.mba.max_ir_instructions;
+  options.mba_enable_polynomial = config.mba.enable_polynomial;
+  options.mba_enable_multiplication = config.mba.enable_multiplication;
+
   return options;
 }
 
@@ -410,7 +415,7 @@ indirect_dispatch_options build_indirect_dispatch_options(const obfuscation_conf
 }
 
 instruction_substitution_options
-build_instruction_substitution_options(const obfuscation_config&, const policy_decision& decision) {
+build_instruction_substitution_options(const obfuscation_config& config, const policy_decision& decision) {
   instruction_substitution_options options;
   if (has_strong_classical(decision.policy.level)) {
     options.max_substitutions_per_function = 6;
@@ -418,12 +423,20 @@ build_instruction_substitution_options(const obfuscation_config&, const policy_d
     options.max_substitutions_per_function = 2;
   }
 
+  options.seed = decision.seed;
+  options.mba_depth = config.mba.depth;
+  options.mba_max_ir_instructions = config.mba.max_ir_instructions;
+  options.mba_enable_polynomial = config.mba.enable_polynomial;
+  options.mba_enable_multiplication = config.mba.enable_multiplication;
+  options.max_padded_sites = has_strong_classical(decision.policy.level) ? 2 : 0;
+
   return options;
 }
 
 opaque_gep_options build_opaque_gep_options(const obfuscation_config& config,
-                                            const policy_decision&) {
+                                            const policy_decision& decision) {
   opaque_gep_options options;
+  options.seed = decision.seed;
   options.mba_depth = config.mba.depth;
   options.mba_max_ir_instructions = config.mba.max_ir_instructions;
   options.mba_enable_polynomial = config.mba.enable_polynomial;
@@ -456,6 +469,7 @@ bogus_control_flow_options build_bogus_control_flow_options(const obfuscation_co
   options.mba_max_ir_instructions = config.mba.max_ir_instructions;
   options.mba_enable_polynomial = config.mba.enable_polynomial;
   options.mba_enable_multiplication = config.mba.enable_multiplication;
+  options.seed = decision.seed;
   return options;
 }
 

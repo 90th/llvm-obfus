@@ -1,5 +1,6 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/bogus-control-flow.yaml -passes=obf-bogus-cf -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/bogus-control-flow.yaml -passes=obf-bogus-cf -S %s -o %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/bogus-control-flow.yaml --obf-seed=1 -passes=obf-bogus-cf -S %s -o %t
+; RUN: %FileCheck %s < %t
+; RUN: %opt -passes=verify -disable-output %t
 ; RUN: %lli %t
 
 define i32 @branchy(i32 %x) {
@@ -25,6 +26,12 @@ entry:
   ret i32 %ret
 }
 
+; The always-true entropy predicate is unchanged, but the branch polarity and the
+; decoy trap family are seed-selected: the guard may be emitted directly
+; (br i1 %obf.bogus.true, ...) or inverted (%obf.bogus.false), and the trap may be
+; the decoy loop (%obf.bogus.state.init + %obf.bogus.loop) or the straight-line
+; arithmetic chain (%obf.bogus.acc0..2). The literal trip count is not pinned.
+; %lli proves the guarded-off trap never alters @branchy's result.
 ; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @branchy
 ; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
@@ -33,22 +40,9 @@ entry:
 ; CHECK: %obf.opaque.direct = extractvalue { i64, i64 } %obf.opaque.pair, 0
 ; CHECK: %obf.opaque.indirect = extractvalue { i64, i64 } %obf.opaque.pair, 1
 ; CHECK: %obf.opaque.entropy.mix{{.*}} = {{.*}} i64 %obf.opaque.direct
-; CHECK: %obf.opaque.seed =
 ; CHECK: %obf.opaque.seed.freeze = freeze i64 %obf.opaque.seed
-; CHECK: [[EXPRA:%obf\.opaque\.expr\.a[^ ]*]] =
-; CHECK: [[EXPRB:%obf\.opaque\.expr\.b[^ ]*]] =
-; CHECK: %obf.bogus.true = icmp eq i64 [[EXPRA]], [[EXPRB]]
-; CHECK: br i1 %obf.bogus.true, label %merge, label %obf.bogus
+; CHECK: %obf.bogus.true = icmp eq i64
+; CHECK: br i1 %obf.bogus.{{(true|false)}},
 ; CHECK: obf.bogus:
 ; CHECK: %obf.bogus.seed = load i64, ptr @rt_core_ea
-; CHECK: br label %obf.bogus.loop
-; CHECK: obf.bogus.loop:
-; CHECK: %obf.bogus.iter = phi i32
-; CHECK: %obf.bogus.state = phi i64
-; CHECK: %obf.bogus.rotl.shl = shl i64 %obf.bogus.state, 13
-; CHECK: %obf.bogus.rotl.lshr = lshr i64 %obf.bogus.state, 51
-; CHECK: %obf.bogus.mix = xor i64 %obf.bogus.rotl,
-; CHECK: %obf.bogus.iter.next = add i32 %obf.bogus.iter, 1
-; CHECK: %obf.bogus.done = icmp eq i32 %obf.bogus.iter.next, 1000000
-; CHECK: br i1 %obf.bogus.done, label %obf.bogus.sink, label %obf.bogus.loop
-; CHECK-NOT: %obf.bogus.xor =
+; CHECK: %obf.bogus.{{(state.init|acc0)}} =

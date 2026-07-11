@@ -12,6 +12,7 @@ class Function;
 namespace obf {
 
 struct opaque_gep_options {
+  std::uint64_t seed = 0;
   std::uint32_t mba_depth = 1;
   std::optional<std::uint32_t> mba_max_ir_instructions;
   std::optional<bool> mba_enable_polynomial;

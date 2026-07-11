@@ -1,8 +1,13 @@
 #include "obf/transforms/block_split.h"
 
+#include "obf/support/mba_config_builder.h"
+#include "obf/transforms/mba.h"
+
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 
 #include <algorithm>
@@ -110,14 +115,65 @@ run_block_split(llvm::Function& function, const block_split_options& options, st
       continue;
     }
 
-    llvm::Instruction* split_point =
-        select_split_point(*block, options, seed ^ (0x9e3779b97f4a7c15ULL + block_index));
+    const std::uint64_t block_seed = seed ^ (0x9e3779b97f4a7c15ULL + block_index);
+    llvm::Instruction* split_point = select_split_point(*block, options, block_seed);
     if (split_point == nullptr) {
       ++block_index;
       continue;
     }
 
-    block->splitBasicBlock(split_point->getIterator(), block->getName() + ".obf.split");
+    llvm::BasicBlock* tail =
+        block->splitBasicBlock(split_point->getIterator(), block->getName() + ".obf.split");
+
+    llvm::SmallVector<llvm::Instruction*, 4> live_outs;
+    const std::size_t max_live_outs = 1 + static_cast<std::size_t>(block_seed & 1ULL);
+    for (llvm::Instruction& instruction : *block) {
+      if (live_outs.size() >= max_live_outs) { break; }
+      if (instruction.isTerminator() || !instruction.getType()->isIntegerTy()) { continue; }
+      bool used_outside = false;
+      for (const llvm::User* user : instruction.users()) {
+        const auto* user_inst = llvm::dyn_cast<llvm::Instruction>(user);
+        if (user_inst != nullptr && user_inst->getParent() != block) {
+          used_outside = true;
+          break;
+        }
+      }
+      if (used_outside) { live_outs.push_back(&instruction); }
+    }
+
+    if (!live_outs.empty()) {
+      llvm::LLVMContext& ctx = function.getContext();
+      llvm::BasicBlock* bridge =
+          llvm::BasicBlock::Create(ctx, block->getName() + ".obf.bridge", &function, tail);
+      block->getTerminator()->setSuccessor(0, bridge);
+      auto mctx = obf::support::make_mba_context(
+          function,
+          "obf.split",
+          block_seed,
+          {options.mba_depth,
+           options.mba_max_ir_instructions,
+           options.mba_enable_polynomial,
+           options.mba_enable_multiplication});
+      llvm::IRBuilder<> builder(bridge);
+      std::uint64_t site_salt = block_seed;
+      for (llvm::Instruction* live_out : live_outs) {
+        auto* int_type = llvm::cast<llvm::IntegerType>(live_out->getType());
+        llvm::Value* zero = mba::create_opaque_integer(
+            builder, int_type, mctx, llvm::APInt(int_type->getBitWidth(), 0), site_salt,
+            "obf.split.zero");
+        llvm::Value* ident =
+            ((site_salt >> 1) & 1ULL) != 0ULL
+                ? mba::create_add(builder, live_out, zero, mctx, site_salt, "obf.split.id")
+                : mba::create_xor(builder, live_out, zero, mctx, site_salt, "obf.split.id");
+        live_out->replaceUsesWithIf(ident, [&](llvm::Use& use) {
+          const auto* user_inst = llvm::dyn_cast<llvm::Instruction>(use.getUser());
+          return user_inst != nullptr && user_inst->getParent() != block &&
+                 user_inst->getParent() != bridge;
+        });
+        ++site_salt;
+      }
+      builder.CreateBr(tail);
+    }
     ++split_count;
     ++block_index;
   }

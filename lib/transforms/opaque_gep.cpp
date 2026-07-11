@@ -5,11 +5,11 @@
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
-#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GetElementPtrTypeIterator.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
@@ -34,8 +34,8 @@ bool constant_contains_gep(const llvm::Constant* constant) {
   return false;
 }
 
-std::uint64_t derive_mba_seed(const llvm::Function& function) {
-  const std::uint64_t seed = stable_hash_string(function.getName());
+std::uint64_t derive_mba_seed(const llvm::Function& function, std::uint64_t option_seed) {
+  const std::uint64_t seed = mix_seed(option_seed, stable_hash_string(function.getName()));
   return seed == 0 ? 0x61e1f3b77b6d4c29ULL : seed;
 }
 
@@ -123,7 +123,8 @@ llvm::Value* build_scaled_offset_term(llvm::IRBuilder<>& builder,
                                       llvm::IntegerType* ptr_int_type,
                                       const llvm::APInt& multiplier,
                                       const mba::builder_context& context,
-                                      std::uint64_t salt) {
+                                      std::uint64_t salt,
+                                      std::uint64_t decomposition_bit) {
   llvm::Value* scaled_index = index;
   if (scaled_index->getType() != ptr_int_type) {
     scaled_index = builder.CreateSExtOrTrunc(index, ptr_int_type, "obf.gep.index");
@@ -134,6 +135,17 @@ llvm::Value* build_scaled_offset_term(llvm::IRBuilder<>& builder,
 
   if (typed_multiplier.isAllOnes()) {
     return builder.CreateNeg(scaled_index, "obf.gep.scale.neg");
+  }
+
+  if (decomposition_bit == 1) {
+    const llvm::APInt reduced_multiplier = typed_multiplier - 1;
+    llvm::Value* hi = mba::create_mul(builder,
+                                      scaled_index,
+                                      llvm::ConstantInt::get(ptr_int_type, reduced_multiplier),
+                                      context,
+                                      salt,
+                                      "obf.gep.scale.hi");
+    return mba::create_add(builder, hi, scaled_index, context, salt, "obf.gep.scale");
   }
 
   return mba::create_mul(builder,
@@ -158,10 +170,10 @@ llvm::Value* lower_gep(llvm::GetElementPtrInst& instruction,
   auto* ptr_int_type = data_layout.getIntPtrType(function->getContext(), instruction.getAddressSpace());
   const unsigned ptr_bit_width = ptr_int_type->getBitWidth();
 
-  llvm::SmallMapVector<llvm::Value*, llvm::APInt, 4> variable_offsets;
-  llvm::APInt constant_offset(ptr_bit_width, 0);
-  if (!instruction.collectOffset(data_layout, ptr_bit_width, variable_offsets, constant_offset)) {
-    return nullptr;
+  for (auto gti = llvm::gep_type_begin(instruction), gte = llvm::gep_type_end(instruction);
+       gti != gte; ++gti) {
+    if (gti.getStructTypeOrNull() != nullptr) { continue; }
+    if (data_layout.getTypeAllocSize(gti.getIndexedType()).isScalable()) { return nullptr; }
   }
 
   llvm::IRBuilder<> builder(&instruction);
@@ -188,27 +200,51 @@ llvm::Value* lower_gep(llvm::GetElementPtrInst& instruction,
       "obf.gep.offset.base");
 
   std::uint64_t local_salt = salt + 1;
-  if (!constant_offset.isZero()) {
-    offset_value = mba::create_add(builder,
-                                   offset_value,
-                                   mba::create_opaque_integer(builder,
-                                                              ptr_int_type,
-                                                              mba_context,
-                                                              constant_offset.sextOrTrunc(ptr_bit_width),
-                                                              local_salt,
-                                                              "obf.gep.offset.const"),
-                                   mba_context,
-                                   local_salt ^ 0x35f1e2d7ULL,
-                                   "obf.gep.offset");
-    ++local_salt;
-  }
+  const std::uint64_t seed_base = mba_context.seed_base;
+  std::size_t dim = 0;
+  for (auto gti = llvm::gep_type_begin(instruction), gte = llvm::gep_type_end(instruction);
+       gti != gte; ++gti, ++dim) {
+    llvm::Value* term = nullptr;
+    if (llvm::StructType* struct_type = gti.getStructTypeOrNull()) {
+      const uint64_t field_index =
+          llvm::cast<llvm::ConstantInt>(gti.getOperand())->getZExtValue();
+      const uint64_t field_offset =
+          data_layout.getStructLayout(struct_type)->getElementOffset(
+              static_cast<unsigned>(field_index));
+      term = mba::create_opaque_integer(builder,
+                                        ptr_int_type,
+                                        mba_context,
+                                        llvm::APInt(ptr_bit_width, field_offset),
+                                        local_salt,
+                                        "obf.gep.field");
+    } else {
+      if (data_layout.getTypeAllocSize(gti.getIndexedType()).isScalable()) { return nullptr; }
+      const uint64_t elem_size =
+          data_layout.getTypeAllocSize(gti.getIndexedType()).getFixedValue();
+      term = build_scaled_offset_term(builder,
+                                      gti.getOperand(),
+                                      ptr_int_type,
+                                      llvm::APInt(ptr_bit_width, elem_size),
+                                      mba_context,
+                                      local_salt,
+                                      (mix_seed(seed_base, dim) & 1ULL));
+    }
 
-  for (const auto& entry : variable_offsets) {
-    llvm::Value* term =
-        build_scaled_offset_term(
-            builder, entry.first, ptr_int_type, entry.second, mba_context, local_salt);
     offset_value =
         mba::create_add(builder, offset_value, term, mba_context, local_salt, "obf.gep.offset");
+    ++local_salt;
+    offset_value = mba::create_add(
+        builder,
+        offset_value,
+        mba::create_opaque_integer(builder,
+                                   ptr_int_type,
+                                   mba_context,
+                                   llvm::APInt(ptr_bit_width, 0),
+                                   local_salt,
+                                   "obf.gep.pad"),
+        mba_context,
+        local_salt ^ 0x5bd1e995ULL,
+        "obf.gep.offset");
     ++local_salt;
   }
 
@@ -239,7 +275,7 @@ opaque_gep_result run_opaque_gep(llvm::Function& function, const opaque_gep_opti
   }
 
   auto mba_context = obf::support::make_mba_context(
-      function, "obf.gep", derive_mba_seed(function),
+      function, "obf.gep", derive_mba_seed(function, options.seed),
       {options.mba_depth, options.mba_max_ir_instructions, options.mba_enable_polynomial, options.mba_enable_multiplication});
 
   std::size_t lowered_count = 0;

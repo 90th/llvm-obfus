@@ -1,5 +1,6 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/instruction-substitute-depth.yaml -passes=obf-instruction-substitute -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/instruction-substitute-depth.yaml -passes=obf-instruction-substitute -S %s -o %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/instruction-substitute-depth.yaml --obf-seed=1 -passes=obf-instruction-substitute -S %s -o %t
+; RUN: %FileCheck %s < %t
+; RUN: %opt -passes=verify -disable-output %t
 ; RUN: %lli %t
 
 define i32 @value(i32 %x, i32 %y) {
@@ -17,10 +18,10 @@ entry:
   ret i32 %ret
 }
 
+; @value is level strong, so and/or are substituted, and under strong classical
+; up to two sites gain a depth-3 MBA opaque-zero pad. The identity family per op
+; is seed/path dependent; assert only that each op's chain and the MBA pad exist.
 ; CHECK-LABEL: define i32 @value
-; CHECK: %obf.and.notlhs = xor i32 %x, -1
-; CHECK: %obf.and.notrhs = xor i32 %y, -1
-; CHECK: %lhs = xor i32 %obf.and.or, -1
-; CHECK: %obf.or.notlhs = xor i32 %lhs, -1
-; CHECK: %obf.or.and = and i32 %obf.or.notlhs, -4
-; CHECK: %rhs = xor i32 %obf.or.and, -1
+; CHECK-DAG: %obf.and.
+; CHECK-DAG: %obf.or.
+; CHECK-DAG: %obf.subst.pad

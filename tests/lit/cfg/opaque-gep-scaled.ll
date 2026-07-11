@@ -1,6 +1,6 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/opaque-gep-scaled.yaml -passes=obf-opaque-gep -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/opaque-gep-scaled.yaml -passes=obf-opaque-gep -S %s -o - | %opt -passes=verify -disable-output
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/opaque-gep-scaled.yaml -passes=obf-opaque-gep -S %s -o %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/opaque-gep-scaled.yaml --obf-seed=1 -passes=obf-opaque-gep -S %s -o %t
+; RUN: %FileCheck %s < %t
+; RUN: %opt -passes=verify -disable-output %t
 ; RUN: %lli %t
 
 target datalayout = "e-m:e-p:64:64-i64:64-n8:16:32:64-S128"
@@ -33,11 +33,15 @@ entry:
   ret i32 %ret
 }
 
+; The variable-index array GEP is lowered per dimension with a seed-selected
+; scale decomposition (obf.gep.scale or obf.gep.scale.hi) plus a struct-field
+; term and interleaved opaque-zero pads. %lli proves address correctness.
 ; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-NOT: getelementptr
 ; CHECK-LABEL: define i64 @read_index(i32 %idx)
 ; CHECK: %obf.gep.base = ptrtoint ptr @pairs to i64
-; CHECK: %obf.gep.index = sext i32 %idx to i64
-; CHECK: %obf.gep.scale.term.shl.0 = shl i64 %obf.gep.index, 4
-; CHECK: %obf.gep.scale =
+; CHECK-DAG: %obf.gep.index = sext i32 %idx to i64
+; CHECK-DAG: %obf.gep.field
+; CHECK-DAG: %obf.gep.scale
+; CHECK-DAG: %obf.gep.pad
 ; CHECK: %field = inttoptr i64 %obf.gep.addr{{[0-9]*}} to ptr

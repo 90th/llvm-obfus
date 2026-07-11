@@ -1,6 +1,7 @@
 #include "obf/transforms/bogus_control_flow.h"
 
 #include "obf/support/decoy_trap.h"
+#include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -17,8 +18,6 @@ namespace obf {
 
 namespace {
 
-constexpr std::uint32_t dse_trap_iterations = 1000000U;
-
 bool is_supported_branch_candidate(llvm::BasicBlock& block) {
   auto* branch = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator());
   if (branch == nullptr || !branch->isUnconditional()) { return false; }
@@ -27,35 +26,60 @@ bool is_supported_branch_candidate(llvm::BasicBlock& block) {
   return successor != nullptr && successor->phis().empty();
 }
 
-void populate_dse_trap(llvm::Function& function, llvm::BasicBlock& bogus, llvm::BasicBlock& sink) {
+void populate_dse_trap(llvm::Function& function, llvm::BasicBlock& bogus, llvm::BasicBlock& sink,
+                       std::uint64_t site_seed) {
   llvm::LLVMContext& context = function.getContext();
-  llvm::BasicBlock* loop = llvm::BasicBlock::Create(context, "obf.bogus.loop", &function, &sink);
 
-  llvm::IRBuilder<> bogus_builder(&bogus);
-  llvm::Value* initial_entropy =
-      bogus_builder.CreateLoad(bogus_builder.getInt64Ty(),
-                               mba::get_or_create_entropy_anchor(*function.getParent()),
-                               "obf.bogus.seed");
-  llvm::Value* initial_state = bogus_builder.CreateXor(
-      initial_entropy,
-      llvm::ConstantInt::get(bogus_builder.getInt64Ty(), 0xd6e8feb86659fd93ULL),
-      "obf.bogus.state.init");
-  bogus_builder.CreateBr(loop);
+  if (((site_seed >> 1) & 1ULL) == 0ULL) {
+    // Family 0: entropy-seeded decoy loop.
+    llvm::BasicBlock* loop = llvm::BasicBlock::Create(context, "obf.bogus.loop", &function, &sink);
 
-  llvm::IRBuilder<> loop_builder(loop);
-  llvm::PHINode* iteration = loop_builder.CreatePHI(loop_builder.getInt32Ty(), 2, "obf.bogus.iter");
-  llvm::PHINode* state = loop_builder.CreatePHI(loop_builder.getInt64Ty(), 2, "obf.bogus.state");
-  auto loop_state = support::build_decoy_loop_core(loop_builder, state, iteration, "obf.bogus");
-  llvm::Value* done = loop_builder.CreateICmpEQ(
-      loop_state.next_iteration,
-      llvm::ConstantInt::get(loop_builder.getInt32Ty(), dse_trap_iterations),
-      "obf.bogus.done");
-  loop_builder.CreateCondBr(done, &sink, loop);
+    llvm::IRBuilder<> bogus_builder(&bogus);
+    llvm::Value* initial_entropy =
+        bogus_builder.CreateLoad(bogus_builder.getInt64Ty(),
+                                 mba::get_or_create_entropy_anchor(*function.getParent()),
+                                 "obf.bogus.seed");
+    llvm::Value* initial_state = bogus_builder.CreateXor(
+        initial_entropy,
+        llvm::ConstantInt::get(bogus_builder.getInt64Ty(), mix_seed(site_seed, 0x1ULL)),
+        "obf.bogus.state.init");
+    bogus_builder.CreateBr(loop);
 
-  iteration->addIncoming(llvm::ConstantInt::get(loop_builder.getInt32Ty(), 0), &bogus);
-  iteration->addIncoming(loop_state.next_iteration, loop);
-  state->addIncoming(initial_state, &bogus);
-  state->addIncoming(loop_state.next_state, loop);
+    llvm::IRBuilder<> loop_builder(loop);
+    llvm::PHINode* iteration = loop_builder.CreatePHI(loop_builder.getInt32Ty(), 2, "obf.bogus.iter");
+    llvm::PHINode* state = loop_builder.CreatePHI(loop_builder.getInt64Ty(), 2, "obf.bogus.state");
+    auto loop_state = support::build_decoy_loop_core(loop_builder, state, iteration, "obf.bogus");
+    const std::uint32_t trip_count = 900000U + static_cast<std::uint32_t>(site_seed % 200001ULL);
+    llvm::Value* done = loop_builder.CreateICmpEQ(
+        loop_state.next_iteration,
+        llvm::ConstantInt::get(loop_builder.getInt32Ty(), trip_count),
+        "obf.bogus.done");
+    loop_builder.CreateCondBr(done, &sink, loop);
+
+    iteration->addIncoming(llvm::ConstantInt::get(loop_builder.getInt32Ty(), 0), &bogus);
+    iteration->addIncoming(loop_state.next_iteration, loop);
+    state->addIncoming(initial_state, &bogus);
+    state->addIncoming(loop_state.next_state, loop);
+  } else {
+    // Family 1: straight-line entropy-seeded arithmetic decoy (no loop).
+    llvm::IRBuilder<> bogus_builder(&bogus);
+    llvm::Type* word_type = bogus_builder.getInt64Ty();
+    llvm::Value* seed_value =
+        bogus_builder.CreateLoad(word_type,
+                                 mba::get_or_create_entropy_anchor(*function.getParent()),
+                                 "obf.bogus.seed");
+    llvm::Value* acc0 = bogus_builder.CreateXor(
+        seed_value, llvm::ConstantInt::get(word_type, mix_seed(site_seed, 0x2ULL)), "obf.bogus.acc0");
+    llvm::Value* product = bogus_builder.CreateMul(
+        acc0, llvm::ConstantInt::get(word_type, mix_seed(site_seed, 0x3ULL) | 1ULL),
+        "obf.bogus.acc1.mul");
+    llvm::Value* acc1 = bogus_builder.CreateAdd(
+        product, llvm::ConstantInt::get(word_type, mix_seed(site_seed, 0x4ULL)), "obf.bogus.acc1");
+    llvm::Value* acc2 = bogus_builder.CreateXor(
+        acc1, llvm::ConstantInt::get(word_type, mix_seed(site_seed, 0x5ULL)), "obf.bogus.acc2");
+    (void)acc2;
+    bogus_builder.CreateBr(&sink);
+  }
 
   llvm::IRBuilder<> sink_builder(&sink);
   sink_builder.CreateBr(sink.getNextNode());
@@ -106,6 +130,8 @@ bogus_control_flow_result run_bogus_control_flow(llvm::Function& function,
   if (analysis.insertion_count == 0) { return analysis; }
 
   std::size_t inserted = 0;
+  const std::uint64_t function_seed =
+      mix_seed(options.seed, stable_hash_string(function.getName()));
   llvm::SmallVector<llvm::BasicBlock*, 16> blocks;
   for (llvm::BasicBlock& block : function) { blocks.push_back(&block); }
 
@@ -123,13 +149,15 @@ bogus_control_flow_result run_bogus_control_flow(llvm::Function& function,
         llvm::BasicBlock::Create(function.getContext(), "obf.bogus.sink", &function, successor);
 
     llvm::IRBuilder<> builder(branch);
+    const std::uint64_t site_seed =
+        mix_seed(function_seed, static_cast<std::uint64_t>(inserted + 1));
     llvm::Value* predicate =
         mba::build_entropy_true_predicate(builder,
                                           function,
                                           options.mba_depth,
-                                          static_cast<std::uint64_t>(inserted + 1),
-                                          0x31415926ULL,
-                                          0x27182818ULL,
+                                          site_seed,
+                                          site_seed,
+                                          site_seed,
                                           "obf.bogus.pred.a",
                                           "obf.bogus.pred.b",
                                           "obf.bogus.true",
@@ -142,9 +170,13 @@ bogus_control_flow_result run_bogus_control_flow(llvm::Function& function,
       continue;
     }
 
-    builder.CreateCondBr(predicate, successor, bogus);
+    if ((site_seed & 1ULL) == 0ULL) {
+      builder.CreateCondBr(predicate, successor, bogus);
+    } else {
+      builder.CreateCondBr(builder.CreateNot(predicate, "obf.bogus.false"), bogus, successor);
+    }
     branch->eraseFromParent();
-    populate_dse_trap(function, *bogus, *sink);
+    populate_dse_trap(function, *bogus, *sink, site_seed);
     ++inserted;
   }
 

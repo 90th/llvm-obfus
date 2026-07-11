@@ -1,6 +1,6 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/bogus-control-flow-depth3.yaml -passes=obf-bogus-cf -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/bogus-control-flow-depth3.yaml -passes=obf-bogus-cf -S %s -o - | %opt -passes=verify -disable-output
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/bogus-control-flow-depth3.yaml -passes=obf-bogus-cf -S %s -o %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/bogus-control-flow-depth3.yaml --obf-seed=1 -passes=obf-bogus-cf -S %s -o %t
+; RUN: %FileCheck %s < %t
+; RUN: %opt -passes=verify -disable-output %t
 ; RUN: %lli %t
 
 define i32 @branchy(i32 %x) {
@@ -26,6 +26,9 @@ entry:
   ret i32 %ret
 }
 
+; At mba depth 3 the always-true predicate uses affine encode/decode; the branch
+; polarity and decoy trap family remain seed-selected (direct or inverted guard;
+; decoy loop or straight-line arithmetic chain). The trip count is not pinned.
 ; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-LABEL: define i32 @branchy
 ; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
@@ -34,14 +37,11 @@ entry:
 ; CHECK: %obf.opaque.direct = extractvalue { i64, i64 } %obf.opaque.pair, 0
 ; CHECK: %obf.opaque.indirect = extractvalue { i64, i64 } %obf.opaque.pair, 1
 ; CHECK: %obf.opaque.entropy.mix{{.*}} = {{.*}} i64 %obf.opaque.direct
-; CHECK: %obf.opaque.seed =
 ; CHECK: %obf.opaque.seed.freeze = freeze i64 %obf.opaque.seed
 ; CHECK-DAG: %obf.opaque.seed.lhs.mul = mul i64 %obf.opaque.seed.freeze,
-; CHECK-DAG: %obf.opaque.seed.lhs.dec = mul i64 %obf.opaque.seed.lhs.sub,
 ; CHECK-DAG: %obf.opaque.seed.rhs.mul = mul i64 %obf.opaque.seed.freeze,
-; CHECK-DAG: %obf.opaque.seed.rhs.dec = mul i64 %obf.opaque.seed.rhs.sub,
-; CHECK: %obf.bogus.true = icmp eq i64 %obf.opaque.expr.a, %obf.opaque.expr.b
-; CHECK: br i1 %obf.bogus.true, label %merge, label %obf.bogus
+; CHECK: %obf.bogus.true = icmp eq i64
+; CHECK: br i1 %obf.bogus.{{(true|false)}},
 ; CHECK: obf.bogus:
 ; CHECK: %obf.bogus.seed = load i64, ptr @rt_core_ea
-; CHECK: br label %obf.bogus.loop
+; CHECK: %obf.bogus.{{(state.init|acc0)}} =

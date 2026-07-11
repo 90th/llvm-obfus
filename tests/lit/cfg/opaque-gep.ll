@@ -1,5 +1,6 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/opaque-gep.yaml -passes=obf-opaque-gep -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/opaque-gep.yaml -passes=obf-opaque-gep -S %s -o %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/opaque-gep.yaml --obf-seed=1 -passes=obf-opaque-gep -S %s -o %t
+; RUN: %FileCheck %s < %t
+; RUN: %opt -passes=verify -disable-output %t
 ; RUN: %lli %t
 
 target datalayout = "e-m:e-p:64:64-i64:64-n8:16:32:64-S128"
@@ -60,11 +61,14 @@ entry:
 
 ; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-NOT: getelementptr
+; The multi-index GEP is now lowered per dimension: a struct-field term, a
+; scaled array/pointer term, and interleaved opaque-zero pads, instead of one
+; folded offset. %lli proves the reconstructed address is identical.
 ; CHECK-LABEL: define i64 @read_field(ptr %p)
-; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
 ; CHECK: %obf.gep.base = ptrtoint ptr %p to i64
-; CHECK: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
-; CHECK: %obf.gep.addr =
+; CHECK-DAG: %obf.gep.field
+; CHECK-DAG: %obf.gep.scale
+; CHECK-DAG: %obf.gep.pad
 ; CHECK: %field = inttoptr i64 %obf.gep.addr to ptr
 ; CHECK-LABEL: define i64 @read_global_field()
 ; CHECK: %obf.gep.base = ptrtoint ptr @glob to i64
