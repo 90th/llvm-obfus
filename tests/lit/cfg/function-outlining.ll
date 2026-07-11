@@ -1,6 +1,14 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/function-outlining.yaml -passes='obf-control-flatten,obf-function-outline' -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/function-outlining.yaml -passes='obf-control-flatten,obf-function-outline' -S %s -o %t
-; RUN: %lli %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/function-outlining.yaml --obf-seed=777 -passes=obf-control-flatten -S %s -o %t.flat
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/function-outlining.yaml --obf-seed=1 -passes=obf-function-outline -S %t.flat -o %t.seed1.first
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/function-outlining.yaml --obf-seed=1 -passes=obf-function-outline -S %t.flat -o %t.seed1.second
+; RUN: cmp %t.seed1.first %t.seed1.second
+; RUN: %FileCheck %s < %t.seed1.first
+; RUN: %opt -passes=verify -disable-output %t.seed1.first
+; RUN: %lli %t.seed1.first
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/function-outlining.yaml --obf-seed=3 -passes=obf-function-outline -S %t.flat -o %t.seed3
+; RUN: %python -c "import pathlib,re,sys; pattern=re.compile(r'switch i32 %obf\.outline\.route[0-9]*, label %[^\n]+ \[(.*?)\n  \]', re.S); parse=lambda path:[tuple(int(value) for value in re.findall(r'i32 (-?[0-9]+), label', body)) for body in pattern.findall(pathlib.Path(path).read_text(encoding='utf-8'))]; a=parse(sys.argv[1]); b=parse(sys.argv[2]); assert a and b, (a,b); assert all(len(tokens)>=2 and len(tokens)==len(set(tokens)) and all((token & 0x80000000)!=0 for token in tokens) for tokens in a+b), (a,b); assert a!=b, (a,b)" %t.seed1.first %t.seed3
+; RUN: %opt -passes=verify -disable-output %t.seed3
+; RUN: %lli %t.seed3
 
 define i32 @shardy(i32 %x) {
 entry:
@@ -58,8 +66,17 @@ merge3:
 
 define i32 @main() {
 entry:
-  %r = call i32 @shardy(i32 7)
-  %ok = icmp eq i32 %r, 7
+  %r0 = call i32 @shardy(i32 0)
+  %ok0 = icmp eq i32 %r0, -2
+  %r1 = call i32 @shardy(i32 5)
+  %ok1 = icmp eq i32 %r1, 11
+  %r2 = call i32 @shardy(i32 7)
+  %ok2 = icmp eq i32 %r2, 7
+  %r3 = call i32 @shardy(i32 10)
+  %ok3 = icmp eq i32 %r3, 6
+  %ok01 = and i1 %ok0, %ok1
+  %ok23 = and i1 %ok2, %ok3
+  %ok = and i1 %ok01, %ok23
   %ret = select i1 %ok, i32 0, i32 1
   ret i32 %ret
 }
@@ -71,4 +88,7 @@ entry:
 ; CHECK: %obf.shard.indirect = inttoptr i64 %obf.shard.addr to ptr
 ; CHECK: call {{.*}} %obf.shard.indirect
 ; CHECK: define internal {{.*}} @__obf_shard_{{[0-9a-f]+}}
+; CHECK: switch i32 %obf.outline.route{{[0-9]*}}, label %{{[^ ]+}} [
+; CHECK-NOT: i32 {{[0-9]+}}, label %
+; CHECK: ]
 ; CHECK: define internal {{.*}} @__obf_shard_{{[0-9a-f]+}}

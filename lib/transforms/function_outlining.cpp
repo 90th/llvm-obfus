@@ -7,8 +7,7 @@
 #include "obf/transforms/mba.h"
 
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -42,6 +41,25 @@ struct handler_info {
   llvm::SmallVector<dispatch_route, 2> routes;
   std::uint64_t rank = 0;
 };
+
+std::uint32_t generate_sparse_route_token(std::uint64_t route_seed,
+                                          std::size_t route_ordinal,
+                                          llvm::DenseSet<std::uint32_t>& used_tokens) {
+  std::uint64_t material = mix_seed(
+      route_seed, (static_cast<std::uint64_t>(route_ordinal) + 1U) * 0x9e3779b97f4a7c15ULL);
+  material = mix_seed(material, 0x94d049bb133111ebULL);
+  std::uint32_t payload = static_cast<std::uint32_t>(material ^ (material >> 32U)) & 0x7fffffffU;
+
+  while (true) {
+    const std::uint32_t candidate = payload | 0x80000000U;
+    if (candidate != 0xffffffffU && candidate != 0xfffffffeU &&
+        used_tokens.insert(candidate).second) {
+      return candidate;
+    }
+
+    payload = (payload + 0x1e3779b9U) & 0x7fffffffU;
+  }
+}
 
 bool is_terminal_handler(const llvm::BasicBlock& block) {
   const llvm::Instruction* terminator = block.getTerminator();
@@ -77,7 +95,8 @@ bool is_dispatch_block(const llvm::BasicBlock& block) {
     case flattening::block_role::dispatch_right:
     case flattening::block_role::dispatch_leaf:
       return true;
-    default: return false;
+    default:
+      return false;
   }
 }
 
@@ -97,9 +116,7 @@ llvm::BasicBlock* find_flatten_default_target(llvm::Function& function) {
     if (branch == nullptr || !is_dispatch_match_branch(block, *branch)) { continue; }
 
     llvm::BasicBlock* fallback = branch->getSuccessor(1);
-    if (fallback == nullptr || is_dispatch_block(*fallback)) {
-      continue;
-    }
+    if (fallback == nullptr || is_dispatch_block(*fallback)) { continue; }
 
     if (default_target == nullptr) {
       default_target = fallback;
@@ -170,9 +187,7 @@ std::vector<handler_info> collect_handler_infos(llvm::Function& function, std::u
     if (branch == nullptr || !is_dispatch_match_branch(block, *branch)) { continue; }
 
     llvm::BasicBlock* handler = branch->getSuccessor(0);
-    if (handler == nullptr || !is_outline_eligible_handler(*handler, default_target)) {
-      continue;
-    }
+    if (handler == nullptr || !is_outline_eligible_handler(*handler, default_target)) { continue; }
 
     const auto [iterator, inserted] = indices.try_emplace(handler, handlers.size());
     if (inserted) { handlers.push_back({.block = handler, .routes = {}, .rank = 0}); }
@@ -210,9 +225,13 @@ void obfuscate_shard_calls(llvm::Function& parent,
                            llvm::Function& shard,
                            const function_outlining_options& options,
                            std::uint64_t salt_base) {
-  auto context = obf::support::make_mba_context(
-      parent, "obf.shard.call", mix_seed(options.seed, salt_base),
-      {options.mba_depth, options.mba_max_ir_instructions, options.mba_enable_polynomial, options.mba_enable_multiplication});
+  auto context = obf::support::make_mba_context(parent,
+                                                "obf.shard.call",
+                                                mix_seed(options.seed, salt_base),
+                                                {options.mba_depth,
+                                                 options.mba_max_ir_instructions,
+                                                 options.mba_enable_polynomial,
+                                                 options.mba_enable_multiplication});
 
   std::uint64_t local_salt = salt_base;
   llvm::SmallVector<llvm::CallBase*, 4> calls;
@@ -265,27 +284,34 @@ bool try_extract_cluster(llvm::Function& function,
   llvm::LLVMContext& context = function.getContext();
   llvm::BasicBlock* cluster_entry = llvm::BasicBlock::Create(
       context, "obf.outline.entry", &function, cluster_handlers.front().block);
-  llvm::PHINode* route_selector =
-      llvm::PHINode::Create(llvm::Type::getInt32Ty(context), route_count, "obf.outline.route", cluster_entry);
+  llvm::PHINode* route_selector = llvm::PHINode::Create(
+      llvm::Type::getInt32Ty(context), route_count, "obf.outline.route", cluster_entry);
   llvm::IRBuilder<> entry_builder(cluster_entry);
   llvm::SwitchInst* cluster_switch =
       entry_builder.CreateSwitch(route_selector, cluster_handlers.front().block, route_count);
 
   llvm::SmallVector<llvm::BasicBlock*, 8> route_blocks;
   route_blocks.reserve(route_count);
-  std::uint32_t route_index = 0;
+  constexpr std::uint64_t kDefaultOutliningSeed = 0x6d2534f1f6c7a29bULL;
+  const std::uint64_t function_seed = options.seed == 0 ? kDefaultOutliningSeed : options.seed;
+  const std::uint64_t route_seed = mix_seed(function_seed,
+                                            mix_seed(stable_hash_string(function.getName()),
+                                                     (cluster_index + 1U) * 0xd1b54a32d192ed03ULL));
+  llvm::DenseSet<std::uint32_t> used_route_tokens;
+  std::size_t route_ordinal = 0;
   for (const handler_info& handler : cluster_handlers) {
     for (const dispatch_route& route : handler.routes) {
+      const std::uint32_t route_token =
+          generate_sparse_route_token(route_seed, route_ordinal++, used_route_tokens);
+      llvm::ConstantInt* route_token_value = entry_builder.getInt32(route_token);
       llvm::BasicBlock* route_block =
           llvm::BasicBlock::Create(context, "obf.outline.route", &function, cluster_entry);
       llvm::IRBuilder<> route_builder(route_block);
       route_builder.CreateBr(cluster_entry);
-      route_selector->addIncoming(
-          llvm::ConstantInt::get(route_selector->getType(), route_index), route_block);
-      cluster_switch->addCase(entry_builder.getInt32(route_index), handler.block);
+      route_selector->addIncoming(route_token_value, route_block);
+      cluster_switch->addCase(route_token_value, handler.block);
       route.branch->setSuccessor(0, route_block);
       route_blocks.push_back(route_block);
-      ++route_index;
     }
   }
 
@@ -311,9 +337,7 @@ bool try_extract_cluster(llvm::Function& function,
 
   llvm::SmallVector<llvm::BasicBlock*, 8> region_blocks;
   region_blocks.push_back(cluster_entry);
-  for (const handler_info& handler : cluster_handlers) {
-    region_blocks.push_back(handler.block);
-  }
+  for (const handler_info& handler : cluster_handlers) { region_blocks.push_back(handler.block); }
 
   dom_tree.recalculate(function);
   llvm::CodeExtractor extractor(region_blocks,
@@ -351,12 +375,15 @@ function_outlining_result analyze_impl(const llvm::Function& function,
   if (function.isDeclaration()) { return {.shard_count = 0, .detail = "declaration"}; }
 
   llvm::Function& mutable_function = const_cast<llvm::Function&>(function);
-  if (!is_flattened_function(function) && find_flatten_default_target(mutable_function) == nullptr) {
+  if (!is_flattened_function(function) &&
+      find_flatten_default_target(mutable_function) == nullptr) {
     return {.shard_count = 0, .detail = "not a flattened function"};
   }
 
   const std::vector<handler_info> handlers = collect_handler_infos(mutable_function, options.seed);
-  if (handlers.empty()) { return {.shard_count = 0, .detail = "no handlers found in flattened function"}; }
+  if (handlers.empty()) {
+    return {.shard_count = 0, .detail = "no handlers found in flattened function"};
+  }
 
   const std::size_t min_cluster_size = std::max<std::size_t>(1, options.min_cluster_size);
   const std::size_t possible = handlers.size() / min_cluster_size;
