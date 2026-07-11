@@ -209,12 +209,12 @@ add_custom_command(
   COMMAND "${OBF_CLANG}" -std=c17 -O0 -I${CMAKE_CURRENT_BINARY_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include -S -emit-llvm "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_LL}"
   COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}" -passes=obf-entropy-init -S "${OBF_ENTROPY_ANCHOR_LL}" -o "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}"
   COMMAND "${OBF_CLANG}" -c -fPIC "${OBF_ENTROPY_ANCHOR_RANDOMIZED_LL}" -o "${OBF_ENTROPY_ANCHOR_OBJ}"
-  DEPENDS obf_plugin "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" "${CMAKE_CURRENT_BINARY_DIR}/include/obf/support/runtime_abi_generated.h" "${OBF_BENCHMARK_SEED_STAMP}"
+  DEPENDS obf_plugin "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" "${CMAKE_CURRENT_SOURCE_DIR}/include/obf/support/blake2s_internal.h" "${CMAKE_CURRENT_BINARY_DIR}/include/obf/support/runtime_abi_generated.h" "${OBF_BENCHMARK_SEED_STAMP}"
   VERBATIM)
 add_custom_command(
   OUTPUT "${OBF_STRING_AUTH_RUNTIME_OBJ}"
   COMMAND "${OBF_CLANG}" -std=c17 -O2 -I${CMAKE_CURRENT_BINARY_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include -c -fPIC "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c" -o "${OBF_STRING_AUTH_RUNTIME_OBJ}"
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c" "${CMAKE_CURRENT_BINARY_DIR}/include/obf/support/runtime_abi_generated.h"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c" "${CMAKE_CURRENT_SOURCE_DIR}/include/obf/support/blake2s_internal.h" "${CMAKE_CURRENT_BINARY_DIR}/include/obf/support/runtime_abi_generated.h"
   VERBATIM)
 add_custom_target(obf-entropy-anchor-runtime ALL DEPENDS "${OBF_ENTROPY_ANCHOR_OBJ}")
 add_custom_target(obf-string-auth-runtime ALL DEPENDS "${OBF_STRING_AUTH_RUNTIME_OBJ}")

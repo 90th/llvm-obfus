@@ -2,6 +2,7 @@
 
 #include "obf/support/runtime_abi_generated.h"
 #include "obf/support/runtime_atomic.h"
+#include "obf/support/blake2s_internal.h"
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -181,9 +182,28 @@ static uint64_t ReadHardwareEntropy(void) {
   return ReadTimestampEntropy();
 }
 
+static const uint8_t kObfEntropyAnchorDomainV1[17] = {
+    'e','n','t','r','o','p','y','_','a','n','c','h','o','r','_','v','1'};
+
+static uint64_t ObfEntropyCompress(uint64_t current, uint64_t entropy) {
+  struct ObfBlake2sState state;
+  uint8_t digest[kObfBlake2sOutBytes];
+  uint64_t value;
+  ObfBlake2sInit(&state, kObfBlake2sOutBytes, NULL, 0);
+  ObfBlake2sUpdateDomain(&state, kObfEntropyAnchorDomainV1, sizeof(kObfEntropyAnchorDomainV1));
+  ObfBlake2sUpdateU64(&state, current);
+  ObfBlake2sUpdateU64(&state, entropy);
+  ObfBlake2sFinal(&state, digest);
+  value = ObfLoad64(digest);
+  ObfSecureZeroize(digest, sizeof(digest));
+  ObfSecureZeroize(&state, sizeof(state));
+  return value;
+}
+
 static void InitializeObfEntropyAnchor(void) {
   const uint64_t current = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
-  ObfAtomicStoreU64Relaxed(&OBF_RT_ENTROPY_ANCHOR, current ^ ReadHardwareEntropy());
+  const uint64_t hardware = ReadHardwareEntropy();
+  ObfAtomicStoreU64Relaxed(&OBF_RT_ENTROPY_ANCHOR, ObfEntropyCompress(current, hardware));
 }
 
 #if defined(_MSC_VER)
