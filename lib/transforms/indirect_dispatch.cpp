@@ -83,14 +83,16 @@ void append_selection_summary(std::string& detail, const site_collection& collec
   detail += ", switch_sites=";
   detail += std::to_string(collection.selected_switch_sites);
   detail += ", shape=";
-  detail += selected_site_shape(collection.selected_branch_sites, collection.selected_switch_sites).str();
+  detail +=
+      selected_site_shape(collection.selected_branch_sites, collection.selected_switch_sites).str();
   detail += ")";
 }
 
 std::string make_result_detail(const indirect_dispatch_result& result, llvm::StringRef suffix) {
-  std::string detail = std::to_string(result.site_count) + " site(s) rewritten (branches=" +
-         std::to_string(result.branch_site_count) + ", switches=" +
-         std::to_string(result.switch_site_count) + "); " + suffix.str();
+  std::string detail = std::to_string(result.site_count) +
+                       " site(s) rewritten (branches=" + std::to_string(result.branch_site_count) +
+                       ", switches=" + std::to_string(result.switch_site_count) + "); " +
+                       suffix.str();
   detail += "; selected(branch_sites=";
   detail += std::to_string(result.branch_site_count);
   detail += ", switch_sites=";
@@ -160,7 +162,9 @@ void append_unique_target(llvm::SmallVectorImpl<llvm::BasicBlock*>& targets,
                           llvm::BasicBlock* target) {
   if (target == nullptr) { return; }
 
-  if (std::find(targets.begin(), targets.end(), target) == targets.end()) { targets.push_back(target); }
+  if (std::find(targets.begin(), targets.end(), target) == targets.end()) {
+    targets.push_back(target);
+  }
 }
 
 bool has_unsupported_function_shape(const llvm::Function& function, std::string& detail) {
@@ -182,9 +186,10 @@ bool has_unsupported_function_shape(const llvm::Function& function, std::string&
     }
 
     if (llvm::isa<llvm::InvokeInst>(terminator) || llvm::isa<llvm::CallBrInst>(terminator) ||
-        llvm::isa<llvm::IndirectBrInst>(terminator) || llvm::isa<llvm::CatchSwitchInst>(terminator) ||
-        llvm::isa<llvm::CatchReturnInst>(terminator) || llvm::isa<llvm::CleanupReturnInst>(terminator) ||
-        llvm::isa<llvm::ResumeInst>(terminator)) {
+        llvm::isa<llvm::IndirectBrInst>(terminator) ||
+        llvm::isa<llvm::CatchSwitchInst>(terminator) ||
+        llvm::isa<llvm::CatchReturnInst>(terminator) ||
+        llvm::isa<llvm::CleanupReturnInst>(terminator) || llvm::isa<llvm::ResumeInst>(terminator)) {
       detail = "contains EH or indirect terminator";
       return true;
     }
@@ -327,23 +332,10 @@ site_collection collect_sites(const llvm::Function& function,
   return collection;
 }
 
-llvm::Instruction* get_entry_insertion_point(llvm::Function& function) {
-  for (llvm::Instruction& instruction : function.getEntryBlock()) {
-    if (llvm::isa<llvm::PHINode>(instruction) || llvm::isa<llvm::AllocaInst>(instruction) ||
-        instruction.isDebugOrPseudoInst()) {
-      continue;
-    }
-
-    return &instruction;
-  }
-
-  return function.getEntryBlock().getTerminator();
-}
-
 site_masking materialize_site_tokens(llvm::Function& function,
                                      llvm::BasicBlock& anchor_block,
                                      llvm::ArrayRef<llvm::BasicBlock*> unique_targets,
-                                     llvm::IRBuilder<llvm::NoFolder>& entry_builder,
+                                     llvm::IRBuilder<llvm::NoFolder>& site_builder,
                                      const mba::builder_context& mba_context,
                                      std::uint64_t site_seed,
                                      std::size_t site_index) {
@@ -371,8 +363,8 @@ site_masking materialize_site_tokens(llvm::Function& function,
         support::make_odd_affine_multiplier(bit_width, mix_seed(site_seed, 0x616666696e652e6dULL));
     const llvm::APInt affine_bias =
         support::make_affine_bias(bit_width, mix_seed(site_seed, 0x616666696e652e62ULL));
-    affine_multiplier_constant = llvm::cast<llvm::ConstantInt>(
-        llvm::ConstantInt::get(int_type, affine_multiplier));
+    affine_multiplier_constant =
+        llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(int_type, affine_multiplier));
     affine_bias_constant =
         llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(int_type, affine_bias));
     affine_inverse_constant = llvm::cast<llvm::ConstantInt>(
@@ -400,30 +392,30 @@ site_masking materialize_site_tokens(llvm::Function& function,
     llvm::Constant* delta = llvm::ConstantExpr::getSub(target_int, anchor_int);
     llvm::Value* encoded_delta = delta;
     if (use_affine_delta) {
-      llvm::Value* scaled_delta = entry_builder.CreateMul(
+      llvm::Value* scaled_delta = site_builder.CreateMul(
           delta,
           affine_multiplier_constant,
           support::scoped_ir_name(std::string("obf.idis.site") + std::to_string(site_index),
                                   "aff.mul" + std::to_string(target_index)));
-      encoded_delta = entry_builder.CreateAdd(
+      encoded_delta = site_builder.CreateAdd(
           scaled_delta,
           affine_bias_constant,
           support::scoped_ir_name(std::string("obf.idis.site") + std::to_string(site_index),
                                   "aff.enc" + std::to_string(target_index)));
     }
 
-    llvm::Value* xored = entry_builder.CreateXor(
+    llvm::Value* xored = site_builder.CreateXor(
         encoded_delta,
         key_constant,
         support::scoped_ir_name(std::string("obf.idis.site") + std::to_string(site_index),
                                 "xor" + std::to_string(target_index)));
-    llvm::Value* rotated = support::rotate_left_scalar(entry_builder,
-                                              xored,
-                                              rotate_amount,
-                                              support::scoped_ir_name(
-                                                  std::string("obf.idis.site") + std::to_string(site_index),
-                                                  "rot" + std::to_string(target_index)));
-    llvm::Value* encoded = entry_builder.CreateAdd(
+    llvm::Value* rotated = support::rotate_left_scalar(
+        site_builder,
+        xored,
+        rotate_amount,
+        support::scoped_ir_name(std::string("obf.idis.site") + std::to_string(site_index),
+                                "rot" + std::to_string(target_index)));
+    llvm::Value* encoded = site_builder.CreateAdd(
         rotated,
         bias_constant,
         support::scoped_ir_name(std::string("obf.idis.site") + std::to_string(site_index),
@@ -435,12 +427,12 @@ site_masking materialize_site_tokens(llvm::Function& function,
 }
 
 llvm::Value* decode_selected_token(llvm::IRBuilder<>& builder,
-                                    llvm::Function& function,
-                                    llvm::BasicBlock& anchor_block,
-                                    llvm::Value* selected_token,
-                                    const site_masking& masking,
-                                    const mba::builder_context& mba_context,
-                                    std::uint64_t salt_base) {
+                                   llvm::Function& function,
+                                   llvm::BasicBlock& anchor_block,
+                                   llvm::Value* selected_token,
+                                   const site_masking& masking,
+                                   const mba::builder_context& mba_context,
+                                   std::uint64_t salt_base) {
   llvm::Value* unbiased = mba::create_sub(builder,
                                           selected_token,
                                           masking.bias_constant,
@@ -449,12 +441,8 @@ llvm::Value* decode_selected_token(llvm::IRBuilder<>& builder,
                                           "obf.idis.unbias");
   llvm::Value* rotated =
       support::rotate_right_scalar(builder, unbiased, masking.rotate_amount, "obf.idis.rot");
-  llvm::Value* delta = mba::create_xor(builder,
-                                       rotated,
-                                       masking.key_constant,
-                                       mba_context,
-                                       salt_base ^ 0x23ULL,
-                                       "obf.idis.delta");
+  llvm::Value* delta = mba::create_xor(
+      builder, rotated, masking.key_constant, mba_context, salt_base ^ 0x23ULL, "obf.idis.delta");
   if (masking.use_affine_delta) {
     llvm::Value* affine_sub = mba::create_sub(builder,
                                               delta,
@@ -471,17 +459,12 @@ llvm::Value* decode_selected_token(llvm::IRBuilder<>& builder,
   }
   llvm::Value* anchor = builder.CreatePtrToInt(
       llvm::BlockAddress::get(&function, &anchor_block), masking.int_type, "obf.idis.anchor");
-  llvm::Value* dest_int = mba::create_add(builder,
-                                          anchor,
-                                          delta,
-                                          mba_context,
-                                          salt_base ^ 0x35ULL,
-                                          "obf.idis.addr");
+  llvm::Value* dest_int =
+      mba::create_add(builder, anchor, delta, mba_context, salt_base ^ 0x35ULL, "obf.idis.addr");
   return builder.CreateIntToPtr(dest_int, masking.pointer_type, "obf.idis.dest");
 }
 
 bool rewrite_branch_site(llvm::BranchInst& branch,
-                         llvm::IRBuilder<llvm::NoFolder>& entry_builder,
                          const mba::builder_context& mba_context,
                          std::uint64_t site_seed,
                          std::size_t site_index) {
@@ -495,30 +478,72 @@ bool rewrite_branch_site(llvm::BranchInst& branch,
   llvm::BasicBlock& anchor_block = select_anchor_block(source_block, unique_targets);
   if (!is_legal_anchor_block(source_block, anchor_block)) { return false; }
 
-  const site_masking masking = materialize_site_tokens(
-      function, anchor_block, unique_targets, entry_builder, mba_context, site_seed, site_index);
+  llvm::IRBuilder<llvm::NoFolder> materialize_builder(function.getContext(), llvm::NoFolder());
+  materialize_builder.SetInsertPoint(&branch);
+  const site_masking masking = materialize_site_tokens(function,
+                                                       anchor_block,
+                                                       unique_targets,
+                                                       materialize_builder,
+                                                       mba_context,
+                                                       site_seed,
+                                                       site_index);
 
   llvm::IRBuilder<> builder(function.getContext());
   builder.SetInsertPoint(&branch);
 
   llvm::Value* frozen_condition = builder.CreateFreeze(branch.getCondition(), "obf.idis.cond");
-  llvm::Value* selected_token = builder.CreateSelect(
-      frozen_condition,
-      masking.encoded_tokens.lookup(branch.getSuccessor(0)),
-      masking.encoded_tokens.lookup(branch.getSuccessor(1)),
-      "obf.idis.sel");
+  llvm::Value* selected_token =
+      builder.CreateSelect(frozen_condition,
+                           masking.encoded_tokens.lookup(branch.getSuccessor(0)),
+                           masking.encoded_tokens.lookup(branch.getSuccessor(1)),
+                           "obf.idis.sel");
   llvm::Value* destination = decode_selected_token(
       builder, function, anchor_block, selected_token, masking, mba_context, site_seed);
 
-  llvm::IndirectBrInst* indirect_branch = builder.CreateIndirectBr(destination, unique_targets.size());
+  llvm::IndirectBrInst* indirect_branch =
+      builder.CreateIndirectBr(destination, unique_targets.size());
   for (llvm::BasicBlock* target : unique_targets) { indirect_branch->addDestination(target); }
 
   branch.eraseFromParent();
   return true;
 }
 
+llvm::SmallVector<std::size_t, 8> seeded_case_order(std::size_t n, std::uint64_t site_seed) {
+  llvm::SmallVector<std::size_t, 8> order;
+  order.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) { order.push_back(i); }
+  for (std::size_t i = n; i > 1; --i) {
+    const std::uint64_t r =
+        mix_seed(site_seed, 0x6f7264725f7331ULL ^ static_cast<std::uint64_t>(i));
+    const std::size_t j = static_cast<std::size_t>(r % i);
+    const std::size_t tmp = order[i - 1];
+    order[i - 1] = order[j];
+    order[j] = tmp;
+  }
+  return order;
+}
+
+llvm::Value* reduce_or_balanced(llvm::IRBuilder<>& builder,
+                                llvm::ArrayRef<llvm::Value*> terms,
+                                llvm::StringRef base) {
+  llvm::SmallVector<llvm::Value*, 8> level(terms.begin(), terms.end());
+  std::size_t round = 0;
+  while (level.size() > 1) {
+    llvm::SmallVector<llvm::Value*, 8> next;
+    for (std::size_t i = 0; i + 1 < level.size(); i += 2) {
+      next.push_back(
+          builder.CreateOr(level[i],
+                           level[i + 1],
+                           base.str() + std::to_string(round) + "_" + std::to_string(i / 2)));
+    }
+    if (level.size() % 2 == 1) { next.push_back(level.back()); }
+    level.assign(next.begin(), next.end());
+    ++round;
+  }
+  return level.front();
+}
+
 bool rewrite_switch_site(llvm::SwitchInst& switch_inst,
-                         llvm::IRBuilder<llvm::NoFolder>& entry_builder,
                          const mba::builder_context& mba_context,
                          std::uint64_t site_seed,
                          std::size_t site_index) {
@@ -533,29 +558,55 @@ bool rewrite_switch_site(llvm::SwitchInst& switch_inst,
   llvm::BasicBlock& anchor_block = select_anchor_block(source_block, unique_targets);
   if (!is_legal_anchor_block(source_block, anchor_block)) { return false; }
 
-  const site_masking masking = materialize_site_tokens(
-      function, anchor_block, unique_targets, entry_builder, mba_context, site_seed, site_index);
+  llvm::IRBuilder<llvm::NoFolder> materialize_builder(function.getContext(), llvm::NoFolder());
+  materialize_builder.SetInsertPoint(&switch_inst);
+  const site_masking masking = materialize_site_tokens(function,
+                                                       anchor_block,
+                                                       unique_targets,
+                                                       materialize_builder,
+                                                       mba_context,
+                                                       site_seed,
+                                                       site_index);
 
   llvm::IRBuilder<> builder(function.getContext());
   builder.SetInsertPoint(&switch_inst);
 
   llvm::Value* frozen_state = builder.CreateFreeze(switch_inst.getCondition(), "obf.idis.state");
-  llvm::Value* selected_token = masking.encoded_tokens.lookup(switch_inst.getDefaultDest());
-  std::size_t case_index = 0;
+  llvm::Value* default_token = masking.encoded_tokens.lookup(switch_inst.getDefaultDest());
+
+  struct case_entry {
+    llvm::ConstantInt* value;
+    llvm::BasicBlock* successor;
+  };
+  llvm::SmallVector<case_entry, 8> entries;
   for (const auto& case_handle : switch_inst.cases()) {
-    llvm::Value* is_match = builder.CreateICmpEQ(
-        frozen_state, case_handle.getCaseValue(), "obf.idis.case" + std::to_string(case_index));
-    selected_token = builder.CreateSelect(is_match,
-                                          masking.encoded_tokens.lookup(case_handle.getCaseSuccessor()),
-                                          selected_token,
-                                          "obf.idis.sel" + std::to_string(case_index));
-    ++case_index;
+    entries.push_back({case_handle.getCaseValue(), case_handle.getCaseSuccessor()});
   }
+  const llvm::SmallVector<std::size_t, 8> order = seeded_case_order(entries.size(), site_seed);
+
+  llvm::ConstantInt* zero_token = llvm::ConstantInt::get(masking.int_type, 0);
+  llvm::SmallVector<llvm::Value*, 8> candidates;
+  llvm::SmallVector<llvm::Value*, 8> hits;
+  for (std::size_t p = 0; p < order.size(); ++p) {
+    const case_entry& e = entries[order[p]];
+    llvm::Value* is_match =
+        builder.CreateICmpEQ(frozen_state, e.value, "obf.idis.case" + std::to_string(p));
+    llvm::Value* token = masking.encoded_tokens.lookup(e.successor);
+    llvm::Value* cand =
+        builder.CreateSelect(is_match, token, zero_token, "obf.idis.cand" + std::to_string(p));
+    hits.push_back(is_match);
+    candidates.push_back(cand);
+  }
+  llvm::Value* combined = reduce_or_balanced(builder, candidates, "obf.idis.acc");
+  llvm::Value* any_match = reduce_or_balanced(builder, hits, "obf.idis.hit");
+  llvm::Value* selected_token =
+      builder.CreateSelect(any_match, combined, default_token, "obf.idis.sel");
 
   llvm::Value* destination = decode_selected_token(
       builder, function, anchor_block, selected_token, masking, mba_context, site_seed);
 
-  llvm::IndirectBrInst* indirect_branch = builder.CreateIndirectBr(destination, unique_targets.size());
+  llvm::IndirectBrInst* indirect_branch =
+      builder.CreateIndirectBr(destination, unique_targets.size());
   for (llvm::BasicBlock* target : unique_targets) { indirect_branch->addDestination(target); }
 
   switch_inst.eraseFromParent();
@@ -604,29 +655,24 @@ indirect_dispatch_result run_indirect_dispatch(llvm::Function& function,
     return result;
   }
 
-  llvm::Instruction* entry_insertion_point = get_entry_insertion_point(function);
-  llvm::IRBuilder<llvm::NoFolder> entry_builder(function.getContext(), llvm::NoFolder());
-  entry_builder.SetInsertPoint(entry_insertion_point);
-  auto mba_context = obf::support::make_mba_context(
-      function, "obf.idis", options.seed,
-      {options.mba_depth, options.mba_max_ir_instructions, options.mba_enable_polynomial, options.mba_enable_multiplication});
+  auto mba_context = obf::support::make_mba_context(function,
+                                                    "obf.idis",
+                                                    options.seed,
+                                                    {options.mba_depth,
+                                                     options.mba_max_ir_instructions,
+                                                     options.mba_enable_polynomial,
+                                                     options.mba_enable_multiplication});
 
   for (std::size_t site_index = 0; site_index < collection.sites.size(); ++site_index) {
     const dispatch_site& site = collection.sites[site_index];
     bool rewritten = false;
     if (site.kind == dispatch_site_kind::branch) {
-      rewritten = rewrite_branch_site(*llvm::cast<llvm::BranchInst>(site.terminator),
-                                      entry_builder,
-                                      mba_context,
-                                      site.seed,
-                                      site_index);
+      rewritten = rewrite_branch_site(
+          *llvm::cast<llvm::BranchInst>(site.terminator), mba_context, site.seed, site_index);
       if (rewritten) { ++result.branch_site_count; }
     } else {
-      rewritten = rewrite_switch_site(*llvm::cast<llvm::SwitchInst>(site.terminator),
-                                      entry_builder,
-                                      mba_context,
-                                      site.seed,
-                                      site_index);
+      rewritten = rewrite_switch_site(
+          *llvm::cast<llvm::SwitchInst>(site.terminator), mba_context, site.seed, site_index);
       if (rewritten) { ++result.switch_site_count; }
     }
 
