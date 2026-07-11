@@ -36,4 +36,4 @@ entry:
 ; CHECK: %obf.opaque.seed.freeze = freeze i64 %obf.opaque.seed
 ; CHECK: %obf.opaque.expr.a =
 ; CHECK: %obf.opaque.expr.b =
-; CHECK: %obf.opaque.true = icmp eq i64 %obf.opaque.expr.a, %obf.opaque.expr.b
+; CHECK: %obf.opaque.guard.true = icmp eq i64 %obf.opaque.expr.a, %obf.opaque.expr.b

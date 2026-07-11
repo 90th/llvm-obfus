@@ -18,6 +18,7 @@ struct opaque_predicate_options {
   std::optional<std::uint32_t> mba_max_ir_instructions;
   std::optional<bool> mba_enable_polynomial;
   std::optional<bool> mba_enable_multiplication;
+  std::uint64_t seed = 0;
 };
 
 struct opaque_predicate_result {

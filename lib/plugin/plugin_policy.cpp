@@ -468,6 +468,7 @@ opaque_predicate_options build_opaque_predicate_options(const obfuscation_config
   options.mba_max_ir_instructions = config.mba.max_ir_instructions;
   options.mba_enable_polynomial = config.mba.enable_polynomial;
   options.mba_enable_multiplication = config.mba.enable_multiplication;
+  options.seed = decision.seed;
   return options;
 }
 
