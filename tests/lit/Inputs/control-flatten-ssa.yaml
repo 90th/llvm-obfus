@@ -1,0 +1,7 @@
+seed: 8080
+default_level: none
+targets:
+  - match: "flat_*"
+    level: strong
+mba:
+  depth: 1

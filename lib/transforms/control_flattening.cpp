@@ -23,10 +23,12 @@
 #include "llvm/IR/Module.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace obf {
@@ -43,6 +45,30 @@ struct transition_edge {
   llvm::BasicBlock* successor = nullptr;
   llvm::BasicBlock* block = nullptr;
   llvm::Value* next_state = nullptr;
+};
+
+// Pre-mutation snapshot of the SSA edges threaded across the dispatcher. It is
+// captured before any use replacement so that dispatcher-PHI wiring always reads
+// the ORIGINAL incoming value of each flattened PHI, never an operand mutated in
+// place. Rewriting an original PHI operand and later reading it back is the
+// ordering hazard this plan exists to remove.
+struct flattening_ssa_plan {
+  llvm::DenseMap<std::pair<llvm::PHINode*, llvm::BasicBlock*>, llvm::Value*> phi_incomings;
+
+  void snapshot(llvm::ArrayRef<llvm::PHINode*> original_phis) {
+    for (llvm::PHINode* phi : original_phis) {
+      for (unsigned index = 0; index < phi->getNumIncomingValues(); ++index) {
+        phi_incomings[{phi, phi->getIncomingBlock(index)}] = phi->getIncomingValue(index);
+      }
+    }
+  }
+
+  llvm::Value* incoming_value(llvm::PHINode* phi, llvm::BasicBlock* predecessor) const {
+    const auto it = phi_incomings.find({phi, predecessor});
+    assert(it != phi_incomings.end() &&
+           "flattening SSA plan is missing an incoming value for a carried PHI edge");
+    return it->second;
+  }
 };
 
 enum class state_encoding_family : std::uint8_t { add_zero, sub_zero, xor_zero };
@@ -308,22 +334,21 @@ llvm::BasicBlock* create_decoy_trap(llvm::Function& function,
   return entry;
 }
 
+// Map a concrete SSA value that is live on the `source`->`successor` edge to the
+// value the dispatcher PHI must carry. Original PHIs are erased by flattening, so
+// any PHI is routed through its dispatcher PHI. A non-PHI instruction defined in
+// `source` still dominates the edge block, so its fresh, current value is used
+// directly; any other carried value is routed through its dispatcher PHI.
 llvm::Value*
-translate_value_for_edge(llvm::Value* value,
+map_flattened_edge_value(llvm::Value* value,
                          llvm::BasicBlock* source,
-                         llvm::BasicBlock* successor,
                          const llvm::DenseMap<llvm::Value*, llvm::PHINode*>& dispatcher_phis) {
-  if (auto* phi = llvm::dyn_cast<llvm::PHINode>(value)) {
-    if (phi->getParent() == successor) {
-      return translate_value_for_edge(
-          phi->getIncomingValueForBlock(source), source, successor, dispatcher_phis);
-    }
-
-    if (const auto it = dispatcher_phis.find(phi); it != dispatcher_phis.end()) {
+  if (llvm::isa<llvm::PHINode>(value)) {
+    if (const auto it = dispatcher_phis.find(value); it != dispatcher_phis.end()) {
       return it->second;
     }
 
-    return phi;
+    return value;
   }
 
   auto* instruction = llvm::dyn_cast<llvm::Instruction>(value);
@@ -336,6 +361,24 @@ translate_value_for_edge(llvm::Value* value,
   }
 
   return instruction;
+}
+
+llvm::Value*
+translate_value_for_edge(llvm::Value* value,
+                         llvm::BasicBlock* source,
+                         llvm::BasicBlock* successor,
+                         const llvm::DenseMap<llvm::Value*, llvm::PHINode*>& dispatcher_phis,
+                         const flattening_ssa_plan& plan) {
+  // A carried PHI in the successor selects, on this edge, its incoming value for
+  // `source`. Resolve that ORIGINAL incoming from the pre-mutation snapshot (never
+  // from the live operand, which the use-replacement pass must leave untouched),
+  // then map it to the value the dispatcher PHI should carry.
+  if (auto* phi = llvm::dyn_cast<llvm::PHINode>(value);
+      phi != nullptr && phi->getParent() == successor) {
+    return map_flattened_edge_value(plan.incoming_value(phi, source), source, dispatcher_phis);
+  }
+
+  return map_flattened_edge_value(value, source, dispatcher_phis);
 }
 
 bool is_cfg_state_placeholder_call(const llvm::Instruction& instruction,
@@ -702,6 +745,13 @@ control_flattening_result run_control_flattening(llvm::Function& function,
     }
   }
 
+  // Snapshot every (original PHI, predecessor) -> incoming value BEFORE any use
+  // replacement mutates operands. Dispatcher wiring reads exclusively from here.
+  flattening_ssa_plan ssa_plan;
+  ssa_plan.snapshot(original_phis);
+  llvm::DenseSet<const llvm::PHINode*> original_phi_set;
+  for (llvm::PHINode* phi : original_phis) { original_phi_set.insert(phi); }
+
   llvm::PHINode* state_phi =
       llvm::PHINode::Create(llvm::Type::getInt32Ty(context), 1, "obf.state", dispatch);
   llvm::DenseMap<llvm::Value*, llvm::PHINode*> dispatcher_phis;
@@ -714,20 +764,32 @@ control_flattening_result run_control_flattening(llvm::Function& function,
   bind_cfg_state_placeholders(blocks, state_ids, state_phi);
 
   for (const carried_value& carried : carried_values) {
-    llvm::SmallVector<llvm::Use*, 8> escaping_uses;
-    for (llvm::Use& use : carried.original->uses()) { escaping_uses.push_back(&use); }
-
     auto* instruction = llvm::cast<llvm::Instruction>(carried.original);
-    for (llvm::Use* use : escaping_uses) {
+    const bool carried_is_phi = llvm::isa<llvm::PHINode>(instruction);
+
+    llvm::SmallVector<llvm::Use*, 8> uses;
+    for (llvm::Use& use : carried.original->uses()) { uses.push_back(&use); }
+
+    for (llvm::Use* use : uses) {
       auto* user_instruction = llvm::dyn_cast<llvm::Instruction>(use->getUser());
       if (user_instruction == nullptr) {
         use->set(carried.dispatcher_phi);
         continue;
       }
 
-      const bool replace_use = llvm::isa<llvm::PHINode>(instruction) ||
-                               llvm::isa<llvm::PHINode>(user_instruction) ||
-                               user_instruction->getParent() != instruction->getParent();
+      // Never rewrite an operand inside an original PHI: it is a CFG-edge value
+      // threaded by the SSA plan, and the PHI itself is erased afterwards.
+      // Mutating it here is the ordering hazard that corrupted the threaded value.
+      if (auto* user_phi = llvm::dyn_cast<llvm::PHINode>(user_instruction);
+          user_phi != nullptr && original_phi_set.contains(user_phi)) {
+        continue;
+      }
+
+      // A carried PHI is erased, so every surviving use must read its dispatcher
+      // PHI. A carried non-PHI instruction survives; only its cross-block uses
+      // need the dispatcher PHI, because its definition no longer dominates them.
+      const bool replace_use =
+          carried_is_phi || user_instruction->getParent() != instruction->getParent();
       if (replace_use) { use->set(carried.dispatcher_phi); }
     }
   }
@@ -808,12 +870,47 @@ control_flattening_result run_control_flattening(llvm::Function& function,
     state_phi->addIncoming(edge.next_state, edge.block);
     for (const carried_value& carried : carried_values) {
       carried.dispatcher_phi->addIncoming(
-          translate_value_for_edge(carried.original, edge.source, edge.successor, dispatcher_phis),
+          translate_value_for_edge(
+              carried.original, edge.source, edge.successor, dispatcher_phis, ssa_plan),
           edge.block);
     }
   }
 
-  for (llvm::PHINode* phi : original_phis) { phi->eraseFromParent(); }
+  // Invariants (debug/CI): the dispatcher has exactly one predecessor per original
+  // transition edge plus the setup edge, and every dispatcher PHI (and the state
+  // PHI) has exactly one incoming per dispatcher predecessor.
+#ifndef NDEBUG
+  {
+    const std::size_t dispatcher_predecessors = transition_edges.size() + 1;
+    const auto has_unique_incomings = [dispatcher_predecessors](const llvm::PHINode* phi) {
+      if (phi->getNumIncomingValues() != dispatcher_predecessors) { return false; }
+      llvm::DenseSet<const llvm::BasicBlock*> seen;
+      for (unsigned index = 0; index < phi->getNumIncomingValues(); ++index) {
+        if (!seen.insert(phi->getIncomingBlock(index)).second) { return false; }
+      }
+      return true;
+    };
+    assert(has_unique_incomings(state_phi) &&
+           "state PHI must have exactly one incoming per dispatcher predecessor");
+    for (const carried_value& carried : carried_values) {
+      assert(has_unique_incomings(carried.dispatcher_phi) &&
+             "dispatcher PHI must have exactly one incoming per dispatcher predecessor");
+    }
+  }
+#endif
+
+  // Break references before deleting. Every remaining use of an original PHI now
+  // lives inside another original PHI (those operands were intentionally left
+  // untouched by the use-replacement loop above), so route them all to the
+  // dispatcher PHIs first. Dispatcher incomings were populated from the snapshot
+  // and never reference an original PHI, so this cannot disturb the wiring. This
+  // makes every erase order safe, including inter-referential / cyclic PHIs.
+  for (llvm::PHINode* phi : original_phis) { phi->replaceAllUsesWith(dispatcher_phis[phi]); }
+
+  for (llvm::PHINode* phi : original_phis) {
+    assert(phi->use_empty() && "original PHI still has uses at erase time");
+    phi->eraseFromParent();
+  }
 
   std::vector<dispatch_case> dispatch_cases = build_dispatch_cases(blocks, state_ids, decoy_states);
   shuffle_dispatch_cases(dispatch_cases, state_rng);
