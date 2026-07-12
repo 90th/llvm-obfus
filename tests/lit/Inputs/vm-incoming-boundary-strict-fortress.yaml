@@ -1,0 +1,6 @@
+profile: fortress
+seed: 9001
+default_level: none
+targets:
+  - match: vm_target
+    level: vm

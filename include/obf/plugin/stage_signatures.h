@@ -114,6 +114,13 @@ collect_virtualized_function_names(const virtualized_function_map& virtualized_f
 void include_vm_parent_functions(llvm::StringSet<>& virtualized_names,
                                  const virtualized_function_map& virtualized_functions);
 
+// Callers that retain a preserved (non-rewritable) incoming VM boundary site
+// (invoke/callbr/musttail/operand-bundle/ABI-mismatch). They must be shielded
+// from downstream CFG-mutating transforms that would break the preserved
+// instruction's invariants (e.g. a musttail call must immediately precede ret).
+llvm::StringSet<>
+collect_preserved_site_caller_names(const virtualized_function_map& virtualized_functions);
+
 bool enforce_security_gates(llvm::Module& module,
                             const llvm::SmallVectorImpl<function_pipeline_state>& states,
                             const virtualized_function_map& virtualized_functions,

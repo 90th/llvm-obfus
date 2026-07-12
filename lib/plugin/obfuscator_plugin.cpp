@@ -581,6 +581,11 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
         collect_virtualized_function_names(strong_vm_virtualized);
     for (const auto& entry : strong_vm_names) { all_vm_virtualized.insert(entry.getKey()); }
     include_vm_parent_functions(all_vm_virtualized, strong_vm_virtualized);
+    const llvm::StringSet<> preserved_site_callers =
+        collect_preserved_site_caller_names(post_vm_virtualized);
+    for (const auto& caller_entry : preserved_site_callers) {
+      all_vm_virtualized.insert(caller_entry.getKey());
+    }
 
     changed |= apply_constant_encoding_stage(module, post_vm_states, config, &all_vm_virtualized);
     changed |= apply_opaque_gep_stage(post_vm_states, config, &all_vm_virtualized);

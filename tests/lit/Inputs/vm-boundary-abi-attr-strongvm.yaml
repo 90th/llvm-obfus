@@ -1,0 +1,7 @@
+seed: 9001
+default_level: none
+targets:
+  - match: abi_target
+    level: strong_vm
+security:
+  fail_on_public_obf_symbol: true

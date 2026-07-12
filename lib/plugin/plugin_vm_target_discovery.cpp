@@ -1,4 +1,5 @@
 #include "obf/plugin/internal/plugin_vm_target_discovery.h"
+#include "obf/plugin/internal/plugin_vm_binding_prep.h"
 
 #include "obf/plugin/obfuscator_plugin_internal.h"
 
@@ -229,7 +230,8 @@ bool can_virtualize_extracted_region(llvm::Function& function,
   llvm::SetVector<llvm::Value*> inputs;
   llvm::SetVector<llvm::Value*> outputs;
   llvm::Function* extracted = extractor.extractCodeRegion(cache, inputs, outputs);
-  bool eligible = extracted != nullptr && vm::analyze_candidate(*extracted).eligible;
+  bool eligible = extracted != nullptr && vm::analyze_candidate(*extracted).eligible &&
+                  analyze_vm_boundary(*extracted, {}).target_supported;
   if (extracted != nullptr) { extracted->eraseFromParent(); }
   clone->eraseFromParent();
   return eligible;

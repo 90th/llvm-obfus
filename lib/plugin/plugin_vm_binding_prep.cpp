@@ -1,6 +1,7 @@
 #include "obf/plugin/internal/plugin_vm_binding_prep.h"
 
 #include "obf/plugin/obfuscator_plugin_internal.h"
+#include "obf/frontend/config.h"
 
 #include "obf/support/generated_names.h"
 #include "obf/support/mba_config_builder.h"
@@ -14,6 +15,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
 #include <string>
@@ -26,7 +28,6 @@ bool is_vm_abi_safe_return_attribute(llvm::Attribute attribute) {
   if (attribute.isStringAttribute() || !attribute.hasKindAsEnum()) { return false; }
 
   switch (attribute.getKindAsEnum()) {
-    case llvm::Attribute::InReg:
     case llvm::Attribute::SExt:
     case llvm::Attribute::ZExt:
       return true;
@@ -39,7 +40,24 @@ bool is_vm_abi_safe_parameter_attribute(llvm::Attribute attribute) {
   if (attribute.isStringAttribute() || !attribute.hasKindAsEnum()) { return false; }
 
   switch (attribute.getKindAsEnum()) {
-    case llvm::Attribute::Alignment:
+    case llvm::Attribute::SExt:
+    case llvm::Attribute::ZExt:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Parameter/return attributes that change how an argument is passed or
+// returned. Cloning with an appended hidden token or forwarding through an
+// indirect thunk cannot preserve these, so a target carrying any of them is
+// rejected at the VM boundary rather than silently stripped. `inalloca` is the
+// concretely verifier-invalid case (it must remain the last parameter); the
+// rest are ABI-unsafe to forward.
+bool is_abi_affecting_boundary_attribute(llvm::Attribute attribute) {
+  if (attribute.isStringAttribute() || !attribute.hasKindAsEnum()) { return false; }
+
+  switch (attribute.getKindAsEnum()) {
     case llvm::Attribute::ByRef:
     case llvm::Attribute::ByVal:
     case llvm::Attribute::ElementType:
@@ -47,16 +65,85 @@ bool is_vm_abi_safe_parameter_attribute(llvm::Attribute attribute) {
     case llvm::Attribute::InReg:
     case llvm::Attribute::Nest:
     case llvm::Attribute::Preallocated:
-    case llvm::Attribute::SExt:
     case llvm::Attribute::StructRet:
     case llvm::Attribute::SwiftAsync:
     case llvm::Attribute::SwiftError:
     case llvm::Attribute::SwiftSelf:
-    case llvm::Attribute::ZExt:
       return true;
     default:
       return false;
   }
+}
+
+bool attribute_set_has_abi_affecting(llvm::AttributeSet attributes) {
+  for (llvm::Attribute attribute : attributes) {
+    if (is_abi_affecting_boundary_attribute(attribute)) { return true; }
+  }
+  return false;
+}
+
+bool attribute_set_abi_relevant_differs(llvm::AttributeSet lhs, llvm::AttributeSet rhs) {
+  const auto is_abi_relevant = [](llvm::Attribute attribute) {
+    if (attribute.isStringAttribute() || !attribute.hasKindAsEnum()) { return false; }
+    switch (attribute.getKindAsEnum()) {
+      case llvm::Attribute::SExt:
+      case llvm::Attribute::ZExt:
+        return true;
+      default:
+        return is_abi_affecting_boundary_attribute(attribute);
+    }
+  };
+  for (llvm::Attribute attribute : lhs) {
+    if (is_abi_relevant(attribute) && !rhs.hasAttribute(attribute.getKindAsEnum())) { return true; }
+  }
+  for (llvm::Attribute attribute : rhs) {
+    if (is_abi_relevant(attribute) && !lhs.hasAttribute(attribute.getKindAsEnum())) { return true; }
+  }
+  return false;
+}
+
+// A rewritable ordinary call must share the callee's ABI contract. Any
+// disagreement on sign/zero extension or an ABI-affecting attribute at a
+// matching index is preserved as an ABI mismatch rather than rewritten.
+bool callsite_abi_mismatches_target(const llvm::CallBase& call, const llvm::Function& target) {
+  const llvm::AttributeList call_attributes = call.getAttributes();
+  const llvm::AttributeList target_attributes = target.getAttributes();
+  if (attribute_set_abi_relevant_differs(call_attributes.getRetAttrs(),
+                                         target_attributes.getRetAttrs())) {
+    return true;
+  }
+  for (unsigned index = 0; index < target.arg_size(); ++index) {
+    if (attribute_set_abi_relevant_differs(call_attributes.getParamAttrs(index),
+                                           target_attributes.getParamAttrs(index))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+llvm::StringRef vm_incoming_site_kind_name(vm_incoming_site_kind kind) {
+  switch (kind) {
+    case vm_incoming_site_kind::ordinary_call:
+      return "ordinary call";
+    case vm_incoming_site_kind::invoke:
+      return "invoke";
+    case vm_incoming_site_kind::callbr:
+      return "callbr";
+    case vm_incoming_site_kind::musttail:
+      return "musttail call";
+    case vm_incoming_site_kind::operand_bundles:
+      return "operand-bundle call";
+    case vm_incoming_site_kind::abi_mismatch:
+      return "ABI-incompatible call";
+  }
+  return "call";
+}
+
+// Strict VM boundary: high-security profiles or the strong_vm level must fail
+// closed rather than silently leave a call path unvirtualized.
+bool requires_strict_vm_boundary(const obfuscation_config& config, protection_level level) {
+  if (level == protection_level::strong_vm) { return true; }
+  return config.profile == config_profile::fortress || config.profile == config_profile::lab;
 }
 
 }  // namespace
@@ -83,6 +170,60 @@ llvm::AttributeList build_vm_abi_attribute_list(const llvm::Function& function) 
   }
 
   return sanitized;
+}
+
+vm_boundary_analysis analyze_vm_boundary(const llvm::Function& target,
+                                         llvm::ArrayRef<llvm::CallBase*> sites) {
+  vm_boundary_analysis analysis;
+
+  if (target.isVarArg()) {
+    analysis.target_reason = "variadic functions are unsupported at the VM boundary";
+    return analysis;
+  }
+
+  const llvm::AttributeList attributes = target.getAttributes();
+  if (attribute_set_has_abi_affecting(attributes.getRetAttrs())) {
+    analysis.target_reason = "return carries an ABI-affecting attribute unsupported at the VM boundary";
+    return analysis;
+  }
+  for (const llvm::Argument& argument : target.args()) {
+    if (attribute_set_has_abi_affecting(attributes.getParamAttrs(argument.getArgNo()))) {
+      analysis.target_reason = "a parameter carries an ABI-affecting attribute unsupported at the VM boundary";
+      return analysis;
+    }
+  }
+
+  analysis.target_supported = true;
+  analysis.sites.reserve(sites.size());
+  for (llvm::CallBase* call : sites) {
+    vm_boundary_site site;
+    site.call = call;
+    if (call == nullptr) {
+      site.kind = vm_incoming_site_kind::abi_mismatch;
+      site.rewritable = false;
+    } else if (llvm::isa<llvm::InvokeInst>(call)) {
+      site.kind = vm_incoming_site_kind::invoke;
+      site.rewritable = false;
+    } else if (llvm::isa<llvm::CallBrInst>(call)) {
+      site.kind = vm_incoming_site_kind::callbr;
+      site.rewritable = false;
+    } else if (call->getNumOperandBundles() != 0) {
+      site.kind = vm_incoming_site_kind::operand_bundles;
+      site.rewritable = false;
+    } else if (call->isMustTailCall()) {
+      site.kind = vm_incoming_site_kind::musttail;
+      site.rewritable = false;
+    } else if (callsite_abi_mismatches_target(*call, target)) {
+      site.kind = vm_incoming_site_kind::abi_mismatch;
+      site.rewritable = false;
+    } else {
+      site.kind = vm_incoming_site_kind::ordinary_call;
+      site.rewritable = true;
+    }
+    if (!site.rewritable) { analysis.has_preserved_site = true; }
+    analysis.sites.push_back(site);
+  }
+  return analysis;
 }
 
 std::uint64_t mix_vm_handshake_seed(std::uint64_t seed, std::uint64_t salt) {
@@ -253,6 +394,37 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
     direct_call_sites.push_back(call);
   }
 
+  const vm_boundary_analysis boundary = analyze_vm_boundary(*interface_function, direct_call_sites);
+  const protection_level level = state.report.decision.policy.level;
+  const bool strict = requires_strict_vm_boundary(config, level);
+  if (!boundary.target_supported) {
+    if (strict) {
+      std::string message = "vm strict boundary violation: function ";
+      message += interface_function->getName().str();
+      message += " cannot be virtualized safely (";
+      message += boundary.target_reason;
+      message += "); lower its protection level or adjust its ABI";
+      llvm::report_fatal_error(llvm::StringRef(message));
+    }
+    return binding;
+  }
+  if (strict && boundary.has_preserved_site) {
+    vm_incoming_site_kind preserved_kind = vm_incoming_site_kind::abi_mismatch;
+    for (const vm_boundary_site& site : boundary.sites) {
+      if (!site.rewritable) {
+        preserved_kind = site.kind;
+        break;
+      }
+    }
+    std::string message = "vm strict boundary violation: function ";
+    message += interface_function->getName().str();
+    message += " has an incoming ";
+    message += vm_incoming_site_kind_name(preserved_kind).str();
+    message += " site that cannot be safely virtualized; rewrite the caller to an "
+               "ordinary call or lower the protection level";
+    llvm::report_fatal_error(llvm::StringRef(message));
+  }
+
   const std::uint64_t seed = state.report.decision.seed;
   const bool preserve_generated_names = config.debug_preserve_generated_names;
   const llvm::StringRef source_name = interface_function->getName();
@@ -297,7 +469,9 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
       derive_vm_wrapper_token(state.report.decision.seed, interface_function->getName());
 
   std::uint64_t callsite_ordinal = 0;
-  for (llvm::CallBase* call : direct_call_sites) {
+  for (const vm_boundary_site& boundary_site : boundary.sites) {
+    llvm::CallBase* call = boundary_site.call;
+    if (call == nullptr) { continue; }
     llvm::Function* caller = call->getFunction();
     if (caller == nullptr) { continue; }
 
@@ -306,7 +480,9 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
          .hidden_token = derive_vm_hidden_token(state.report.decision.seed,
                                                 interface_function->getName(),
                                                 caller->getName(),
-                                                callsite_ordinal++)});
+                                                callsite_ordinal++),
+         .kind = boundary_site.kind,
+         .rewritable = boundary_site.rewritable});
   }
 
   return binding;

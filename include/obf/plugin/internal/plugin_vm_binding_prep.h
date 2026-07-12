@@ -7,6 +7,9 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/InstrTypes.h"
 
 #include <cstdint>
 #include <string>
@@ -70,6 +73,25 @@ llvm::Function* clone_vm_implementation(llvm::Function& interface_function,
 virtualized_function_binding
 prepare_virtualized_function_binding(const function_pipeline_state& state,
                                      const obfuscation_config& config);
+struct vm_boundary_site {
+  llvm::CallBase* call = nullptr;
+  vm_incoming_site_kind kind = vm_incoming_site_kind::ordinary_call;
+  bool rewritable = true;
+};
+
+struct vm_boundary_analysis {
+  bool target_supported = false;
+  std::string target_reason;
+  llvm::SmallVector<vm_boundary_site, 8> sites;
+  bool has_preserved_site = false;
+};
+
+// Side-effect-free classification of a VM target and its incoming direct call
+// sites. Must run before any cloning/extraction so an unsupported boundary
+// leaves the module unmodified.
+vm_boundary_analysis analyze_vm_boundary(const llvm::Function& target,
+                                         llvm::ArrayRef<llvm::CallBase*> sites);
+
 }  // namespace obf
 
 #endif

@@ -1,0 +1,7 @@
+seed: 9001
+default_level: none
+targets:
+  - match: ext_target
+    level: vm
+mba:
+  depth: 2

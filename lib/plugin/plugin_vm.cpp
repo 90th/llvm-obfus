@@ -10,6 +10,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/IR/Instructions.h"
 
 #include <utility>
 
@@ -62,7 +63,7 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
           .symbol_tag = binding.vm_symbol_tag};
       vm_options.valid_hidden_tokens.push_back(binding.wrapper_token);
       for (const virtualized_call_site& site : binding.call_sites) {
-        vm_options.valid_hidden_tokens.push_back(site.hidden_token);
+        if (site.rewritable) { vm_options.valid_hidden_tokens.push_back(site.hidden_token); }
       }
 
       const vm::virtualization_result result =
@@ -155,6 +156,20 @@ void include_vm_parent_functions(llvm::StringSet<>& virtualized_names,
       virtualized_names.insert(state->function->getName());
     }
   }
+}
+
+llvm::StringSet<>
+collect_preserved_site_caller_names(const virtualized_function_map& virtualized_functions) {
+  llvm::StringSet<> callers;
+  for (const auto& entry : virtualized_functions) {
+    for (const virtualized_call_site& site : entry.second.call_sites) {
+      if (site.rewritable) { continue; }
+      auto* call = llvm::dyn_cast_or_null<llvm::CallBase>(site.call);
+      if (call == nullptr) { continue; }
+      if (llvm::Function* caller = call->getFunction()) { callers.insert(caller->getName()); }
+    }
+  }
+  return callers;
 }
 
 }  // namespace obf

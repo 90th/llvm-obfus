@@ -14,9 +14,20 @@ namespace obf {
 
 struct function_pipeline_state;
 
+enum class vm_incoming_site_kind {
+  ordinary_call,
+  invoke,
+  callbr,
+  musttail,
+  operand_bundles,
+  abi_mismatch,
+};
+
 struct virtualized_call_site {
   llvm::WeakTrackingVH call;
   std::uint64_t hidden_token = 0;
+  vm_incoming_site_kind kind = vm_incoming_site_kind::ordinary_call;
+  bool rewritable = true;
 };
 
 struct virtualized_function_binding {

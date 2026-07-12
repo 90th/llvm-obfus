@@ -14,11 +14,32 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/IR/Module.h"
 
 namespace obf {
 
 namespace {
+
+// Preserve the observable properties of a rewritten ordinary call. The new call
+// necessarily uses the thunk's extended signature (original params + hidden
+// token), so only non-type properties transfer: debug location, an explicit
+// `notail` restriction, and fast-math flags for FP-returning calls. The `tail`
+// hint is dropped because the rewritten call is followed by return-decode
+// instructions and is no longer in tail position; `musttail` is never rewritten
+// (it is preserved via the interface wrapper). Return-value metadata (e.g.
+// !range) is intentionally dropped because integer returns are re-encoded.
+void preserve_ordinary_callsite_semantics(llvm::CallInst* rewritten, llvm::CallBase* original) {
+  rewritten->setDebugLoc(original->getDebugLoc());
+  if (auto* original_call = llvm::dyn_cast<llvm::CallInst>(original)) {
+    if (original_call->getTailCallKind() == llvm::CallInst::TCK_NoTail) {
+      rewritten->setTailCallKind(llvm::CallInst::TCK_NoTail);
+    }
+  }
+  if (llvm::isa<llvm::FPMathOperator>(rewritten)) {
+    rewritten->setFastMathFlags(original->getFastMathFlags());
+  }
+}
 
 bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& binding,
                                            std::uint32_t mba_depth) {
@@ -79,6 +100,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
   for (const virtualized_call_site& site : binding.call_sites) {
     llvm::CallBase* call = llvm::dyn_cast_or_null<llvm::CallBase>(site.call);
     if (call == nullptr) { continue; }
+    if (!site.rewritable) { continue; }
     llvm::BasicBlock* call_block = call->getParent();
     if (call_block == nullptr || call->getCalledOperand()->stripPointerCasts() != &function) {
       continue;
@@ -152,6 +174,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
           call->getType()->isVoidTy() ? "" : function.getName() + ".obf.callsite");
       rewritten_call->setCallingConv(call->getCallingConv());
       rewritten_call->setAttributes(build_vm_safe_callsite_attributes(thunk_function));
+      preserve_ordinary_callsite_semantics(rewritten_call, call);
 
       llvm::Type* call_ret_type = rewritten_call->getType();
       if (call_ret_type->isIntegerTy()) {
@@ -264,6 +287,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
         call->getType()->isVoidTy() ? "" : function.getName() + ".obf.callsite");
     rewritten_call->setCallingConv(call->getCallingConv());
     rewritten_call->setAttributes(build_vm_safe_callsite_attributes(thunk_function));
+    preserve_ordinary_callsite_semantics(rewritten_call, call);
 
     llvm::Type* call_ret_type = rewritten_call->getType();
     if (call_ret_type->isIntegerTy()) {
