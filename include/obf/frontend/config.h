@@ -64,6 +64,11 @@ struct mba_config {
   std::optional<bool> enable_multiplication;
 };
 
+struct vm_config {
+  std::uint32_t max_virtual_instructions = 512;
+  std::optional<std::uint32_t> max_mba_depth;
+};
+
 struct indirect_dispatch_config {
   bool enabled = false;
   std::uint32_t max_sites_per_function = 4;
@@ -88,6 +93,7 @@ struct obfuscation_config {
   string_encoding_config string_encoding;
   constant_encoding_config constant_encoding;
   mba_config mba;
+  vm_config vm;
   indirect_dispatch_config indirect_dispatch;
   security_gate_config security;
   bool debug_preserve_generated_names = false;

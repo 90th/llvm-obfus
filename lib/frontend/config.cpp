@@ -105,6 +105,15 @@ struct MappingTraits<obf::mba_config> {
 };
 
 template <>
+struct MappingTraits<obf::vm_config> {
+  static void mapping(IO& io, obf::vm_config& config) {
+    io.mapOptional(
+        "max_virtual_instructions", config.max_virtual_instructions, std::uint32_t{512});
+    io.mapOptional("max_mba_depth", config.max_mba_depth);
+  }
+};
+
+template <>
 struct MappingTraits<obf::indirect_dispatch_config> {
   static void mapping(IO& io, obf::indirect_dispatch_config& config) {
     io.mapOptional("enabled", config.enabled, false);
@@ -137,6 +146,7 @@ struct MappingTraits<obf::obfuscation_config> {
     io.mapOptional("string_encoding", config.string_encoding);
     io.mapOptional("constant_encoding", config.constant_encoding);
     io.mapOptional("mba", config.mba);
+    io.mapOptional("vm", config.vm);
     io.mapOptional("indirect_dispatch", config.indirect_dispatch);
     io.mapOptional("security", config.security);
     io.mapOptional("debug_preserve_generated_names", config.debug_preserve_generated_names, false);
@@ -159,6 +169,7 @@ struct config_parse_presence {
   bool string_encoding = false;
   bool constant_encoding = false;
   bool mba = false;
+  bool vm = false;
   bool indirect_dispatch = false;
   bool security = false;
   bool debug_preserve_generated_names = false;
@@ -191,6 +202,7 @@ config_parse_presence collect_presence(llvm::StringRef text) {
           .string_encoding = has_top_level_key(text, "string_encoding"),
           .constant_encoding = has_top_level_key(text, "constant_encoding"),
           .mba = has_top_level_key(text, "mba"),
+          .vm = has_top_level_key(text, "vm"),
           .indirect_dispatch = has_top_level_key(text, "indirect_dispatch"),
           .security = has_top_level_key(text, "security"),
           .debug_preserve_generated_names =
@@ -281,6 +293,7 @@ obfuscation_config apply_profile_defaults(const obfuscation_config& raw_config,
   if (presence.string_encoding) { config.string_encoding = raw_config.string_encoding; }
   if (presence.constant_encoding) { config.constant_encoding = raw_config.constant_encoding; }
   if (presence.mba) { config.mba = raw_config.mba; }
+  if (presence.vm) { config.vm = raw_config.vm; }
   if (presence.indirect_dispatch) { config.indirect_dispatch = raw_config.indirect_dispatch; }
   if (presence.security) { config.security = raw_config.security; }
   if (presence.debug_preserve_generated_names) {
@@ -345,6 +358,9 @@ bool is_high_security_profile(config_profile profile) {
 }  // namespace
 
 void validate_effective_config(const obfuscation_config& config) {
+  if (config.vm.max_virtual_instructions == 0) {
+    llvm::report_fatal_error("config error: vm.max_virtual_instructions must be >= 1");
+  }
   if (config.security.allow_unsafe_config) { return; }
 
   if (config.debug_preserve_generated_names && config_selects_vm(config)) {
@@ -473,6 +489,14 @@ std::string summarize_config(const obfuscation_config& config) {
     stream << (*config.mba.enable_multiplication ? "true" : "false");
   } else {
     stream << "derived";
+  }
+  stream << '\n';
+  stream << "vm.max_virtual_instructions: " << config.vm.max_virtual_instructions << '\n';
+  stream << "vm.max_mba_depth: ";
+  if (config.vm.max_mba_depth.has_value()) {
+    stream << *config.vm.max_mba_depth;
+  } else {
+    stream << "unclamped";
   }
   stream << '\n';
   stream << "indirect_dispatch.enabled: "
