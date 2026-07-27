@@ -126,6 +126,65 @@ void TestConfigLoader() {
   std::filesystem::remove(path, ec);
 }
 
+void TestVmConfig() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "obf_vm_config.yaml";
+  {
+    std::ofstream out(path);
+    out << "profile: guarded\n";
+    out << "seed: 7\n";
+    out << "default_level: none\n";
+    out << "vm:\n";
+    out << "  max_virtual_instructions: 32\n";
+    out << "  max_mba_depth: 1\n";
+  }
+
+  llvm::Expected<obf::obfuscation_config> loaded = obf::load_config_from_file(path.string());
+  ExpectTrue(static_cast<bool>(loaded), "vm config should load successfully");
+  if (loaded) {
+    ExpectTrue(loaded->vm.max_virtual_instructions == 32,
+               "vm.max_virtual_instructions should respect yaml override");
+    ExpectTrue(loaded->vm.max_mba_depth.has_value() && *loaded->vm.max_mba_depth == 1,
+               "vm.max_mba_depth should respect yaml override");
+
+    const std::string summary = obf::summarize_config(*loaded);
+    ExpectTrue(summary.find("vm.max_virtual_instructions: 32") != std::string::npos,
+               "config summary should report vm instruction budget");
+    ExpectTrue(summary.find("vm.max_mba_depth: 1") != std::string::npos,
+               "config summary should report vm mba depth clamp");
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+void TestVmConfigDefaults() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "obf_vm_config_defaults.yaml";
+  {
+    std::ofstream out(path);
+    out << "profile: guarded\n";
+    out << "seed: 7\n";
+    out << "default_level: none\n";
+  }
+
+  llvm::Expected<obf::obfuscation_config> loaded = obf::load_config_from_file(path.string());
+  ExpectTrue(static_cast<bool>(loaded), "default vm config should load successfully");
+  if (loaded) {
+    ExpectTrue(loaded->vm.max_virtual_instructions == 512,
+               "vm.max_virtual_instructions should keep its default value");
+    ExpectTrue(!loaded->vm.max_mba_depth.has_value(),
+               "vm.max_mba_depth should remain unclamped by default");
+
+    const std::string summary = obf::summarize_config(*loaded);
+    ExpectTrue(summary.find("vm.max_mba_depth: unclamped") != std::string::npos,
+               "config summary should report unclamped vm mba depth");
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 void TestAuthenticatedStringConfig() {
   const std::filesystem::path path =
       std::filesystem::temp_directory_path() / "obf_auth_string_config.yaml";
@@ -634,6 +693,8 @@ int main() {
   TestGeneratedNames();
   TestPolicySelection();
   TestConfigLoader();
+  TestVmConfig();
+  TestVmConfigDefaults();
   TestAuthenticatedStringConfig();
   TestReleaseMarkerConfig();
   TestConstantProtectionModeConfig();

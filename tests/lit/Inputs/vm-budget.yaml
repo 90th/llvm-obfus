@@ -1,0 +1,9 @@
+seed: 20260727
+default_level: none
+overrides:
+  - name: budget_target
+    level: strong_vm
+vm:
+  max_virtual_instructions: 1
+security:
+  fail_on_public_obf_symbol: true
