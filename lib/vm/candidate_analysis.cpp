@@ -322,7 +322,9 @@ std::uint32_t add_slot(bytecode_program& program, const llvm::Type* type) {
   return static_cast<std::uint32_t>(program.slots.size() - 1);
 }
 
-candidate_result build_program(const llvm::Function& function, bytecode_program* program_output) {
+candidate_result build_program(const llvm::Function& function,
+                               bytecode_program* program_output,
+                               std::uint32_t max_virtual_instructions) {
   if (function.isDeclaration()) { return reject("declaration"); }
 
   const llvm::Module* module = function.getParent();
@@ -780,7 +782,11 @@ candidate_result build_program(const llvm::Function& function, bytecode_program*
 
   if (program.instructions.empty()) { return reject("missing virtual instructions"); }
 
-  if (program.instructions.size() > 512) { return reject("too many virtual instructions"); }
+  if (program.instructions.size() > max_virtual_instructions) {
+    return reject("too many virtual instructions (" +
+                  std::to_string(program.instructions.size()) + " > " +
+                  std::to_string(max_virtual_instructions) + ")");
+  }
 
   if (program_output != nullptr) { *program_output = program; }
 
@@ -793,8 +799,10 @@ candidate_result build_program(const llvm::Function& function, bytecode_program*
 
 }  // namespace
 
-candidate_result analyze_candidate(const llvm::Function& function, bytecode_program* program) {
-  return build_program(function, program);
+candidate_result analyze_candidate(const llvm::Function& function,
+                                   bytecode_program* program,
+                                   std::uint32_t max_virtual_instructions) {
+  return build_program(function, program, max_virtual_instructions);
 }
 
 }  // namespace obf::vm

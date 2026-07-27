@@ -3,6 +3,7 @@
 #include "obf/vm/micro_ir.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace llvm {
@@ -18,6 +19,7 @@ struct candidate_result {
 };
 
 candidate_result analyze_candidate(const llvm::Function& function,
-                                   bytecode_program* program = nullptr);
+                                   bytecode_program* program = nullptr,
+                                   std::uint32_t max_virtual_instructions = 512);
 
 }  // namespace obf::vm

@@ -36,8 +36,11 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
     if (skip_functions.contains(state.function->getName())) { continue; }
 
     const llvm::SmallVector<vm_target_candidate, 8> target_candidates =
-        discover_vm_targets_for_state(
-            state, skip_functions, regional_helper_ordinal, config.debug_preserve_generated_names);
+        discover_vm_targets_for_state(state,
+                                      skip_functions,
+                                      regional_helper_ordinal,
+                                      config.debug_preserve_generated_names,
+                                      config.vm.max_virtual_instructions);
 
     for (const vm_target_candidate& target_candidate : target_candidates) {
       llvm::Function* target_function = target_candidate.function;
@@ -52,10 +55,11 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
       binding.state = target_candidate.state;
 
       vm::virtualization_options vm_options{
-          .mba_depth = config.mba.depth,
+          .mba_depth = effective_vm_mba_depth(config),
           .mba_max_ir_instructions = config.mba.max_ir_instructions,
           .mba_enable_polynomial = config.mba.enable_polynomial,
           .mba_enable_multiplication = config.mba.enable_multiplication,
+          .max_virtual_instructions = config.vm.max_virtual_instructions,
           .decision_seed = target_candidate.state->report.decision.seed,
           .hidden_token_handshake = true,
           .prefer_island_helpers = true,
@@ -126,7 +130,7 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                      binding.wrapper_token,
                                      resolver_shape,
                                      seed_resolver_shape,
-                                     config.mba.depth);
+                                     effective_vm_mba_depth(config));
       }
     }
   }

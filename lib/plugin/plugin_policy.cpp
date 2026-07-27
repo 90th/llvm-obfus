@@ -265,6 +265,10 @@ bool is_obfuscation_enabled() {
   return obf_enable || !obf_config_path.empty();
 }
 
+std::uint32_t effective_vm_mba_depth(const obfuscation_config& config) {
+  return config.vm.max_mba_depth ? std::min(config.mba.depth, *config.vm.max_mba_depth)
+                                 : config.mba.depth;
+}
 
 obfuscation_config load_active_config() {
   static std::optional<obfuscation_config> cached_config;

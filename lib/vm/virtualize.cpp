@@ -10,7 +10,8 @@ namespace obf::vm {
 virtualization_result run_virtualization(llvm::Function& function,
                                          const virtualization_options& options) {
   bytecode_program program;
-  const candidate_result analysis = analyze_candidate(function, &program);
+  const candidate_result analysis =
+      analyze_candidate(function, &program, options.max_virtual_instructions);
   if (!analysis.eligible) { return {.virtualized = false, .detail = analysis.detail}; }
 
   rewrite_function_body(function, program, options);

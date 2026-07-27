@@ -16,7 +16,8 @@ llvm::SmallVector<vm_target_candidate, 8>
 discover_vm_targets_for_state(const function_pipeline_state& state,
                               llvm::StringSet<>& skip_functions,
                               std::uint64_t& helper_ordinal,
-                              bool preserve_generated_names);
+                              bool preserve_generated_names,
+                              std::uint32_t max_virtual_instructions);
 
 }  // namespace obf
 

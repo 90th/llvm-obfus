@@ -56,7 +56,8 @@ build_transform_reports(llvm::Module& module,
   for (const function_pipeline_state& state : states) {
     if (state.function == nullptr || !state.report.decision.policy.allow_vm) { continue; }
 
-    if (vm::analyze_candidate(*state.function).eligible) {
+    if (vm::analyze_candidate(*state.function, nullptr, config.vm.max_virtual_instructions)
+            .eligible) {
       virtualized_functions.insert(state.function->getName());
     }
   }
@@ -71,7 +72,8 @@ build_transform_reports(llvm::Module& module,
         virtualized_functions.contains(function->getName()) &&
         state.report.decision.policy.level == protection_level::strong_vm;
 
-    const vm::candidate_result vm_result = vm::analyze_candidate(*function);
+    const vm::candidate_result vm_result =
+        vm::analyze_candidate(*function, nullptr, config.vm.max_virtual_instructions);
     if (!state.report.decision.policy.allow_vm) {
       reports.push_back(
           make_transform_report("vm",

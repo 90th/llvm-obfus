@@ -73,6 +73,9 @@ llvm::StringRef classify_vm_candidate_reason_tag(llvm::StringRef reason) {
   if (reason.contains("eh pad unsupported")) { return "eh_pad_unsupported"; }
   if (reason.contains("inline asm unsupported")) { return "inline_asm_unsupported"; }
   if (reason.contains("no whole-function or regional VM target")) { return "no_vm_target"; }
+  if (reason.contains("too many virtual instructions")) {
+    return "virtual_instruction_budget_exceeded";
+  }
   if (reason.contains("unsupported")) { return "unsupported_shape"; }
   return "unclassified";
 }
@@ -93,19 +96,25 @@ llvm::StringRef vm_candidate_reason_remediation(llvm::StringRef reason_tag) {
   if (reason_tag == "no_vm_target") {
     return "ensure function has a whole-function or regional VM target";
   }
+  if (reason_tag == "virtual_instruction_budget_exceeded") {
+    return "reduce function size, lower mba.depth or set vm.max_mba_depth, raise "
+           "vm.max_virtual_instructions, or compile the source with -O1 -fno-inline";
+  }
   return "review candidate analysis detail and adjust function policy";
 }
 
 void enforce_strong_vm_virtualization_gate(
     const llvm::SmallVectorImpl<function_pipeline_state>& states,
-    const virtualized_function_map& virtualized_functions) {
+    const virtualized_function_map& virtualized_functions,
+    const obfuscation_config& config) {
   for (const function_pipeline_state& state : states) {
     if (!is_strong_vm_state(state) || !state.report.decision.policy.allow_vm ||
         has_virtualized_binding_for_state(virtualized_functions, state)) {
       continue;
     }
 
-    const vm::candidate_result result = vm::analyze_candidate(*state.function);
+    const vm::candidate_result result =
+        vm::analyze_candidate(*state.function, nullptr, config.vm.max_virtual_instructions);
     std::string detail = "function ";
     detail += state.function->getName().str();
     detail += " was not virtualized; policy_source=";
@@ -815,7 +824,7 @@ bool enforce_security_gates(llvm::Module& module,
                             const llvm::SmallVectorImpl<function_pipeline_state>& states,
                             const virtualized_function_map& virtualized_functions,
                             const obfuscation_config& config) {
-  enforce_strong_vm_virtualization_gate(states, virtualized_functions);
+  enforce_strong_vm_virtualization_gate(states, virtualized_functions, config);
   enforce_strong_vm_string_gate(module, states, virtualized_functions, config);
   enforce_strong_vm_shared_seed_gate(module, states, virtualized_functions);
   enforce_strong_vm_target_cache_gate(module, states, virtualized_functions);

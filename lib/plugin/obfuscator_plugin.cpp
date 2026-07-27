@@ -403,8 +403,10 @@ class vm_pass : public llvm::PassInfoMixin<vm_pass> {
                                 const virtualized_function_map virtualized_functions =
                                     apply_vm_stage(states, config);
                                 bool changed = !virtualized_functions.empty();
-                                changed |= rewrite_calls_to_virtualized_functions(
-                                    current_module, virtualized_functions, config.mba.depth);
+                                changed |=
+                                    rewrite_calls_to_virtualized_functions(current_module,
+                                                                          virtualized_functions,
+                                                                          effective_vm_mba_depth(config));
                                 return changed;
                               });
   }
@@ -553,7 +555,9 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     constexpr protection_level vm_level = protection_level::vm;
     const virtualized_function_map vm_only = apply_vm_stage(states, config, &vm_level);
     changed |= !vm_only.empty();
-    changed |= rewrite_calls_to_virtualized_functions(module, vm_only, config.mba.depth);
+    changed |= rewrite_calls_to_virtualized_functions(module,
+                                                      vm_only,
+                                                      effective_vm_mba_depth(config));
 
     constexpr protection_level strong_vm_level = protection_level::strong_vm;
     const std::size_t selected_strong_vm_count =
@@ -565,7 +569,9 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
         apply_vm_stage(states, config, &strong_vm_level);
     changed |= !strong_vm_virtualized.empty();
     changed |=
-        rewrite_calls_to_virtualized_functions(module, strong_vm_virtualized, config.mba.depth);
+        rewrite_calls_to_virtualized_functions(module,
+                                               strong_vm_virtualized,
+                                               effective_vm_mba_depth(config));
 
     virtualized_function_map post_vm_virtualized = vm_only;
     for (const auto& entry : strong_vm_virtualized) {

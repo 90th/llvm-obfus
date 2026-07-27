@@ -47,6 +47,7 @@ struct function_pipeline_state {
 
 bool is_obfuscation_enabled();
 obfuscation_config load_active_config();
+std::uint32_t effective_vm_mba_depth(const obfuscation_config& config);
 
 std::uint64_t get_obf_seed_override();
 

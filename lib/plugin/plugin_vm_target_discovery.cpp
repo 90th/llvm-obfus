@@ -191,7 +191,8 @@ bool can_virtualize_extracted_region(llvm::Function& function,
                                      const vm_region_candidate& candidate,
                                      std::uint64_t helper_ordinal,
                                      std::uint64_t seed,
-                                     bool preserve_generated_names) {
+                                     bool preserve_generated_names,
+                                     std::uint32_t max_virtual_instructions) {
   llvm::ValueToValueMapTy value_map;
   llvm::Function* clone = llvm::CloneFunction(&function, value_map);
   if (clone == nullptr) { return false; }
@@ -230,8 +231,10 @@ bool can_virtualize_extracted_region(llvm::Function& function,
   llvm::SetVector<llvm::Value*> inputs;
   llvm::SetVector<llvm::Value*> outputs;
   llvm::Function* extracted = extractor.extractCodeRegion(cache, inputs, outputs);
-  bool eligible = extracted != nullptr && vm::analyze_candidate(*extracted).eligible &&
-                  analyze_vm_boundary(*extracted, {}).target_supported;
+  bool eligible =
+      extracted != nullptr &&
+      vm::analyze_candidate(*extracted, nullptr, max_virtual_instructions).eligible &&
+      analyze_vm_boundary(*extracted, {}).target_supported;
   if (extracted != nullptr) { extracted->eraseFromParent(); }
   clone->eraseFromParent();
   return eligible;
@@ -277,6 +280,7 @@ bool collect_regional_vm_targets(llvm::Function& function,
                                  std::size_t max_nesting_depth,
                                  std::size_t max_regions,
                                  bool preserve_generated_names,
+                                 std::uint32_t max_virtual_instructions,
                                  llvm::SmallVectorImpl<vm_target_candidate>& targets) {
   bool extracted_any = false;
   std::size_t extracted_count = 0;
@@ -289,7 +293,8 @@ bool collect_regional_vm_targets(llvm::Function& function,
                                            candidate,
                                            helper_ordinal,
                                            state.report.decision.seed,
-                                           preserve_generated_names)) {
+                                           preserve_generated_names,
+                                           max_virtual_instructions)) {
         continue;
       }
 
@@ -310,10 +315,11 @@ bool collect_regional_vm_targets(llvm::Function& function,
                                           max_nesting_depth,
                                           /*max_regions=*/1,
                                           preserve_generated_names,
+                                          max_virtual_instructions,
                                           nested_targets);
       }
 
-      if (vm::analyze_candidate(*helper).eligible) {
+      if (vm::analyze_candidate(*helper, nullptr, max_virtual_instructions).eligible) {
         targets.push_back(
             {.function = helper, .state = &state, .nesting_depth = nesting_depth + 1});
       }
@@ -339,7 +345,8 @@ llvm::SmallVector<vm_target_candidate, 8>
 discover_vm_targets_for_state(const function_pipeline_state& state,
                               llvm::StringSet<>& skip_functions,
                               std::uint64_t& helper_ordinal,
-                              bool preserve_generated_names) {
+                              bool preserve_generated_names,
+                              std::uint32_t max_virtual_instructions) {
   llvm::SmallVector<vm_target_candidate, 8> targets;
   if (state.function == nullptr || state.function->isDeclaration() ||
       skip_functions.contains(state.function->getName())) {
@@ -348,7 +355,8 @@ discover_vm_targets_for_state(const function_pipeline_state& state,
 
   if (state.function->isVarArg()) { return targets; }
 
-  const vm::candidate_result whole_function_analysis = vm::analyze_candidate(*state.function);
+  const vm::candidate_result whole_function_analysis =
+      vm::analyze_candidate(*state.function, nullptr, max_virtual_instructions);
 
   if (state.report.decision.policy.level == protection_level::strong_vm) {
     if (whole_function_analysis.eligible) {
@@ -364,6 +372,7 @@ discover_vm_targets_for_state(const function_pipeline_state& state,
                                                                /*max_nesting_depth=*/1,
                                                                /*max_regions=*/2,
                                                                preserve_generated_names,
+                                                               max_virtual_instructions,
                                                                targets);
     if (extracted_regions) { return targets; }
   }
