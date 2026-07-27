@@ -1,0 +1,9 @@
+profile: guarded
+seed: 20260727
+default_level: strong
+string_encoding:
+  authenticated_mode: true
+constant_encoding:
+  mode: auto
+indirect_dispatch:
+  enabled: true
