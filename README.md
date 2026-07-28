@@ -160,8 +160,8 @@ All profiles default to `authenticated_mode: false`, `indirect_dispatch.enabled:
 
 `vm` and `strong_vm` lowering intentionally emit large IR.
 A function with about 20 instructions expands to about 100k IR lines at `mba.depth: 0`.
-Each added MBA depth level increases that size by about 5x.
-The same function reaches about 500k IR lines at depth 1 and about 1.6M lines at depth 3.
+Depth 0 to depth 1 is the steepest step, about 5x, and reaches about 500k IR lines.
+Higher levels add less: about 1.0M IR lines at depth 2 and about 1.6M at depth 3.
 
 The obfuscation pass itself is fast.
 The native backend that compiles the expanded IR causes the cost.
