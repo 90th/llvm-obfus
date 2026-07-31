@@ -20,11 +20,16 @@
 
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
-#include "llvm/Transforms/Utils/Mem2Reg.h"
+#include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
@@ -497,6 +502,31 @@ class bogus_control_flow_pass : public llvm::PassInfoMixin<bogus_control_flow_pa
   }
 };
 
+bool promote_target_allocas_for_o0(llvm::Function& function, llvm::FunctionAnalysisManager& fam) {
+  auto& dom_tree = fam.getResult<llvm::DominatorTreeAnalysis>(function);
+  auto& assumption_cache = fam.getResult<llvm::AssumptionAnalysis>(function);
+  llvm::BasicBlock& entry_block = function.getEntryBlock();
+  llvm::SmallVector<llvm::AllocaInst*, 8> promotable_allocas;
+  bool changed = false;
+
+  while (true) {
+    promotable_allocas.clear();
+    for (llvm::Instruction& instruction : entry_block) {
+      auto* alloca_inst = llvm::dyn_cast<llvm::AllocaInst>(&instruction);
+      if (alloca_inst != nullptr && llvm::isAllocaPromotable(alloca_inst)) {
+        promotable_allocas.push_back(alloca_inst);
+      }
+    }
+
+    if (promotable_allocas.empty()) { break; }
+
+    llvm::PromoteMemToReg(promotable_allocas, dom_tree, &assumption_cache);
+    changed = true;
+  }
+
+  return changed;
+}
+
 class prepare_o0_pass : public llvm::PassInfoMixin<prepare_o0_pass> {
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& mam) {
@@ -504,19 +534,25 @@ class prepare_o0_pass : public llvm::PassInfoMixin<prepare_o0_pass> {
     const llvm::SmallVector<function_pipeline_state, 32> states =
         build_pipeline_state(module, config);
 
-    // Run PromotePass (mem2reg) strictly on functions targeted for obfuscation
-    // before running the obfuscation pipeline, preparing raw AST allocas into SSA form.
-    llvm::FunctionPassManager fpm;
-    fpm.addPass(llvm::PromotePass());
+    // PromotePass is skipped on optnone functions by the standard pass
+    // instrumentation. The O0 obfuscation callback still needs targeted,
+    // promotable locals in SSA form before strong_vm lowering, so invoke the
+    // mem2reg utility directly on eligible entry-block allocas.
     auto& fam = mam.getResult<llvm::FunctionAnalysisManagerModuleProxy>(module).getManager();
     bool changed = false;
-    for (const auto& state : states) {
-      if (state.report.decision.policy.level != protection_level::none && state.function != nullptr) {
-        llvm::PreservedAnalyses pa = fpm.run(*state.function, fam);
-        if (!pa.areAllPreserved()) { changed = true; }
+    for (const function_pipeline_state& state : states) {
+      if (state.report.decision.policy.level == protection_level::none ||
+          state.function == nullptr || state.function->isDeclaration()) {
+        continue;
       }
+
+      changed |= promote_target_allocas_for_o0(*state.function, fam);
     }
-    return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
+
+    if (!changed) { return llvm::PreservedAnalyses::all(); }
+
+    verify_changed_module(module);
+    return llvm::PreservedAnalyses::none();
   }
 };
 
@@ -721,6 +757,11 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
 
                   if (name == "obf-bogus-cf") {
                     module_pm.addPass(obf::bogus_control_flow_pass());
+                    return true;
+                  }
+
+                  if (name == "obf-prepare-o0") {
+                    module_pm.addPass(obf::prepare_o0_pass());
                     return true;
                   }
 

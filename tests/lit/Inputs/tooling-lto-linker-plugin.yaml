@@ -1,0 +1,13 @@
+seed: 20260731
+default_level: none
+targets:
+  - match: main
+    level: strong
+  - match: fold
+    level: vm
+string_encoding:
+  authenticated_mode: true
+constant_encoding:
+  mode: auto
+indirect_dispatch:
+  enabled: true
