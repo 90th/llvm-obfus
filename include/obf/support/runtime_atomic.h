@@ -7,8 +7,17 @@
 #endif
 
 static inline uint64_t ObfAtomicLoadU64Relaxed(const uint64_t* value) {
-#if defined(_MSC_VER)
+#if defined(__clang__) || defined(__GNUC__)
+  return __atomic_load_n(value, __ATOMIC_RELAXED);
+#elif defined(_MSC_VER)
+#if defined(_M_IX86)
+  /* 32-bit x86 fallback: no pure tear-free 64-bit load intrinsic. */
   return (uint64_t)_InterlockedCompareExchange64((volatile __int64*)value, 0, 0);
+#elif defined(_M_ARM)
+  return (uint64_t)__ldrexd((const volatile __int64*)value);
+#else
+  return (uint64_t)__iso_volatile_load64((const volatile __int64*)value);
+#endif
 #else
   return __atomic_load_n(value, __ATOMIC_RELAXED);
 #endif
@@ -23,8 +32,21 @@ static inline void ObfAtomicStoreU64Relaxed(uint64_t* value, uint64_t next) {
 }
 
 static inline uint64_t ObfAtomicLoadU64Acquire(const uint64_t* value) {
-#if defined(_MSC_VER)
+#if defined(__clang__) || defined(__GNUC__)
+  return __atomic_load_n(value, __ATOMIC_ACQUIRE);
+#elif defined(_MSC_VER)
+#if defined(_M_ARM64) || defined(_M_ARM64EC)
+  return (uint64_t)__load_acquire64((const volatile unsigned __int64*)value);
+#elif defined(_M_ARM)
+  const uint64_t observed = (uint64_t)__ldrexd((const volatile __int64*)value);
+  __dmb(_ARM_BARRIER_ISH);
+  return observed;
+#elif defined(_M_IX86)
+  /* 32-bit x86 fallback: no pure tear-free 64-bit load intrinsic. */
   return (uint64_t)_InterlockedCompareExchange64((volatile __int64*)value, 0, 0);
+#else
+  return (uint64_t)__iso_volatile_load64((const volatile __int64*)value);
+#endif
 #else
   return __atomic_load_n(value, __ATOMIC_ACQUIRE);
 #endif
@@ -39,8 +61,19 @@ static inline void ObfAtomicStoreU64Release(uint64_t* value, uint64_t next) {
 }
 
 static inline uint32_t ObfAtomicLoadU32Acquire(const uint32_t* value) {
-#if defined(_MSC_VER)
-  return (uint32_t)_InterlockedCompareExchange((volatile long*)value, 0, 0);
+#if defined(__clang__) || defined(__GNUC__)
+  return __atomic_load_n(value, __ATOMIC_ACQUIRE);
+#elif defined(_MSC_VER)
+#if defined(_M_ARM64) || defined(_M_ARM64EC)
+  return (uint32_t)__load_acquire32((const volatile unsigned __int32*)value);
+#elif defined(_M_ARM)
+  const uint32_t observed =
+      (uint32_t)__iso_volatile_load32((const volatile __int32*)value);
+  __dmb(_ARM_BARRIER_ISH);
+  return observed;
+#else
+  return (uint32_t)__iso_volatile_load32((const volatile __int32*)value);
+#endif
 #else
   return __atomic_load_n(value, __ATOMIC_ACQUIRE);
 #endif

@@ -200,6 +200,16 @@ target_include_directories(obf-unit-tests PRIVATE ${PROJECT_SOURCE_DIR}/include
                                                   ${CMAKE_CURRENT_BINARY_DIR}/include)
 target_link_libraries(obf-unit-tests PRIVATE obf_core ${OBF_LLVM_LIBS})
 
+add_executable(obf-runtime-atomic-tests
+  tests/unit/runtime_atomic_tests.c
+)
+set_target_properties(obf-runtime-atomic-tests PROPERTIES
+  C_STANDARD 17
+  C_STANDARD_REQUIRED ON
+)
+target_include_directories(obf-runtime-atomic-tests PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                                            ${CMAKE_CURRENT_BINARY_DIR}/include)
+
 set(OBF_ENTROPY_ANCHOR_LL "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.ll")
 set(OBF_ENTROPY_ANCHOR_RANDOMIZED_LL "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.randomized.ll")
 set(OBF_ENTROPY_ANCHOR_OBJ "${CMAKE_CURRENT_BINARY_DIR}/obf_entropy_anchor.o")
@@ -256,6 +266,11 @@ add_test(
 add_test(
   NAME obf-unit-tests
   COMMAND obf-unit-tests
+)
+
+add_test(
+  NAME obf-runtime-atomic-tests
+  COMMAND obf-runtime-atomic-tests
 )
 
 function(add_obf_benchmark target_name source_file config_file compiler std_flag)
