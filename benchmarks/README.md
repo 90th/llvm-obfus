@@ -6,16 +6,19 @@ This directory will hold the benchmark corpus used for:
 - overhead measurements
 - decompiler and reverse engineering evaluation inputs
 
-Current corpus:
+Current CMake corpus targets:
 
-- `corpus/license_demo.cpp`
-- `corpus/config_demo.c`
-- `corpus/vm_workflow_demo.c`
+- `license_demo` from `corpus/license_demo.cpp`
+- `config_demo` from `corpus/config_demo.c`
+- `vm_workflow_demo` from `corpus/vm_workflow_demo.c`
+- `wpo_demo` linked from `corpus/wpo_demo_main.c` and `corpus/wpo_demo_core.c`
+
+The four targets above are the current build corpus, including the linked `wpo_demo`. The current `obf-re-harness` and `obf-seed-diversity` verification targets intentionally analyze only `license_demo`, `config_demo`, and `vm_workflow_demo`.
 
 Build benchmark pairs with:
 
 ```sh
-cmake --build build --target obf-benchmarks
+cmake --build build --target obf-benchmarks -- -j1
 ```
 
 For reproducible checkpoint work, configure a dedicated build with a fixed seed:

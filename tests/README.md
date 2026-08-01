@@ -2,6 +2,5 @@
 
 This directory is reserved for:
 
-- `lit/` for pass-pipeline and IR checks
+- `lit/` for pass-pipeline, IR checks, and source/config-driven baseline-versus-protected tooling coverage
 - `unit/` for small library-level tests
-- `integration/` for protected versus baseline validation flows

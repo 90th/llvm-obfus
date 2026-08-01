@@ -11,7 +11,7 @@
 * The repository enforces a customized Google C++ style via `.clang-format` (K&R braces, 2-space indentation, 100-column limit).
 
 ## Building & Testing
-All modifications must preserve LLVM IR semantics, pass module verification, and retain deterministic seed diversity. 
+All modifications must preserve LLVM IR semantics and pass module verification. Deterministic seed diversity remains part of the heavier opt-in release sweep.
 
 Validate your changes locally before submitting:
 
@@ -19,7 +19,15 @@ Validate your changes locally before submitting:
 # Configure the build
 cmake -S . -B build -DLLVM_DIR="$(llvm-config --cmakedir)"
 
-# Build and run the verification suite
-cmake --build build --target obf-benchmarks obf-seed-diversity obf-unit-tests
-ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests"
+# Fast contributor checks
+cmake --build build --target obf-clang-wrappers obf-driver obf-unit-tests obf-runtime-atomic-tests -- -j1
+ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests|obf-runtime-atomic-tests"
+
+# Opt-in sequential benchmark, audit, and diversity checks
+cmake --build build --target obf-benchmarks -- -j1
+cmake --build build --target obf-audit-benchmarks -- -j1
+cmake --build build --target obf-re-harness -- -j1
+cmake --build build --target obf-seed-diversity -- -j1
 ```
+
+`obf-benchmarks` and `obf-audit-benchmarks` cover the four CMake corpus targets, including the linked `wpo_demo`. The current `obf-re-harness` and `obf-seed-diversity` checks intentionally stay scoped to `license_demo`, `config_demo`, and `vm_workflow_demo`.

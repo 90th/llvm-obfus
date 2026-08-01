@@ -332,7 +332,7 @@ opt -load-pass-plugin build/obf_plugin.so \
 Other standalone passes:
 
 - Read-only/reporting: `obf-feature-report`, `obf-audit`.
-- Transform stages: `obf-entropy-init`, `obf-vm`, `obf-block-split`, `obf-string-encode`, `obf-constant-encode`, `obf-opaque-gep`, `obf-instruction-substitute`, `obf-control-flatten`, `obf-function-outline`, `obf-opaque-preds`, `obf-bogus-cf`, `obf-indirect-dispatch`, `obf-cfg-state-cleanup`, and `obf-artifact-cleanup`.
+- Transform stages: `obf-prepare-o0`, `obf-entropy-init`, `obf-vm`, `obf-block-split`, `obf-string-encode`, `obf-constant-encode`, `obf-opaque-gep`, `obf-instruction-substitute`, `obf-control-flatten`, `obf-function-outline`, `obf-opaque-preds`, `obf-bogus-cf`, `obf-indirect-dispatch`, `obf-cfg-state-cleanup`, and `obf-artifact-cleanup`.
 
 `obf-driver` remains a config-summary and debugging utility. `build/obf-clang` and `build/obf-clang++` are the compile wrappers.
 
@@ -373,7 +373,7 @@ Benchmark targets build paired baseline and obfuscated artifacts under `build/be
 Build benchmark pairs:
 
 ```sh
-cmake --build build --target obf-benchmarks
+cmake --build build --target obf-benchmarks -- -j1
 ```
 
 Per-benchmark artifacts:
@@ -386,11 +386,11 @@ Per-benchmark artifacts:
 
 Benchmark and analysis targets:
 
-- `obf-benchmarks` builds stripped baseline and obfuscated pairs for the full corpus.
+- `obf-benchmarks` builds stripped baseline and obfuscated pairs for the full four-target corpus, including the linked `wpo_demo`.
 - `obf-benchmarks-mir` emits MIR snapshots for linked benchmark targets such as `wpo_demo`.
 - `obf-audit-benchmarks` audits stripped obfuscated benchmark binaries for leaked symbols and, when `strings` is available, residual strings.
-- `obf-re-harness` scores how much VM structure is recoverable from obfuscated benchmark IR and writes `build/re-harness/vm_recovery.json`.
-- `obf-seed-diversity` verifies seed-driven IR diversity and writes `build/diversity/diversity.json`.
+- `obf-re-harness` intentionally scores how much VM structure is recoverable from obfuscated benchmark IR only for `license_demo`, `config_demo`, and `vm_workflow_demo`, and writes `build/re-harness/vm_recovery.json`.
+- `obf-seed-diversity` intentionally verifies seed-driven IR diversity only for `license_demo`, `config_demo`, and `vm_workflow_demo`, and writes `build/diversity/diversity.json`.
 
 Current benchmark corpus:
 
@@ -409,14 +409,23 @@ The helper writes temporary inputs under `build/string-auth-bench/` and reports 
 
 ## Verification
 
-Requested release sweep:
+Fast contributor checks:
 
 ```sh
-cmake --build build --target obf-benchmarks obf-seed-diversity obf-unit-tests obf-driver obf-runtime
-ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests"
+cmake --build build --target obf-clang-wrappers obf-driver obf-unit-tests obf-runtime-atomic-tests -- -j1
+ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests|obf-runtime-atomic-tests"
 ```
 
-The lit suite covers 175 tests across MBA engine shapes, opaque predicates, bogus control flow, control flattening, opaque GEP, constant encoding (inline and keyed-pool), string encoding (lazy, eager, auth), indirect dispatch, VM lowering, VM handler and dispatcher polymorphism, seed determinism, safe pipeline ordering, security gates, and artifact cleanup. The tests check IR with `opt`, match expected output with FileCheck, and validate runtime behavior with `lli`. Runtime entropy anchors are external. The suite precompiles the runtime sources into `obf_entropy_anchor.o` and `obf_string_auth_runtime.o`. It links these objects into `lli` with `--extra-object`.
+Opt-in sequential benchmark, audit, and diversity checks:
+
+```sh
+cmake --build build --target obf-benchmarks -- -j1
+cmake --build build --target obf-audit-benchmarks -- -j1
+cmake --build build --target obf-re-harness -- -j1
+cmake --build build --target obf-seed-diversity -- -j1
+```
+
+The current lit suite covers 179 tests across MBA engine shapes, opaque predicates, bogus control flow, control flattening, opaque GEP, constant encoding (inline and keyed-pool), string encoding (lazy, eager, auth), indirect dispatch, VM lowering, VM handler and dispatcher polymorphism, seed determinism, safe pipeline ordering, security gates, and artifact cleanup. `obf-runtime-atomic-tests` is a separate CTest entry, so it is not included in the lit count. The tests check IR with `opt`, match expected output with FileCheck, and validate runtime behavior with `lli`. Runtime entropy anchors are external. The suite precompiles the runtime sources into `obf_entropy_anchor.o` and `obf_string_auth_runtime.o`. It links these objects into `lli` with `--extra-object`.
 
 ## Repository Layout
 

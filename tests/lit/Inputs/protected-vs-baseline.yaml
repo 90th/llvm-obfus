@@ -1,0 +1,11 @@
+seed: 20260801
+default_level: none
+targets:
+  - match: protected_value
+    level: light
+string_encoding:
+  authenticated_mode: true
+  prefer_lazy_decode: true
+  allow_ctor_fallback: false
+security:
+  fail_on_public_obf_symbol: true

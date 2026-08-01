@@ -7,32 +7,41 @@ assignees: ''
 
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+**Bug summary**
+What breaks, and where? Note whether this is a miscompile, wrong output, verifier failure, assertion, or crash.
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+**LLVM version**
+LLVM/Clang version, commit, or package revision used for this reproducer.
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+**Host compiler**
+Compiler and version used to build LLVM-obfus.
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+**Target triple**
+The target triple for the failing case.
 
-**Desktop (please complete the following information):**
- - OS: [e.g. iOS]
- - Browser [e.g. chrome, safari]
- - Version [e.g. 22]
+**Exact `opt` / `obf-clang` command**
+```sh
+# Paste the full command line exactly as run.
+```
 
-**Smartphone (please complete the following information):**
- - Device: [e.g. iPhone6]
- - OS: [e.g. iOS8.1]
- - Browser [e.g. stock browser, safari]
- - Version [e.g. 22]
+**YAML / `OBF_ENABLE` configuration**
+```yaml
+# Paste the relevant YAML config and any OBF_ENABLE settings.
+```
+
+**Reduced C / LLVM IR input**
+```c
+// Paste the smallest C or .ll reproducer you have.
+```
+
+**Expected result**
+What output, IR property, or successful behavior did you expect?
+
+**Actual result / crash**
+Paste the wrong output, verifier error, assertion, stack trace, or crash log.
+
+**Relevant target / test information**
+List the affected lit test, runtime target, architecture-specific flags, or other target details needed to reproduce.
 
 **Additional context**
-Add any other context about the problem here.
+Anything else that helps reproduce or narrow the issue.
