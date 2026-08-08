@@ -45,6 +45,20 @@ bool is_user_pipeline_function(const llvm::Function& function) {
   return !name.starts_with("__obf_") && !name.starts_with("llvm.");
 }
 
+void resolve_non_generic_configured_names(const llvm::Module& module, obfuscation_config& config) {
+  const auto resolve_name = [&](std::string& name) {
+    const llvm::Function* function = resolve_configured_function(module, name);
+    if (function == nullptr) {
+      llvm_unreachable("module validation must resolve every non-generic configured function");
+    }
+
+    name = function->getName().str();
+  };
+
+  for (target_rule& rule : config.targets) { resolve_name(rule.match); }
+  for (function_override& override : config.overrides) { resolve_name(override.name); }
+}
+
 bool is_top_level_semantic_function(const llvm::Function& function) {
   return function.getName() == "main";
 }
@@ -300,7 +314,14 @@ std::uint64_t get_obf_seed_override() { return obf_seed_override; }
 
 llvm::SmallVector<function_pipeline_state, 32>
 build_pipeline_state(llvm::Module& module, const obfuscation_config& config) {
-  if (config.frontend != frontend_kind::generic) { validate_effective_config(config, module); }
+  std::optional<obfuscation_config> resolved_config;
+  if (config.frontend != frontend_kind::generic) {
+    validate_effective_config(config, module);
+    resolved_config.emplace(config);
+    resolve_non_generic_configured_names(module, *resolved_config);
+  }
+
+  const obfuscation_config& policy_config = resolved_config.has_value() ? *resolved_config : config;
 
   const function_annotation_map annotations = config.frontend == frontend_kind::generic
                                                   ? collect_function_annotations(module)
@@ -317,7 +338,7 @@ build_pipeline_state(llvm::Module& module, const obfuscation_config& config) {
       report.annotation = *annotation;
     }
 
-    report.decision = select_policy(module, report.features, config, report.annotation);
+    report.decision = select_policy(module, report.features, policy_config, report.annotation);
     states.push_back({.function = &function, .report = std::move(report), .mba_counts = {}});
   }
 

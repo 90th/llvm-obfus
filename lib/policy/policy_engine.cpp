@@ -312,7 +312,8 @@ policy_decision select_policy(const llvm::Module& module,
   }
 
   if (features.has_exception_edges || features.has_inline_asm) {
-    if (decision.source == policy_source::explicit_override) {
+    if (decision.source == policy_source::explicit_override &&
+        config.frontend == frontend_kind::generic) {
       append_detail(decision.detail, "explicit override kept despite risky features");
       decision.policy.allow_vm = false;
     } else {

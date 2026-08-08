@@ -1,7 +1,9 @@
 #include "obf/frontend/config.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -201,11 +203,25 @@ bool has_top_level_key(llvm::StringRef text, llvm::StringRef key) {
         line_end == llvm::StringRef::npos ? text.substr(offset) : text.slice(offset, line_end);
     offset = line_end == llvm::StringRef::npos ? text.size() : line_end + 1;
 
+    line.consume_front("\xEF\xBB\xBF");
     if (line.empty() || line.front() == ' ' || line.front() == '\t') { continue; }
-    const std::size_t comment = line.find('#');
-    if (comment != llvm::StringRef::npos) { line = line.take_front(comment); }
-    line = line.rtrim();
-    if (line.consume_front(key) && line.ltrim().starts_with(":")) { return true; }
+
+    llvm::StringRef parsed_key;
+    llvm::StringRef suffix;
+    if (line.front() == '\'' || line.front() == '"') {
+      const char quote = line.front();
+      const std::size_t closing_quote = line.find(quote, 1);
+      if (closing_quote == llvm::StringRef::npos) { continue; }
+      parsed_key = line.slice(1, closing_quote);
+      suffix = line.drop_front(closing_quote + 1);
+    } else {
+      const std::size_t colon = line.find(':');
+      if (colon == llvm::StringRef::npos) { continue; }
+      parsed_key = line.take_front(colon).rtrim();
+      suffix = line.drop_front(colon);
+    }
+
+    if (parsed_key == key && suffix.ltrim().starts_with(":")) { return true; }
   }
   return false;
 }
@@ -401,6 +417,18 @@ bool is_light_or_strong(protection_level level) {
   report_non_generic_config_error(detail);
 }
 
+[[noreturn]] void report_non_generic_alias_resolution_error(llvm::StringRef alias_name,
+                                                            llvm::StringRef function_name) {
+  std::string detail;
+  detail.reserve(alias_name.size() + function_name.size() + 96);
+  detail += "configured alias '";
+  detail.append(alias_name.data(), alias_name.size());
+  detail += "' resolves to function '";
+  detail.append(function_name.data(), function_name.size());
+  detail += "' whose name is not exact; aliases must resolve to names without '*' or '?'";
+  report_non_generic_config_error(detail);
+}
+
 void validate_non_generic_config(const obfuscation_config& config) {
   if (config.security.allow_unsafe_config) {
     report_non_generic_config_error("forbids security.allow_unsafe_config");
@@ -454,14 +482,22 @@ void validate_non_generic_config(const obfuscation_config& config) {
   }
 }
 
-void validate_non_generic_configured_function(const llvm::Module& module, llvm::StringRef name) {
-  const llvm::Function* function = module.getFunction(name);
-  if (function != nullptr && !function->isDeclaration()) { return; }
-
-  report_non_generic_named_config_error("configured function", name, "is not a defined function");
-}
-
 }  // namespace
+
+const llvm::Function* resolve_configured_function(const llvm::Module& module,
+                                                  llvm::StringRef name) {
+  if (!is_exact_function_name(name)) { return nullptr; }
+
+  const llvm::Function* function = module.getFunction(name);
+  if (function == nullptr) {
+    const llvm::GlobalAlias* alias = module.getNamedAlias(name);
+    if (alias == nullptr) { return nullptr; }
+
+    function = llvm::dyn_cast_or_null<llvm::Function>(alias->getAliaseeObject());
+  }
+
+  return function != nullptr && !function->isDeclaration() ? function : nullptr;
+}
 
 void validate_effective_config(const obfuscation_config& config) {
   if (config.frontend != frontend_kind::generic) { validate_non_generic_config(config); }
@@ -488,11 +524,28 @@ void validate_effective_config(const obfuscation_config& config, const llvm::Mod
   validate_effective_config(config);
   if (config.frontend == frontend_kind::generic) { return; }
 
-  for (const target_rule& rule : config.targets) {
-    validate_non_generic_configured_function(module, rule.match);
-  }
+  llvm::SmallPtrSet<const llvm::Function*, 8> configured_functions;
+  const auto validate_configured_function = [&](llvm::StringRef name) {
+    const llvm::Function* function = resolve_configured_function(module, name);
+    if (function == nullptr) {
+      report_non_generic_named_config_error(
+          "configured function", name, "is not a defined function");
+    }
+
+    if (!is_exact_function_name(function->getName())) {
+      report_non_generic_alias_resolution_error(name, function->getName());
+    }
+    if (!configured_functions.insert(function).second) {
+      report_non_generic_named_config_error(
+          "configured function",
+          name,
+          "resolves to a function already selected by another target or override");
+    }
+  };
+
+  for (const target_rule& rule : config.targets) { validate_configured_function(rule.match); }
   for (const function_override& override : config.overrides) {
-    validate_non_generic_configured_function(module, override.name);
+    validate_configured_function(override.name);
   }
 }
 

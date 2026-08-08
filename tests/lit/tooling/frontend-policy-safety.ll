@@ -9,12 +9,14 @@
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-duplicate-overlap.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=DUPLICATE
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-vm.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=VM
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-overlap.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=OVERLAP
+; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-alias-duplicate.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=ALIAS-DUPLICATE
+; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-alias-wildcard.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=ALIAS-WILDCARD
 
-; The safe frontend config must select only the exact configured function. Its
+; The safe frontend config must select a function through its public alias. Its
 ; transformed output and runnable result prove the pipeline still runs; the
 ; unchanged helper proves unmatched functions cannot be promoted implicitly.
 
-define i32 @selected(i32 %x) {
+define internal i32 @selected(i32 %x) {
 entry:
   %slot = alloca i32, align 4
   store i32 %x, ptr %slot, align 4
@@ -22,6 +24,8 @@ entry:
   %sum = add nsw i32 %loaded, 129
   ret i32 %sum
 }
+
+@selected_export = alias i32 (i32), ptr @selected
 
 define i32 @helper(i32 %x) {
 entry:
@@ -42,9 +46,19 @@ entry:
   ret i32 %x
 }
 
+@duplicate_alias_one = alias i32 (i32), ptr @duplicate_target
+@duplicate_alias_two = alias i32 (i32), ptr @duplicate_target
+
+define internal i32 @"selected*"(i32 %x) {
+entry:
+  ret i32 %x
+}
+
+@wildcard_aliasee_alias = alias i32 (i32), ptr @"selected*"
+
 define i32 @main() {
 entry:
-  %selected = call i32 @selected(i32 5)
+  %selected = call i32 @selected_export(i32 5)
   %helper = call i32 @helper(i32 8)
   %sum = add i32 %selected, %helper
   %ok = icmp eq i32 %sum, 149
@@ -52,11 +66,11 @@ entry:
   ret i32 %ret
 }
 
-; POLICY-DAG: "detail":"config match:selected","level":"strong"
+; POLICY-DAG: "name":"selected","policy":{{.*}}"detail":"config match:selected","level":"strong"
 ; POLICY-DAG: "name":"helper","policy":{{.*}}"detail":"default","level":"none"
 
 ; SAFE-DAG: @rt_core_ea = external externally_initialized global i64, align 8
-; SAFE-LABEL: define i32 @selected(i32
+; SAFE-LABEL: define internal i32 @selected(i32
 ; SAFE: alloca i32, align 4
 ; SAFE: alloca { i64, i64 }, align 8
 ; SAFE: call {{.*}} @{{_[0-9a-f]+}}
@@ -73,7 +87,7 @@ entry:
 ; SAFE: ret i32 %{{[^ ]+}}
 ; SAFE-NOT: alloca { i64, i64 }, align 8
 ; SAFE-LABEL: define i32 @main()
-; SAFE: call i32 @selected(i32 5)
+; SAFE: call i32 @selected_export(i32 5)
 ; SAFE: call i32 @helper(i32 8)
 ; SAFE: icmp eq i32 %{{[^,]+}}, 149
 
@@ -83,3 +97,5 @@ entry:
 ; DUPLICATE: LLVM ERROR: config error: non-generic frontend has duplicate configured function 'duplicate_target'
 ; VM: LLVM ERROR: config error: non-generic frontend entries must use light or strong
 ; OVERLAP: LLVM ERROR: config error: non-generic frontend target/override overlap 'overlap_target'
+; ALIAS-DUPLICATE: LLVM ERROR: config error: non-generic frontend configured function 'duplicate_alias_two' resolves to a function already selected by another target or override
+; ALIAS-WILDCARD: LLVM ERROR: config error: non-generic frontend configured alias 'wildcard_aliasee_alias' resolves to function 'selected*' whose name is not exact; aliases must resolve to names without '*' or '?'

@@ -11,8 +11,9 @@
 #include <vector>
 
 namespace llvm {
+class Function;
 class Module;
-}
+}  // namespace llvm
 
 namespace obf {
 
@@ -119,5 +120,8 @@ llvm::StringRef to_string(config_profile profile);
 llvm::StringRef to_string(constant_protection_mode mode);
 
 void validate_effective_config(const obfuscation_config& config, const llvm::Module& module);
+
+/// Resolves an exact configured name to a defined function, following aliases.
+const llvm::Function* resolve_configured_function(const llvm::Module& module, llvm::StringRef name);
 llvm::StringRef to_string(frontend_kind frontend);
 }  // namespace obf

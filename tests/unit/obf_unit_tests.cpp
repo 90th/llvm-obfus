@@ -126,6 +126,36 @@ void TestFrontendPolicyConfigAndSelection() {
   std::error_code ec;
   std::filesystem::remove(path, ec);
 
+  const std::filesystem::path quoted_path =
+      std::filesystem::temp_directory_path() / "obf_frontend_quoted_keys.yaml";
+  {
+    std::ofstream out(quoted_path);
+    out << "'frontend': rust\n";
+    out << "'profile': standard\n";
+    out << "'default_level': none\n";
+    out << "'targets':\n";
+    out << "  - match: quoted_selected\n";
+    out << "    level: light\n";
+    out << "'security':\n";
+    out << "  strip_release_markers: true\n";
+    out << "'string_encoding':\n";
+    out << "  max_strings_per_module: 0\n";
+  }
+
+  llvm::Expected<obf::obfuscation_config> quoted = obf::load_config_from_file(quoted_path.string());
+  ExpectTrue(static_cast<bool>(quoted), "quoted top-level YAML keys should load successfully");
+  if (quoted) {
+    ExpectTrue(quoted->frontend == obf::frontend_kind::rust,
+               "quoted frontend should override the profile default");
+    ExpectTrue(quoted->default_level == obf::protection_level::none,
+               "quoted default_level should override the profile default");
+    ExpectTrue(quoted->security.strip_release_markers,
+               "quoted security should override the profile default");
+    ExpectTrue(quoted->string_encoding.max_strings_per_module == 0,
+               "quoted string_encoding should override the profile default");
+  }
+  std::filesystem::remove(quoted_path, ec);
+
   llvm::LLVMContext context;
   llvm::Module module("frontend_policy_module", context);
 
@@ -209,6 +239,22 @@ void TestFrontendPolicyConfigAndSelection() {
   ExpectTrue(selected_decision.minimum_security_floor.has_value() &&
                  *selected_decision.minimum_security_floor == obf::protection_level::strong,
              "explicit non-generic selections should retain their security floor");
+
+  rust_config.overrides.push_back(
+      {.name = "risky_override", .level = obf::protection_level::strong});
+  obf::function_features risky_override;
+  risky_override.name = "risky_override";
+  risky_override.has_exception_edges = true;
+  const obf::policy_decision risky_override_decision =
+      obf::select_policy(module, risky_override, rust_config, "");
+  ExpectTrue(risky_override_decision.source == obf::policy_source::explicit_override,
+             "an exact non-generic override should remain explicit");
+  ExpectTrue(risky_override_decision.policy.level == obf::protection_level::light,
+             "a risky non-generic override should downgrade to light protection");
+  ExpectTrue(!risky_override_decision.policy.allow_flattening &&
+                 !risky_override_decision.policy.allow_function_outlining &&
+                 !risky_override_decision.policy.allow_indirect_calls,
+             "a risky non-generic override should disable structural transforms");
 
   obf::obfuscation_config tinygo_config;
   tinygo_config.frontend = obf::frontend_kind::tinygo;

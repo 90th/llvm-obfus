@@ -1,0 +1,10 @@
+frontend: rust
+default_level: none
+targets:
+  - match: duplicate_alias_one
+    level: strong
+overrides:
+  - name: duplicate_alias_two
+    level: light
+security:
+  strip_release_markers: true

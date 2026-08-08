@@ -1,0 +1,7 @@
+frontend: rust
+default_level: none
+targets:
+  - match: wildcard_aliasee_alias
+    level: strong
+security:
+  strip_release_markers: true
