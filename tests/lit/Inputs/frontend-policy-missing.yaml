@@ -1,0 +1,7 @@
+frontend: zig
+default_level: none
+targets:
+  - match: missing_exact
+    level: light
+security:
+  strip_release_markers: true

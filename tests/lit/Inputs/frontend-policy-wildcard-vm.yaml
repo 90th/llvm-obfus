@@ -1,0 +1,7 @@
+frontend: zig
+default_level: none
+targets:
+  - match: selected_*
+    level: vm
+security:
+  strip_release_markers: true

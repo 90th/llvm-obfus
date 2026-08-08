@@ -245,10 +245,8 @@ llvm::cl::opt<std::string>
                     llvm::cl::desc("Path to llvm-obfus milestone-zero YAML config"),
                     llvm::cl::init(""));
 
-llvm::cl::opt<bool> obf_enable("obf-enable",
-                               llvm::cl::desc("Enable obfuscation pipeline"),
-                               llvm::cl::init(false));
-
+llvm::cl::opt<bool>
+    obf_enable("obf-enable", llvm::cl::desc("Enable obfuscation pipeline"), llvm::cl::init(false));
 
 llvm::cl::opt<std::uint64_t> obf_seed_override(
     "obf-seed", llvm::cl::desc("Overrides the top-level obfuscation seed"), llvm::cl::init(0));
@@ -276,9 +274,7 @@ obfuscation_config load_active_config() {
 
   std::string config_path = obf_config_path.getValue();
   if (config_path.empty()) {
-    if (const char* env = std::getenv("OBF_CONFIG")) {
-      config_path = env;
-    }
+    if (const char* env = std::getenv("OBF_CONFIG")) { config_path = env; }
   }
 
   obfuscation_config config;
@@ -304,7 +300,11 @@ std::uint64_t get_obf_seed_override() { return obf_seed_override; }
 
 llvm::SmallVector<function_pipeline_state, 32>
 build_pipeline_state(llvm::Module& module, const obfuscation_config& config) {
-  const function_annotation_map annotations = collect_function_annotations(module);
+  if (config.frontend != frontend_kind::generic) { validate_effective_config(config, module); }
+
+  const function_annotation_map annotations = config.frontend == frontend_kind::generic
+                                                  ? collect_function_annotations(module)
+                                                  : function_annotation_map{};
 
   llvm::SmallVector<function_pipeline_state, 32> states;
   states.reserve(module.size());
@@ -318,12 +318,10 @@ build_pipeline_state(llvm::Module& module, const obfuscation_config& config) {
     }
 
     report.decision = select_policy(module, report.features, config, report.annotation);
-    states.push_back({.function = &function,
-                      .report = std::move(report),
-                      .mba_counts = {}});
+    states.push_back({.function = &function, .report = std::move(report), .mba_counts = {}});
   }
 
-  apply_orchestrator_policy_promotions(states);
+  if (config.frontend == frontend_kind::generic) { apply_orchestrator_policy_promotions(states); }
 
   return states;
 }
@@ -355,7 +353,9 @@ block_split_options build_block_split_options(const obfuscation_config& config,
 
 string_encoding_options build_string_encoding_options(const obfuscation_config& config) {
   return {.min_string_length = config.string_encoding.min_string_length,
-          .max_strings_per_module = config.string_encoding.max_strings_per_module,
+          .max_strings_per_module = config.frontend == frontend_kind::tinygo
+                                        ? 0
+                                        : config.string_encoding.max_strings_per_module,
           .ctor_priority = 0,
           .prefer_lazy_decode = config.string_encoding.prefer_lazy_decode,
           .allow_ctor_fallback = config.string_encoding.allow_ctor_fallback,
@@ -419,7 +419,8 @@ indirect_dispatch_options build_indirect_dispatch_options(const obfuscation_conf
 }
 
 instruction_substitution_options
-build_instruction_substitution_options(const obfuscation_config& config, const policy_decision& decision) {
+build_instruction_substitution_options(const obfuscation_config& config,
+                                       const policy_decision& decision) {
   instruction_substitution_options options;
   if (has_strong_classical(decision.policy.level)) {
     options.max_substitutions_per_function = 6;

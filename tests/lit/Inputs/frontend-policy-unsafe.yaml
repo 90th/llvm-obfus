@@ -1,0 +1,8 @@
+frontend: rust
+default_level: none
+targets:
+  - match: selected
+    level: strong
+security:
+  strip_release_markers: true
+  allow_unsafe_config: true

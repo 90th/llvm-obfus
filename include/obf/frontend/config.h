@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+namespace llvm {
+class Module;
+}
+
 namespace obf {
 
 struct function_override {
@@ -20,6 +24,12 @@ struct function_override {
 struct target_rule {
   std::string match;
   protection_level level = protection_level::none;
+};
+enum class frontend_kind {
+  generic,
+  rust,
+  zig,
+  tinygo,
 };
 
 enum class config_profile {
@@ -85,6 +95,8 @@ struct security_gate_config {
 
 struct obfuscation_config {
   std::optional<config_profile> profile;
+  frontend_kind frontend = frontend_kind::generic;
+
   std::uint64_t seed = 0;
   protection_level default_level = protection_level::none;
   std::vector<function_override> overrides;
@@ -106,4 +118,6 @@ std::string summarize_config(const obfuscation_config& config);
 llvm::StringRef to_string(config_profile profile);
 llvm::StringRef to_string(constant_protection_mode mode);
 
+void validate_effective_config(const obfuscation_config& config, const llvm::Module& module);
+llvm::StringRef to_string(frontend_kind frontend);
 }  // namespace obf

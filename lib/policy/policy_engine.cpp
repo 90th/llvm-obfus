@@ -58,6 +58,15 @@ const target_rule* find_matching_rule(const obfuscation_config& config,
   return nullptr;
 }
 
+const target_rule* find_exact_matching_rule(const obfuscation_config& config,
+                                            llvm::StringRef function_name) {
+  for (const target_rule& rule : config.targets) {
+    if (rule.match == function_name) { return &rule; }
+  }
+
+  return nullptr;
+}
+
 const function_override* find_explicit_override(const obfuscation_config& config,
                                                 llvm::StringRef function_name) {
   for (const function_override& override : config.overrides) {
@@ -228,39 +237,72 @@ policy_decision select_policy(const llvm::Module& module,
                               llvm::StringRef annotation_text) {
   policy_decision decision;
   decision.seed = derive_seed(module, features.name, config.seed);
-  decision.minimum_security_floor = derive_minimum_security_floor(features);
 
-  if (const function_override* override = find_explicit_override(config, features.name)) {
-    decision.source = policy_source::explicit_override;
-    decision.detail = "override:" + override->name;
-    decision.policy = make_function_policy(override->level);
-  } else if (const auto annotation_level = parse_protection_level(annotation_text)) {
-    decision.source = policy_source::source_annotation;
-    decision.detail = ("annotation:" + annotation_text.trim()).str();
-    decision.policy = make_function_policy(*annotation_level);
-  } else if (const target_rule* rule = find_matching_rule(config, features.name)) {
-    decision.source = policy_source::config_rule;
-    decision.detail = "config match:" + rule->match;
-    decision.policy = make_function_policy(rule->level);
+  if (config.frontend == frontend_kind::generic) {
+    decision.minimum_security_floor = derive_minimum_security_floor(features);
+
+    if (const function_override* override = find_explicit_override(config, features.name)) {
+      decision.source = policy_source::explicit_override;
+      decision.detail = "override:" + override->name;
+      decision.policy = make_function_policy(override->level);
+    } else if (const auto annotation_level = parse_protection_level(annotation_text)) {
+      decision.source = policy_source::source_annotation;
+      decision.detail = ("annotation:" + annotation_text.trim()).str();
+      decision.policy = make_function_policy(*annotation_level);
+    } else if (const target_rule* rule = find_matching_rule(config, features.name)) {
+      decision.source = policy_source::config_rule;
+      decision.detail = "config match:" + rule->match;
+      decision.policy = make_function_policy(rule->level);
+    } else {
+      std::string automatic_detail;
+      if (const auto automatic_level = classify_from_features(features, automatic_detail)) {
+        decision.source = policy_source::automatic_analysis;
+        decision.detail = automatic_detail;
+        decision.policy = make_function_policy(*automatic_level);
+      } else {
+        decision.source = policy_source::default_policy;
+        decision.detail = "default";
+        decision.policy = make_function_policy(config.default_level);
+      }
+    }
+
+    if (decision.minimum_security_floor.has_value() &&
+        !satisfies_security_floor(decision.policy.level, *decision.minimum_security_floor)) {
+      decision.policy =
+          promote_to_security_floor(decision.policy, *decision.minimum_security_floor);
+      const std::string floor_detail = "minimum security floor raised to " +
+                                       std::string(to_string(*decision.minimum_security_floor));
+      append_detail(decision.detail, floor_detail);
+    }
   } else {
-    std::string automatic_detail;
-    if (const auto automatic_level = classify_from_features(features, automatic_detail)) {
-      decision.source = policy_source::automatic_analysis;
-      decision.detail = automatic_detail;
-      decision.policy = make_function_policy(*automatic_level);
+    bool has_explicit_selection = false;
+    if (const function_override* override = find_explicit_override(config, features.name)) {
+      has_explicit_selection = true;
+      decision.source = policy_source::explicit_override;
+      decision.detail = "override:" + override->name;
+      decision.policy = make_function_policy(override->level);
+    } else if (const target_rule* rule = find_exact_matching_rule(config, features.name)) {
+      has_explicit_selection = true;
+      decision.source = policy_source::config_rule;
+      decision.detail = "config match:" + rule->match;
+      decision.policy = make_function_policy(rule->level);
     } else {
       decision.source = policy_source::default_policy;
       decision.detail = "default";
-      decision.policy = make_function_policy(config.default_level);
+      decision.policy = make_function_policy(protection_level::none);
     }
-  }
 
-  if (decision.minimum_security_floor.has_value() &&
-      !satisfies_security_floor(decision.policy.level, *decision.minimum_security_floor)) {
-    decision.policy = promote_to_security_floor(decision.policy, *decision.minimum_security_floor);
-    const std::string floor_detail = "minimum security floor raised to " +
-                                     std::string(to_string(*decision.minimum_security_floor));
-    append_detail(decision.detail, floor_detail);
+    if (has_explicit_selection) {
+      decision.minimum_security_floor = derive_minimum_security_floor(features);
+      if (decision.minimum_security_floor.has_value() &&
+          !satisfies_security_floor(decision.policy.level, *decision.minimum_security_floor)) {
+        decision.policy =
+            promote_to_security_floor(decision.policy, *decision.minimum_security_floor);
+        const std::string floor_detail = "minimum security floor raised to " +
+                                         std::string(to_string(*decision.minimum_security_floor));
+        append_detail(decision.detail, floor_detail);
+      }
+    }
   }
 
   if (features.is_declaration) {
@@ -314,6 +356,8 @@ policy_decision select_policy(const llvm::Module& module,
       decision.policy.allow_constant_encoding = true;
     }
   }
+
+  if (config.frontend == frontend_kind::tinygo) { decision.policy.allow_string_encoding = false; }
 
   return decision;
 }

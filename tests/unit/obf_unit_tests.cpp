@@ -96,6 +96,138 @@ void TestPolicySelection() {
              "parse_protection_level should parse annotation prefix form");
 }
 
+void TestFrontendPolicyConfigAndSelection() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "obf_frontend_policy_config.yaml";
+  {
+    std::ofstream out(path);
+    out << "frontend: tinygo\n";
+    out << "default_level: none\n";
+    out << "targets:\n";
+    out << "  - match: tinygo_selected\n";
+    out << "    level: strong\n";
+    out << "security:\n";
+    out << "  strip_release_markers: true\n";
+    out << "string_encoding:\n";
+    out << "  max_strings_per_module: 0\n";
+  }
+
+  llvm::Expected<obf::obfuscation_config> loaded = obf::load_config_from_file(path.string());
+  ExpectTrue(static_cast<bool>(loaded), "frontend config should load successfully");
+  if (loaded) {
+    ExpectTrue(loaded->frontend == obf::frontend_kind::tinygo, "frontend should parse from yaml");
+    ExpectTrue(loaded->string_encoding.max_strings_per_module == 0,
+               "tinygo config should retain its required string budget");
+    const std::string summary = obf::summarize_config(*loaded);
+    ExpectTrue(summary.find("frontend: tinygo") != std::string::npos,
+               "config summary should report the frontend");
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+
+  llvm::LLVMContext context;
+  llvm::Module module("frontend_policy_module", context);
+
+  obf::obfuscation_config generic_config;
+  generic_config.seed = 0x1234ULL;
+  ExpectTrue(generic_config.frontend == obf::frontend_kind::generic,
+             "generic should remain the default frontend");
+
+  obf::function_features generic_string;
+  generic_string.name = "generic_string";
+  generic_string.string_ref_count = 1;
+  const obf::policy_decision generic_string_decision =
+      obf::select_policy(module, generic_string, generic_config, "");
+  ExpectTrue(generic_string_decision.source == obf::policy_source::automatic_analysis,
+             "generic string-sensitive functions should retain automatic classification");
+  ExpectTrue(generic_string_decision.policy.level == obf::protection_level::light,
+             "generic string-sensitive functions should retain light protection");
+
+  obf::function_features generic_complex;
+  generic_complex.name = "generic_complex";
+  generic_complex.instruction_count = 32;
+  generic_complex.cyclomatic_complexity = 4;
+  const obf::policy_decision generic_complex_decision =
+      obf::select_policy(module, generic_complex, generic_config, "");
+  ExpectTrue(generic_complex_decision.source == obf::policy_source::automatic_analysis,
+             "generic control-sensitive functions should retain automatic classification");
+  ExpectTrue(generic_complex_decision.policy.level == obf::protection_level::strong,
+             "generic control-sensitive functions should retain strong protection");
+
+  obf::obfuscation_config rust_config;
+  rust_config.frontend = obf::frontend_kind::rust;
+  rust_config.default_level = obf::protection_level::none;
+  rust_config.security.strip_release_markers = true;
+  rust_config.targets.push_back(
+      {.match = "selected_exact", .level = obf::protection_level::strong});
+
+  obf::function_features unmatched_complex;
+  unmatched_complex.name = "unmatched_complex";
+  unmatched_complex.instruction_count = 32;
+  unmatched_complex.cyclomatic_complexity = 4;
+  const obf::policy_decision unmatched_complex_decision =
+      obf::select_policy(module, unmatched_complex, rust_config, "");
+  ExpectTrue(unmatched_complex_decision.source == obf::policy_source::default_policy,
+             "non-generic unmatched complex functions should bypass automatic classification");
+  ExpectTrue(unmatched_complex_decision.policy.level == obf::protection_level::none,
+             "non-generic unmatched complex functions should remain unprotected");
+  ExpectTrue(!unmatched_complex_decision.minimum_security_floor.has_value(),
+             "non-generic unmatched complex functions should not gain a security floor");
+
+  obf::function_features unmatched_string;
+  unmatched_string.name = "unmatched_string";
+  unmatched_string.string_ref_count = 1;
+  const obf::policy_decision unmatched_string_decision =
+      obf::select_policy(module, unmatched_string, rust_config, "");
+  ExpectTrue(unmatched_string_decision.source == obf::policy_source::default_policy,
+             "non-generic unmatched string functions should bypass automatic classification");
+  ExpectTrue(unmatched_string_decision.policy.level == obf::protection_level::none,
+             "non-generic unmatched string functions should remain unprotected");
+  ExpectTrue(!unmatched_string_decision.minimum_security_floor.has_value(),
+             "non-generic unmatched string functions should not gain a security floor");
+
+  obf::function_features annotated;
+  annotated.name = "annotated";
+  const obf::policy_decision annotated_decision =
+      obf::select_policy(module, annotated, rust_config, "obf:strong");
+  ExpectTrue(annotated_decision.source == obf::policy_source::default_policy,
+             "non-generic frontends should ignore source annotations");
+  ExpectTrue(annotated_decision.policy.level == obf::protection_level::none,
+             "ignored non-generic annotations should not select protection");
+
+  obf::function_features selected;
+  selected.name = "selected_exact";
+  selected.instruction_count = 32;
+  selected.cyclomatic_complexity = 4;
+  const obf::policy_decision selected_decision =
+      obf::select_policy(module, selected, rust_config, "");
+  ExpectTrue(selected_decision.source == obf::policy_source::config_rule,
+             "an exact non-generic target should select its configured policy");
+  ExpectTrue(selected_decision.policy.level == obf::protection_level::strong,
+             "an exact non-generic target should select strong protection");
+  ExpectTrue(selected_decision.minimum_security_floor.has_value() &&
+                 *selected_decision.minimum_security_floor == obf::protection_level::strong,
+             "explicit non-generic selections should retain their security floor");
+
+  obf::obfuscation_config tinygo_config;
+  tinygo_config.frontend = obf::frontend_kind::tinygo;
+  tinygo_config.default_level = obf::protection_level::none;
+  tinygo_config.security.strip_release_markers = true;
+  tinygo_config.string_encoding.max_strings_per_module = 0;
+  tinygo_config.targets.push_back(
+      {.match = "tinygo_selected", .level = obf::protection_level::strong});
+
+  obf::function_features tinygo_selected;
+  tinygo_selected.name = "tinygo_selected";
+  const obf::policy_decision tinygo_decision =
+      obf::select_policy(module, tinygo_selected, tinygo_config, "");
+  ExpectTrue(tinygo_decision.policy.level == obf::protection_level::strong,
+             "TinyGo exact targets should retain their configured protection");
+  ExpectTrue(!tinygo_decision.policy.allow_string_encoding,
+             "TinyGo selected policies should disable string encoding");
+}
+
 void TestConfigLoader() {
   const std::filesystem::path path =
       std::filesystem::temp_directory_path() / "obf_unit_config.yaml";
@@ -127,8 +259,7 @@ void TestConfigLoader() {
 }
 
 void TestVmConfig() {
-  const std::filesystem::path path =
-      std::filesystem::temp_directory_path() / "obf_vm_config.yaml";
+  const std::filesystem::path path = std::filesystem::temp_directory_path() / "obf_vm_config.yaml";
   {
     std::ofstream out(path);
     out << "profile: guarded\n";
@@ -363,44 +494,46 @@ void TestAuthEncodingDerivationAndTagging() {
   const std::uint64_t other_string_binding =
       obf::auth::DeriveStringBindingId(0x111ULL, 0x222ULL, 0x334ULL);
   const std::uint64_t pool_binding = obf::auth::DeriveConstantPoolBindingId(0x111ULL, 0x333ULL);
-  const std::uint64_t same_pool_binding = obf::auth::DeriveConstantPoolBindingId(0x111ULL, 0x333ULL);
-  const std::uint64_t other_pool_binding = obf::auth::DeriveConstantPoolBindingId(0x111ULL, 0x334ULL);
-  const std::uint64_t destination_cookie = obf::auth::DeriveReferenceCookieV3(
-      mac_key,
-      obf::auth::AuthDescriptorKind::string,
-      string_binding,
-      obf::auth::AuthReferenceRole::destination,
-      7);
-  const std::uint64_t ciphertext_cookie = obf::auth::DeriveReferenceCookieV3(
-      mac_key,
-      obf::auth::AuthDescriptorKind::string,
-      string_binding,
-      obf::auth::AuthReferenceRole::ciphertext,
-      7);
-  const std::uint64_t state_cookie = obf::auth::DeriveReferenceCookieV3(
-      mac_key,
-      obf::auth::AuthDescriptorKind::string,
-      string_binding,
-      obf::auth::AuthReferenceRole::state,
-      0);
-  const std::uint64_t pool_destination_cookie = obf::auth::DeriveReferenceCookieV3(
-      mac_key,
-      obf::auth::AuthDescriptorKind::constant_pool,
-      string_binding,
-      obf::auth::AuthReferenceRole::destination,
-      7);
-  const std::uint64_t other_destination_cookie = obf::auth::DeriveReferenceCookieV3(
-      mac_key,
-      obf::auth::AuthDescriptorKind::string,
-      other_string_binding,
-      obf::auth::AuthReferenceRole::destination,
-      7);
-  const std::uint64_t resized_destination_cookie = obf::auth::DeriveReferenceCookieV3(
-      mac_key,
-      obf::auth::AuthDescriptorKind::string,
-      string_binding,
-      obf::auth::AuthReferenceRole::destination,
-      8);
+  const std::uint64_t same_pool_binding =
+      obf::auth::DeriveConstantPoolBindingId(0x111ULL, 0x333ULL);
+  const std::uint64_t other_pool_binding =
+      obf::auth::DeriveConstantPoolBindingId(0x111ULL, 0x334ULL);
+  const std::uint64_t destination_cookie =
+      obf::auth::DeriveReferenceCookieV3(mac_key,
+                                         obf::auth::AuthDescriptorKind::string,
+                                         string_binding,
+                                         obf::auth::AuthReferenceRole::destination,
+                                         7);
+  const std::uint64_t ciphertext_cookie =
+      obf::auth::DeriveReferenceCookieV3(mac_key,
+                                         obf::auth::AuthDescriptorKind::string,
+                                         string_binding,
+                                         obf::auth::AuthReferenceRole::ciphertext,
+                                         7);
+  const std::uint64_t state_cookie =
+      obf::auth::DeriveReferenceCookieV3(mac_key,
+                                         obf::auth::AuthDescriptorKind::string,
+                                         string_binding,
+                                         obf::auth::AuthReferenceRole::state,
+                                         0);
+  const std::uint64_t pool_destination_cookie =
+      obf::auth::DeriveReferenceCookieV3(mac_key,
+                                         obf::auth::AuthDescriptorKind::constant_pool,
+                                         string_binding,
+                                         obf::auth::AuthReferenceRole::destination,
+                                         7);
+  const std::uint64_t other_destination_cookie =
+      obf::auth::DeriveReferenceCookieV3(mac_key,
+                                         obf::auth::AuthDescriptorKind::string,
+                                         other_string_binding,
+                                         obf::auth::AuthReferenceRole::destination,
+                                         7);
+  const std::uint64_t resized_destination_cookie =
+      obf::auth::DeriveReferenceCookieV3(mac_key,
+                                         obf::auth::AuthDescriptorKind::string,
+                                         string_binding,
+                                         obf::auth::AuthReferenceRole::destination,
+                                         8);
   const std::uint64_t build_key_cookie = obf::auth::DeriveBuildKeyCookieV3(
       build_key, obf::auth::AuthDescriptorKind::string, string_binding, 32);
   const std::uint64_t resized_build_key_cookie = obf::auth::DeriveBuildKeyCookieV3(
@@ -444,8 +577,7 @@ void TestAuthEncodingDerivationAndTagging() {
              "build-key cookies should bind semantic capacity");
   ExpectTrue(cold_status != 0 && same_cold_status == cold_status && resized_cold_status != 0,
              "V3 cold status derivation should be deterministic and nonzero");
-  ExpectTrue(cold_status != resized_cold_status,
-             "V3 cold status should bind semantic capacity");
+  ExpectTrue(cold_status != resized_cold_status, "V3 cold status should bind semantic capacity");
   ExpectTrue(cold_status != pool_cold_status,
              "cache status derivation should separate descriptor kinds and bindings");
 
@@ -501,8 +633,7 @@ void TestAuthEncodingDerivationAndTagging() {
   ExpectTrue(tag != tampered_tag, "string tag should change when ciphertext changes");
   ExpectTrue(tag != rebound_tag, "string tag should change when binding inputs change");
   ExpectTrue(tag != changed_cookie_tag, "string tag should change when cookie inputs change");
-  ExpectTrue(tag != changed_destination_capacity_tag &&
-                 tag != changed_ciphertext_capacity_tag &&
+  ExpectTrue(tag != changed_destination_capacity_tag && tag != changed_ciphertext_capacity_tag &&
                  tag != changed_build_key_capacity_tag,
              "string tag should bind every semantic capacity");
 
@@ -514,29 +645,29 @@ void TestAuthEncodingDerivationAndTagging() {
   pool_metadata.destination_capacity = plaintext.size();
   pool_metadata.ciphertext_capacity = ciphertext.size();
   pool_metadata.build_key_capacity = obf::auth::kBuildKeyBytes;
-  pool_metadata.destination_cookie = obf::auth::DeriveReferenceCookieV3(
-      mac_key,
-      obf::auth::AuthDescriptorKind::constant_pool,
-      pool_metadata.binding_id,
-      obf::auth::AuthReferenceRole::destination,
-      pool_metadata.destination_capacity);
-  pool_metadata.ciphertext_cookie = obf::auth::DeriveReferenceCookieV3(
-      mac_key,
-      obf::auth::AuthDescriptorKind::constant_pool,
-      pool_metadata.binding_id,
-      obf::auth::AuthReferenceRole::ciphertext,
-      pool_metadata.ciphertext_capacity);
-  pool_metadata.build_key_cookie = obf::auth::DeriveBuildKeyCookieV3(
-      build_key,
-      obf::auth::AuthDescriptorKind::constant_pool,
-      pool_metadata.binding_id,
-      pool_metadata.build_key_capacity);
-  pool_metadata.state_cookie = obf::auth::DeriveReferenceCookieV3(
-      mac_key,
-      obf::auth::AuthDescriptorKind::constant_pool,
-      pool_metadata.binding_id,
-      obf::auth::AuthReferenceRole::state,
-      0);
+  pool_metadata.destination_cookie =
+      obf::auth::DeriveReferenceCookieV3(mac_key,
+                                         obf::auth::AuthDescriptorKind::constant_pool,
+                                         pool_metadata.binding_id,
+                                         obf::auth::AuthReferenceRole::destination,
+                                         pool_metadata.destination_capacity);
+  pool_metadata.ciphertext_cookie =
+      obf::auth::DeriveReferenceCookieV3(mac_key,
+                                         obf::auth::AuthDescriptorKind::constant_pool,
+                                         pool_metadata.binding_id,
+                                         obf::auth::AuthReferenceRole::ciphertext,
+                                         pool_metadata.ciphertext_capacity);
+  pool_metadata.build_key_cookie =
+      obf::auth::DeriveBuildKeyCookieV3(build_key,
+                                        obf::auth::AuthDescriptorKind::constant_pool,
+                                        pool_metadata.binding_id,
+                                        pool_metadata.build_key_capacity);
+  pool_metadata.state_cookie =
+      obf::auth::DeriveReferenceCookieV3(mac_key,
+                                         obf::auth::AuthDescriptorKind::constant_pool,
+                                         pool_metadata.binding_id,
+                                         obf::auth::AuthReferenceRole::state,
+                                         0);
   pool_metadata.nonce = nonce;
   ExpectTrue(pool_metadata.version == 3, "constant-pool V3 metadata should default to version 3");
   const obf::auth::StringTag pool_tag =
@@ -685,13 +816,13 @@ void TestSeedStability() {
   ExpectTrue(mixed1 != mixed3, "different seeds should produce different mix_seed results");
 }
 
-
 }  // namespace
 
 int main() {
   TestStableHashAndSeedMix();
   TestGeneratedNames();
   TestPolicySelection();
+  TestFrontendPolicyConfigAndSelection();
   TestConfigLoader();
   TestVmConfig();
   TestVmConfigDefaults();

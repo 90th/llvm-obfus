@@ -1,0 +1,10 @@
+frontend: zig
+default_level: none
+targets:
+  - match: overlap_target
+    level: strong
+overrides:
+  - name: overlap_target
+    level: light
+security:
+  strip_release_markers: true

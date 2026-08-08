@@ -1,5 +1,10 @@
 #include "obf/frontend/config.h"
 
+#include "llvm/ADT/StringSet.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/ErrorHandling.h"
+
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -23,6 +28,16 @@ struct ScalarEnumerationTraits<obf::protection_level> {
     io.enumCase(level, "strong", obf::protection_level::strong);
     io.enumCase(level, "vm", obf::protection_level::vm);
     io.enumCase(level, "strong_vm", obf::protection_level::strong_vm);
+  }
+};
+
+template <>
+struct ScalarEnumerationTraits<obf::frontend_kind> {
+  static void enumeration(IO& io, obf::frontend_kind& frontend) {
+    io.enumCase(frontend, "generic", obf::frontend_kind::generic);
+    io.enumCase(frontend, "rust", obf::frontend_kind::rust);
+    io.enumCase(frontend, "zig", obf::frontend_kind::zig);
+    io.enumCase(frontend, "tinygo", obf::frontend_kind::tinygo);
   }
 };
 
@@ -107,8 +122,7 @@ struct MappingTraits<obf::mba_config> {
 template <>
 struct MappingTraits<obf::vm_config> {
   static void mapping(IO& io, obf::vm_config& config) {
-    io.mapOptional(
-        "max_virtual_instructions", config.max_virtual_instructions, std::uint32_t{512});
+    io.mapOptional("max_virtual_instructions", config.max_virtual_instructions, std::uint32_t{512});
     io.mapOptional("max_mba_depth", config.max_mba_depth);
   }
 };
@@ -117,8 +131,7 @@ template <>
 struct MappingTraits<obf::indirect_dispatch_config> {
   static void mapping(IO& io, obf::indirect_dispatch_config& config) {
     io.mapOptional("enabled", config.enabled, false);
-    io.mapOptional(
-        "max_sites_per_function", config.max_sites_per_function, std::uint32_t{4});
+    io.mapOptional("max_sites_per_function", config.max_sites_per_function, std::uint32_t{4});
     io.mapOptional("max_switch_targets", config.max_switch_targets, std::uint32_t{8});
     io.mapOptional("target_vm_dispatchers", config.target_vm_dispatchers, true);
     io.mapOptional("target_flattened_headers", config.target_flattened_headers, true);
@@ -137,6 +150,8 @@ struct MappingTraits<obf::security_gate_config> {
 template <>
 struct MappingTraits<obf::obfuscation_config> {
   static void mapping(IO& io, obf::obfuscation_config& config) {
+    io.mapOptional("frontend", config.frontend, obf::frontend_kind::generic);
+
     io.mapOptional("profile", config.profile);
     io.mapOptional("seed", config.seed, std::uint64_t{0});
     io.mapOptional("default_level", config.default_level, obf::protection_level::none);
@@ -161,6 +176,8 @@ namespace obf {
 namespace {
 
 struct config_parse_presence {
+  bool frontend = false;
+
   bool seed = false;
   bool default_level = false;
   bool overrides = false;
@@ -194,7 +211,8 @@ bool has_top_level_key(llvm::StringRef text, llvm::StringRef key) {
 }
 
 config_parse_presence collect_presence(llvm::StringRef text) {
-  return {.seed = has_top_level_key(text, "seed"),
+  return {.frontend = has_top_level_key(text, "frontend"),
+          .seed = has_top_level_key(text, "seed"),
           .default_level = has_top_level_key(text, "default_level"),
           .overrides = has_top_level_key(text, "overrides"),
           .targets = has_top_level_key(text, "targets"),
@@ -285,6 +303,7 @@ obfuscation_config apply_profile_defaults(const obfuscation_config& raw_config,
   if (!raw_config.profile.has_value()) { return raw_config; }
 
   obfuscation_config config = defaults_for_profile(*raw_config.profile);
+  if (presence.frontend) { config.frontend = raw_config.frontend; }
   if (presence.seed) { config.seed = raw_config.seed; }
   if (presence.default_level) { config.default_level = raw_config.default_level; }
   if (presence.overrides) { config.overrides = raw_config.overrides; }
@@ -318,12 +337,9 @@ bool is_vm_level(protection_level level) {
   llvm_unreachable("unknown protection level");
 }
 
-bool is_strong_vm_level(protection_level level) {
-  return level == protection_level::strong_vm;
-}
+bool is_strong_vm_level(protection_level level) { return level == protection_level::strong_vm; }
 
-bool config_selects_level(const obfuscation_config& config,
-                          bool (*predicate)(protection_level)) {
+bool config_selects_level(const obfuscation_config& config, bool (*predicate)(protection_level)) {
   if (predicate(config.default_level)) { return true; }
   for (const function_override& override : config.overrides) {
     if (predicate(override.level)) { return true; }
@@ -355,9 +371,101 @@ bool is_high_security_profile(config_profile profile) {
   llvm_unreachable("unknown config profile");
 }
 
+bool is_exact_function_name(llvm::StringRef name) {
+  return !name.empty() && name.find_first_of("*?") == llvm::StringRef::npos;
+}
+
+bool is_light_or_strong(protection_level level) {
+  return level == protection_level::light || level == protection_level::strong;
+}
+
+[[noreturn]] void report_non_generic_config_error(llvm::StringRef detail) {
+  std::string message = "config error: non-generic frontend ";
+  message.append(detail.data(), detail.size());
+  llvm::report_fatal_error(llvm::StringRef(message));
+}
+
+[[noreturn]] void report_non_generic_named_config_error(llvm::StringRef entry,
+                                                        llvm::StringRef name,
+                                                        llvm::StringRef requirement) {
+  std::string detail;
+  detail.reserve(entry.size() + name.size() + requirement.size() + 4);
+  detail.append(entry.data(), entry.size());
+  detail += " '";
+  detail.append(name.data(), name.size());
+  detail += "'";
+  if (!requirement.empty()) {
+    detail += " ";
+    detail.append(requirement.data(), requirement.size());
+  }
+  report_non_generic_config_error(detail);
+}
+
+void validate_non_generic_config(const obfuscation_config& config) {
+  if (config.security.allow_unsafe_config) {
+    report_non_generic_config_error("forbids security.allow_unsafe_config");
+  }
+  if (config.default_level != protection_level::none) {
+    report_non_generic_config_error("requires default_level: none");
+  }
+  if (!config.security.strip_release_markers) {
+    report_non_generic_config_error("requires security.strip_release_markers: true");
+  }
+  if (config.frontend == frontend_kind::tinygo &&
+      config.string_encoding.max_strings_per_module != 0) {
+    report_non_generic_config_error(
+        "requires string_encoding.max_strings_per_module: 0 for tinygo");
+  }
+  if (config.targets.empty() && config.overrides.empty()) {
+    report_non_generic_config_error("requires at least one target or override");
+  }
+
+  llvm::StringSet<> target_names;
+  for (const target_rule& rule : config.targets) {
+    const llvm::StringRef name(rule.match);
+    if (!is_exact_function_name(name)) {
+      report_non_generic_named_config_error("target", name, "must use an exact function name");
+    }
+    if (!is_light_or_strong(rule.level)) {
+      report_non_generic_config_error("entries must use light or strong");
+    }
+    if (!target_names.insert(name).second) {
+      report_non_generic_named_config_error(
+          "has duplicate configured function", name, "in targets");
+    }
+  }
+
+  llvm::StringSet<> override_names;
+  for (const function_override& override : config.overrides) {
+    const llvm::StringRef name(override.name);
+    if (!is_exact_function_name(name)) {
+      report_non_generic_named_config_error("override", name, "must use an exact function name");
+    }
+    if (!is_light_or_strong(override.level)) {
+      report_non_generic_config_error("entries must use light or strong");
+    }
+    if (!override_names.insert(name).second) {
+      report_non_generic_named_config_error(
+          "has duplicate configured function", name, "in overrides");
+    }
+    if (target_names.contains(name)) {
+      report_non_generic_named_config_error("target/override overlap", name, "");
+    }
+  }
+}
+
+void validate_non_generic_configured_function(const llvm::Module& module, llvm::StringRef name) {
+  const llvm::Function* function = module.getFunction(name);
+  if (function != nullptr && !function->isDeclaration()) { return; }
+
+  report_non_generic_named_config_error("configured function", name, "is not a defined function");
+}
+
 }  // namespace
 
 void validate_effective_config(const obfuscation_config& config) {
+  if (config.frontend != frontend_kind::generic) { validate_non_generic_config(config); }
+
   if (config.vm.max_virtual_instructions == 0) {
     llvm::report_fatal_error("config error: vm.max_virtual_instructions must be >= 1");
   }
@@ -367,10 +475,39 @@ void validate_effective_config(const obfuscation_config& config) {
     llvm::report_fatal_error("security gate failure: debug names preserved with VM enabled");
   }
 
-  if ((config_selects_strong_vm(config) || (config.profile.has_value() && is_high_security_profile(*config.profile))) &&
+  if ((config_selects_strong_vm(config) ||
+       (config.profile.has_value() && is_high_security_profile(*config.profile))) &&
       !config.security.fail_on_public_obf_symbol) {
-    llvm::report_fatal_error("security gate failure: strong_vm or high-security profile without fail_on_public_obf_symbol");
+    llvm::report_fatal_error(
+        "security gate failure: strong_vm or high-security profile without "
+        "fail_on_public_obf_symbol");
   }
+}
+
+void validate_effective_config(const obfuscation_config& config, const llvm::Module& module) {
+  validate_effective_config(config);
+  if (config.frontend == frontend_kind::generic) { return; }
+
+  for (const target_rule& rule : config.targets) {
+    validate_non_generic_configured_function(module, rule.match);
+  }
+  for (const function_override& override : config.overrides) {
+    validate_non_generic_configured_function(module, override.name);
+  }
+}
+
+llvm::StringRef to_string(frontend_kind frontend) {
+  switch (frontend) {
+    case frontend_kind::generic:
+      return "generic";
+    case frontend_kind::rust:
+      return "rust";
+    case frontend_kind::zig:
+      return "zig";
+    case frontend_kind::tinygo:
+      return "tinygo";
+  }
+  llvm_unreachable("unknown frontend kind");
 }
 
 llvm::StringRef to_string(config_profile profile) {
@@ -432,6 +569,7 @@ std::string summarize_config(const obfuscation_config& config) {
   std::string output;
   llvm::raw_string_ostream stream(output);
 
+  stream << "frontend: " << to_string(config.frontend) << '\n';
   stream << "profile: ";
   if (config.profile.has_value()) {
     stream << to_string(*config.profile);
@@ -499,12 +637,12 @@ std::string summarize_config(const obfuscation_config& config) {
     stream << "unclamped";
   }
   stream << '\n';
-  stream << "indirect_dispatch.enabled: "
-         << (config.indirect_dispatch.enabled ? "true" : "false") << '\n';
+  stream << "indirect_dispatch.enabled: " << (config.indirect_dispatch.enabled ? "true" : "false")
+         << '\n';
   stream << "indirect_dispatch.max_sites_per_function: "
          << config.indirect_dispatch.max_sites_per_function << '\n';
-  stream << "indirect_dispatch.max_switch_targets: "
-         << config.indirect_dispatch.max_switch_targets << '\n';
+  stream << "indirect_dispatch.max_switch_targets: " << config.indirect_dispatch.max_switch_targets
+         << '\n';
   stream << "indirect_dispatch.target_vm_dispatchers: "
          << (config.indirect_dispatch.target_vm_dispatchers ? "true" : "false") << '\n';
   stream << "indirect_dispatch.target_flattened_headers: "
@@ -518,8 +656,8 @@ std::string summarize_config(const obfuscation_config& config) {
          << (config.security.allow_unsafe_config ? "true" : "false") << '\n';
   stream << "debug_preserve_generated_names: "
          << (config.debug_preserve_generated_names ? "true" : "false") << '\n';
-  stream << "emit_progress_warnings: "
-         << (config.emit_progress_warnings ? "true" : "false") << '\n';
+  stream << "emit_progress_warnings: " << (config.emit_progress_warnings ? "true" : "false")
+         << '\n';
 
   return output;
 }
