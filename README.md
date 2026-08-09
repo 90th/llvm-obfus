@@ -531,12 +531,18 @@ Pseudocode comparison:
 
 ## Benchmarks
 
-Benchmark targets build paired baseline and obfuscated artifacts under `build/benchmarks/<name>/`. The benchmark build passes `--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}` to `opt`. So `OBF_BENCHMARK_SEED` controls the effective benchmark seed for the whole build tree. This holds even when a sample benchmark config contains its own `seed:` entry.
+Benchmark targets build paired baseline and obfuscated artifacts under `build/benchmarks/<name>/`. The C and C++ benchmark pipeline passes `--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}` to `opt`. The generated Rust, Zig, and TinyGo benchmark configs use that same effective seed. So `OBF_BENCHMARK_SEED` controls the whole corpus build tree.
 
 Build benchmark pairs:
 
 ```sh
 cmake --build build --target obf-benchmarks -- -j1
+```
+
+Run end-to-end corpus parity checks:
+
+```sh
+cmake --build build --target obf-benchmarks-e2e -- -j1
 ```
 
 Per-benchmark artifacts:
@@ -549,7 +555,8 @@ Per-benchmark artifacts:
 
 Benchmark and analysis targets:
 
-- `obf-benchmarks` builds stripped baseline and obfuscated pairs for the full four-target corpus, including the linked `wpo_demo`.
+- `obf-benchmarks` builds stripped baseline and obfuscated pairs for the four core C and C++ targets, and adds the Rust, Zig, and TinyGo corpus targets when compatible toolchains are configured.
+- `obf-benchmarks-e2e` runs default-mode and `OBF_BENCH_ITERS` parity checks across every built corpus benchmark.
 - `obf-benchmarks-mir` emits MIR snapshots for linked benchmark targets such as `wpo_demo`.
 - `obf-audit-benchmarks` audits stripped obfuscated benchmark binaries for leaked symbols and, when `strings` is available, residual strings.
 - `obf-re-harness` intentionally scores how much VM structure is recoverable from obfuscated benchmark IR only for `license_demo`, `config_demo`, and `vm_workflow_demo`, and writes `build/re-harness/vm_recovery.json`.
@@ -557,10 +564,8 @@ Benchmark and analysis targets:
 
 Current benchmark corpus:
 
-- `license_demo`
-- `config_demo`
-- `vm_workflow_demo`
-- `wpo_demo`
+- Core C and C++ targets: `license_demo`, `config_demo`, `vm_workflow_demo`, `wpo_demo`
+- Optional language targets: `rust_demo`, `zig_demo`, `tinygo_demo`
 
 Measure keyed string decode overhead:
 
@@ -583,6 +588,7 @@ Opt-in sequential benchmark, audit, and diversity checks:
 
 ```sh
 cmake --build build --target obf-benchmarks -- -j1
+cmake --build build --target obf-benchmarks-e2e -- -j1
 cmake --build build --target obf-audit-benchmarks -- -j1
 cmake --build build --target obf-re-harness -- -j1
 cmake --build build --target obf-seed-diversity -- -j1

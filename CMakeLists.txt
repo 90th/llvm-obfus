@@ -107,6 +107,147 @@ else()
   set(OBF_TINYGO_COMMAND "tinygo")
 endif()
 
+set(OBF_HAS_RUST_BENCHMARK_TOOLCHAIN OFF)
+set(OBF_HAS_ZIG_BENCHMARK_TOOLCHAIN OFF)
+set(OBF_HAS_TINYGO_BENCHMARK_TOOLCHAIN OFF)
+
+set(OBF_PROJECT_LLVM_MAJOR_MINOR "")
+if(LLVM_PACKAGE_VERSION MATCHES "^([0-9]+)\\.([0-9]+)")
+  set(OBF_PROJECT_LLVM_MAJOR_MINOR "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}")
+endif()
+
+execute_process(
+  COMMAND "${OBF_RUSTC_COMMAND}" -Vv
+  RESULT_VARIABLE OBF_RUSTC_VERSION_STATUS
+  OUTPUT_VARIABLE OBF_RUSTC_VERSION_STDOUT
+  ERROR_VARIABLE OBF_RUSTC_VERSION_STDERR)
+string(CONCAT OBF_RUSTC_VERSION_OUTPUT
+  "${OBF_RUSTC_VERSION_STDOUT}" "\n" "${OBF_RUSTC_VERSION_STDERR}")
+set(OBF_RUSTC_RELEASE "")
+if(OBF_RUSTC_VERSION_OUTPUT MATCHES "release:[ \t]*([^ \t\r\n]+)")
+  set(OBF_RUSTC_RELEASE "${CMAKE_MATCH_1}")
+endif()
+set(OBF_RUSTC_LLVM_MAJOR_MINOR "")
+if(OBF_RUSTC_VERSION_OUTPUT MATCHES "LLVM version:[ \t]*([0-9]+)\.([0-9]+)")
+  set(OBF_RUSTC_LLVM_MAJOR_MINOR "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}")
+endif()
+if(OBF_RUSTC_VERSION_STATUS EQUAL 0
+    AND OBF_CARGO
+    AND NOT OBF_PROJECT_LLVM_MAJOR_MINOR STREQUAL ""
+    AND OBF_RUSTC_RELEASE MATCHES "(^|[-.])(nightly|dev)([-.]|$)"
+    AND OBF_RUSTC_LLVM_MAJOR_MINOR STREQUAL OBF_PROJECT_LLVM_MAJOR_MINOR)
+  set(OBF_HAS_RUST_BENCHMARK_TOOLCHAIN ON)
+endif()
+
+execute_process(
+  COMMAND "${OBF_ZIG_COMMAND}" version
+  RESULT_VARIABLE OBF_ZIG_VERSION_STATUS
+  OUTPUT_VARIABLE OBF_ZIG_VERSION_STDOUT
+  ERROR_VARIABLE OBF_ZIG_VERSION_STDERR)
+string(CONCAT OBF_ZIG_VERSION_OUTPUT
+  "${OBF_ZIG_VERSION_STDOUT}" "\n" "${OBF_ZIG_VERSION_STDERR}")
+
+string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" OBF_HOST_SYSTEM_PROCESSOR_LOWER)
+string(TOLOWER "${LLVM_HOST_TRIPLE}" OBF_LLVM_HOST_TRIPLE_LOWER)
+string(REGEX MATCH "^[^-]+" OBF_LLVM_HOST_ARCH "${OBF_LLVM_HOST_TRIPLE_LOWER}")
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux"
+    AND OBF_LLVM_HOST_TRIPLE_LOWER MATCHES "linux"
+    AND OBF_ZIG_VERSION_STATUS EQUAL 0
+    AND OBF_ZIG_VERSION_OUTPUT MATCHES "(^|[\r\n])[ \\t]*0\\.16\\.[0-9]+([-+][^\\r\\n]*)?([\r\n]|$)")
+  set(OBF_HAS_ZIG_BENCHMARK_TOOLCHAIN ON)
+endif()
+
+set(OBF_TINYGO_HOST_MATCH OFF)
+set(OBF_TINYGO_ARM_HOST_ARCHES
+  arm
+  armv5
+  armv5l
+  armv5tel
+  armv6
+  armv6l
+  armv7
+  armv7l
+  armv8
+  armv8l)
+
+if((OBF_HOST_SYSTEM_PROCESSOR_LOWER STREQUAL "x86_64"
+      OR OBF_HOST_SYSTEM_PROCESSOR_LOWER STREQUAL "amd64")
+    AND (OBF_LLVM_HOST_ARCH STREQUAL "x86_64"
+      OR OBF_LLVM_HOST_ARCH STREQUAL "amd64"))
+  set(OBF_TINYGO_HOST_MATCH ON)
+elseif((OBF_HOST_SYSTEM_PROCESSOR_LOWER STREQUAL "aarch64"
+         OR OBF_HOST_SYSTEM_PROCESSOR_LOWER STREQUAL "arm64")
+       AND (OBF_LLVM_HOST_ARCH STREQUAL "aarch64"
+         OR OBF_LLVM_HOST_ARCH STREQUAL "arm64"))
+  set(OBF_TINYGO_HOST_MATCH ON)
+elseif(OBF_HOST_SYSTEM_PROCESSOR_LOWER IN_LIST OBF_TINYGO_ARM_HOST_ARCHES
+       AND OBF_LLVM_HOST_ARCH IN_LIST OBF_TINYGO_ARM_HOST_ARCHES)
+  set(OBF_TINYGO_HOST_MATCH ON)
+endif()
+
+set(OBF_LLC_VERSION_COMMAND "${OBF_LLC}" "--version")
+execute_process(
+  COMMAND ${OBF_LLC_VERSION_COMMAND}
+  RESULT_VARIABLE OBF_LLC_VERSION_STATUS
+  OUTPUT_VARIABLE OBF_LLC_VERSION_STDOUT
+  ERROR_VARIABLE OBF_LLC_VERSION_STDERR)
+string(CONCAT OBF_LLC_VERSION_OUTPUT
+  "${OBF_LLC_VERSION_STDOUT}" "\n" "${OBF_LLC_VERSION_STDERR}")
+
+set(OBF_LLD_VERSION_COMMAND "${OBF_LLD_COMMAND}")
+if(NOT OBF_LLD_DRIVER STREQUAL "")
+  separate_arguments(OBF_LLD_DRIVER_ARGS NATIVE_COMMAND "${OBF_LLD_DRIVER}")
+  list(APPEND OBF_LLD_VERSION_COMMAND ${OBF_LLD_DRIVER_ARGS})
+endif()
+list(APPEND OBF_LLD_VERSION_COMMAND "--version")
+execute_process(
+  COMMAND ${OBF_LLD_VERSION_COMMAND}
+  RESULT_VARIABLE OBF_LLD_VERSION_STATUS
+  OUTPUT_VARIABLE OBF_LLD_VERSION_STDOUT
+  ERROR_VARIABLE OBF_LLD_VERSION_STDERR)
+string(CONCAT OBF_LLD_VERSION_OUTPUT
+  "${OBF_LLD_VERSION_STDOUT}" "\n" "${OBF_LLD_VERSION_STDERR}")
+
+execute_process(
+  COMMAND "${OBF_TINYGO_COMMAND}" version
+  RESULT_VARIABLE OBF_TINYGO_VERSION_STATUS
+  OUTPUT_VARIABLE OBF_TINYGO_VERSION_STDOUT
+  ERROR_VARIABLE OBF_TINYGO_VERSION_STDERR)
+string(CONCAT OBF_TINYGO_VERSION_OUTPUT
+  "${OBF_TINYGO_VERSION_STDOUT}" "\n" "${OBF_TINYGO_VERSION_STDERR}")
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux"
+    AND OBF_LLVM_HOST_TRIPLE_LOWER MATCHES "linux"
+    AND OBF_TINYGO_HOST_MATCH
+    AND LLVM_PACKAGE_VERSION MATCHES "^21(\\.|$)"
+    AND OBF_LLC_VERSION_STATUS EQUAL 0
+    AND OBF_LLC_VERSION_OUTPUT MATCHES "LLVM.*version[ \\t:]*21(\\.|$)"
+    AND OBF_TINYGO_VERSION_STATUS EQUAL 0
+    AND OBF_LLD_VERSION_STATUS EQUAL 0
+    AND OBF_TINYGO_VERSION_OUTPUT MATCHES "tinygo version 0\\.41\\.[0-9]+"
+    AND OBF_TINYGO_VERSION_OUTPUT MATCHES "using go version go1\\.(23|24|25|26)"
+    AND OBF_TINYGO_VERSION_OUTPUT MATCHES "LLVM version 20\\."
+    AND OBF_LLD_VERSION_OUTPUT MATCHES "LLD[ \\t]+21(\\.|$)")
+  set(OBF_HAS_TINYGO_BENCHMARK_TOOLCHAIN ON)
+endif()
+
+if(OBF_HAS_RUST_BENCHMARK_TOOLCHAIN)
+  message(STATUS "Enabled Rust corpus benchmark")
+else()
+  message(STATUS "Rust corpus benchmark disabled: requires nightly or dev rustc with matching LLVM and Cargo")
+endif()
+
+if(OBF_HAS_ZIG_BENCHMARK_TOOLCHAIN)
+  message(STATUS "Enabled Zig corpus benchmark")
+else()
+  message(STATUS "Zig corpus benchmark disabled: requires Zig 0.16.x on native Linux")
+endif()
+
+if(OBF_HAS_TINYGO_BENCHMARK_TOOLCHAIN)
+  message(STATUS "Enabled TinyGo corpus benchmark")
+else()
+  message(STATUS "TinyGo corpus benchmark disabled: requires TinyGo 0.41.x, Go 1.23-1.26, configured LLVM 21 llc, native Linux, and LLD 21")
+endif()
+
 
 option(OBF_BENCHMARK_CLEAN_IR
   "Generate cleaned benchmark IR for analysis builds"
@@ -354,6 +495,29 @@ add_test(
   COMMAND obf-runtime-atomic-tests
 )
 
+set(OBF_BENCHMARK_GENERATED_CONFIG_DIR
+  "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/config")
+file(MAKE_DIRECTORY "${OBF_BENCHMARK_GENERATED_CONFIG_DIR}")
+configure_file(
+  benchmarks/config/rust_demo.yaml.in
+  "${OBF_BENCHMARK_GENERATED_CONFIG_DIR}/rust_demo.yaml"
+  @ONLY)
+configure_file(
+  benchmarks/config/zig_demo.yaml.in
+  "${OBF_BENCHMARK_GENERATED_CONFIG_DIR}/zig_demo.yaml"
+  @ONLY)
+configure_file(
+  benchmarks/config/tinygo_demo.yaml.in
+  "${OBF_BENCHMARK_GENERATED_CONFIG_DIR}/tinygo_demo.yaml"
+  @ONLY)
+
+set(OBF_RUST_DEMO_BENCH_CONFIG
+  "${OBF_BENCHMARK_GENERATED_CONFIG_DIR}/rust_demo.yaml")
+set(OBF_ZIG_DEMO_BENCH_CONFIG
+  "${OBF_BENCHMARK_GENERATED_CONFIG_DIR}/zig_demo.yaml")
+set(OBF_TINYGO_DEMO_BENCH_CONFIG
+  "${OBF_BENCHMARK_GENERATED_CONFIG_DIR}/tinygo_demo.yaml")
+
 function(add_obf_benchmark target_name source_file config_file compiler std_flag)
   set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/${target_name}")
   set(baseline_ll "${output_dir}/${target_name}.baseline.ll")
@@ -487,6 +651,232 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
   set(OBF_MIR_TARGETS "${OBF_MIR_TARGETS}" PARENT_SCOPE)
 endfunction()
 
+function(add_obf_rust_benchmark target_name source_file config_file)
+  set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/${target_name}")
+  set(baseline_ll "${output_dir}/${target_name}.baseline.ll")
+  set(obfuscated_ll "${output_dir}/${target_name}.obfuscated.ll")
+  set(cleaned_ll "${output_dir}/${target_name}.obfuscated.cleaned.ll")
+  set(extra_ir_outputs)
+  set(baseline_bin "${output_dir}/${target_name}.baseline")
+  set(obfuscated_bin "${output_dir}/${target_name}.obfuscated")
+
+  add_custom_command(
+    OUTPUT "${baseline_ll}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+    COMMAND "${OBF_RUSTC_COMMAND}"
+            --crate-name=${target_name}
+            --crate-type=bin
+            --edition=2021
+            --emit=llvm-ir
+            -Copt-level=1
+            -Ccodegen-units=1
+            "${source_file}"
+            -o "${baseline_ll}"
+    DEPENDS "${source_file}"
+    VERBATIM)
+
+  add_custom_command(
+    OUTPUT "${obfuscated_ll}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${obfuscated_ll}"
+    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/obf-rustc"
+            --obf-config=${config_file}
+            --crate-name=${target_name}
+            --crate-type=bin
+            --edition=2021
+            --emit=llvm-ir
+            -Copt-level=1
+            "${source_file}"
+            -o "${obfuscated_ll}"
+    DEPENDS obf-language-tools "${source_file}" "${config_file}"
+    VERBATIM)
+
+  if(OBF_BENCHMARK_CLEAN_IR)
+    add_custom_command(
+      OUTPUT "${cleaned_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E rm -f "${cleaned_ll}"
+      COMMAND "${OBF_OPT}" "-passes=${OBF_BENCHMARK_CLEANUP_PASSES}" -S "${obfuscated_ll}" -o "${cleaned_ll}"
+      DEPENDS "${obfuscated_ll}"
+      VERBATIM)
+    list(APPEND extra_ir_outputs "${cleaned_ll}")
+  endif()
+
+  add_custom_command(
+    OUTPUT "${baseline_bin}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+    COMMAND "${OBF_RUSTC_COMMAND}"
+            --crate-name=${target_name}
+            --crate-type=bin
+            --edition=2021
+            -Copt-level=1
+            -Ccodegen-units=1
+            "${source_file}"
+            -o "${baseline_bin}"
+    COMMAND "${OBF_STRIP}" --strip-all "${baseline_bin}"
+    DEPENDS "${source_file}"
+    VERBATIM)
+
+  add_custom_command(
+    OUTPUT "${obfuscated_bin}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/obf-rustc"
+            --obf-config=${config_file}
+            --crate-name=${target_name}
+            --crate-type=bin
+            --edition=2021
+            --emit=link
+            -Copt-level=1
+            "${source_file}"
+            -o "${obfuscated_bin}"
+    COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
+    DEPENDS obf-language-tools "${source_file}" "${config_file}"
+    VERBATIM)
+
+  add_custom_target("${target_name}_bench"
+    DEPENDS "${baseline_ll}" "${obfuscated_ll}" ${extra_ir_outputs} "${baseline_bin}" "${obfuscated_bin}")
+  list(APPEND OBF_BENCHMARK_TARGETS "${target_name}_bench")
+  set(OBF_BENCHMARK_TARGETS "${OBF_BENCHMARK_TARGETS}" PARENT_SCOPE)
+endfunction()
+
+function(add_obf_zig_benchmark target_name component_source main_source config_file)
+  set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/${target_name}")
+  set(cache_dir "${output_dir}/zig-cache")
+  set(global_cache_dir "${output_dir}/zig-global-cache")
+  set(component_bc "${output_dir}/${target_name}.component.bc")
+  set(protected_bc "${output_dir}/${target_name}.component.protected.bc")
+  set(baseline_ll "${output_dir}/${target_name}.baseline.ll")
+  set(obfuscated_ll "${output_dir}/${target_name}.obfuscated.ll")
+  set(cleaned_ll "${output_dir}/${target_name}.obfuscated.cleaned.ll")
+  set(extra_ir_outputs)
+  set(baseline_bin "${output_dir}/${target_name}.baseline")
+  set(obfuscated_bin "${output_dir}/${target_name}.obfuscated")
+
+  add_custom_command(
+    OUTPUT "${component_bc}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+    COMMAND "${OBF_ZIG_COMMAND}" build-obj "${component_source}"
+            -fllvm
+            -O ReleaseFast
+            --cache-dir "${cache_dir}"
+            --global-cache-dir "${global_cache_dir}"
+            -femit-llvm-bc=${component_bc}
+            -fno-emit-bin
+    DEPENDS "${component_source}"
+    VERBATIM)
+
+  add_custom_command(
+    OUTPUT "${protected_bc}"
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${protected_bc}"
+    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/obf-bc"
+            --obf-config=${config_file}
+            --obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}
+            "${component_bc}"
+            -o "${protected_bc}"
+    DEPENDS obf-language-tools "${component_bc}" "${config_file}"
+    VERBATIM)
+
+  add_custom_command(
+    OUTPUT "${baseline_ll}"
+    COMMAND "${OBF_OPT}" -S "${component_bc}" -o "${baseline_ll}"
+    DEPENDS "${component_bc}"
+    VERBATIM)
+
+  add_custom_command(
+    OUTPUT "${obfuscated_ll}"
+    COMMAND "${OBF_OPT}" -S "${protected_bc}" -o "${obfuscated_ll}"
+    DEPENDS "${protected_bc}"
+    VERBATIM)
+
+  if(OBF_BENCHMARK_CLEAN_IR)
+    add_custom_command(
+      OUTPUT "${cleaned_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E rm -f "${cleaned_ll}"
+      COMMAND "${OBF_OPT}" "-passes=${OBF_BENCHMARK_CLEANUP_PASSES}" -S "${obfuscated_ll}" -o "${cleaned_ll}"
+      DEPENDS "${obfuscated_ll}"
+      VERBATIM)
+    list(APPEND extra_ir_outputs "${cleaned_ll}")
+  endif()
+
+  add_custom_command(
+    OUTPUT "${baseline_bin}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+    COMMAND "${OBF_ZIG_COMMAND}" build-exe "${main_source}" "${component_bc}"
+            -O ReleaseFast
+            --cache-dir "${cache_dir}"
+            --global-cache-dir "${global_cache_dir}"
+            -femit-bin=${baseline_bin}
+    COMMAND "${OBF_STRIP}" --strip-all "${baseline_bin}"
+    DEPENDS "${main_source}" "${component_bc}"
+    VERBATIM)
+
+  add_custom_command(
+    OUTPUT "${obfuscated_bin}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+    COMMAND "${OBF_ZIG_COMMAND}" build-exe "${main_source}" "${protected_bc}" "${OBF_RUNTIME_ARCHIVE}"
+            -O ReleaseFast
+            --cache-dir "${cache_dir}"
+            --global-cache-dir "${global_cache_dir}"
+            -femit-bin=${obfuscated_bin}
+    COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
+    DEPENDS "${main_source}" "${protected_bc}" "${OBF_RUNTIME_ARCHIVE}"
+    VERBATIM)
+
+  add_custom_target("${target_name}_bench"
+    DEPENDS "${baseline_ll}" "${obfuscated_ll}" ${extra_ir_outputs} "${baseline_bin}" "${obfuscated_bin}")
+  list(APPEND OBF_BENCHMARK_TARGETS "${target_name}_bench")
+  set(OBF_BENCHMARK_TARGETS "${OBF_BENCHMARK_TARGETS}" PARENT_SCOPE)
+endfunction()
+
+function(add_obf_tinygo_benchmark target_name source_file config_file)
+  set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/${target_name}")
+  set(baseline_ll "${output_dir}/${target_name}.baseline.ll")
+  set(obfuscated_ll "${output_dir}/${target_name}.obfuscated.ll")
+  set(cleaned_ll "${output_dir}/${target_name}.obfuscated.cleaned.ll")
+  set(extra_ir_outputs)
+  set(baseline_bin "${output_dir}/${target_name}.baseline")
+  set(obfuscated_bin "${output_dir}/${target_name}.obfuscated")
+
+  add_custom_command(
+    OUTPUT "${baseline_ll}" "${obfuscated_ll}" "${baseline_bin}" "${obfuscated_bin}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/obf-bench/build_tinygo_benchmark.py"
+            --tinygo "${OBF_TINYGO_COMMAND}"
+            --wrapper "${CMAKE_CURRENT_BINARY_DIR}/obf-tinygo"
+            --opt "${OBF_OPT}"
+            --strip "${OBF_STRIP}"
+            --config "${config_file}"
+            --source "${source_file}"
+            --output-dir "${output_dir}"
+            --name "${target_name}"
+    DEPENDS obf-language-tools
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/obf-bench/build_tinygo_benchmark.py"
+            "${source_file}"
+            "${config_file}"
+    VERBATIM)
+
+  if(OBF_BENCHMARK_CLEAN_IR)
+    add_custom_command(
+      OUTPUT "${cleaned_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E rm -f "${cleaned_ll}"
+      COMMAND "${OBF_OPT}" "-passes=${OBF_BENCHMARK_CLEANUP_PASSES}" -S "${obfuscated_ll}" -o "${cleaned_ll}"
+      DEPENDS "${obfuscated_ll}"
+      VERBATIM)
+    list(APPEND extra_ir_outputs "${cleaned_ll}")
+  endif()
+
+  add_custom_target("${target_name}_bench"
+    DEPENDS "${baseline_ll}" "${obfuscated_ll}" ${extra_ir_outputs} "${baseline_bin}" "${obfuscated_bin}")
+  list(APPEND OBF_BENCHMARK_TARGETS "${target_name}_bench")
+  set(OBF_BENCHMARK_TARGETS "${OBF_BENCHMARK_TARGETS}" PARENT_SCOPE)
+endfunction()
+
+set(OBF_CORPUS_E2E_BENCHMARKS
+  license_demo
+  config_demo
+  vm_workflow_demo
+  wpo_demo)
+
 add_obf_benchmark(
   license_demo
   "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/corpus/license_demo.cpp"
@@ -516,7 +906,42 @@ add_obf_linked_benchmark(
   "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/corpus/wpo_demo_main.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/corpus/wpo_demo_core.c")
 
+if(OBF_HAS_RUST_BENCHMARK_TOOLCHAIN)
+  add_obf_rust_benchmark(
+    rust_demo
+    "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/corpus/rust_demo.rs"
+    "${OBF_RUST_DEMO_BENCH_CONFIG}")
+  list(APPEND OBF_CORPUS_E2E_BENCHMARKS rust_demo)
+endif()
+
+if(OBF_HAS_ZIG_BENCHMARK_TOOLCHAIN)
+  add_obf_zig_benchmark(
+    zig_demo
+    "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/corpus/zig_demo_component.zig"
+    "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/corpus/zig_demo_main.zig"
+    "${OBF_ZIG_DEMO_BENCH_CONFIG}")
+  list(APPEND OBF_CORPUS_E2E_BENCHMARKS zig_demo)
+endif()
+
+if(OBF_HAS_TINYGO_BENCHMARK_TOOLCHAIN)
+  add_obf_tinygo_benchmark(
+    tinygo_demo
+    "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/corpus/tinygo_demo.go"
+    "${OBF_TINYGO_DEMO_BENCH_CONFIG}")
+  list(APPEND OBF_CORPUS_E2E_BENCHMARKS tinygo_demo)
+endif()
+
+string(JOIN "," OBF_CORPUS_E2E_BENCHMARKS_CSV ${OBF_CORPUS_E2E_BENCHMARKS})
+
 add_custom_target(obf-benchmarks DEPENDS ${OBF_BENCHMARK_TARGETS})
+add_custom_target(obf-benchmarks-e2e
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/obf-bench/run_corpus_e2e.py"
+          "--benchmarks-dir" "${CMAKE_CURRENT_BINARY_DIR}/benchmarks"
+          "--runtime-prefix" "${OBF_RUNTIME_ABI_PREFIX}"
+          "--benchmarks" "${OBF_CORPUS_E2E_BENCHMARKS_CSV}"
+  DEPENDS obf-benchmarks
+  VERBATIM)
 add_custom_target(obf-benchmarks-mir DEPENDS ${OBF_MIR_TARGETS})
 add_custom_target(obf-audit-benchmarks
   COMMAND "${Python3_EXECUTABLE}"

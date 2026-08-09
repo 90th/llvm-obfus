@@ -25,9 +25,10 @@ ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests|obf-runtim
 
 # Opt-in sequential benchmark, audit, and diversity checks
 cmake --build build --target obf-benchmarks -- -j1
+cmake --build build --target obf-benchmarks-e2e -- -j1
 cmake --build build --target obf-audit-benchmarks -- -j1
 cmake --build build --target obf-re-harness -- -j1
 cmake --build build --target obf-seed-diversity -- -j1
 ```
 
-`obf-benchmarks` and `obf-audit-benchmarks` cover the four CMake corpus targets, including the linked `wpo_demo`. The current `obf-re-harness` and `obf-seed-diversity` checks intentionally stay scoped to `license_demo`, `config_demo`, and `vm_workflow_demo`.
+`obf-benchmarks` builds the four core C and C++ corpus targets and adds the Rust, Zig, and TinyGo corpus targets when compatible toolchains are configured. `obf-benchmarks-e2e` then proves baseline versus obfuscated runtime parity for every built corpus benchmark. `obf-audit-benchmarks` audits every built benchmark pair. The current `obf-re-harness` and `obf-seed-diversity` checks intentionally stay scoped to `license_demo`, `config_demo`, and `vm_workflow_demo`. 

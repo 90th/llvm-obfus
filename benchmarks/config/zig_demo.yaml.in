@@ -1,0 +1,12 @@
+frontend: zig
+seed: @OBF_EFFECTIVE_BENCHMARK_SEED@
+default_level: none
+targets:
+  - match: zig_protected_component
+    level: strong
+constant_encoding:
+  max_constants_per_function: 4
+  min_bit_width: 8
+security:
+  strip_release_markers: true
+  fail_on_public_obf_symbol: true
