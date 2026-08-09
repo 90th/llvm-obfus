@@ -1,6 +1,7 @@
 #include "obf/frontend/config.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalAlias.h"
@@ -8,13 +9,13 @@
 #include "llvm/Support/ErrorHandling.h"
 
 #include "llvm/Support/Error.h"
-#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/YAMLParser.h"
 #include "llvm/Support/YAMLTraits.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdint>
-#include <string_view>
 #include <utility>
 
 LLVM_YAML_IS_SEQUENCE_VECTOR(obf::function_override)
@@ -178,6 +179,8 @@ namespace obf {
 namespace {
 
 struct config_parse_presence {
+  bool has_document = false;
+  bool multiple_documents = false;
   bool frontend = false;
 
   bool seed = false;
@@ -195,53 +198,71 @@ struct config_parse_presence {
   bool emit_progress_warnings = false;
 };
 
-bool has_top_level_key(llvm::StringRef text, llvm::StringRef key) {
-  std::size_t offset = 0;
-  while (offset < text.size()) {
-    const std::size_t line_end = text.find('\n', offset);
-    llvm::StringRef line =
-        line_end == llvm::StringRef::npos ? text.substr(offset) : text.slice(offset, line_end);
-    offset = line_end == llvm::StringRef::npos ? text.size() : line_end + 1;
-
-    line.consume_front("\xEF\xBB\xBF");
-    if (line.empty() || line.front() == ' ' || line.front() == '\t') { continue; }
-
-    llvm::StringRef parsed_key;
-    llvm::StringRef suffix;
-    if (line.front() == '\'' || line.front() == '"') {
-      const char quote = line.front();
-      const std::size_t closing_quote = line.find(quote, 1);
-      if (closing_quote == llvm::StringRef::npos) { continue; }
-      parsed_key = line.slice(1, closing_quote);
-      suffix = line.drop_front(closing_quote + 1);
-    } else {
-      const std::size_t colon = line.find(':');
-      if (colon == llvm::StringRef::npos) { continue; }
-      parsed_key = line.take_front(colon).rtrim();
-      suffix = line.drop_front(colon);
-    }
-
-    if (parsed_key == key && suffix.ltrim().starts_with(":")) { return true; }
+void mark_config_presence(config_parse_presence& presence, llvm::StringRef key) {
+  if (key == "frontend") {
+    presence.frontend = true;
+  } else if (key == "seed") {
+    presence.seed = true;
+  } else if (key == "default_level") {
+    presence.default_level = true;
+  } else if (key == "overrides") {
+    presence.overrides = true;
+  } else if (key == "targets") {
+    presence.targets = true;
+  } else if (key == "block_split") {
+    presence.block_split = true;
+  } else if (key == "string_encoding") {
+    presence.string_encoding = true;
+  } else if (key == "constant_encoding") {
+    presence.constant_encoding = true;
+  } else if (key == "mba") {
+    presence.mba = true;
+  } else if (key == "vm") {
+    presence.vm = true;
+  } else if (key == "indirect_dispatch") {
+    presence.indirect_dispatch = true;
+  } else if (key == "security") {
+    presence.security = true;
+  } else if (key == "debug_preserve_generated_names") {
+    presence.debug_preserve_generated_names = true;
+  } else if (key == "emit_progress_warnings") {
+    presence.emit_progress_warnings = true;
   }
-  return false;
 }
 
 config_parse_presence collect_presence(llvm::StringRef text) {
-  return {.frontend = has_top_level_key(text, "frontend"),
-          .seed = has_top_level_key(text, "seed"),
-          .default_level = has_top_level_key(text, "default_level"),
-          .overrides = has_top_level_key(text, "overrides"),
-          .targets = has_top_level_key(text, "targets"),
-          .block_split = has_top_level_key(text, "block_split"),
-          .string_encoding = has_top_level_key(text, "string_encoding"),
-          .constant_encoding = has_top_level_key(text, "constant_encoding"),
-          .mba = has_top_level_key(text, "mba"),
-          .vm = has_top_level_key(text, "vm"),
-          .indirect_dispatch = has_top_level_key(text, "indirect_dispatch"),
-          .security = has_top_level_key(text, "security"),
-          .debug_preserve_generated_names =
-              has_top_level_key(text, "debug_preserve_generated_names"),
-          .emit_progress_warnings = has_top_level_key(text, "emit_progress_warnings")};
+  config_parse_presence presence;
+  llvm::SourceMgr source_manager;
+  llvm::yaml::Stream stream(text, source_manager);
+
+  for (llvm::yaml::Document& document : stream) {
+    llvm::yaml::Node* root = document.getRoot();
+    if (root == nullptr || llvm::isa<llvm::yaml::NullNode>(root)) {
+      if (root != nullptr) { root->skip(); }
+      continue;
+    }
+    if (presence.has_document) {
+      presence.multiple_documents = true;
+      root->skip();
+      continue;
+    }
+    presence.has_document = true;
+
+    auto* mapping = llvm::dyn_cast<llvm::yaml::MappingNode>(root);
+    if (mapping == nullptr) {
+      root->skip();
+      continue;
+    }
+
+    for (llvm::yaml::KeyValueNode& entry : *mapping) {
+      llvm::SmallString<64> storage;
+      if (auto* scalar = llvm::dyn_cast_or_null<llvm::yaml::ScalarNode>(entry.getKey())) {
+        mark_config_presence(presence, scalar->getValue(storage));
+      }
+      if (llvm::yaml::Node* value = entry.getValue()) { value->skip(); }
+    }
+  }
+  return presence;
 }
 
 obfuscation_config defaults_for_profile(config_profile profile) {
@@ -607,6 +628,11 @@ llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path) {
   const config_parse_presence presence = collect_presence(buffer);
   llvm::yaml::Input input(buffer);
   obfuscation_config config;
+  if (presence.multiple_documents) {
+    return llvm::createStringError(
+        "failed to parse config '%s': multiple non-empty YAML documents are not supported",
+        path.str().c_str());
+  }
   input >> config;
 
   if (input.error()) {

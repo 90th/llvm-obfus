@@ -289,6 +289,7 @@ llvm::PreservedAnalyses run_stateful_stage(llvm::Module& module, StageFn&& stage
 template <typename StageFn>
 llvm::PreservedAnalyses run_config_stage(llvm::Module& module, StageFn&& stage) {
   const obfuscation_config config = load_active_config();
+  validate_effective_config(config, module);
   if (!std::forward<StageFn>(stage)(module, config)) { return llvm::PreservedAnalyses::all(); }
 
   verify_changed_module(module);

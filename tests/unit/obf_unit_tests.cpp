@@ -127,10 +127,12 @@ void TestFrontendPolicyConfigAndSelection() {
   std::filesystem::remove(path, ec);
 
   const std::filesystem::path quoted_path =
-      std::filesystem::temp_directory_path() / "obf_frontend_quoted_keys.yaml";
+      std::filesystem::temp_directory_path() / "obf_frontend_escaped_keys.yaml";
   {
     std::ofstream out(quoted_path);
-    out << "'frontend': rust\n";
+    out << "\xEF\xBB\xBF";
+    out << "---\n...\n---\n";
+    out << "\"fr\\x6fntend\": \"r\\x75st\"\n";
     out << "'profile': standard\n";
     out << "'default_level': none\n";
     out << "'targets':\n";
@@ -143,10 +145,11 @@ void TestFrontendPolicyConfigAndSelection() {
   }
 
   llvm::Expected<obf::obfuscation_config> quoted = obf::load_config_from_file(quoted_path.string());
-  ExpectTrue(static_cast<bool>(quoted), "quoted top-level YAML keys should load successfully");
+  ExpectTrue(static_cast<bool>(quoted),
+             "escaped top-level YAML keys after an empty document should load successfully");
   if (quoted) {
     ExpectTrue(quoted->frontend == obf::frontend_kind::rust,
-               "quoted frontend should override the profile default");
+               "escaped frontend should override the profile default");
     ExpectTrue(quoted->default_level == obf::protection_level::none,
                "quoted default_level should override the profile default");
     ExpectTrue(quoted->security.strip_release_markers,
@@ -155,6 +158,26 @@ void TestFrontendPolicyConfigAndSelection() {
                "quoted string_encoding should override the profile default");
   }
   std::filesystem::remove(quoted_path, ec);
+
+  const std::filesystem::path multiple_documents_path =
+      std::filesystem::temp_directory_path() / "obf_frontend_multiple_documents.yaml";
+  {
+    std::ofstream out(multiple_documents_path);
+    out << "profile: standard\n";
+    out << "---\n";
+    out << "frontend: rust\n";
+    out << "default_level: none\n";
+    out << "targets:\n";
+    out << "  - match: selected\n";
+    out << "    level: light\n";
+    out << "security:\n";
+    out << "  strip_release_markers: true\n";
+  }
+  llvm::Expected<obf::obfuscation_config> multiple_documents =
+      obf::load_config_from_file(multiple_documents_path.string());
+  ExpectTrue(!multiple_documents, "multiple non-empty YAML documents should be rejected");
+  if (!multiple_documents) { llvm::consumeError(multiple_documents.takeError()); }
+  std::filesystem::remove(multiple_documents_path, ec);
 
   llvm::LLVMContext context;
   llvm::Module module("frontend_policy_module", context);

@@ -4,6 +4,7 @@
 ; RUN: %opt -passes=verify -disable-output %t.safe
 ; RUN: %lli %t.safe
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-missing.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=MISSING
+; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-missing.yaml -passes=obf-artifact-cleanup -disable-output %s 2>&1 | %FileCheck %s --check-prefix=MISSING
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-unsafe.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=UNSAFE
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-wildcard-vm.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=WILDCARD
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-duplicate-overlap.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=DUPLICATE
