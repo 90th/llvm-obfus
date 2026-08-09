@@ -119,6 +119,7 @@ The late ordering matters. Indirect dispatch runs after the major structural pas
 
 The loader currently supports these top-level sections:
 
+- `frontend`
 - `profile`
 - `seed`
 - `default_level`
@@ -137,6 +138,14 @@ The loader currently supports these top-level sections:
 `overrides` entries match exact function names. `targets` entries support glob-style wildcard patterns (e.g., `"verify_*"`).
 
 `emit_progress_warnings: true` emits stderr progress messages around long `strong_vm` lowering and hardening phases. The default is silent.
+`frontend` defaults to `generic`. The other values are `rust`, `zig`, and `tinygo`.
+
+A non-generic frontend uses stricter policy rules. It requires `default_level: none` and `security.strip_release_markers: true`.
+It rejects `security.allow_unsafe_config: true`. It also requires exact function names and `light` or `strong` protection.
+The module validator rejects duplicate names, target and override overlaps, missing functions, and ambiguous aliases.
+TinyGo also requires `string_encoding.max_strings_per_module: 0`.
+The loader rejects files with more than one nonempty YAML document.
+
 
 ### Profile Defaults
 
@@ -243,6 +252,9 @@ Requirements:
 - `lit`
 - LLVM tools: `opt`, `clang`, `clang++`, `llvm-link`, `llc`, `llvm-strip`, `llvm-nm`, `llvm-objdump`
 - Optional: `strings` for benchmark string audits
+- Optional Rust support: nightly or development `rustc` with a matching LLVM major and minor version, plus Cargo
+- Optional Zig support: Zig 0.16.x
+- Optional Go support: TinyGo 0.41.x, Go 1.23 through 1.26, and LLVM 21 `llc` and LLD on native Linux
 
 Configure and build:
 
@@ -257,6 +269,11 @@ Useful cache variables:
 - `OBF_RUNTIME_ABI_PREFIX`
 - `OBF_BENCHMARK_CLEAN_IR`
 - `OBF_BENCHMARK_CLEANUP_PASSES`
+- `OBF_RUSTC`
+- `OBF_CARGO`
+- `OBF_ZIG`
+- `OBF_TINYGO`
+- `OBF_LLD`
 
 ## Usage
 
@@ -283,6 +300,152 @@ OBF_CONFIG=config.yaml clang++ -O3 \
 ```
 
 `build/libobf_runtime.a` contains the entropy anchor and string/constant authentication runtime support. When you invoke raw `clang` or `clang++`, place the archive after transformed inputs and objects on the linker command line.
+
+### LLVM Bitcode (`obf-bc`)
+
+`build/obf-bc` applies `obf-safe-pipeline` to one LLVM bitcode file. It then runs the LLVM verifier.
+The command replaces the output only after both steps succeed. It keeps an existing output after a pre-commit signal.
+
+```sh
+build/obf-bc \
+  --obf-config=config.yaml \
+  --obf-seed=31337 \
+  input.bc -o output.bc
+```
+
+The input and output paths must be different. The output must be absent or a regular file.
+The command rejects unknown options and multiple bitcode inputs.
+
+### Zig 0.16
+
+Zig cannot load this pass plugin through its compiler command line. The supported path uses a Zig component bitcode file.
+The component must use a stable exported C ABI name. The Zig config must use `frontend: zig` and that exact name.
+Declare the component seam with `export fn`. Use C-compatible types at its ABI boundary.
+
+```yaml
+frontend: zig
+default_level: none
+targets:
+  - match: protected_component
+    level: strong
+security:
+  strip_release_markers: true
+```
+
+Build and protect the component:
+
+```sh
+zig build-obj protected.zig \
+  -fllvm -O ReleaseFast \
+  -femit-llvm-bc=component.bc -fno-emit-bin
+
+build/obf-bc \
+  --obf-config=zig.yaml \
+  component.bc -o component.protected.bc
+```
+
+Link the protected component and the runtime with Zig:
+
+```sh
+zig build-exe main.zig \
+  component.protected.bc build/libobf_runtime.a \
+  -femit-bin=app
+```
+
+This path supports Zig 0.16.x on the same host as the project LLVM tools.
+The module validator follows a Zig `GlobalAlias` to its defined function.
+It rejects wildcard target names and aliases that do not resolve to one exact function.
+
+### Rust
+
+`build/obf-rustc` supports a nightly or development `rustc`. The Rust LLVM major and minor versions must match the project LLVM.
+The wrapper supports native `bin`, `cdylib`, and `--test` code-generation actions.
+Active commands require an explicit `--crate-type=bin`, `--crate-type=cdylib`, or `--test`.
+The wrapper forces one code-generation unit so module validation can find each selected function.
+It passes queries and metadata-only actions to `rustc` without plugin injection.
+
+Use `frontend: rust` in the config. Give each selected function a stable exact symbol name.
+Use an exported `extern "C"` function with `#[no_mangle]` or `#[export_name]`.
+Use the unsafe attribute form that the selected Rust edition requires.
+
+Direct `rustc` example:
+
+```sh
+build/obf-rustc \
+  --obf-config=rust.yaml \
+  --crate-name=my_app --crate-type=bin \
+  -Copt-level=2 src/main.rs -o my_app
+```
+
+An active direct command supports exactly one code-generation `--emit` kind.
+Use Cargo for commands that request code generation and sidecar outputs together.
+Set the direct output path with `-o` or an explicit `--emit=<kind>=<path>` value.
+The wrapper forces `-Csplit-debuginfo=off` and rejects other options that create unplanned sidecar files.
+Direct mode rejects user `-Clink-arg` values. Use Rust `-l` and `-L` options or Cargo instead.
+Active code-generation commands reject Rust response files and `-Cllvm-args` because they can override wrapper policy.
+The wrapper uses a temporary file and replaces the requested path only after `rustc` succeeds.
+
+For Cargo, set `RUSTC_WORKSPACE_WRAPPER`. Do not set `RUSTC_WRAPPER` to `obf-rustc`.
+The four owner variables select one workspace target. Their path values must be canonical absolute paths.
+
+```sh
+ROOT=$(pwd -P)
+RUSTC=/path/to/matching-nightly/rustc \
+RUSTC_WORKSPACE_WRAPPER="$ROOT/build/obf-rustc" \
+OBF_CONFIG="$ROOT/rust.yaml" \
+OBF_RUST_MANIFEST_DIR="$ROOT" \
+OBF_RUST_CRATE_NAME=my_app \
+OBF_RUST_CRATE_TYPE=bin \
+OBF_RUST_CRATE_ROOT="$ROOT/src/main.rs" \
+cargo build --release
+```
+
+The wrapper matches the manifest directory, normalized crate name, crate type, and crate root.
+It leaves dependencies and unselected workspace targets unchanged.
+Link actions add `build/libobf_runtime.a` after the Rust inputs.
+
+### Go with TinyGo
+
+The standard Go compiler does not emit LLVM IR and is not supported. Use `build/obf-tinygo` for the supported Go path.
+
+The wrapper requires project LLVM 21.x `llc` and LLD, TinyGo 0.41.x, Go 1.23 through 1.26, and TinyGo embedded LLVM 20.x.
+It supports native Linux ELF builds on x86-64, AArch64, and ARM.
+It accepts one package or Go file and the default build mode. It requires `-scheduler=none` and an explicit `-gc=conservative` or `-gc=none`.
+It rejects cgo, cross compilation, firmware formats, response files, and ambiguous retained linker commands.
+Write TinyGo configs with block-style YAML mappings and sequences.
+The wrapper rejects flow-style collections and files with multiple nonempty YAML documents.
+
+Use `frontend: tinygo`, exact exported names in `targets` or `overrides`, and disabled string encoding:
+Use `//go:export name` and `//go:noinline` on each selected function.
+
+```yaml
+frontend: tinygo
+default_level: none
+targets:
+  - match: protected_value
+    level: light
+string_encoding:
+  max_strings_per_module: 0
+security:
+  strip_release_markers: true
+```
+
+Build a protected native executable:
+
+```sh
+build/obf-tinygo \
+  --obf-config="$PWD/tinygo.yaml" \
+  --obf-save-bc="$PWD/app.protected.bc" \
+  build -scheduler=none -gc=conservative \
+  -o "$PWD/app" ./cmd/app
+```
+
+The wrapper gets TinyGo's retained `ld.lld` command. It replaces only the whole-program object and preserves the remaining link arguments.
+It validates the captured or configured linker as LLVM 21 LLD.
+It lowers the protected bitcode with LLVM 21 `llc`. It then links `build/libobf_runtime.a` immediately after the protected object.
+Set `OBF_LLD` to an LLVM 21 `ld.lld` executable when CMake cannot find one. If Zig 0.16 is configured, CMake can use its `zig ld.lld` frontend instead.
+The wrapper verifies each ELF stage. It replaces the requested executable only after the final link succeeds.
+`--obf-save-bc` saves the exact protected bitcode through a separate atomic replacement.
 
 ### Manual IR Transforms (opt)
 
@@ -412,7 +575,7 @@ The helper writes temporary inputs under `build/string-auth-bench/` and reports 
 Fast contributor checks:
 
 ```sh
-cmake --build build --target obf-clang-wrappers obf-driver obf-unit-tests obf-runtime-atomic-tests -- -j1
+cmake --build build --target obf-clang-wrappers obf-language-tools obf-driver obf-unit-tests obf-runtime-atomic-tests -- -j1
 ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests|obf-runtime-atomic-tests"
 ```
 
@@ -425,7 +588,12 @@ cmake --build build --target obf-re-harness -- -j1
 cmake --build build --target obf-seed-diversity -- -j1
 ```
 
-The current lit suite covers 179 tests across MBA engine shapes, opaque predicates, bogus control flow, control flattening, opaque GEP, constant encoding (inline and keyed-pool), string encoding (lazy, eager, auth), indirect dispatch, VM lowering, VM handler and dispatcher polymorphism, seed determinism, safe pipeline ordering, security gates, and artifact cleanup. `obf-runtime-atomic-tests` is a separate CTest entry, so it is not included in the lit count. The tests check IR with `opt`, match expected output with FileCheck, and validate runtime behavior with `lli`. Runtime entropy anchors are external. The suite precompiles the runtime sources into `obf_entropy_anchor.o` and `obf_string_auth_runtime.o`. It links these objects into `lli` with `--extra-object`.
+The current lit suite covers 189 tests.
+It covers the transform pipeline, policy rules, security gates, seed behavior, runtime behavior, and artifact cleanup.
+Language tests cover bitcode transactions and native Zig, Rust, and TinyGo execution when compatible toolchains are present.
+`obf-runtime-atomic-tests` is a separate CTest entry and is not part of the lit count.
+The lit tests use `opt`, FileCheck, and `lli`.
+The suite links the external runtime objects into `lli` with `--extra-object`.
 
 ## Repository Layout
 
