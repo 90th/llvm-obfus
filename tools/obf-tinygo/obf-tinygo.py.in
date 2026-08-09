@@ -1,0 +1,1704 @@
+#!@Python3_EXECUTABLE@
+
+"""Fail-closed native TinyGo build wrapper.
+
+This wrapper deliberately owns only the narrow retained-link workflow used by
+TinyGo 0.41 on a native Linux host.  It never tries to reconstruct a linker
+command from frontend flags: it obtains TinyGo's printed closure, validates its
+shape, and changes only WORK/main.o plus the immediately following runtime
+archive.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Callable, Iterable
+
+
+TINYGO = r"@OBF_TINYGO_COMMAND@"
+OBF_BC = r"@CMAKE_CURRENT_BINARY_DIR@/obf-bc@CMAKE_EXECUTABLE_SUFFIX@"
+LLC = r"@OBF_LLC@"
+LLD = r"@OBF_LLD_COMMAND@"
+LLD_DRIVER = r"@OBF_LLD_DRIVER@"
+RUNTIME_ARCHIVE = r"@OBF_RUNTIME_ARCHIVE@"
+LLVM_PACKAGE_VERSION = r"@LLVM_PACKAGE_VERSION@"
+LLVM_HOST_TRIPLE = r"@LLVM_HOST_TRIPLE@"
+
+
+_ACTIVE_CHILD: subprocess.Popen[str] | None = None
+_SPAWNING_CHILD = False
+_DEFERRED_SIGNAL: int | None = None
+_TERMINAL_SIGNALS = frozenset(
+    signum
+    for signum in (
+        getattr(signal, "SIGINT", None),
+        getattr(signal, "SIGTERM", None),
+        getattr(signal, "SIGHUP", None),
+        getattr(signal, "SIGQUIT", None),
+    )
+    if signum is not None
+)
+_YAML_SIMPLE_ESCAPES = {
+    "0": "\x00",
+    "a": "\x07",
+    "b": "\x08",
+    "t": "\x09",
+    "n": "\x0a",
+    "v": "\x0b",
+    "f": "\x0c",
+    "r": "\x0d",
+    "e": "\x1b",
+    " ": " ",
+    '"': '"',
+    "/": "/",
+    "\\": "\\",
+    "N": "\u0085",
+    "_": "\u00a0",
+    "L": "\u2028",
+    "P": "\u2029",
+}
+_YAML_HEX_WIDTHS = {"x": 2, "u": 4, "U": 8}
+_YAML_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+
+class WrapperError(Exception):
+    """An invocation the wrapper intentionally rejects."""
+
+
+class ChildExit(Exception):
+    """A child exited normally with a non-zero status."""
+
+    def __init__(self, status: int, output: str = ""):
+        self.status = status
+        self.output = output
+
+
+class ChildSignal(Exception):
+    """A child was terminated by a signal that must be propagated."""
+
+    def __init__(self, signum: int, output: str = ""):
+        self.signum = signum
+        self.output = output
+
+
+class SignalAbort(BaseException):
+    """A signal delivered to the wrapper while it owns temporary output."""
+
+    def __init__(self, signum: int, output: str = ""):
+        self.signum = signum
+        self.output = output
+
+
+@dataclass
+class Cleanup:
+    scratch: Path | None = None
+    final_temp: Path | None = None
+    save_temp: Path | None = None
+    install_backup: Path | None = None
+    config_temp: Path | None = None
+    work_dirs: list[Path] = field(default_factory=list)
+    keep_work: bool = False
+
+    def cleanup(self) -> None:
+        for path_name in (
+            "install_backup",
+            "save_temp",
+            "final_temp",
+            "config_temp",
+        ):
+            path = getattr(self, path_name)
+            if path is None:
+                continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            setattr(self, path_name, None)
+
+        if not self.keep_work:
+            for work in self.work_dirs:
+                if not _is_tinygo_work_dir(work):
+                    continue
+                try:
+                    shutil.rmtree(work)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+        self.work_dirs.clear()
+
+        if self.scratch is not None:
+            if not self.keep_work:
+                try:
+                    shutil.rmtree(self.scratch)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+            self.scratch = None
+
+
+@dataclass(frozen=True)
+class Invocation:
+    config: Path
+    output: Path
+    save_bc: Path | None
+    package: str
+    forwarded_flags: tuple[str, ...]
+    requested_x: bool
+    requested_work: bool
+
+
+@dataclass(frozen=True)
+class LinkClosure:
+    work: Path
+    linker: str
+    arguments: tuple[str, ...]
+    main_index: int
+    output_index: int
+    output_inline: bool
+    mcpu: str
+    mattr: str
+    code_model: str | None
+    lto_level: str
+
+
+_VALUE_BUILD_FLAGS = {
+    "opt",
+    "gc",
+    "panic",
+    "scheduler",
+    "serial",
+    "interp-timeout",
+    "tags",
+    "target",
+    "buildmode",
+    "stack-size",
+    "size",
+    "print-allocs",
+    "p",
+    "ocd-commands",
+    "port",
+    "timeout",
+    "programmer",
+    "ldflags",
+    "llvm-features",
+    "cpuprofile",
+    "baudrate",
+    "go-compatibility",
+    "wit-package",
+    "wit-world",
+    "o",
+}
+
+_BOOLEAN_BUILD_FLAGS = {
+    "work",
+    "print-stacks",
+    "x",
+    "json",
+    "no-debug",
+    "nobounds",
+    "ocd-output",
+    "monitor",
+    "internal-printir",
+    "internal-dumpssa",
+    "internal-verifyir",
+    "internal-nodwarf",
+}
+
+_SUPPORTED_CODE_MODELS = {"default", "tiny", "small", "kernel", "medium", "large"}
+
+
+# ELF machine values. TinyGo's native Linux support is intentionally constrained
+# to hosts whose ELF ABI the wrapper can verify instead of guessing from a target.
+_HOST_ELF_MACHINES = {
+    "x86_64": (62, 2),
+    "amd64": (62, 2),
+    "aarch64": (183, 2),
+    "arm64": (183, 2),
+    "armv5": (40, 1),
+    "armv5l": (40, 1),
+    "armv5tel": (40, 1),
+    "armv7l": (40, 1),
+    "armv6l": (40, 1),
+    "arm": (40, 1),
+    "armv6": (40, 1),
+    "armv7": (40, 1),
+    "armv8": (40, 1),
+    "armv8l": (40, 1),
+}
+
+
+def _fail(message: str) -> int:
+    print(f"obf-tinygo: {message}", file=sys.stderr)
+    return 2
+
+
+def _canonical(path: str | Path) -> Path:
+    try:
+        return Path(path).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise WrapperError(f"cannot canonicalize path {path}: {error}") from error
+
+
+def _strip_yaml_comment(value: str) -> str:
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(value):
+        if quote == '"' and character == "\\" and not escaped:
+            escaped = True
+            continue
+        if character in {"'", '"'} and not escaped:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+        elif character == "#" and quote is None:
+            return value[:index]
+        escaped = False
+    return value
+
+
+def _decode_yaml_double_quoted(value: str) -> str | None:
+    if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+        return None
+    decoded: list[str] = []
+    index = 1
+    limit = len(value) - 1
+    while index < limit:
+        character = value[index]
+        if character != "\\":
+            decoded.append(character)
+            index += 1
+            continue
+        if index + 1 >= limit:
+            return None
+        escape = value[index + 1]
+        replacement = _YAML_SIMPLE_ESCAPES.get(escape)
+        if replacement is not None:
+            decoded.append(replacement)
+            index += 2
+            continue
+        width = _YAML_HEX_WIDTHS.get(escape)
+        if width is None:
+            return None
+        digits = value[index + 2 : index + 2 + width]
+        if len(digits) != width or any(digit not in _YAML_HEX_DIGITS for digit in digits):
+            return None
+        codepoint = int(digits, 16)
+        if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+            return None
+        decoded.append(chr(codepoint))
+        index += width + 2
+    return "".join(decoded)
+
+
+def _yaml_scalar(value: str) -> str:
+    value = _strip_yaml_comment(value).strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        parsed = _decode_yaml_double_quoted(value)
+        if parsed is None:
+            raise WrapperError("unsupported double-quoted YAML scalar")
+        return parsed
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def _yaml_mapping_entry(value: str) -> tuple[str, str] | None:
+    value = _strip_yaml_comment(value).strip()
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(value):
+        if quote == '"' and character == "\\" and not escaped:
+            escaped = True
+            continue
+        if character in {"'", '"'} and not escaped:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+        elif character == ":" and quote is None:
+            key = _yaml_scalar(value[:index])
+            return None if not key else (key, value[index + 1 :])
+        escaped = False
+    return None
+
+
+def _yaml_lines(path: Path) -> list[tuple[int, str, int]]:
+    try:
+        source = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as error:
+        raise WrapperError(f"cannot read --obf-config {path}: {error}") from error
+
+    lines: list[tuple[int, str, int]] = []
+    nonempty_documents = 0
+    document_has_content = False
+    for line_number, raw_line in enumerate(source.splitlines(), 1):
+        if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]:
+            raise WrapperError(f"unsupported tab indentation in --obf-config line {line_number}")
+        stripped = _strip_yaml_comment(raw_line).rstrip()
+        if not stripped.strip():
+            continue
+        indentation = len(stripped) - len(stripped.lstrip(" "))
+        content = stripped[indentation:]
+        if indentation == 0 and any(
+            content == marker
+            or content.startswith(f"{marker} ")
+            or content.startswith(f"{marker}\t")
+            for marker in ("---", "...")
+        ):
+            if document_has_content:
+                nonempty_documents += 1
+                document_has_content = False
+            continue
+        if not (indentation == 0 and content.startswith("%")):
+            document_has_content = True
+        lines.append((indentation, content, line_number))
+
+    if document_has_content:
+        nonempty_documents += 1
+    if nonempty_documents != 1:
+        raise WrapperError("--obf-config must contain exactly one non-empty YAML document")
+    return lines
+
+
+def _top_level_entries(
+    lines: Iterable[tuple[int, str, int]], key: str
+) -> list[tuple[str, int, int]]:
+    entries: list[tuple[str, int, int]] = []
+    for index, (indentation, content, line_number) in enumerate(lines):
+        if indentation != 0:
+            continue
+        entry = _yaml_mapping_entry(content)
+        if entry is not None and entry[0] == key:
+            entries.append((entry[1], index, line_number))
+    return entries
+
+
+def _section(
+    lines: list[tuple[int, str, int]], entry_index: int
+) -> list[tuple[int, str, int]]:
+    result: list[tuple[int, str, int]] = []
+    for indentation, content, line_number in lines[entry_index + 1 :]:
+        if indentation == 0:
+            break
+        result.append((indentation, content, line_number))
+    return result
+
+
+def _require_one_top_scalar(
+    lines: list[tuple[int, str, int]], key: str, expected: str
+) -> None:
+    entries = _top_level_entries(lines, key)
+    if len(entries) != 1:
+        raise WrapperError(f"--obf-config must contain exactly one top-level {key}: {expected}")
+    value, _, line_number = entries[0]
+    if _yaml_scalar(value) != expected:
+        raise WrapperError(f"--obf-config line {line_number} requires {key}: {expected}")
+
+
+def _validate_tinygo_config(config: Path) -> None:
+    if not config.is_file():
+        raise WrapperError(f"--obf-config is not a regular file: {config}")
+
+    lines = _yaml_lines(config)
+    _require_one_top_scalar(lines, "frontend", "tinygo")
+    _require_one_top_scalar(lines, "default_level", "none")
+
+    selections: list[tuple[str, str, str, int]] = []
+    for section_key, item_key, item_label in (
+        ("targets", "match", "targets[].match"),
+        ("overrides", "name", "overrides[].name"),
+    ):
+        section_entries = _top_level_entries(lines, section_key)
+        if len(section_entries) > 1:
+            raise WrapperError(
+                f"--obf-config may contain at most one top-level {section_key}: block"
+            )
+        if not section_entries:
+            continue
+        section_value, section_index, section_line = section_entries[0]
+        scalar = _yaml_scalar(section_value)
+        if scalar == "[]":
+            continue
+        if scalar != "":
+            raise WrapperError(
+                f"--obf-config line {section_line} must use a block {section_key}: list"
+            )
+        for _, content, line_number in _section(lines, section_index):
+            candidate = content[1:].lstrip() if content.startswith("-") else content
+            entry = _yaml_mapping_entry(candidate)
+            if entry is not None and entry[0] == item_key:
+                selections.append(
+                    (section_key, item_label, _yaml_scalar(entry[1]), line_number)
+                )
+
+    if not selections:
+        raise WrapperError(
+            "--obf-config requires at least one exact targets[].match or overrides[].name entry"
+        )
+    for section_key, item_label, selected_name, line_number in selections:
+        if not selected_name:
+            raise WrapperError(f"--obf-config line {line_number} has an empty {item_label}")
+        if "*" in selected_name or "?" in selected_name:
+            raise WrapperError(
+                f"--obf-config line {line_number} {item_label} must be exact, not a wildcard"
+            )
+
+    string_entries = _top_level_entries(lines, "string_encoding")
+    if len(string_entries) != 1:
+        raise WrapperError("--obf-config requires exactly one top-level string_encoding: block")
+    string_value, string_index, string_line = string_entries[0]
+    if _yaml_scalar(string_value) != "":
+        raise WrapperError(
+            f"--obf-config line {string_line} must use a block string_encoding: mapping"
+        )
+
+    maximums: list[tuple[str, int]] = []
+    for _, content, line_number in _section(lines, string_index):
+        entry = _yaml_mapping_entry(content)
+        if entry is not None and entry[0] == "max_strings_per_module":
+            maximums.append((_yaml_scalar(entry[1]), line_number))
+    if len(maximums) != 1 or maximums[0][0] != "0":
+        raise WrapperError("--obf-config requires string_encoding.max_strings_per_module: 0")
+
+
+def _split_option(argument: str) -> tuple[str, str | None] | None:
+    if argument == "--":
+        raise WrapperError("-- is unsupported because the package argument must be unambiguous")
+    if not argument.startswith("-") or argument == "-":
+        return None
+    stripped = argument[2:] if argument.startswith("--") else argument[1:]
+    if not stripped:
+        return None
+    if "=" in stripped:
+        name, value = stripped.split("=", 1)
+        return name, value
+    return stripped, None
+
+
+def _take_wrapper_options(argv: list[str]) -> tuple[Path, Path | None, list[str]]:
+    config: Path | None = None
+    save_bc: Path | None = None
+    remainder: list[str] = []
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        for option, description in (("--obf-config", "--obf-config"), ("--obf-save-bc", "--obf-save-bc")):
+            if argument == option:
+                if index + 1 >= len(argv) or argv[index + 1] == "":
+                    raise WrapperError(f"{description} requires a path")
+                value = argv[index + 1]
+                index += 2
+                break
+            if argument.startswith(option + "="):
+                value = argument.split("=", 1)[1]
+                if value == "":
+                    raise WrapperError(f"{description} requires a path")
+                index += 1
+                break
+        else:
+            if argument.startswith("--obf-"):
+                raise WrapperError(f"unsupported wrapper option: {argument}")
+            remainder.append(argument)
+            index += 1
+            continue
+
+        if option == "--obf-config":
+            if config is not None:
+                raise WrapperError("--obf-config may be specified only once")
+            config = _canonical(value)
+        else:
+            if save_bc is not None:
+                raise WrapperError("--obf-save-bc may be specified only once")
+            save_bc = _canonical(value)
+
+    if config is None:
+        raise WrapperError("--obf-config requires a path")
+    return config, save_bc, remainder
+
+
+def _parse_invocation(argv: list[str]) -> Invocation:
+    config, save_bc, remaining = _take_wrapper_options(argv)
+    if not remaining or remaining[0] != "build":
+        raise WrapperError("only the TinyGo build subcommand is supported")
+
+    build_arguments = remaining[1:]
+    forwarded: list[str] = []
+    positions: list[str] = []
+    output: Path | None = None
+    gc: str | None = None
+    buildmode: str | None = None
+    scheduler: str | None = None
+    requested_x = False
+    requested_work = False
+    index = 0
+
+    while index < len(build_arguments):
+        argument = build_arguments[index]
+        parsed = _split_option(argument)
+        if parsed is None:
+            positions.append(argument)
+            index += 1
+            continue
+
+        name, inline_value = parsed
+        if name in _VALUE_BUILD_FLAGS:
+            if inline_value is None:
+                if index + 1 >= len(build_arguments):
+                    raise WrapperError(f"-{name} requires a value")
+                value = build_arguments[index + 1]
+                consumed = [argument, value]
+                index += 2
+            else:
+                value = inline_value
+                consumed = [argument]
+                index += 1
+            if value == "":
+                raise WrapperError(f"-{name} requires a non-empty value")
+
+            if name == "o":
+                if output is not None:
+                    raise WrapperError("-o may be specified only once")
+                if value == "-":
+                    raise WrapperError("-o must name a regular executable path")
+                output = _canonical(value)
+                continue
+            if name == "gc":
+                if gc is not None:
+                    raise WrapperError("-gc may be specified only once")
+                if value not in {"conservative", "none"}:
+                    raise WrapperError("only -gc=conservative and -gc=none are supported")
+                gc = value
+            elif name == "scheduler":
+                if scheduler is not None:
+                    raise WrapperError("-scheduler may be specified only once")
+                scheduler = value
+                if value != "none":
+                    raise WrapperError("only -scheduler=none is supported")
+            elif name == "target":
+                raise WrapperError("-target is unsupported; only the native host default is supported")
+            elif name == "buildmode":
+                if buildmode is not None:
+                    raise WrapperError("-buildmode may be specified only once")
+                buildmode = value
+                if value != "default":
+                    raise WrapperError("only the default TinyGo buildmode is supported")
+
+            forwarded.extend(consumed)
+            continue
+
+        if name in _BOOLEAN_BUILD_FLAGS:
+            if inline_value is not None and inline_value not in {"true", "false"}:
+                raise WrapperError(f"-{name} must be a boolean flag")
+            if name == "x":
+                requested_x = inline_value != "false"
+            if name == "work":
+                requested_work = inline_value != "false"
+            if name in {"x", "work"}:
+                # The retained baseline owns these knobs. It always needs both,
+                # while an explicitly requested trace/work flag is replayed for
+                # the whole-program BC build below.
+                index += 1
+                continue
+            forwarded.append(argument)
+            index += 1
+            continue
+
+        if name == "C":
+            raise WrapperError("-C is unsupported; invoke obf-tinygo from the intended directory")
+        raise WrapperError(f"unsupported TinyGo build flag: {argument}")
+
+    if output is None:
+        raise WrapperError("-o requires a path")
+    if gc is None:
+        raise WrapperError("an explicit -gc=conservative or -gc=none is required")
+    if scheduler is None:
+        raise WrapperError("an explicit -scheduler=none is required")
+    if len(positions) != 1:
+        raise WrapperError("build requires exactly one package or .go file argument")
+    package = positions[0]
+    if package.endswith("...") or "/.../" in package:
+        raise WrapperError("package wildcards are unsupported; build exactly one package or .go file")
+
+    forbidden_output_suffixes = {".a", ".bc", ".bin", ".hex", ".ll", ".o", ".uf2", ".wasm"}
+    if output.suffix.lower() in forbidden_output_suffixes:
+        raise WrapperError("-o must name a native ELF executable, not an intermediate or firmware image")
+    if not output.parent.is_dir():
+        raise WrapperError(f"output directory does not exist: {output.parent}")
+    if output.exists() and output.is_dir():
+        raise WrapperError(f"-o must name a file, not a directory: {output}")
+
+    for environment_name in ("GOOS", "GOARCH", "GOARM", "GOMIPS"):
+        if os.environ.get(environment_name):
+            raise WrapperError(
+                f"{environment_name} target override is unsupported; only the native host default is supported"
+            )
+
+    if save_bc is not None:
+        if not save_bc.parent.is_dir():
+            raise WrapperError(f"--obf-save-bc directory does not exist: {save_bc.parent}")
+        if save_bc == output:
+            raise WrapperError("--obf-save-bc must be canonically distinct from -o")
+        try:
+            if save_bc.exists() and output.exists() and os.path.samefile(save_bc, output):
+                raise WrapperError("--obf-save-bc must be canonically distinct from -o")
+        except OSError as error:
+            raise WrapperError(f"cannot compare -o and --obf-save-bc: {error.strerror or error}") from error
+
+    return Invocation(config, output, save_bc, package, tuple(forwarded), requested_x, requested_work)
+
+
+def _resolve_tool(environment_name: str, configured: str, description: str) -> str:
+    candidate = os.environ.get(environment_name) or configured
+    if not candidate:
+        raise WrapperError(f"missing {description} command")
+    if os.path.sep in candidate:
+        path = Path(candidate)
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise WrapperError(f"{description} is not an executable file: {candidate}")
+        return str(path)
+    resolved = shutil.which(candidate)
+    if resolved is None:
+        raise WrapperError(f"cannot find {description}: {candidate}")
+    return resolved
+
+
+def _require_regular_file(path: Path, description: str) -> None:
+    try:
+        mode = path.stat().st_mode
+    except OSError as error:
+        raise WrapperError(f"missing {description}: {path}") from error
+    if not stat.S_ISREG(mode):
+        raise WrapperError(f"{description} is not a regular file: {path}")
+
+
+def _emit_child_output(stdout: str, stderr: str) -> None:
+    if stdout:
+        sys.stdout.write(stdout)
+        sys.stdout.flush()
+    if stderr:
+        sys.stderr.write(stderr)
+        sys.stderr.flush()
+
+
+def _run_capture(
+    argv: list[str],
+    *,
+    echo: bool,
+    stdout_only: bool = False,
+    on_output: Callable[[str], None] | None = None,
+) -> str:
+    global _ACTIVE_CHILD, _SPAWNING_CHILD, _DEFERRED_SIGNAL
+    child: subprocess.Popen[str] | None = None
+    spawn_error: OSError | None = None
+    try:
+        _SPAWNING_CHILD = True
+        try:
+            try:
+                child = subprocess.Popen(
+                    argv,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    errors="replace",
+                    start_new_session=True,
+                )
+            except OSError as error:
+                spawn_error = error
+            else:
+                _ACTIVE_CHILD = child
+        finally:
+            _SPAWNING_CHILD = False
+
+        if _DEFERRED_SIGNAL is not None:
+            signum = _DEFERRED_SIGNAL
+            _DEFERRED_SIGNAL = None
+            raise SignalAbort(signum)
+        if spawn_error is not None:
+            raise WrapperError(
+                f"cannot execute {argv[0]}: {spawn_error.strerror or spawn_error}"
+            ) from spawn_error
+
+        assert child is not None
+        stdout, stderr = child.communicate()
+        if on_output is not None:
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _TERMINAL_SIGNALS)
+            try:
+                on_output(stdout + stderr)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    except SignalAbort as error:
+        if child is None:
+            raise
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = child.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = child.communicate()
+        error.output = stdout + stderr
+        if echo:
+            _emit_child_output(stdout, stderr)
+        raise
+    finally:
+        _SPAWNING_CHILD = False
+        _ACTIVE_CHILD = None
+
+    if echo or child.returncode != 0:
+        _emit_child_output(stdout, stderr)
+
+    combined_output = stdout + stderr
+    if child.returncode < 0:
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        raise ChildSignal(-child.returncode, combined_output)
+    if child.returncode != 0:
+        raise ChildExit(child.returncode, combined_output)
+    return stdout if stdout_only else combined_output
+
+
+def _reject_cgo_package_graph(tinygo: str, invocation: Invocation) -> None:
+    output = _run_capture(
+        [
+            tinygo,
+            "list",
+            "-deps",
+            "-json",
+            *invocation.forwarded_flags,
+            invocation.package,
+        ],
+        echo=False,
+        stdout_only=True,
+    )
+    decoder = json.JSONDecoder()
+    offset = 0
+    package_count = 0
+    while True:
+        while offset < len(output) and output[offset].isspace():
+            offset += 1
+        if offset == len(output):
+            break
+        try:
+            package, offset = decoder.raw_decode(output, offset)
+        except json.JSONDecodeError as error:
+            raise WrapperError(
+                f"cannot parse TinyGo package graph JSON at byte {error.pos}"
+            ) from error
+        if not isinstance(package, dict):
+            raise WrapperError("TinyGo package graph contains a non-object entry")
+        package_count += 1
+        cgo_files = package.get("CgoFiles", [])
+        imports = package.get("Imports", [])
+        if not isinstance(cgo_files, list) or not isinstance(imports, list):
+            raise WrapperError("TinyGo package graph contains malformed package metadata")
+        if cgo_files or "C" in imports:
+            package_name = package.get("ImportPath") or package.get("Dir") or "<unknown>"
+            raise WrapperError(
+                f"cgo is unsupported (package {package_name} contains cgo sources)"
+            )
+    if package_count == 0:
+        raise WrapperError("TinyGo package graph is empty")
+
+
+def _validate_host() -> tuple[int, int]:
+    if sys.platform != "linux":
+        raise WrapperError("only native-host Linux ELF builds are supported")
+    machine = platform.machine().lower()
+    if machine not in _HOST_ELF_MACHINES:
+        raise WrapperError(f"unsupported native Linux architecture: {platform.machine()}")
+    if "linux" not in LLVM_HOST_TRIPLE.lower():
+        raise WrapperError(f"configured LLVM host triple is not Linux: {LLVM_HOST_TRIPLE}")
+    triple_arch = LLVM_HOST_TRIPLE.split("-", 1)[0].lower()
+    if triple_arch not in _HOST_ELF_MACHINES:
+        raise WrapperError(f"configured LLVM host architecture is unsupported: {LLVM_HOST_TRIPLE}")
+    if _HOST_ELF_MACHINES[triple_arch] != _HOST_ELF_MACHINES[machine]:
+        raise WrapperError(
+            f"configured LLVM host triple is not native ({LLVM_HOST_TRIPLE} vs {platform.machine()})"
+        )
+    return _HOST_ELF_MACHINES[machine]
+
+
+def _validate_tinygo_version(tinygo: str) -> None:
+    output = _run_capture([tinygo, "version"], echo=False)
+    tinygo_match = re.search(r"\btinygo\s+version\s+(0\.41\.\d+)\b", output, re.IGNORECASE)
+    go_match = re.search(
+        r"\busing\s+go\s+version\s+go1\.(?:23|24|25|26)(?:\.\d+)?(?:[-+][^\s)]*)?(?=\s|\))",
+        output,
+        re.IGNORECASE,
+    )
+    llvm_match = re.search(
+        r"\bLLVM\b.*?\bversion\s*:?\s*(20\.\d+(?:\.\d+)?)\b",
+        output,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if tinygo_match is None or go_match is None or llvm_match is None:
+        raise WrapperError(
+            "requires TinyGo 0.41.x with Go 1.23-1.26 and embedded LLVM 20.x"
+        )
+
+
+def _validate_llc_version(llc: str) -> None:
+    configured_match = re.match(r"(\d+)", LLVM_PACKAGE_VERSION)
+    if configured_match is None or configured_match.group(1) != "21":
+        raise WrapperError(f"requires configured LLVM 21 llc, got LLVM {LLVM_PACKAGE_VERSION}")
+    output = _run_capture([llc, "--version"], echo=False)
+    match = re.search(r"\bLLVM\b.*?\bversion\s*:?\s*(\d+)(?:\.\d+)?", output, re.IGNORECASE | re.DOTALL)
+    if match is None or match.group(1) != "21":
+        raise WrapperError("requires configured LLVM 21 llc")
+
+
+def _validate_lld_version(command: list[str]) -> None:
+    output = _run_capture([*command, "--version"], echo=False)
+    match = re.search(r"\bLLD\s+(\d+)(?:\.\d+)?", output, re.IGNORECASE)
+    if match is None or match.group(1) != "21":
+        raise WrapperError("requires an LLVM 21 LLD linker")
+
+
+def _configured_lld_command() -> list[str]:
+    lld = _resolve_tool("OBF_LLD_BIN", LLD, "LLVM 21 LLD")
+    raw_driver = os.environ.get("OBF_LLD_DRIVER", LLD_DRIVER)
+    try:
+        driver = shlex.split(raw_driver, posix=True)
+    except ValueError as error:
+        raise WrapperError(f"cannot parse OBF_LLD_DRIVER: {error}") from error
+    command = [lld, *driver]
+    _validate_lld_version(command)
+    return command
+
+
+def _select_linker_command(captured: str) -> list[str]:
+    candidate = Path(captured)
+    explicit_path = candidate.is_absolute() or os.path.sep in captured
+    if not explicit_path:
+        return _configured_lld_command()
+    if not candidate.is_file():
+        raise WrapperError(f"captured ld.lld executable does not exist: {captured}")
+    if not os.access(candidate, os.X_OK):
+        raise WrapperError(f"captured ld.lld executable is not executable: {captured}")
+    command = [captured]
+    _validate_lld_version(command)
+    return command
+
+
+def _preflight(invocation: Invocation) -> tuple[str, str, str, Path, tuple[int, int]]:
+    _validate_tinygo_config(invocation.config)
+    elf_machine, elf_class = _validate_host()
+    tinygo = _resolve_tool("OBF_TINYGO_BIN", TINYGO, "TinyGo")
+    obf_bc = _resolve_tool("OBF_BC_BIN", OBF_BC, "obf-bc")
+    llc = _resolve_tool("OBF_LLC_BIN", LLC, "llc")
+    runtime = _canonical(RUNTIME_ARCHIVE)
+    _require_regular_file(runtime, "obfuscator runtime archive")
+    _validate_tinygo_version(tinygo)
+    _validate_llc_version(llc)
+    return tinygo, obf_bc, llc, runtime, (elf_machine, elf_class)
+
+
+def _is_tinygo_work_dir(path: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=True)
+        temporary_root = Path(os.environ.get("TMPDIR") or "/tmp").resolve(strict=True)
+        info = resolved.lstat()
+    except (OSError, RuntimeError):
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and resolved.parent == temporary_root
+        and resolved.name.startswith("tinygo")
+    )
+
+
+def _record_owned_work_dirs(output: str, cleanup: Cleanup) -> None:
+    for raw_line in output.splitlines():
+        if not raw_line.startswith("WORK="):
+            continue
+        value = raw_line.removeprefix("WORK=")
+        if not value:
+            continue
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            continue
+        resolved = _canonical(candidate)
+        if _is_tinygo_work_dir(resolved) and resolved not in cleanup.work_dirs:
+            cleanup.work_dirs.append(resolved)
+
+
+def _verify_elf(path: Path, machine: int, elf_class: int, *, relocatable: bool) -> None:
+    try:
+        with path.open("rb") as file:
+            header = file.read(20)
+    except OSError as error:
+        raise WrapperError(f"cannot read expected ELF artifact {path}: {error.strerror or error}") from error
+    if len(header) < 20 or header[:4] != b"\x7fELF":
+        raise WrapperError(f"expected native ELF artifact, got non-ELF file: {path}")
+    if header[4] != elf_class:
+        raise WrapperError(f"ELF class does not match the native host: {path}")
+    data_encoding = header[5]
+    if data_encoding not in {1, 2}:
+        raise WrapperError(f"ELF data encoding is invalid: {path}")
+    byteorder = "little" if data_encoding == 1 else "big"
+    expected_order = "little" if sys.byteorder == "little" else "big"
+    if byteorder != expected_order:
+        raise WrapperError(f"ELF byte order does not match the native host: {path}")
+    elf_type = int.from_bytes(header[16:18], byteorder)
+    actual_machine = int.from_bytes(header[18:20], byteorder)
+    if actual_machine != machine:
+        raise WrapperError(f"ELF architecture does not match the native host: {path}")
+    if relocatable:
+        if elf_type != 1:
+            raise WrapperError(f"expected a relocatable native ELF object: {path}")
+    elif elf_type not in {2, 3}:
+        raise WrapperError(f"expected a native ELF executable: {path}")
+
+
+def _require_nonempty_regular(path: Path, description: str) -> None:
+    try:
+        info = path.stat()
+    except OSError as error:
+        raise WrapperError(f"{description} was not produced: {path}") from error
+    if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+        raise WrapperError(f"{description} is not a non-empty regular file: {path}")
+
+
+def _contains_link_syntax(argument: str) -> bool:
+    lowered = argument.lower()
+    return (
+        argument.startswith("@")
+        or ",@" in argument
+        or lowered.startswith("--response")
+        or lowered in {"--start-group", "--end-group", "--start-lib", "--end-lib", "-(", "-)"}
+        or "start-group" in lowered
+        or "end-group" in lowered
+        or "start-lib" in lowered
+        or "end-lib" in lowered
+        or argument in {"|", "||", "&&", ";", "<", ">"}
+    )
+
+
+def _is_forbidden_target_argument(argument: str) -> bool:
+    lowered = argument.lower()
+    direct = {
+        "-target",
+        "--target",
+        "-triple",
+        "--triple",
+        "-mtriple",
+        "--mtriple",
+        "-march",
+        "--march",
+        "-mcpu",
+        "--mcpu",
+        "-mattr",
+        "--mattr",
+        "-code-model",
+        "--code-model",
+        "-m",
+        "--emulation",
+        "--oformat",
+        "--format",
+        "--machine",
+    }
+    if lowered in direct:
+        return True
+    prefixes = (
+        "-target=",
+        "--target=",
+        "-triple=",
+        "--triple=",
+        "-mtriple=",
+        "--mtriple=",
+        "-march=",
+        "--march=",
+        "-mcpu=",
+        "--mcpu=",
+        "-mattr=",
+        "--mattr=",
+        "-code-model=",
+        "--code-model=",
+        "--emulation=",
+        "--oformat=",
+        "--format=",
+        "--machine=",
+    )
+    if lowered.startswith(prefixes):
+        return True
+    if re.match(r"^-m(?:elf|aarch|arm|i[3-6]86|x86)", lowered):
+        return True
+    return lowered.startswith("--plugin-opt=") and any(
+        name in lowered for name in ("triple", "mcpu", "mattr", "code-model")
+    )
+
+
+def _is_non_elf_argument(argument: str) -> bool:
+    lowered = argument.lower()
+    return lowered.endswith((".wasm", ".hex", ".bin", ".uf2")) or lowered.startswith("--oformat=")
+
+
+def _is_forbidden_output_mode_argument(argument: str) -> bool:
+    return argument.lower() in {
+        "-r",
+        "--relocatable",
+        "-shared",
+        "--shared",
+        "-bshareable",
+        "--bshareable",
+        "-pie",
+        "--pie",
+        "-pic-executable",
+        "--pic-executable",
+    }
+
+
+def _is_library_or_archive(argument: str) -> bool:
+    lowered = argument.lower()
+    if argument.startswith("-l") and not argument.startswith("-lto"):
+        return True
+    if lowered.startswith("--library"):
+        return True
+    return lowered.endswith((".a", ".lib", ".so")) or ".so." in lowered
+
+
+def _is_runtime_argument(argument: str, runtime: Path) -> bool:
+    if argument in {f"-l:{runtime.name}", f"-l{runtime.stem.removeprefix('lib')}"}:
+        return True
+    try:
+        if _canonical(argument) == runtime:
+            return True
+    except OSError:
+        pass
+    return Path(argument).name == runtime.name
+
+
+def _extract_link_closure(output: str, runtime: Path) -> LinkClosure:
+    work_values: list[str] = []
+    commands: list[list[str]] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if raw_line.startswith("WORK="):
+            work_values.append(raw_line.removeprefix("WORK="))
+
+        if "ld.lld" not in line:
+            continue
+        try:
+            words = shlex.split(line, posix=True)
+        except ValueError as error:
+            raise WrapperError(f"cannot parse retained ld.lld command: {error}") from error
+        if not words or Path(words[0]).name != "ld.lld":
+            continue
+        commands.append(words)
+
+    if len(work_values) != 1:
+        raise WrapperError(f"retained TinyGo build must print exactly one WORK= path (got {len(work_values)})")
+    if len(commands) != 1:
+        raise WrapperError(f"retained TinyGo build must print exactly one ld.lld command (got {len(commands)})")
+
+    raw_work = Path(work_values[0])
+    if not raw_work.is_absolute():
+        raise WrapperError("retained WORK= path must be absolute")
+    work = _canonical(raw_work)
+    if not work.is_dir():
+        raise WrapperError(f"retained WORK= path is not a directory: {work}")
+    if not _is_tinygo_work_dir(work):
+        raise WrapperError("retained WORK= path is not an owned TinyGo temporary directory")
+
+    words = commands[0]
+    linker = words[0]
+    arguments = words[1:]
+    if not arguments:
+        raise WrapperError("retained ld.lld command has no arguments")
+
+    main = _canonical(work / "main.o")
+    expected_output = _canonical(work / "main")
+    main_positions: list[int] = []
+    output_positions: list[tuple[int, bool]] = []
+    mcpu_values: list[str] = []
+    mattr_values: list[str] = []
+    code_models: list[str] = []
+    lto_levels: list[str] = []
+
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if _contains_link_syntax(argument):
+            raise WrapperError(f"retained ld.lld command uses unsupported response/group/shell syntax: {argument}")
+        if _is_forbidden_target_argument(argument):
+            raise WrapperError(f"retained ld.lld command uses unsupported target selection: {argument}")
+        if _is_non_elf_argument(argument):
+            raise WrapperError(f"retained ld.lld command is not a native ELF closure: {argument}")
+        if _is_forbidden_output_mode_argument(argument):
+            raise WrapperError(f"retained ld.lld command is not an executable closure: {argument}")
+        if _is_runtime_argument(argument, runtime):
+            raise WrapperError("retained ld.lld command already contains the obfuscator runtime archive")
+
+        if argument == "-o":
+            if index + 1 >= len(arguments):
+                raise WrapperError("retained ld.lld command has -o without an output path")
+            output_positions.append((index + 1, False))
+            index += 2
+            continue
+        if argument.startswith("-o="):
+            if argument == "-o=":
+                raise WrapperError("retained ld.lld command has an empty -o output path")
+            output_positions.append((index, True))
+            index += 1
+            continue
+
+        if argument == "-mllvm":
+            if index + 1 >= len(arguments):
+                raise WrapperError("retained ld.lld command has -mllvm without a value")
+            value = arguments[index + 1]
+            if value.startswith("-mcpu="):
+                mcpu_values.append(value.split("=", 1)[1])
+            elif value.startswith("-mattr="):
+                mattr_values.append(value.split("=", 1)[1])
+            elif value.startswith("-code-model="):
+                code_model = value.split("=", 1)[1]
+                if code_model not in _SUPPORTED_CODE_MODELS:
+                    raise WrapperError(f"retained ld.lld command has unsupported code model: {code_model}")
+                code_models.append(code_model)
+            elif _is_forbidden_target_argument(value):
+                raise WrapperError(f"retained ld.lld command uses unsupported target selection: {value}")
+            index += 2
+            continue
+
+        if argument == "--lto-O":
+            if index + 1 >= len(arguments):
+                raise WrapperError("retained ld.lld command has --lto-O without a value")
+            lto_levels.append(arguments[index + 1])
+            index += 2
+            continue
+        lto_match = re.fullmatch(r"--lto-O(?:=)?(.+)", argument)
+        if lto_match is not None:
+            lto_levels.append(lto_match.group(1))
+            index += 1
+            continue
+
+        try:
+            is_main = _canonical(argument) == main
+        except OSError:
+            is_main = False
+        if is_main:
+            main_positions.append(index)
+        elif not main_positions and _is_library_or_archive(argument):
+            raise WrapperError("retained ld.lld command places a library/archive before WORK/main.o")
+        index += 1
+
+    if len(main_positions) != 1:
+        raise WrapperError(f"retained ld.lld command must contain exactly one WORK/main.o (got {len(main_positions)})")
+    if len(output_positions) != 1:
+        raise WrapperError(f"retained ld.lld command must contain exactly one output path (got {len(output_positions)})")
+    output_index, output_inline = output_positions[0]
+    output_argument = arguments[output_index]
+    output_path = output_argument.split("=", 1)[1] if output_inline else output_argument
+    if _canonical(output_path) != expected_output:
+        raise WrapperError("retained ld.lld output must be exactly WORK/main")
+    if len(mcpu_values) != 1 or not mcpu_values[0]:
+        raise WrapperError(f"retained ld.lld command must contain exactly one non-empty -mllvm -mcpu= value (got {len(mcpu_values)})")
+    if len(mattr_values) != 1 or not mattr_values[0]:
+        raise WrapperError(f"retained ld.lld command must contain exactly one non-empty -mllvm -mattr= value (got {len(mattr_values)})")
+    if len(code_models) > 1:
+        raise WrapperError("retained ld.lld command contains more than one -mllvm -code-model= value")
+    if len(lto_levels) != 1 or not re.fullmatch(r"[0-3]", lto_levels[0]):
+        raise WrapperError(f"retained ld.lld command must contain exactly one supported --lto-O<N> value (got {len(lto_levels)})")
+
+    main_file = work / "main.o"
+    _require_nonempty_regular(main_file, "retained WORK/main.o")
+    return LinkClosure(
+        work=work,
+        linker=linker,
+        arguments=tuple(arguments),
+        main_index=main_positions[0],
+        output_index=output_index,
+        output_inline=output_inline,
+        mcpu=mcpu_values[0],
+        mattr=mattr_values[0],
+        code_model=code_models[0] if code_models else None,
+        lto_level=lto_levels[0],
+    )
+
+
+def _make_owned_temp(
+    cleanup: Cleanup,
+    attribute: str,
+    parent: Path,
+    prefix: str,
+    suffix: str,
+    mode: int,
+) -> Path:
+    if getattr(cleanup, attribute) is not None:
+        raise WrapperError(f"internal error: temporary path {attribute} is already registered")
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _TERMINAL_SIGNALS)
+    try:
+        try:
+            descriptor, name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=parent)
+        except OSError as error:
+            raise WrapperError(
+                f"cannot create temporary output in {parent}: {error.strerror or error}"
+            ) from error
+        try:
+            try:
+                os.fchmod(descriptor, mode)
+            except OSError as error:
+                try:
+                    Path(name).unlink()
+                except OSError:
+                    pass
+                raise WrapperError(
+                    f"cannot set temporary output permissions: {error.strerror or error}"
+                ) from error
+        finally:
+            os.close(descriptor)
+        path = Path(name)
+        setattr(cleanup, attribute, path)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    return path
+
+
+def _pin_config(config: Path, cleanup: Cleanup) -> Path:
+    pinned = _make_owned_temp(
+        cleanup,
+        "config_temp",
+        Path(tempfile.gettempdir()),
+        "obf-tinygo-config-",
+        ".yaml",
+        0o600,
+    )
+    try:
+        with config.open("rb") as source, pinned.open("wb") as destination:
+            shutil.copyfileobj(source, destination, 1024 * 1024)
+            destination.flush()
+            os.fsync(destination.fileno())
+    except OSError as error:
+        raise WrapperError(
+            f"cannot pin --obf-config {config}: {error.strerror or error}"
+        ) from error
+    return pinned
+
+
+def _make_owned_scratch(cleanup: Cleanup) -> Path:
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _TERMINAL_SIGNALS)
+    try:
+        try:
+            scratch = Path(tempfile.mkdtemp(prefix="obf-tinygo-"))
+        except OSError as error:
+            raise WrapperError(
+                f"cannot create TinyGo scratch directory: {error.strerror or error}"
+            ) from error
+        cleanup.scratch = scratch
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    return scratch
+
+
+def _snapshot_destination(destination: Path, cleanup: Cleanup) -> Path | None:
+    try:
+        destination.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise WrapperError(
+            f"cannot inspect existing output {destination}: {error.strerror or error}"
+        ) from error
+
+    backup = _make_owned_temp(
+        cleanup,
+        "install_backup",
+        destination.parent,
+        f".{destination.name}.obf-tinygo-backup-",
+        ".tmp",
+        0o600,
+    )
+    try:
+        backup.unlink()
+        os.link(destination, backup, follow_symlinks=False)
+    except OSError as error:
+        raise WrapperError(
+            f"cannot preserve existing output {destination}: {error.strerror or error}"
+        ) from error
+    return backup
+
+
+def _rollback_install(
+    destination: Path, backup: Path | None, cleanup: Cleanup, description: str
+) -> None:
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _TERMINAL_SIGNALS)
+    try:
+        if backup is None:
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise WrapperError(
+                    f"cannot roll back interrupted {description} install {destination}: "
+                    f"{error.strerror or error}"
+                ) from error
+            return
+
+        try:
+            os.replace(backup, destination)
+        except OSError as error:
+            raise WrapperError(
+                f"cannot restore interrupted {description} install {destination}: "
+                f"{error.strerror or error}"
+            ) from error
+        cleanup.install_backup = None
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def _replace_owned_temp(
+    source: Path,
+    destination: Path,
+    cleanup: Cleanup,
+    attribute: str,
+    description: str,
+) -> None:
+    backup = _snapshot_destination(destination, cleanup)
+    replaced = False
+    committed = False
+    try:
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _TERMINAL_SIGNALS)
+        try:
+            os.replace(source, destination)
+            replaced = True
+            pending = signal.sigpending().intersection(_TERMINAL_SIGNALS)
+            if pending:
+                raise SignalAbort(min(int(signum) for signum in pending))
+        except OSError as error:
+            raise WrapperError(
+                f"cannot atomically install {description} {destination}: "
+                f"{error.strerror or error}"
+            ) from error
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        committed = True
+    except SignalAbort:
+        if replaced and not committed:
+            _rollback_install(destination, backup, cleanup, description)
+        raise
+    finally:
+        if committed:
+            setattr(cleanup, attribute, None)
+            if backup is not None:
+                try:
+                    backup.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+                else:
+                    cleanup.install_backup = None
+
+def _fresh_file_mode() -> int:
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _TERMINAL_SIGNALS)
+    try:
+        previous_umask = os.umask(0)
+        try:
+            return 0o666 & ~previous_umask
+        finally:
+            os.umask(previous_umask)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def _saved_bitcode_mode(destination: Path) -> int:
+    try:
+        existing = destination.stat()
+    except FileNotFoundError:
+        return _fresh_file_mode()
+    except OSError as error:
+        raise WrapperError(
+            f"cannot inspect --obf-save-bc destination {destination}: {error.strerror or error}"
+        ) from error
+    if not stat.S_ISREG(existing.st_mode):
+        raise WrapperError(f"--obf-save-bc destination is not a regular file: {destination}")
+    return stat.S_IMODE(existing.st_mode)
+
+
+def _rewrite_link_arguments(
+    closure: LinkClosure, lowered_object: Path, final_temp: Path, runtime: Path
+) -> list[str]:
+    arguments = list(closure.arguments)
+    arguments[closure.main_index] = str(lowered_object)
+    if closure.output_inline:
+        arguments[closure.output_index] = "-o=" + str(final_temp)
+    else:
+        arguments[closure.output_index] = str(final_temp)
+    arguments.insert(closure.main_index + 1, str(runtime))
+    return arguments
+
+
+def _save_bitcode_atomically(source: Path, destination: Path, cleanup: Cleanup) -> None:
+    try:
+        mode = _saved_bitcode_mode(destination)
+        temporary = _make_owned_temp(
+            cleanup,
+            "save_temp",
+            destination.parent,
+            f".{destination.name}.obf-tinygo-",
+            ".bc",
+            0o600,
+        )
+        with source.open("rb") as input_file, temporary.open("wb") as output_file:
+            shutil.copyfileobj(input_file, output_file, 1024 * 1024)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+        os.chmod(temporary, mode)
+        _replace_owned_temp(
+            temporary,
+            destination,
+            cleanup,
+            "save_temp",
+            "--obf-save-bc output",
+        )
+    except (OSError, WrapperError) as error:
+        raise WrapperError(
+            "executable was installed, but --obf-save-bc failed: "
+            f"{error}"
+        ) from error
+
+
+def _emit_provenance(
+    input_bc: Path,
+    protected_bc: Path,
+    obf_bc_argv: list[str],
+    lowered_object: Path,
+    llc_argv: list[str],
+    relink_argv: list[str],
+) -> None:
+    record = {
+        "input_bc": str(input_bc),
+        "protected_bc": str(protected_bc),
+        "obf_bc_argv": obf_bc_argv,
+        "llc_object": str(lowered_object),
+        "llc_argv": llc_argv,
+        "relink_argv": relink_argv,
+    }
+    print("obf-tinygo: provenance " + json.dumps(record, ensure_ascii=True, sort_keys=True), file=sys.stderr)
+
+
+def _run_pipeline(invocation: Invocation, cleanup: Cleanup) -> None:
+    cleanup.keep_work = invocation.requested_work
+    _validate_host()
+    pinned_config = _pin_config(invocation.config, cleanup)
+    invocation = replace(invocation, config=pinned_config)
+    tinygo, obf_bc, llc, runtime, (elf_machine, elf_class) = _preflight(invocation)
+    _reject_cgo_package_graph(tinygo, invocation)
+    scratch = _make_owned_scratch(cleanup)
+    input_bc = scratch / "whole-program.bc"
+    protected_bc = scratch / "whole-program.protected.bc"
+    baseline = scratch / "baseline.elf"
+    lowered_object = scratch / "main.obf.o"
+
+    build_prefix = [tinygo, "build", *invocation.forwarded_flags]
+    whole_build = [*build_prefix]
+    if invocation.requested_x:
+        whole_build.append("-x")
+    if invocation.requested_work:
+        whole_build.append("-work")
+    try:
+        whole_output = _run_capture(
+            [*whole_build, "-o", str(input_bc), invocation.package],
+            echo=invocation.requested_x or invocation.requested_work,
+            on_output=(
+                (lambda output: _record_owned_work_dirs(output, cleanup))
+                if invocation.requested_work
+                else None
+            ),
+        )
+    except (ChildExit, ChildSignal, SignalAbort) as error:
+        if invocation.requested_work:
+            _record_owned_work_dirs(error.output, cleanup)
+        raise
+    _require_nonempty_regular(input_bc, "whole-program TinyGo bitcode")
+
+    try:
+        retained_output = _run_capture(
+            [*build_prefix, "-x", "-work", "-o", str(baseline), invocation.package],
+            echo=invocation.requested_x or invocation.requested_work,
+            on_output=lambda output: _record_owned_work_dirs(output, cleanup),
+        )
+    except (ChildExit, ChildSignal, SignalAbort) as error:
+        _record_owned_work_dirs(error.output, cleanup)
+        raise
+    _require_nonempty_regular(baseline, "retained baseline executable")
+    _verify_elf(baseline, elf_machine, elf_class, relocatable=False)
+    try:
+        baseline_mode = stat.S_IMODE(baseline.stat().st_mode)
+    except OSError as error:
+        raise WrapperError(f"cannot inspect retained baseline executable: {error.strerror or error}") from error
+    if not baseline_mode & stat.S_IXUSR:
+        raise WrapperError("retained baseline executable is not user-executable")
+    closure = _extract_link_closure(retained_output, runtime)
+
+    final_temp = _make_owned_temp(
+        cleanup,
+        "final_temp",
+        invocation.output.parent,
+        f".{invocation.output.name}.obf-tinygo-",
+        ".tmp",
+        0o700,
+    )
+    obf_bc_argv = [obf_bc, "--obf-config", str(invocation.config), str(input_bc), "-o", str(protected_bc)]
+    llc_argv = [
+        llc,
+        "-filetype=obj",
+        f"-mcpu={closure.mcpu}",
+        f"-mattr={closure.mattr}",
+        "-function-sections",
+        "-data-sections",
+    ]
+    if closure.code_model is not None:
+        llc_argv.append(f"-code-model={closure.code_model}")
+    llc_argv.extend([f"-O{closure.lto_level}", str(protected_bc), "-o", str(lowered_object)])
+    relink_argv = [
+        *_select_linker_command(closure.linker),
+        *_rewrite_link_arguments(closure, lowered_object, final_temp, runtime),
+    ]
+
+    _run_capture(obf_bc_argv, echo=True)
+    _require_nonempty_regular(protected_bc, "protected whole-program bitcode")
+    _emit_provenance(input_bc, protected_bc, obf_bc_argv, lowered_object, llc_argv, relink_argv)
+    _run_capture(llc_argv, echo=True)
+    _verify_elf(lowered_object, elf_machine, elf_class, relocatable=True)
+    _run_capture(relink_argv, echo=True)
+    _verify_elf(final_temp, elf_machine, elf_class, relocatable=False)
+    try:
+        os.chmod(final_temp, baseline_mode)
+    except OSError as error:
+        raise WrapperError(f"cannot apply retained executable permissions: {error.strerror or error}") from error
+
+    _replace_owned_temp(
+        final_temp,
+        invocation.output,
+        cleanup,
+        "final_temp",
+        "executable",
+    )
+
+    if invocation.save_bc is not None:
+        _save_bitcode_atomically(protected_bc, invocation.save_bc, cleanup)
+
+
+def _report_retained_work(cleanup: Cleanup) -> None:
+    if not cleanup.keep_work:
+        return
+    if cleanup.scratch is not None and cleanup.scratch.is_dir():
+        print(f"OBF_WORK={cleanup.scratch}", file=sys.stderr)
+    for work in cleanup.work_dirs:
+        if work.is_dir():
+            print(f"TINYGO_WORK={work}", file=sys.stderr)
+
+
+def _install_signal_handlers() -> dict[int, object]:
+    previous: dict[int, object] = {}
+
+    def handle_signal(signum: int, _frame: object) -> None:
+        global _DEFERRED_SIGNAL
+        if _SPAWNING_CHILD:
+            if _DEFERRED_SIGNAL is None:
+                _DEFERRED_SIGNAL = signum
+            return
+        child = _ACTIVE_CHILD
+        if child is not None and child.poll() is None:
+            try:
+                os.killpg(child.pid, signum)
+            except ProcessLookupError:
+                pass
+        raise SignalAbort(signum)
+
+    for signal_name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"):
+        signum = getattr(signal, signal_name, None)
+        if signum is None:
+            continue
+        previous[signum] = signal.getsignal(signum)
+        signal.signal(signum, handle_signal)
+    return previous
+
+
+def _replace_signal_handlers(replacements: dict[int, object]) -> None:
+    previous_mask: set[signal.Signals] | None = None
+    if os.name == "posix":
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _TERMINAL_SIGNALS)
+    try:
+        for signum, handler in replacements.items():
+            signal.signal(signum, handler)
+    finally:
+        if previous_mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def _restore_signal_handlers(previous: dict[int, object]) -> None:
+    _replace_signal_handlers(previous)
+
+
+def main() -> int:
+    cleanup = Cleanup()
+    previous_handlers = _install_signal_handlers()
+    status = 2
+    pending_signal: int | None = None
+
+    def defer_cleanup_signal(signum: int, _frame: object) -> None:
+        nonlocal pending_signal
+        if pending_signal is None:
+            pending_signal = signum
+
+    try:
+        try:
+            invocation = _parse_invocation(sys.argv[1:])
+            _run_pipeline(invocation, cleanup)
+            status = 0
+        except WrapperError as error:
+            status = _fail(str(error))
+        except ChildExit as error:
+            status = error.status
+        except ChildSignal as error:
+            pending_signal = error.signum
+        except SignalAbort as error:
+            pending_signal = error.signum
+    finally:
+        _replace_signal_handlers(
+            {signum: defer_cleanup_signal for signum in previous_handlers}
+        )
+        _report_retained_work(cleanup)
+        cleanup.cleanup()
+
+    if pending_signal is not None:
+        signal.signal(pending_signal, signal.SIG_DFL)
+        if os.name == "posix":
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {pending_signal})
+        os.kill(os.getpid(), pending_signal)
+        return 128 + pending_signal
+    _restore_signal_handlers(previous_handlers)
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

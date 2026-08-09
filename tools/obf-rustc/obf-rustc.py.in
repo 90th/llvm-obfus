@@ -1,0 +1,1439 @@
+#!@Python3_EXECUTABLE@
+
+from __future__ import annotations
+
+import os
+import re
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
+
+
+RUSTC = r"@OBF_RUSTC_COMMAND@"
+PLUGIN = r"@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@"
+RUNTIME_ARCHIVE = r"@OBF_RUNTIME_ARCHIVE@"
+CONFIG_DRIVER = r"@CMAKE_CURRENT_BINARY_DIR@/obf-driver@CMAKE_EXECUTABLE_SUFFIX@"
+LLVM_PACKAGE_VERSION = r"@LLVM_PACKAGE_VERSION@"
+LLVM_HOST_TRIPLE = r"@LLVM_HOST_TRIPLE@"
+
+_PASSIVE_EMITS = frozenset({"metadata", "dep-info"})
+_CODEGEN_EMITS = frozenset({"link", "llvm-ir", "llvm-bc", "asm", "obj"})
+_SUPPORTED_CRATE_TYPES = frozenset({"bin", "cdylib"})
+_QUERY_OPTIONS = frozenset(
+    {"-V", "-Vv", "-vV", "--version", "-h", "--help", "--explain"}
+)
+_JOBSERVER_FD_PATTERN = re.compile(
+    r"(?:^|\s)--jobserver-(?:fds|auth)=(\d+),(\d+)(?=$|\s)"
+)
+_DIRECT_SIDE_EFFECT_CODEGEN = frozenset({"incremental", "save-temps"})
+_DIRECT_SIDE_EFFECT_UNSTABLE_PREFIXES = (
+    "dump-mir",
+    "dump-mono-stats",
+    "llvm-time-trace",
+    "save-analysis",
+    "self-profile",
+)
+_VALUE_OPTIONS = frozenset(
+    {
+        "--allow",
+        "--cap-lints",
+        "--cfg",
+        "--check-cfg",
+        "--codegen",
+        "--color",
+        "--crate-attr",
+        "--crate-name",
+        "--crate-type",
+        "--deny",
+        "--edition",
+        "--emit",
+        "--error-format",
+        "--extern",
+        "--forbid",
+        "--json",
+        "--link-arg",
+        "--out-dir",
+        "--print",
+        "--remap-path-prefix",
+        "--sysroot",
+        "--target",
+        "--warn",
+    }
+)
+_SHORT_VALUE_OPTIONS = frozenset({"-A", "-C", "-D", "-F", "-L", "-W", "-Z", "-l", "-o"})
+_SIGNAL_NUMBERS = (
+    tuple(
+        getattr(signal, name)
+        for name in ("SIGHUP", "SIGINT", "SIGTERM", "SIGQUIT")
+        if hasattr(signal, name)
+    )
+    if os.name == "posix"
+    else ()
+)
+
+
+@dataclass(frozen=True)
+class local_options:
+    rustc: str | None
+    config: str | None
+    enable: bool
+    rustc_args: list[str]
+
+
+@dataclass(frozen=True)
+class codegen_setting:
+    family: str
+    value: str
+    positions: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class active_action:
+    crate_type: str
+    link: bool
+    codegen_settings: list[codegen_setting]
+
+
+
+@dataclass(frozen=True)
+class direct_output_plan:
+    destination: Path
+    option_index: int
+    value_index: int | None
+    emit_kind: str | None
+
+
+class _ProcessSignal(BaseException):
+    def __init__(self, signum: int):
+        self.signum = signum
+
+class _SignalScope:
+    def __init__(self) -> None:
+        self._child: subprocess.Popen[str] | None = None
+        self._received_signal: int | None = None
+        self._previous_handlers: dict[int, object] = {}
+
+    @property
+    def received_signal(self) -> int | None:
+        return self._received_signal
+
+    def raise_if_received(self) -> None:
+        if self._received_signal is not None:
+            raise _ProcessSignal(self._received_signal)
+
+    def __enter__(self) -> "_SignalScope":
+        for signum in _SIGNAL_NUMBERS:
+            self._previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, self._handle_signal)
+        return self
+
+    def __exit__(
+        self, _exc_type: object, _exc_value: object, _traceback: object
+    ) -> None:
+        for signum, previous_handler in self._previous_handlers.items():
+            signal.signal(signum, previous_handler)
+
+    def _forward_signal(self, signum: int) -> None:
+        if self._child is None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(self._child.pid, signum)
+            else:
+                self._child.send_signal(signum)
+        except (OSError, ProcessLookupError):
+            pass
+
+    def _handle_signal(self, signum: int, _frame: object) -> None:
+        if self._received_signal is None:
+            self._received_signal = signum
+        self._forward_signal(signum)
+
+    def attach(self, child: subprocess.Popen[str]) -> None:
+        self._child = child
+        if self._received_signal is not None:
+            self._forward_signal(self._received_signal)
+
+    def detach(self) -> None:
+        self._child = None
+
+
+def _fail(message: str) -> int:
+    print(f"obf-rustc: {message}", file=sys.stderr)
+    return 2
+
+
+def _set_once(
+    current: str | None, value: str, option: str
+) -> tuple[str | None, int | None]:
+    if value == "":
+        return current, _fail(f"{option} requires a non-empty value")
+    if current is not None and current != value:
+        return current, _fail(f"conflicting {option} values")
+    return value, None
+
+
+def _parse_local_options(argv: list[str]) -> tuple[local_options | None, int | None]:
+    rustc: str | None = None
+    config: str | None = None
+    enable = False
+    rustc_args: list[str] = []
+    index = 0
+
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--":
+            rustc_args.extend(argv[index + 1:])
+            break
+        if arg == "--rustc":
+            if index + 1 >= len(argv):
+                return None, _fail("--rustc requires a path")
+            rustc, error = _set_once(rustc, argv[index + 1], "--rustc")
+            if error is not None:
+                return None, error
+            index += 2
+            continue
+        if arg.startswith("--rustc="):
+            rustc, error = _set_once(rustc, arg.split("=", 1)[1], "--rustc")
+            if error is not None:
+                return None, error
+            index += 1
+            continue
+        if arg == "--obf-config":
+            if index + 1 >= len(argv):
+                return None, _fail("--obf-config requires a path")
+            config, error = _set_once(config, argv[index + 1], "--obf-config")
+            if error is not None:
+                return None, error
+            index += 2
+            continue
+        if arg.startswith("--obf-config="):
+            config, error = _set_once(
+                config, arg.split("=", 1)[1], "--obf-config"
+            )
+            if error is not None:
+                return None, error
+            index += 1
+            continue
+        if arg == "--obf-enable":
+            enable = True
+            index += 1
+            continue
+        if arg.startswith("--obf-"):
+            return None, _fail(f"unknown wrapper option: {arg}")
+        rustc_args.append(arg)
+        index += 1
+
+    return local_options(rustc, config, enable, rustc_args), None
+
+
+def _is_query(rustc_args: Iterable[str]) -> bool:
+    return any(
+        arg in _QUERY_OPTIONS
+        or arg == "--print"
+        or arg.startswith("--print=")
+        or arg.startswith("--explain=")
+        for arg in rustc_args
+    )
+
+
+def _collect_option_values(
+    rustc_args: list[str], option: str
+) -> tuple[list[str] | None, int | None]:
+    values: list[str] = []
+    index = 0
+    while index < len(rustc_args):
+        arg = rustc_args[index]
+        if arg == option:
+            if index + 1 >= len(rustc_args) or rustc_args[index + 1].startswith("-"):
+                return None, _fail(f"{option} requires a value")
+            values.append(rustc_args[index + 1])
+            index += 2
+            continue
+        if arg.startswith(f"{option}="):
+            value = arg.split("=", 1)[1]
+            if value == "":
+                return None, _fail(f"{option} requires a value")
+            values.append(value)
+        index += 1
+    return values, None
+
+
+def _split_comma_values(
+    values: Iterable[str], option: str, *, output_path: bool
+) -> tuple[list[str] | None, int | None]:
+    result: list[str] = []
+    for value in values:
+        for item in value.split(","):
+            token = item.split("=", 1)[0] if output_path else item
+            token = token.strip()
+            if token == "":
+                return None, _fail(f"{option} contains an empty value")
+            result.append(token)
+    return result, None
+
+
+def _codegen_settings(rustc_args: list[str]) -> list[codegen_setting]:
+    settings: list[codegen_setting] = []
+    index = 0
+    while index < len(rustc_args):
+        arg = rustc_args[index]
+        family: str | None = None
+        value: str | None = None
+        positions: tuple[int, ...] | None = None
+
+        if arg in {"-C", "--codegen", "-Z"}:
+            if index + 1 < len(rustc_args):
+                family = "Z" if arg == "-Z" else "C"
+                value = rustc_args[index + 1]
+                positions = (index, index + 1)
+                index += 2
+            else:
+                index += 1
+        elif arg.startswith("-C") and len(arg) > 2:
+            family = "C"
+            value = arg[2:]
+            positions = (index,)
+            index += 1
+        elif arg.startswith("-Z") and len(arg) > 2:
+            family = "Z"
+            value = arg[2:]
+            positions = (index,)
+            index += 1
+        elif arg.startswith("--codegen="):
+            family = "C"
+            value = arg.split("=", 1)[1]
+            positions = (index,)
+            index += 1
+        else:
+            index += 1
+
+        if family is not None and value is not None and positions is not None:
+            settings.append(
+                codegen_setting(family, value.removeprefix("="), positions)
+            )
+    return settings
+
+
+def _rust_source_inputs(rustc_args: list[str]) -> list[str]:
+    inputs: list[str] = []
+    index = 0
+    options_ended = False
+    while index < len(rustc_args):
+        arg = rustc_args[index]
+        if options_ended:
+            inputs.append(arg)
+            index += 1
+            continue
+        if arg == "--":
+            options_ended = True
+            index += 1
+            continue
+        if arg in _VALUE_OPTIONS or arg in _SHORT_VALUE_OPTIONS:
+            index += 2
+            continue
+        if any(arg.startswith(f"{option}=") for option in _VALUE_OPTIONS):
+            index += 1
+            continue
+        if any(
+            arg.startswith(option) and len(arg) > len(option)
+            for option in _SHORT_VALUE_OPTIONS
+        ):
+            index += 1
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        inputs.append(arg)
+        index += 1
+    return inputs
+
+
+def _resolved_crate_type(
+    crate_types: list[str], is_test: bool
+) -> tuple[str | None, int | None]:
+    unique_types = list(dict.fromkeys(crate_types))
+    if len(unique_types) > 1:
+        return None, _fail("active Rust invocation has mixed --crate-type values")
+    if is_test:
+        if unique_types and unique_types[0] != "bin":
+            return None, _fail("active Rust test invocation only supports bin crate type")
+        return "test", None
+    if not unique_types:
+        return None, _fail(
+            "active Rust invocation requires an explicit --crate-type=bin or "
+            "--crate-type=cdylib (or --test)"
+        )
+    crate_type = unique_types[0]
+    if crate_type not in _SUPPORTED_CRATE_TYPES:
+        return None, _fail(
+            "active Rust invocation only supports bin, cdylib, or --test; "
+            f"got crate type {crate_type!r}"
+        )
+    return crate_type, None
+
+def _normalize_emit_arguments(
+    rustc_args: list[str],
+) -> tuple[list[str] | None, int | None]:
+    effective: dict[str, str | None] = {}
+    remove_positions: set[int] = set()
+    first_option_index: int | None = None
+    option_count = 0
+    token_count = 0
+    index = 0
+    while index < len(rustc_args):
+        argument = rustc_args[index]
+        if argument == "--":
+            break
+        if argument == "--emit":
+            if index + 1 >= len(rustc_args):
+                return None, _fail("--emit requires a value")
+            value = rustc_args[index + 1]
+            positions = (index, index + 1)
+            index += 2
+        elif argument.startswith("--emit="):
+            value = argument.split("=", 1)[1]
+            positions = (index,)
+            index += 1
+        else:
+            index += 1
+            continue
+
+        if first_option_index is None:
+            first_option_index = positions[0]
+        option_count += 1
+        remove_positions.update(positions)
+        for item in value.split(","):
+            token = item.strip()
+            if not token:
+                return None, _fail("--emit contains an empty value")
+            if "=" in token:
+                emit_kind, output_path = token.split("=", 1)
+                if not output_path:
+                    return None, _fail("--emit output path must be non-empty")
+            else:
+                emit_kind, output_path = token, None
+            emit_kind = emit_kind.strip()
+            if not emit_kind:
+                return None, _fail("--emit contains an empty kind")
+            token_count += 1
+            effective[emit_kind] = output_path
+
+    if first_option_index is None or (
+        option_count == 1 and token_count == len(effective)
+    ):
+        return rustc_args, None
+
+    canonical = ",".join(
+        kind if output is None else f"{kind}={output}"
+        for kind, output in effective.items()
+    )
+    normalized: list[str] = []
+    for position, argument in enumerate(rustc_args):
+        if position == first_option_index:
+            normalized.append(f"--emit={canonical}")
+        if position not in remove_positions:
+            normalized.append(argument)
+    return normalized, None
+
+
+def _classify_active_action(
+    rustc_args: list[str], *, validate_target: bool
+) -> tuple[active_action | None, bool, int | None]:
+    emit_values, error = _collect_option_values(rustc_args, "--emit")
+    if error is not None:
+        return None, False, error
+    assert emit_values is not None
+    emit_tokens, error = _split_comma_values(emit_values, "--emit", output_path=True)
+    if error is not None:
+        return None, False, error
+    assert emit_tokens is not None
+
+    emits = set(emit_tokens) if emit_tokens else {"link"}
+    unknown_emits = emits - _PASSIVE_EMITS - _CODEGEN_EMITS
+    if unknown_emits:
+        return None, False, _fail(
+            "active Rust invocation does not support --emit="
+            + ",".join(sorted(unknown_emits))
+        )
+    if emits <= _PASSIVE_EMITS:
+        return None, True, None
+
+    crate_type_values, error = _collect_option_values(rustc_args, "--crate-type")
+    if error is not None:
+        return None, False, error
+    assert crate_type_values is not None
+    crate_types, error = _split_comma_values(
+        crate_type_values, "--crate-type", output_path=False
+    )
+    if error is not None:
+        return None, False, error
+    assert crate_types is not None
+    crate_type, error = _resolved_crate_type(crate_types, "--test" in rustc_args)
+    if error is not None:
+        return None, False, error
+    assert crate_type is not None
+
+    target_values, error = _collect_option_values(rustc_args, "--target")
+    if error is not None:
+        return None, False, error
+    assert target_values is not None
+    targets = list(dict.fromkeys(target_values))
+    if len(targets) > 1:
+        return None, False, _fail("active Rust invocation has conflicting --target values")
+    if validate_target and targets and targets[0] != LLVM_HOST_TRIPLE:
+        return None, False, _fail(
+            "active Rust invocation only supports native target "
+            f"{LLVM_HOST_TRIPLE}; got {targets[0]}"
+        )
+
+    settings = _codegen_settings(rustc_args)
+    if any(
+        setting.family == "C"
+        and (
+            setting.value == "linker-plugin-lto"
+            or setting.value.startswith("linker-plugin-lto=")
+        )
+        for setting in settings
+    ):
+        return None, False, _fail(
+            "active Rust invocation does not support linker-plugin-LTO"
+        )
+
+    return active_action(crate_type, "link" in emits, settings), False, None
+
+
+def _plan_direct_output(
+    rustc_args: list[str],
+) -> tuple[direct_output_plan | None, int | None]:
+    emit_specs: list[tuple[str, str | None, int, int | None]] = []
+    output_specs: list[tuple[str, int, int | None]] = []
+    index = 0
+    while index < len(rustc_args):
+        argument = rustc_args[index]
+        if argument == "--":
+            break
+        if argument == "--emit":
+            if index + 1 >= len(rustc_args):
+                return None, _fail("--emit requires a value")
+            value = rustc_args[index + 1]
+            option_index, value_index = index, index + 1
+            index += 2
+        elif argument.startswith("--emit="):
+            value = argument.split("=", 1)[1]
+            option_index, value_index = index, None
+            index += 1
+        else:
+            value = ""
+            option_index, value_index = -1, None
+
+        if option_index >= 0:
+            for item in value.split(","):
+                token = item.strip()
+                if not token:
+                    return None, _fail("--emit contains an empty value")
+                if "=" in token:
+                    emit_kind, output_path = token.split("=", 1)
+                    if not output_path:
+                        return None, _fail("--emit output path must be non-empty")
+                else:
+                    emit_kind, output_path = token, None
+                emit_specs.append(
+                    (emit_kind, output_path, option_index, value_index)
+                )
+            continue
+
+        if argument == "-o":
+            if index + 1 >= len(rustc_args):
+                return None, _fail("-o requires a value")
+            output_specs.append((rustc_args[index + 1], index, index + 1))
+            index += 2
+            continue
+        if argument.startswith("-o") and len(argument) > 2:
+            output_specs.append((argument[2:], index, None))
+        index += 1
+
+    if not emit_specs:
+        emit_specs.append(("link", None, -1, None))
+    if len(emit_specs) != 1 or emit_specs[0][0] not in _CODEGEN_EMITS:
+        return None, _fail(
+            "active direct Rust support requires exactly one --emit kind that generates code"
+        )
+    if len(output_specs) > 1:
+        return None, _fail("active direct Rust support accepts exactly one -o output")
+
+    emit_kind, explicit_path, option_index, value_index = emit_specs[0]
+    if explicit_path is not None:
+        if output_specs:
+            return None, _fail(
+                "active direct Rust support does not combine -o with an explicit --emit path"
+            )
+        output_path = explicit_path
+        emit_output_kind: str | None = emit_kind
+    else:
+        if len(output_specs) != 1:
+            return None, _fail(
+                "active direct Rust support requires -o or one explicit --emit output path"
+            )
+        output_path, option_index, value_index = output_specs[0]
+        emit_output_kind = None
+
+    if not output_path or output_path == "-":
+        return None, _fail("active direct Rust output must name a file")
+    destination = Path(os.path.abspath(output_path))
+    if not destination.parent.is_dir():
+        return None, _fail(
+            f"active direct Rust output directory does not exist: {destination.parent}"
+        )
+    try:
+        output_mode = os.lstat(destination).st_mode
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        return None, _fail(f"cannot inspect active direct Rust output: {error}")
+    else:
+        if stat.S_ISLNK(output_mode) or not stat.S_ISREG(output_mode):
+            return None, _fail(
+                "active direct Rust output must be a regular non-symlink file"
+            )
+
+    return (
+        direct_output_plan(
+            destination, option_index, value_index, emit_output_kind
+        ),
+        None,
+    )
+
+
+def _rewrite_direct_output(
+    rustc_args: list[str], plan: direct_output_plan, temporary: Path
+) -> list[str]:
+    rewritten = list(rustc_args)
+    if plan.emit_kind is not None:
+        value = f"{plan.emit_kind}={temporary}"
+        if plan.value_index is None:
+            rewritten[plan.option_index] = f"--emit={value}"
+        else:
+            rewritten[plan.value_index] = value
+    elif plan.value_index is None:
+        rewritten[plan.option_index : plan.option_index + 1] = [
+            "-o",
+            str(temporary),
+        ]
+    else:
+        rewritten[plan.value_index] = str(temporary)
+    return rewritten
+
+
+def _is_metadata_only_emit_request(rustc_args: list[str]) -> bool:
+    """Recognize the passive Cargo/direct fast path without validating other modes."""
+    emit_values, error = _collect_option_values(rustc_args, "--emit")
+    if error is not None or emit_values is None:
+        return False
+    emit_tokens, error = _split_comma_values(
+        emit_values, "--emit", output_path=True
+    )
+    if error is not None or emit_tokens is None:
+        return False
+    return bool(emit_tokens) and set(emit_tokens) <= _PASSIVE_EMITS
+
+
+def _canonical_path(value: str, *, base: str | None = None) -> str:
+    path = Path(value)
+    if not path.is_absolute() and base is not None:
+        path = Path(base) / path
+    return os.path.realpath(os.path.abspath(os.fspath(path)))
+
+
+def _canonical_selector_path(
+    value: str | None, variable: str, *, directory: bool
+) -> tuple[str | None, int | None]:
+    if value is None or value == "":
+        return None, _fail(f"Cargo activation requires {variable}")
+    canonical = _canonical_path(value)
+    if value != canonical:
+        return None, _fail(f"{variable} must be a canonical absolute path")
+    path = Path(canonical)
+    if (directory and not path.is_dir()) or (not directory and not path.is_file()):
+        kind = "directory" if directory else "source file"
+        return None, _fail(f"{variable} must name an existing {kind}")
+    return canonical, None
+
+
+def _normalize_crate_name(value: str) -> str:
+    return value.replace("-", "_")
+
+
+def _cargo_crate_type(
+    rustc_args: list[str]
+) -> tuple[str | None, int | None]:
+    values, error = _collect_option_values(rustc_args, "--crate-type")
+    if error is not None:
+        return None, error
+    assert values is not None
+    types, error = _split_comma_values(values, "--crate-type", output_path=False)
+    if error is not None:
+        return None, error
+    assert types is not None
+    unique_types = list(dict.fromkeys(types))
+    if len(unique_types) > 1:
+        return None, _fail("Cargo Rust owner selector has mixed --crate-type values")
+    if not unique_types:
+        return "bin", None
+    return unique_types[0], None
+
+
+def _cargo_owner_matches(
+    rustc_args: list[str], env: dict[str, str]
+) -> tuple[bool | None, int | None]:
+    manifest_dir, error = _canonical_selector_path(
+        env.get("OBF_RUST_MANIFEST_DIR"),
+        "OBF_RUST_MANIFEST_DIR",
+        directory=True,
+    )
+    if error is not None:
+        return None, error
+    crate_root, error = _canonical_selector_path(
+        env.get("OBF_RUST_CRATE_ROOT"),
+        "OBF_RUST_CRATE_ROOT",
+        directory=False,
+    )
+    if error is not None:
+        return None, error
+    assert manifest_dir is not None and crate_root is not None
+
+    requested_name = env.get("OBF_RUST_CRATE_NAME")
+    if requested_name is None or requested_name == "":
+        return None, _fail("Cargo activation requires OBF_RUST_CRATE_NAME")
+    normalized_name = _normalize_crate_name(requested_name)
+    if requested_name != normalized_name:
+        return None, _fail("OBF_RUST_CRATE_NAME must use Cargo's normalized underscore form")
+
+    requested_type = env.get("OBF_RUST_CRATE_TYPE")
+    if requested_type not in _SUPPORTED_CRATE_TYPES:
+        return None, _fail("OBF_RUST_CRATE_TYPE must be exactly bin or cdylib")
+
+    cargo_manifest_dir = env.get("CARGO_MANIFEST_DIR")
+    if cargo_manifest_dir is None or cargo_manifest_dir == "":
+        return None, _fail("Cargo activation requires CARGO_MANIFEST_DIR")
+    actual_manifest_dir = _canonical_path(cargo_manifest_dir)
+    if not Path(actual_manifest_dir).is_dir():
+        return None, _fail("CARGO_MANIFEST_DIR must name an existing directory")
+
+    crate_name_values, error = _collect_option_values(rustc_args, "--crate-name")
+    if error is not None:
+        return None, error
+    assert crate_name_values is not None
+    actual_names = list(dict.fromkeys(_normalize_crate_name(name) for name in crate_name_values))
+    if len(actual_names) != 1:
+        return None, _fail("Cargo Rust owner selector requires one --crate-name value")
+
+    source_inputs = _rust_source_inputs(rustc_args)
+    if len(source_inputs) != 1:
+        return None, _fail("Cargo Rust owner selector requires one Rust input source path")
+    actual_root = _canonical_path(source_inputs[0])
+    if not Path(actual_root).is_file():
+        return None, _fail(
+            "Cargo Rust owner selector input source path must name an existing file"
+        )
+
+    if actual_manifest_dir != manifest_dir:
+        return False, None
+    if actual_names[0] != normalized_name:
+        return False, None
+    if actual_root != crate_root:
+        return False, None
+
+    actual_type, error = _cargo_crate_type(rustc_args)
+    if error is not None:
+        return None, error
+    assert actual_type is not None
+    return actual_type == requested_type, None
+
+
+def _same_path(left: str | None, right: str) -> bool:
+    return left is not None and left != "" and _canonical_path(left) == _canonical_path(right)
+
+
+def _looks_like_rustc(path: str) -> bool:
+    return Path(path).name.lower() in {"rustc", "rustc.exe"}
+
+
+def _has_cargo_rustc_shape(rustc_args: list[str]) -> bool:
+    if not rustc_args:
+        return False
+    first_argument = rustc_args[0]
+    if _looks_like_rustc(first_argument):
+        return True
+    return (
+        os.environ.get("CARGO_MANIFEST_DIR") not in {None, ""}
+        and not first_argument.startswith("-")
+        and not first_argument.endswith(".rs")
+    )
+
+
+def _check_cargo_wrapper_placement(compiler: str, env: dict[str, str]) -> int | None:
+    if _same_path(env.get("RUSTC_WRAPPER"), sys.argv[0]):
+        return _fail(
+            "obf-rustc must be configured as RUSTC_WORKSPACE_WRAPPER, not RUSTC_WRAPPER"
+        )
+    if _same_path(compiler, sys.argv[0]):
+        return _fail("Cargo workspace wrapper recursively invoked obf-rustc")
+    return None
+
+
+def _requires_rust_frontend(config_path: str, env: dict[str, str]) -> int | None:
+    if not Path(CONFIG_DRIVER).is_file():
+        return _fail(f"missing config validator: {CONFIG_DRIVER}")
+    try:
+        completed = _run_process(
+            [
+                CONFIG_DRIVER,
+                f"--config={config_path}",
+                "--require-frontend=rust",
+                "--quiet",
+            ],
+            env,
+            (),
+            capture_output=True,
+        )
+    except OSError as error:
+        return _fail(f"cannot execute config validator: {error}")
+    if completed.returncode == 0:
+        return None
+
+    detail = (completed.stderr or completed.stdout or "").strip()
+    if detail:
+        return _fail(f"invalid Rust config: {detail}")
+    return _fail("invalid Rust config")
+
+def _inject_active_flags(
+    rustc_args: list[str], action: active_action, *, direct: bool
+) -> tuple[list[str] | None, int | None]:
+    remove_positions: set[int] = set()
+    runtime_name = Path(RUNTIME_ARCHIVE).name
+
+    for setting in action.codegen_settings:
+        if setting.family == "Z" and setting.value.startswith("llvm-plugins"):
+            if setting.value != f"llvm-plugins={PLUGIN}":
+                return None, _fail("active Rust invocation has a conflicting llvm-plugins flag")
+            remove_positions.update(setting.positions)
+        elif (
+            setting.family == "C"
+            and setting.value.split("=", 1)[0] == "llvm-args"
+        ):
+            return None, _fail(
+                "active Rust support does not accept -Cllvm-args because it can "
+                "override wrapper policy"
+            )
+        elif setting.family == "C" and setting.value.startswith("codegen-units"):
+            if setting.value != "codegen-units=1":
+                return None, _fail("active Rust invocation has a conflicting codegen-units flag")
+            remove_positions.update(setting.positions)
+        elif (
+            direct
+            and setting.family == "C"
+            and setting.value.startswith("split-debuginfo")
+        ):
+            if setting.value != "split-debuginfo=off":
+                return None, _fail(
+                    "active direct Rust support requires -Csplit-debuginfo=off"
+                )
+            remove_positions.update(setting.positions)
+        elif (
+            action.link
+            and setting.family == "C"
+            and setting.value.startswith("link-args=")
+        ):
+            return None, _fail(
+                "active Rust invocation does not support -Clink-args; "
+                "use repeated -Clink-arg values"
+            )
+        elif (
+            action.link
+            and setting.family == "C"
+            and setting.value.startswith("link-arg=")
+        ):
+            link_arg = setting.value.split("=", 1)[1]
+            if re.search(r"(?:^|,)@", link_arg):
+                return None, _fail(
+                    "active Rust invocation does not support linker response files"
+                )
+            if runtime_name in link_arg:
+                if link_arg != RUNTIME_ARCHIVE:
+                    return None, _fail("active Rust invocation has a conflicting runtime archive")
+                remove_positions.update(setting.positions)
+
+    filtered_args = [
+        argument
+        for index, argument in enumerate(rustc_args)
+        if index not in remove_positions
+    ]
+    injected = ["-Z", f"llvm-plugins={PLUGIN}", "-Ccodegen-units=1"]
+    if direct:
+        injected.append("-Csplit-debuginfo=off")
+    injected.extend(filtered_args)
+    if action.link:
+        injected.append(f"-Clink-arg={RUNTIME_ARCHIVE}")
+    return injected, None
+
+
+def _version_component(version: str) -> tuple[str, str] | None:
+    match = re.search(r"(\d+)\.(\d+)", version)
+    return None if match is None else match.group(1), match.group(2)
+
+def _validate_direct_side_effects(action: active_action) -> int | None:
+    for setting in action.codegen_settings:
+        name = setting.value.split("=", 1)[0]
+        if setting.family == "C":
+            if name in _DIRECT_SIDE_EFFECT_CODEGEN:
+                return _fail(
+                    f"active direct Rust support does not accept -C{name}; "
+                    "use Cargo for sidecar-producing builds"
+                )
+            if name == "split-debuginfo" and setting.value != "split-debuginfo=off":
+                return _fail(
+                    "active direct Rust support requires -Csplit-debuginfo=off"
+                )
+            if setting.value.startswith("link-arg="):
+                link_arg = setting.value.split("=", 1)[1]
+                if link_arg != RUNTIME_ARCHIVE:
+                    return _fail(
+                        "active direct Rust support does not accept user -Clink-arg "
+                        "values; use -l/-L or Cargo"
+                    )
+        elif setting.family == "Z" and name.startswith(
+            _DIRECT_SIDE_EFFECT_UNSTABLE_PREFIXES
+        ):
+            return _fail(
+                f"active direct Rust support does not accept -Z{name}; "
+                "use Cargo for sidecar-producing builds"
+            )
+    return None
+
+
+def _jobserver_pass_fds(
+    env: dict[str, str],
+) -> tuple[tuple[int, ...] | None, int | None]:
+    """Keep Cargo/Make's inherited POSIX jobserver pipe open in rustc."""
+    if os.name != "posix":
+        return (), None
+
+    file_descriptors: set[int] = set()
+    for variable in ("CARGO_MAKEFLAGS", "MAKEFLAGS"):
+        value = env.get(variable)
+        if value is None:
+            continue
+        for match in _JOBSERVER_FD_PATTERN.finditer(value):
+            read_fd, write_fd = (int(item) for item in match.groups())
+            if read_fd <= 2 or write_fd <= 2 or read_fd == write_fd:
+                return None, _fail(
+                    f"{variable} contains an invalid POSIX jobserver fd pair"
+                )
+            for file_descriptor in (read_fd, write_fd):
+                try:
+                    os.fstat(file_descriptor)
+                except OSError:
+                    return None, _fail(
+                        f"{variable} references a closed POSIX jobserver fd"
+                    )
+                file_descriptors.add(file_descriptor)
+    return tuple(sorted(file_descriptors)), None
+
+
+def _exit_for_signal(signum: int) -> int:
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+    except (OSError, ValueError):
+        pass
+    try:
+        os.kill(os.getpid(), signum)
+    except OSError:
+        pass
+    return 128 + signum
+
+
+def _run_process_in_scope(
+    command: list[str],
+    env: dict[str, str],
+    pass_fds: tuple[int, ...],
+    *,
+    capture_output: bool,
+    signal_scope: _SignalScope,
+) -> subprocess.CompletedProcess[str]:
+    signal_scope.raise_if_received()
+    process_options: dict[str, object] = {
+        "env": env,
+        "text": True,
+        "errors": "replace",
+        "start_new_session": os.name == "posix",
+    }
+    if capture_output:
+        process_options["stdout"] = subprocess.PIPE
+        process_options["stderr"] = subprocess.PIPE
+    if pass_fds:
+        process_options["pass_fds"] = pass_fds
+
+    try:
+        child = subprocess.Popen(command, **process_options)
+    except OSError:
+        signal_scope.raise_if_received()
+        raise
+    signal_scope.attach(child)
+    try:
+        stdout, stderr = child.communicate()
+    finally:
+        signal_scope.detach()
+
+    signal_scope.raise_if_received()
+    assert child.returncode is not None
+    if os.name == "posix" and child.returncode < 0:
+        raise _ProcessSignal(-child.returncode)
+    return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
+
+
+def _run_process(
+    command: list[str],
+    env: dict[str, str],
+    pass_fds: tuple[int, ...],
+    *,
+    capture_output: bool,
+    signal_scope: _SignalScope | None = None,
+) -> subprocess.CompletedProcess[str]:
+    if signal_scope is not None:
+        return _run_process_in_scope(
+            command,
+            env,
+            pass_fds,
+            capture_output=capture_output,
+            signal_scope=signal_scope,
+        )
+
+    local_scope = _SignalScope()
+    with local_scope:
+        completed = _run_process_in_scope(
+            command,
+            env,
+            pass_fds,
+            capture_output=capture_output,
+            signal_scope=local_scope,
+        )
+        local_scope.raise_if_received()
+    local_scope.raise_if_received()
+    return completed
+
+
+def _preflight(compiler: str, env: dict[str, str]) -> int | None:
+    pass_fds, error = _jobserver_pass_fds(env)
+    if error is not None:
+        return error
+    assert pass_fds is not None
+    try:
+        completed = _run_process(
+            [compiler, "-vV"], env, pass_fds, capture_output=True
+        )
+    except OSError as error:
+        return _fail(f"failed to execute rustc preflight: {error}")
+
+    if completed.returncode != 0:
+        sys.stdout.write(completed.stdout or "")
+        sys.stderr.write(completed.stderr or "")
+        return completed.returncode
+
+    output = completed.stdout or ""
+    release = re.search(r"(?mi)^\s*release:\s*(\S+)", output)
+    if release is None or re.search(
+        r"(?:^|[-.])(nightly|dev)(?:$|[-.])", release.group(1)
+    ) is None:
+        return _fail("active Rust support requires a nightly or dev rustc")
+
+    reported_llvm = re.search(r"(?mi)^\s*LLVM version:\s*([^\s]+)", output)
+    expected_components = _version_component(LLVM_PACKAGE_VERSION)
+    reported_components = (
+        None if reported_llvm is None else _version_component(reported_llvm.group(1))
+    )
+    if expected_components is None or reported_components != expected_components:
+        actual = "missing" if reported_llvm is None else reported_llvm.group(1)
+        return _fail(
+            "rustc LLVM major.minor does not match the plugin build "
+            f"({actual} versus {LLVM_PACKAGE_VERSION})"
+        )
+    return None
+
+
+def _run_child(
+    compiler: str,
+    rustc_args: list[str],
+    env: dict[str, str],
+    *,
+    signal_scope: _SignalScope | None = None,
+) -> int:
+    pass_fds, error = _jobserver_pass_fds(env)
+    if error is not None:
+        return error
+    assert pass_fds is not None
+    try:
+        completed = _run_process(
+            [compiler, *rustc_args],
+            env,
+            pass_fds,
+            capture_output=False,
+            signal_scope=signal_scope,
+        )
+    except OSError as error:
+        return _fail(f"failed to execute rustc: {error}")
+    return completed.returncode
+
+def _snapshot_direct_destination(destination: Path) -> Path | None:
+    try:
+        mode = os.lstat(destination).st_mode
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise OSError("active direct Rust output changed to a non-regular or symlink path")
+
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{destination.name}.obf-rustc-backup-",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    backup = Path(name)
+    try:
+        os.close(descriptor)
+        backup.unlink()
+        os.link(destination, backup, follow_symlinks=False)
+    except BaseException:
+        try:
+            backup.unlink()
+        except OSError:
+            pass
+        raise
+    return backup
+
+
+def _rollback_direct_install(destination: Path, backup: Path | None) -> None:
+    if backup is None:
+        try:
+            destination.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    os.replace(backup, destination)
+
+
+def _install_direct_output(
+    temporary: Path, destination: Path, signal_scope: _SignalScope
+) -> None:
+    backup = _snapshot_direct_destination(destination)
+    replaced = False
+    committed = False
+    retain_backup = False
+    try:
+        signal_scope.raise_if_received()
+        previous_mask: set[signal.Signals] | None = None
+        if os.name == "posix":
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _SIGNAL_NUMBERS)
+        try:
+            signal_scope.raise_if_received()
+            os.replace(temporary, destination)
+            replaced = True
+            if previous_mask is not None:
+                pending = signal.sigpending().intersection(_SIGNAL_NUMBERS)
+                if pending:
+                    raise _ProcessSignal(min(int(signum) for signum in pending))
+            else:
+                signal_scope.raise_if_received()
+            committed = True
+        finally:
+            if previous_mask is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    except _ProcessSignal:
+        if replaced and not committed:
+            try:
+                _rollback_direct_install(destination, backup)
+            except OSError as error:
+                retain_backup = backup is not None
+                recovery = "" if backup is None else f"; prior output remains at {backup}"
+                _fail(
+                    "cannot roll back interrupted active direct Rust output: "
+                    f"{error}{recovery}"
+                )
+        raise
+    finally:
+        if backup is not None and not retain_backup:
+            try:
+                backup.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+
+def _run_direct_child(
+    compiler: str,
+    rustc_args: list[str],
+    env: dict[str, str],
+    plan: direct_output_plan,
+) -> int:
+    temporary: Path | None = None
+    status = 0
+    signal_scope = _SignalScope()
+    with signal_scope:
+        try:
+            try:
+                descriptor, name = tempfile.mkstemp(
+                    prefix=f".{plan.destination.name}.obf-rustc-",
+                    suffix=".tmp",
+                    dir=plan.destination.parent,
+                )
+                temporary = Path(name)
+            except OSError as error:
+                status = _fail(
+                    f"cannot create active direct Rust temporary output: {error}"
+                )
+            else:
+                try:
+                    os.close(descriptor)
+                except OSError as error:
+                    status = _fail(
+                        f"cannot close active direct Rust temporary output: {error}"
+                    )
+
+            signal_scope.raise_if_received()
+            if status == 0:
+                assert temporary is not None
+                status = _run_child(
+                    compiler,
+                    _rewrite_direct_output(rustc_args, plan, temporary),
+                    env,
+                    signal_scope=signal_scope,
+                )
+
+            signal_scope.raise_if_received()
+            if status == 0:
+                assert temporary is not None
+                try:
+                    output = os.lstat(temporary)
+                    if not stat.S_ISREG(output.st_mode) or output.st_size == 0:
+                        status = _fail(
+                            "active direct rustc did not produce a non-empty regular output"
+                        )
+                    else:
+                        _install_direct_output(temporary, plan.destination, signal_scope)
+                        temporary = None
+                except OSError as error:
+                    status = _fail(
+                        f"cannot atomically install active direct Rust output: {error}"
+                    )
+            signal_scope.raise_if_received()
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+        signal_scope.raise_if_received()
+    signal_scope.raise_if_received()
+    return status
+
+
+def _pin_config(config_path: str) -> tuple[Path | None, int | None]:
+    temporary: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="obf-rustc-config-", suffix=".yaml"
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as destination, Path(config_path).open(
+            "rb"
+        ) as source:
+            while chunk := source.read(1024 * 1024):
+                destination.write(chunk)
+    except OSError as error:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        return None, _fail(f"cannot pin Rust config: {error}")
+    return temporary, None
+
+
+def _run_active_action_in_scope(
+    compiler: str,
+    rustc_args: list[str],
+    config_path: str,
+    action: active_action,
+    signal_scope: _SignalScope,
+    *,
+    cargo_mode: bool,
+) -> int:
+    pinned_config, error = _pin_config(config_path)
+    if error is not None:
+        return error
+    assert pinned_config is not None
+    try:
+        signal_scope.raise_if_received()
+        frontend_error = _requires_rust_frontend(
+            str(pinned_config), os.environ.copy()
+        )
+        signal_scope.raise_if_received()
+        if frontend_error is not None:
+            return frontend_error
+        if not Path(PLUGIN).is_file():
+            return _fail(f"missing pass plugin: {PLUGIN}")
+        if action.link and not Path(RUNTIME_ARCHIVE).is_file():
+            return _fail(f"missing runtime archive: {RUNTIME_ARCHIVE}")
+
+        injected_args, error = _inject_active_flags(
+            rustc_args, action, direct=not cargo_mode
+        )
+        if error is not None:
+            return error
+        assert injected_args is not None
+        output_plan: direct_output_plan | None = None
+        if not cargo_mode:
+            output_plan, error = _plan_direct_output(injected_args)
+            if error is not None:
+                return error
+            assert output_plan is not None
+        child_env = os.environ.copy()
+        child_env["OBF_CONFIG"] = str(pinned_config)
+        signal_scope.raise_if_received()
+        preflight_error = _preflight(compiler, child_env)
+        if preflight_error is not None:
+            return preflight_error
+        if cargo_mode:
+            return _run_child(compiler, injected_args, child_env)
+        assert output_plan is not None
+        return _run_direct_child(compiler, injected_args, child_env, output_plan)
+    finally:
+        try:
+            pinned_config.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def _run_active_action(
+    compiler: str,
+    rustc_args: list[str],
+    config_path: str,
+    action: active_action,
+    *,
+    cargo_mode: bool,
+) -> int:
+    signal_scope = _SignalScope()
+    with signal_scope:
+        status = _run_active_action_in_scope(
+            compiler,
+            rustc_args,
+            config_path,
+            action,
+            signal_scope,
+            cargo_mode=cargo_mode,
+        )
+        signal_scope.raise_if_received()
+    signal_scope.raise_if_received()
+    return status
+
+
+def _main() -> int:
+    options, error = _parse_local_options(sys.argv[1:])
+    if error is not None:
+        return error
+    assert options is not None
+
+    inherited_config = os.environ.get("OBF_CONFIG")
+    config_path = options.config if options.config is not None else inherited_config
+    config_requested = config_path is not None and config_path != ""
+    if options.enable and not config_requested:
+        return _fail("Rust support requires --obf-config or OBF_CONFIG")
+
+    cargo_candidate = _has_cargo_rustc_shape(options.rustc_args)
+    if cargo_candidate and options.rustc is not None:
+        return _fail("--rustc is not valid for a Cargo workspace-wrapper invocation")
+
+    cargo_mode = cargo_candidate and options.rustc is None
+    if cargo_mode:
+        compiler = options.rustc_args[0]
+        rustc_args = options.rustc_args[1:]
+    else:
+        compiler = options.rustc if options.rustc is not None else RUSTC
+        rustc_args = options.rustc_args
+
+    if not config_requested:
+        return _run_child(compiler, rustc_args, os.environ.copy())
+    if _is_query(rustc_args):
+        return _run_child(compiler, rustc_args, os.environ.copy())
+
+    if any(argument.startswith("@") for argument in rustc_args):
+        return _fail(
+            "active Rust support does not accept rustc response files; "
+            "pass arguments directly"
+        )
+    normalized_args, error = _normalize_emit_arguments(rustc_args)
+    if error is not None:
+        return error
+    assert normalized_args is not None
+    rustc_args = normalized_args
+
+
+
+    if _is_metadata_only_emit_request(rustc_args):
+        return _run_child(compiler, rustc_args, os.environ.copy())
+
+    if cargo_mode:
+        if options.config is not None:
+            return _fail("Cargo activation requires OBF_CONFIG")
+        if not _looks_like_rustc(compiler):
+            return _fail("Cargo workspace wrapper must receive rustc as argv[1]")
+        placement_error = _check_cargo_wrapper_placement(compiler, os.environ)
+        if placement_error is not None:
+            return placement_error
+        owner_matches, error = _cargo_owner_matches(rustc_args, os.environ)
+        if error is not None:
+            return error
+        assert owner_matches is not None
+        if not owner_matches:
+            return _run_child(compiler, rustc_args, os.environ.copy())
+
+    action, metadata_only, error = _classify_active_action(
+        rustc_args, validate_target=True
+    )
+    if error is not None:
+        return error
+    if metadata_only:
+        return _run_child(compiler, rustc_args, os.environ.copy())
+    assert action is not None
+    if not cargo_mode:
+        side_effect_error = _validate_direct_side_effects(action)
+        if side_effect_error is not None:
+            return side_effect_error
+    assert config_path is not None
+    return _run_active_action(
+        compiler,
+        rustc_args,
+        config_path,
+        action,
+        cargo_mode=cargo_mode,
+    )
+
+
+def main() -> int:
+    try:
+        return _main()
+    except _ProcessSignal as error:
+        return _exit_for_signal(error.signum)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

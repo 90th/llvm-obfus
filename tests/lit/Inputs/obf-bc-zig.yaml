@@ -1,0 +1,8 @@
+frontend: zig
+seed: 31337
+default_level: none
+targets:
+  - match: zig_protected_component
+    level: strong
+security:
+  strip_release_markers: true

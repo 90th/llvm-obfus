@@ -1,0 +1,20 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "same-name"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "same_name"
+path = "src/lib.rs"
+
+[[bin]]
+name = "same-name"
+path = "src/main.rs"
+
+[[example]]
+name = "same_name"
+path = "examples/same_name.rs"

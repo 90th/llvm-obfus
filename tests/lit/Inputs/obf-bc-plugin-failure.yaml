@@ -1,0 +1,8 @@
+frontend: zig
+default_level: none
+targets:
+  - match: missing_target
+    level: light
+security:
+  fail_on_public_obf_symbol: true
+  strip_release_markers: true

@@ -1,6 +1,11 @@
 import lit.formats
 import shutil
 import os
+import platform
+import re
+import shlex
+import subprocess
+import sys
 
 config.name = "llvm-obfus"
 config.test_format = lit.formats.ShTest(True)
@@ -47,3 +52,135 @@ config.substitutions.append(("%obf_clang", "@CMAKE_CURRENT_BINARY_DIR@/obf-clang
 config.substitutions.append(("%raw_clang", "@OBF_CLANG@"))
 config.substitutions.append(("%obf_runtime", "@CMAKE_CURRENT_BINARY_DIR@/libobf_runtime.a"))
 config.substitutions.append(("%obf_build_include", "@CMAKE_CURRENT_BINARY_DIR@/include"))
+
+
+def _shell_quote(command):
+    return shlex.quote(command)
+
+
+config.substitutions.extend(
+    [
+        ("%obf_bc", _shell_quote("@CMAKE_CURRENT_BINARY_DIR@/obf-bc")),
+        ("%obf_rustc", _shell_quote("@CMAKE_CURRENT_BINARY_DIR@/obf-rustc")),
+        ("%obf_tinygo", _shell_quote("@CMAKE_CURRENT_BINARY_DIR@/obf-tinygo")),
+        ("%raw_rustc", _shell_quote("@OBF_RUSTC_COMMAND@")),
+        ("%raw_cargo", _shell_quote("@OBF_CARGO_COMMAND@")),
+        ("%raw_zig", _shell_quote("@OBF_ZIG_COMMAND@")),
+        ("%raw_tinygo", _shell_quote("@OBF_TINYGO_COMMAND@")),
+        ("%llvm_nm", _shell_quote("@OBF_NM@")),
+    ]
+)
+
+
+def _tool_output(command, *arguments):
+    try:
+        completed = subprocess.run(
+            [command, *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None
+
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+if sys.platform.startswith("linux"):
+    config.available_features.add("system-linux")
+
+rust_version = _tool_output("@OBF_RUSTC_COMMAND@", "-Vv")
+if rust_version is not None:
+    rust_release = re.search(
+        r"(?mi)^\s*release:\s*(\S+)",
+        rust_version,
+    )
+    if rust_release and re.search(
+        r"(?:^|[-.])(nightly|dev)(?:$|[-.])",
+        rust_release.group(1),
+    ):
+        config.available_features.add("has-rust-nightly")
+
+    expected_llvm = re.search(
+        r"(\d+)\.(\d+)",
+        "@LLVM_PACKAGE_VERSION@",
+    )
+    rust_llvm = re.search(
+        r"(?mi)^\s*LLVM version:\s*(\d+)\.(\d+)(?:\.\d+)?",
+        rust_version,
+    )
+    if expected_llvm and rust_llvm and expected_llvm.group(1, 2) == rust_llvm.group(1, 2):
+        config.available_features.add("has-rust-llvm-match")
+
+if _tool_output("@OBF_CARGO_COMMAND@", "--version") is not None:
+    config.available_features.add("has-cargo")
+
+zig_version = _tool_output("@OBF_ZIG_COMMAND@", "version")
+if zig_version is not None and re.search(
+    r"(?m)^\s*0\.16\.\d+(?:[-+][^\s]*)?\s*$",
+    zig_version,
+):
+    config.available_features.add("has-zig-016")
+
+lld_driver = shlex.split("@OBF_LLD_DRIVER@")
+lld_version = _tool_output("@OBF_LLD_COMMAND@", *lld_driver, "--version")
+if lld_version is not None and re.search(r"\bLLD\s+21(?:\.|$)", lld_version, re.IGNORECASE):
+    config.available_features.add("has-lld-21")
+
+host_elf_machines = {
+    "x86_64": (62, 2),
+    "amd64": (62, 2),
+    "aarch64": (183, 2),
+    "arm64": (183, 2),
+    "armv5": (40, 1),
+    "armv5l": (40, 1),
+    "armv5tel": (40, 1),
+    "armv7l": (40, 1),
+    "armv6l": (40, 1),
+    "arm": (40, 1),
+    "armv6": (40, 1),
+    "armv7": (40, 1),
+    "armv8": (40, 1),
+    "armv8l": (40, 1),
+}
+host_machine = platform.machine().lower()
+llvm_host_triple = "@LLVM_HOST_TRIPLE@".lower()
+llvm_host_arch = llvm_host_triple.split("-", 1)[0]
+if (
+    re.match(r"^21(?:\.|$)", "@LLVM_PACKAGE_VERSION@") is not None
+    and sys.platform == "linux"
+    and "linux" in llvm_host_triple
+    and host_machine in host_elf_machines
+    and llvm_host_arch in host_elf_machines
+    and host_elf_machines[host_machine] == host_elf_machines[llvm_host_arch]
+):
+    config.available_features.add("has-tinygo-wrapper-host")
+
+
+tinygo_version = _tool_output("@OBF_TINYGO_COMMAND@", "version")
+if (
+    "has-tinygo-wrapper-host" in config.available_features
+    and tinygo_version is not None
+    and re.search(
+        r"\btinygo version\s+0\.41\.\d+(?:[-+][^\s]*)?(?=\s|$)",
+        tinygo_version,
+        re.IGNORECASE,
+    )
+    and re.search(
+        r"\busing go version go1\.(?:23|24|25|26)(?:\.\d+)?(?:[-+][^\s)]*)?(?=\s|\))",
+        tinygo_version,
+        re.IGNORECASE,
+    )
+    and re.search(
+        r"\bLLVM version\s+20\.\d+(?:\.\d+)?\b",
+        tinygo_version,
+        re.IGNORECASE,
+    )
+):
+    config.available_features.add("has-tinygo-041-go-supported-llvm20")

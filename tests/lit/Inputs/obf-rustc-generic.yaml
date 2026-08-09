@@ -1,0 +1,7 @@
+seed: 31337
+default_level: none
+targets:
+  - match: rust_wrapper_target
+    level: strong
+security:
+  strip_release_markers: true

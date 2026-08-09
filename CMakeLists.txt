@@ -46,6 +46,67 @@ find_program(OBF_STRIP llvm-strip HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(OBF_NM llvm-nm HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(OBF_OBJDUMP llvm-objdump HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(OBF_STRINGS strings)
+find_program(OBF_RUSTC rustc)
+find_program(OBF_CARGO cargo)
+find_program(OBF_ZIG zig)
+find_program(OBF_TINYGO tinygo)
+find_program(OBF_LLD NAMES ld.lld-21 ld.lld HINTS "${LLVM_TOOLS_BINARY_DIR}")
+
+if(OBF_RUSTC)
+  set(OBF_RUSTC_COMMAND "${OBF_RUSTC}")
+else()
+  set(OBF_RUSTC_COMMAND "rustc")
+endif()
+
+if(OBF_CARGO)
+  set(OBF_CARGO_COMMAND "${OBF_CARGO}")
+else()
+  set(OBF_CARGO_COMMAND "cargo")
+endif()
+
+if(OBF_ZIG)
+  set(OBF_ZIG_COMMAND "${OBF_ZIG}")
+else()
+  set(OBF_ZIG_COMMAND "zig")
+endif()
+
+set(OBF_LLD_IS_LLVM21 OFF)
+if(OBF_LLD)
+  execute_process(
+    COMMAND "${OBF_LLD}" --version
+    RESULT_VARIABLE OBF_LLD_VERSION_STATUS
+    OUTPUT_VARIABLE OBF_LLD_VERSION_STDOUT
+    ERROR_VARIABLE OBF_LLD_VERSION_STDERR
+  )
+  string(CONCAT OBF_LLD_VERSION_OUTPUT
+    "${OBF_LLD_VERSION_STDOUT}" "\n" "${OBF_LLD_VERSION_STDERR}")
+  if(OBF_LLD_VERSION_STATUS EQUAL 0
+      AND OBF_LLD_VERSION_OUTPUT MATCHES "LLD[ \t]+21\\.")
+    set(OBF_LLD_IS_LLVM21 ON)
+  endif()
+endif()
+
+if(OBF_LLD_IS_LLVM21)
+  set(OBF_LLD_COMMAND "${OBF_LLD}")
+  set(OBF_LLD_DRIVER "")
+elseif(OBF_ZIG)
+  set(OBF_LLD_COMMAND "${OBF_ZIG}")
+  set(OBF_LLD_DRIVER "ld.lld")
+elseif(OBF_LLD)
+  set(OBF_LLD_COMMAND "${OBF_LLD}")
+  set(OBF_LLD_DRIVER "")
+else()
+  set(OBF_LLD_COMMAND "ld.lld")
+  set(OBF_LLD_DRIVER "")
+endif()
+
+
+if(OBF_TINYGO)
+  set(OBF_TINYGO_COMMAND "${OBF_TINYGO}")
+else()
+  set(OBF_TINYGO_COMMAND "tinygo")
+endif()
+
 
 option(OBF_BENCHMARK_CLEAN_IR
   "Generate cleaned benchmark IR for analysis builds"
@@ -250,7 +311,27 @@ configure_file(
 add_custom_target(obf-clang-wrappers ALL
   DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/obf-clang" "${CMAKE_CURRENT_BINARY_DIR}/obf-clang++")
 add_dependencies(obf-clang-wrappers obf_plugin obf-runtime)
-
+configure_file(
+  tools/obf-bc/obf-bc.py.in
+  "${CMAKE_CURRENT_BINARY_DIR}/obf-bc"
+  @ONLY
+  FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+configure_file(
+  tools/obf-rustc/obf-rustc.py.in
+  "${CMAKE_CURRENT_BINARY_DIR}/obf-rustc"
+  @ONLY
+  FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+configure_file(
+  tools/obf-tinygo/obf-tinygo.py.in
+  "${CMAKE_CURRENT_BINARY_DIR}/obf-tinygo"
+  @ONLY
+  FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+add_custom_target(obf-language-tools ALL
+  DEPENDS
+    "${CMAKE_CURRENT_BINARY_DIR}/obf-bc"
+    "${CMAKE_CURRENT_BINARY_DIR}/obf-rustc"
+    "${CMAKE_CURRENT_BINARY_DIR}/obf-tinygo")
+add_dependencies(obf-language-tools obf-driver obf_plugin obf-runtime)
 enable_testing()
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
@@ -260,7 +341,7 @@ configure_file(tests/lit.cfg.py.in
 
 add_test(
   NAME obf-lit
-  COMMAND "${OBF_LIT}" -sv "${CMAKE_CURRENT_BINARY_DIR}/tests"
+  COMMAND "${OBF_LIT}" -j 1 -sv "${CMAKE_CURRENT_BINARY_DIR}/tests"
 )
 
 add_test(

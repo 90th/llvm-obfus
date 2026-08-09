@@ -1,0 +1,9 @@
+frontend: tinygo
+default_level: none
+targets:
+  - match: protected_value
+    level: light
+string_encoding:
+  max_strings_per_module: 0
+security:
+  strip_release_markers: true

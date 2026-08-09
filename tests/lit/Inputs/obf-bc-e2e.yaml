@@ -1,0 +1,16 @@
+frontend: zig
+default_level: none
+targets:
+  - match: protected_value
+    level: light
+string_encoding:
+  min_string_length: 2
+  max_strings_per_module: 1
+  prefer_lazy_decode: true
+  allow_ctor_fallback: false
+  authenticated_mode: true
+constant_encoding:
+  mode: off
+security:
+  fail_on_public_obf_symbol: true
+  strip_release_markers: true

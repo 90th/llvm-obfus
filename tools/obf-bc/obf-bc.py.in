@@ -1,0 +1,461 @@
+#!@Python3_EXECUTABLE@
+
+import os
+import re
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+OPT = r"@OBF_OPT@"
+PLUGIN = r"@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@"
+
+_SEED_PATTERN = re.compile(r"[1-9][0-9]*\Z")
+_SIGNAL_NUMBERS = tuple(
+    getattr(signal, name)
+    for name in ("SIGHUP", "SIGINT", "SIGTERM", "SIGQUIT")
+    if hasattr(signal, name)
+)
+
+
+class _ArgumentError(Exception):
+    pass
+
+
+class _PreflightError(Exception):
+    pass
+
+
+class _Interrupted(Exception):
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+
+
+class _ChildLaunchError(Exception):
+    pass
+
+
+class _SignalScope:
+    def __init__(self) -> None:
+        self._child = None
+        self._received_signal: int | None = None
+        self._previous_handlers: dict[int, object] = {}
+
+    def __enter__(self) -> "_SignalScope":
+        for signum in _SIGNAL_NUMBERS:
+            self._previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, self._handle_signal)
+        return self
+
+    def __exit__(self, _exc_type: object, _exc_value: object, _traceback: object) -> None:
+        for signum, previous_handler in self._previous_handlers.items():
+            signal.signal(signum, previous_handler)
+
+    def _forward_signal(self, child: subprocess.Popen, signum: int) -> None:
+        try:
+            child.send_signal(signum)
+        except (OSError, ProcessLookupError):
+            pass
+
+    def _handle_signal(self, signum: int, _frame: object) -> None:
+        if self._received_signal is None:
+            self._received_signal = signum
+
+        child = self._child
+        if child is not None:
+            self._forward_signal(child, signum)
+
+    def raise_if_interrupted(self) -> None:
+        if self._received_signal is not None:
+            raise _Interrupted(self._received_signal)
+
+    def run_child(self, command: list[str]) -> int:
+        self.raise_if_interrupted()
+        try:
+            child = subprocess.Popen(command)
+        except OSError as error:
+            raise _ChildLaunchError(str(error)) from error
+
+        self._child = child
+        try:
+            if self._received_signal is not None:
+                self._forward_signal(child, self._received_signal)
+            status = child.wait()
+        finally:
+            self._child = None
+
+        self.raise_if_interrupted()
+        return status
+
+
+def _fail(message: str) -> int:
+    print(f"obf-bc: {message}", file=sys.stderr)
+    return 2
+
+
+def _require_option_value(
+    argv: list[str], index: int, option: str, description: str
+) -> tuple[str, int]:
+    if index + 1 >= len(argv):
+        raise _ArgumentError(f"{option} requires {description}")
+
+    value = argv[index + 1]
+    if value == "" or value.startswith("-"):
+        raise _ArgumentError(f"{option} requires {description}")
+    return value, index + 2
+
+
+def _parse_args(argv: list[str]) -> tuple[str, str, str, str | None]:
+    config_path: str | None = None
+    output_path: str | None = None
+    seed: str | None = None
+    inputs: list[str] = []
+    index = 0
+
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "--obf-config":
+            if config_path is not None:
+                raise _ArgumentError("--obf-config may only be specified once")
+            config_path, index = _require_option_value(argv, index, "--obf-config", "a path")
+            continue
+        if argument.startswith("--obf-config="):
+            if config_path is not None:
+                raise _ArgumentError("--obf-config may only be specified once")
+            config_path = argument.split("=", 1)[1]
+            if config_path == "":
+                raise _ArgumentError("--obf-config requires a path")
+            index += 1
+            continue
+        if argument == "--obf-seed":
+            if seed is not None:
+                raise _ArgumentError("--obf-seed may only be specified once")
+            seed, index = _require_option_value(argv, index, "--obf-seed", "a decimal value")
+            continue
+        if argument.startswith("--obf-seed="):
+            if seed is not None:
+                raise _ArgumentError("--obf-seed may only be specified once")
+            seed = argument.split("=", 1)[1]
+            if seed == "":
+                raise _ArgumentError("--obf-seed requires a decimal value")
+            index += 1
+            continue
+        if argument == "-o":
+            if output_path is not None:
+                raise _ArgumentError("-o may only be specified once")
+            output_path, index = _require_option_value(argv, index, "-o", "a path")
+            continue
+        if argument.startswith("-o"):
+            if output_path is not None:
+                raise _ArgumentError("-o may only be specified once")
+            output_path = argument[2:]
+            if output_path.startswith("="):
+                output_path = output_path[1:]
+            if output_path == "":
+                raise _ArgumentError("-o requires a path")
+            index += 1
+            continue
+        if argument.startswith("-"):
+            raise _ArgumentError(f"unsupported option: {argument}")
+
+        inputs.append(argument)
+        index += 1
+
+    if config_path is None:
+        raise _ArgumentError("--obf-config is required")
+    if output_path is None:
+        raise _ArgumentError("-o is required")
+    if len(inputs) != 1:
+        raise _ArgumentError("expected exactly one .bc input")
+    if Path(inputs[0]).suffix != ".bc":
+        raise _ArgumentError("input must have a .bc suffix")
+    if Path(output_path).suffix != ".bc":
+        raise _ArgumentError("output must have a .bc suffix")
+    if seed is not None and _SEED_PATTERN.fullmatch(seed) is None:
+        raise _ArgumentError("--obf-seed must be a non-zero decimal integer")
+
+    return inputs[0], config_path, output_path, seed
+
+
+def _absolute_path(path: str) -> Path:
+    return Path(os.path.abspath(path))
+
+
+def _require_regular_file(label: str, path: Path) -> None:
+    try:
+        if not path.exists():
+            raise _PreflightError(f"missing {label}: {path}")
+        if not path.is_file():
+            raise _PreflightError(f"{label} is not a regular file: {path}")
+    except OSError as error:
+        raise _PreflightError(f"cannot inspect {label} '{path}': {error}") from error
+
+
+def _preflight(input_name: str, config_name: str, output_name: str) -> tuple[Path, Path, Path, Path]:
+    input_path = _absolute_path(input_name)
+    config_path = _absolute_path(config_name)
+    output_path = _absolute_path(output_name)
+    plugin_path = Path(PLUGIN)
+
+    _require_regular_file("input bitcode", input_path)
+    _require_regular_file("config", config_path)
+    _require_regular_file("pass plugin", plugin_path)
+
+    output_parent = output_path.parent
+    try:
+        if not output_parent.is_dir():
+            raise _PreflightError(f"output parent is not a directory: {output_parent}")
+        try:
+            output_status = output_path.lstat()
+        except FileNotFoundError:
+            output_status = None
+        if output_status is not None and not stat.S_ISREG(output_status.st_mode):
+            raise _PreflightError(f"output is not a regular file: {output_path}")
+    except OSError as error:
+        raise _PreflightError(f"cannot inspect output path '{output_path}': {error}") from error
+
+    try:
+        input_real_path = input_path.resolve(strict=True)
+        output_real_path = output_path.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise _PreflightError(f"cannot resolve input/output paths: {error}") from error
+
+    if input_real_path == output_real_path:
+        raise _PreflightError("input and output must be distinct")
+
+    try:
+        if output_path.exists() and os.path.samefile(input_path, output_path):
+            raise _PreflightError("input and output must be distinct")
+    except OSError as error:
+        raise _PreflightError(f"cannot compare input and output paths: {error}") from error
+
+    return input_path, config_path, output_path, output_parent
+
+
+def _default_output_mode() -> int:
+    current_umask = os.umask(0)
+    try:
+        return 0o666 & ~current_umask
+    finally:
+        os.umask(current_umask)
+
+
+def _destination_mode(output_path: Path) -> int:
+    try:
+        return stat.S_IMODE(output_path.stat().st_mode)
+    except FileNotFoundError:
+        return _default_output_mode()
+
+
+def _pending_terminal_signal() -> int | None:
+    pending = signal.sigpending()
+    return next((signum for signum in _SIGNAL_NUMBERS if signum in pending), None)
+
+
+def _snapshot_output(output_path: Path) -> tuple[bool, Path | None]:
+    try:
+        output_status = output_path.lstat()
+    except FileNotFoundError:
+        return False, None
+    if not stat.S_ISREG(output_status.st_mode):
+        raise _PreflightError(f"output is not a regular file: {output_path}")
+
+    backup = _create_owned_temp(output_path.parent)
+    try:
+        backup.unlink()
+        os.link(output_path, backup, follow_symlinks=False)
+        if not stat.S_ISREG(backup.lstat().st_mode):
+            raise OSError("output changed while creating rollback snapshot")
+    except OSError:
+        _remove_owned_temp(backup)
+        raise
+    return True, backup
+
+
+def _rollback_output(
+    output_path: Path, destination_existed: bool, backup: Path | None
+) -> None:
+    if destination_existed:
+        assert backup is not None
+        os.replace(backup, output_path)
+        return
+    try:
+        output_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _install_output(
+    temp_path: Path, output_path: Path, signal_scope: _SignalScope
+) -> None:
+    os.chmod(temp_path, _destination_mode(output_path))
+    destination_existed, backup = _snapshot_output(output_path)
+    replaced = False
+    committed = False
+    previous_mask: set[signal.Signals] | None = None
+    if os.name == "posix":
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _SIGNAL_NUMBERS)
+    try:
+        try:
+            signal_scope.raise_if_interrupted()
+            if previous_mask is not None:
+                pending_signal = _pending_terminal_signal()
+                if pending_signal is not None:
+                    raise _Interrupted(pending_signal)
+            os.replace(temp_path, output_path)
+            replaced = True
+            if previous_mask is not None:
+                pending_signal = _pending_terminal_signal()
+                if pending_signal is not None:
+                    raise _Interrupted(pending_signal)
+            committed = True
+        finally:
+            if previous_mask is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    except _Interrupted:
+        if replaced and not committed:
+            try:
+                _rollback_output(output_path, destination_existed, backup)
+                backup = None
+            except OSError as error:
+                print(
+                    f"obf-bc: cannot roll back interrupted output '{output_path}': {error}",
+                    file=sys.stderr,
+                )
+        raise
+    finally:
+        if backup is not None:
+            _remove_owned_temp(backup)
+
+
+def _create_owned_temp(output_parent: Path) -> Path:
+    try:
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=".obf-bc-", suffix=".bc", dir=output_parent
+        )
+    except OSError as error:
+        raise _PreflightError(
+            f"cannot create temporary output in '{output_parent}': {error}"
+        ) from error
+
+    try:
+        os.close(descriptor)
+    except OSError as error:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise _PreflightError(f"cannot close temporary output '{temp_name}': {error}") from error
+
+    return Path(temp_name)
+
+
+def _remove_owned_temp(temp_path: Path) -> None:
+    try:
+        temp_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        print(f"obf-bc: failed to remove temporary output '{temp_path}': {error}", file=sys.stderr)
+
+
+def _run_child(signal_scope: _SignalScope, command: list[str], stage: str) -> int:
+    try:
+        return signal_scope.run_child(command)
+    except _ChildLaunchError as error:
+        raise _PreflightError(f"failed to start {stage}: {error}") from error
+
+
+def _exit_for_signal(signum: int) -> int:
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+    except (OSError, ValueError):
+        pass
+    try:
+        os.kill(os.getpid(), signum)
+    except OSError:
+        pass
+    return 128 + signum
+
+
+def main() -> int:
+    try:
+        input_name, config_name, output_name, seed = _parse_args(sys.argv[1:])
+        input_path, config_path, output_path, output_parent = _preflight(
+            input_name, config_name, output_name
+        )
+    except (_ArgumentError, _PreflightError) as error:
+        return _fail(str(error))
+
+    temp_path: Path | None = None
+    interrupted: _Interrupted | None = None
+    child_signal: int | None = None
+    result = 0
+
+    with _SignalScope() as signal_scope:
+        try:
+            temp_path = _create_owned_temp(output_parent)
+            signal_scope.raise_if_interrupted()
+
+            opt_command = [
+                OPT,
+                "-load-pass-plugin",
+                PLUGIN,
+                f"--obf-config={config_path}",
+            ]
+            if seed is not None:
+                opt_command.append(f"--obf-seed={seed}")
+            opt_command.extend(
+                ["-passes=obf-safe-pipeline", str(input_path), "-o", str(temp_path)]
+            )
+
+            result = _run_child(signal_scope, opt_command, "opt")
+            if os.name == "posix" and result < 0:
+                child_signal = -result
+            elif result == 0:
+                verifier_command = [
+                    OPT,
+                    "-passes=verify",
+                    "-disable-output",
+                    str(temp_path),
+                ]
+                result = _run_child(signal_scope, verifier_command, "verifier")
+                if os.name == "posix" and result < 0:
+                    child_signal = -result
+
+            if result == 0:
+                signal_scope.raise_if_interrupted()
+                try:
+                    _install_output(temp_path, output_path, signal_scope)
+                except OSError as error:
+                    result = _fail(f"cannot install output '{output_path}': {error}")
+                else:
+                    temp_path = None
+                    # A terminal signal delivered during the bounded install
+                    # window is ordered after this commit and still propagated.
+                    signal_scope.raise_if_interrupted()
+        except _Interrupted as error:
+            interrupted = error
+        except _PreflightError as error:
+            result = _fail(str(error))
+        finally:
+            if temp_path is not None:
+                _remove_owned_temp(temp_path)
+
+    if interrupted is None:
+        try:
+            signal_scope.raise_if_interrupted()
+        except _Interrupted as error:
+            interrupted = error
+
+    if interrupted is not None:
+        return _exit_for_signal(interrupted.signum)
+    if child_signal is not None:
+        return _exit_for_signal(child_signal)
+    return result
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

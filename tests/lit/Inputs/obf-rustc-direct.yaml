@@ -1,0 +1,13 @@
+frontend: rust
+seed: 31337
+default_level: none
+targets:
+  - match: rust_direct_target
+    level: strong
+string_encoding:
+  authenticated_mode: true
+  prefer_lazy_decode: true
+  allow_ctor_fallback: false
+security:
+  strip_release_markers: true
+  fail_on_public_obf_symbol: true
