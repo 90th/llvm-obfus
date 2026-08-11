@@ -58,6 +58,9 @@ def _shell_quote(command):
     return shlex.quote(command)
 
 
+config.substitutions.append(("%cmake", _shell_quote("@CMAKE_COMMAND@")))
+config.substitutions.append(("%llvm_host_triple", _shell_quote("@LLVM_HOST_TRIPLE@")))
+
 config.substitutions.extend(
     [
         ("%obf_bc", _shell_quote("@CMAKE_CURRENT_BINARY_DIR@/obf-bc")),
