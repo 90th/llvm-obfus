@@ -31,4 +31,4 @@ cmake --build build --target obf-re-harness -- -j1
 cmake --build build --target obf-seed-diversity -- -j1
 ```
 
-`obf-benchmarks` builds the four core C and C++ corpus targets and adds the Rust, Zig, and TinyGo corpus targets when compatible toolchains are configured. `obf-benchmarks-e2e` then proves baseline versus obfuscated runtime parity for every built corpus benchmark. `obf-audit-benchmarks` audits every built benchmark pair. The current `obf-re-harness` and `obf-seed-diversity` checks intentionally stay scoped to `license_demo`, `config_demo`, and `vm_workflow_demo`. 
+`obf-benchmarks` builds the four core C and C++ corpus targets and adds the Rust, Zig, and TinyGo corpus targets when compatible toolchains are configured. `obf-benchmarks-e2e` then proves baseline versus obfuscated runtime parity for every built corpus benchmark. `obf-audit-benchmarks` audits every built benchmark pair. The current `obf-re-harness` and `obf-seed-diversity` checks intentionally stay scoped to `license_demo`, `config_demo`, and `vm_workflow_demo`.
