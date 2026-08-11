@@ -73,7 +73,7 @@ def run_binary(path: pathlib.Path, argv: tuple[str, ...], env: dict[str, str] | 
 
 
 def parse_bench_line(name: str, text: str) -> tuple[int, int]:
-    match = re.fullmatch(rf"BENCH {re.escape(name)} ns/op=(\d+(?:\.\d+)?) sink=(\d+)\n?", text)
+    match = re.fullmatch(rf"BENCH {re.escape(name)} ns/op=(\d+(?:\.\d+)?(?:[eE][+-]?\d+)?) sink=(\d+)\n?", text)
     if match is None:
         raise CheckError(f"unexpected benchmark line for {name}: {text!r}")
     ns_per_iter = int(float(match.group(1)))
