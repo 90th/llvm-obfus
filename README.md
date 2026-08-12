@@ -560,7 +560,13 @@ Benchmark and analysis targets:
 - `obf-benchmarks-mir` emits MIR snapshots for linked benchmark targets such as `wpo_demo`.
 - `obf-audit-benchmarks` audits stripped obfuscated benchmark binaries for leaked symbols and, when `strings` is available, residual strings.
 - `obf-re-harness` intentionally scores how much VM structure is recoverable from obfuscated benchmark IR only for `license_demo`, `config_demo`, and `vm_workflow_demo`, and writes `build/re-harness/vm_recovery.json`.
+- `obf-re-harness-binary` separately measures automated structural recoverability for the same three final stripped benchmark pairs. It writes the analyzer report to `build/re-harness/binary-recovery.json` and the control verdict to `build/re-harness/binary-recovery-controls.json`. The controller requires `license_demo` and `vm_workflow_demo` to be exactly `vm_candidate`. It permits `config_demo` to be either `interpreter_like` or `vm_candidate`. Each multiseed result still requires an actual `vm_candidate` positive.
+- `obf-re-harness-binary-seeds` is opt-in. It uses isolated builds with seeds `10101`, `20202`, and `30303`, writes `build/re-harness/binary-multiseed-report.json`, and uses `build/re-harness/multiseed/` as its isolated-build root.
 - `obf-seed-diversity` intentionally verifies seed-driven IR diversity only for `license_demo`, `config_demo`, and `vm_workflow_demo`, and writes `build/diversity/diversity.json`.
+
+The binary target supplies only explicitly selected final stripped ELF64 little-endian x86-64 `ET_EXEC` or `ET_DYN` artifacts and `llvm-objdump` to its analyzer. The analyzer does not read source, IR, YAML, configuration, seed values, or benchmark labels. The trusted controller keeps labels outside the analyzer boundary and runs the analyzer on opaque SHA-256 copies. Symbols and relocation metadata can appear under `metadata_exposure`, but their spellings never seed candidates or scores.
+
+The binary reports measure automated structural recoverability from static binary evidence. They do not establish security or semantic recovery. The analyzer never executes an artifact. A `vm_candidate` requires a recurrent dispatcher with at least two selected targets and two reentering handlers. A direct dispatcher also requires at least two conditional selection blocks. At least two reentering handlers must update the same dispatcher-linked state. An exclusive non-pointer dynamic or mapped data read must link to that state through connected relationships. A switch, table, name, or entropy feature alone is insufficient. `semantic_recovery` is always `unavailable`. A classification cannot provide confidence beyond the observed static structure.
 
 Current benchmark corpus:
 
@@ -584,18 +590,20 @@ cmake --build build --target obf-clang-wrappers obf-language-tools obf-driver ob
 ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests|obf-runtime-atomic-tests"
 ```
 
-Opt-in sequential benchmark, audit, and diversity checks:
+Opt-in sequential benchmark, audit, recoverability, diversity, and multiseed checks:
 
 ```sh
 cmake --build build --target obf-benchmarks -- -j1
 cmake --build build --target obf-benchmarks-e2e -- -j1
 cmake --build build --target obf-audit-benchmarks -- -j1
 cmake --build build --target obf-re-harness -- -j1
+cmake --build build --target obf-re-harness-binary -- -j1
+cmake --build build --target obf-re-harness-binary-seeds -- -j1
 cmake --build build --target obf-seed-diversity -- -j1
 ```
 
-The current lit suite covers 189 tests.
-It covers the transform pipeline, policy rules, security gates, seed behavior, runtime behavior, and artifact cleanup.
+The current lit suite covers 193 tests.
+It covers the transform pipeline, policy rules, security gates, seed behavior, runtime behavior, artifact cleanup, and binary-only recovery analysis.
 Language tests cover bitcode transactions and native Zig, Rust, and TinyGo execution when compatible toolchains are present.
 `obf-runtime-atomic-tests` is a separate CTest entry and is not part of the lit count.
 The lit tests use `opt`, FileCheck, and `lli`.

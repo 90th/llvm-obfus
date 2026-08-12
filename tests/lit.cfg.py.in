@@ -71,6 +71,8 @@ config.substitutions.extend(
         ("%raw_zig", _shell_quote("@OBF_ZIG_COMMAND@")),
         ("%raw_tinygo", _shell_quote("@OBF_TINYGO_COMMAND@")),
         ("%llvm_nm", _shell_quote("@OBF_NM@")),
+        ("%llvm_objdump", _shell_quote("@OBF_OBJDUMP@")),
+        ("%llvm_strip", _shell_quote("@OBF_STRIP@")),
     ]
 )
 
@@ -97,6 +99,8 @@ def _tool_output(command, *arguments):
 
 if sys.platform.startswith("linux"):
     config.available_features.add("system-linux")
+    if platform.machine().lower() in ("x86_64", "amd64"):
+        config.available_features.add("system-linux-x86-64")
 
 rust_version = _tool_output("@OBF_RUSTC_COMMAND@", "-Vv")
 if rust_version is not None:
