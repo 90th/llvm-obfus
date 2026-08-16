@@ -1,3 +1,4 @@
+if(OBF_PLUGIN_IS_LOADABLE)
 add_custom_target(obf-audit-benchmarks
   COMMAND "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/obf-audit/audit_binary.py"
@@ -143,3 +144,4 @@ add_custom_target(obf-seed-diversity
           "--json-out" "${CMAKE_CURRENT_BINARY_DIR}/diversity/diversity.json"
   DEPENDS obf_plugin
   VERBATIM)
+endif()

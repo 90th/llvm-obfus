@@ -1,8 +1,10 @@
 #include "obf/policy/policy_engine.h"
 
 #include "obf/support/stable_hash.h"
+#include "llvm/ADT/SmallString.h"
 
 #include "llvm/IR/Module.h"
+#include "llvm/Support/Path.h"
 
 namespace obf {
 
@@ -45,7 +47,9 @@ bool wildcard_match(llvm::StringRef pattern, llvm::StringRef text) {
 std::uint64_t derive_seed(const llvm::Module& module,
                           llvm::StringRef function_name,
                           std::uint64_t top_level_seed) {
-  std::uint64_t hash = stable_hash_string(module.getName(), top_level_seed);
+  llvm::SmallString<128> normalized_name(module.getName());
+  llvm::sys::path::convert_to_slash(normalized_name);
+  std::uint64_t hash = stable_hash_string(normalized_name, top_level_seed);
   return stable_hash_string(function_name, hash);
 }
 

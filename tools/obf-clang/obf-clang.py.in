@@ -10,6 +10,7 @@ CLANGXX = r"@OBF_CLANGXX@"
 PLUGIN = r"@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@"
 RUNTIME_ARCHIVE = r"@OBF_RUNTIME_ARCHIVE@"
 
+_QUERY_ARGS = {"--version", "--help"}
 _COMPILE_ONLY_ARGS = {"-c", "-S", "-E", "-M", "-MM"}
 
 
@@ -42,20 +43,31 @@ def _parse_args(argv: list[str]) -> tuple[list[str], str | None, int | None]:
     return clang_args, config_path, None
 
 
+def _inject_windows_lto_linker(clang_args: list[str], is_windows: bool,
+                               uses_msvc_linker: bool = True) -> None:
+    has_lto = any(arg == "-flto" or arg.startswith("-flto=") for arg in clang_args)
+    has_linker = any(arg.startswith("-fuse-ld=") for arg in clang_args)
+    if is_windows and has_lto and not has_linker:
+        clang_args.append("-fuse-ld=lld-link" if uses_msvc_linker else "-fuse-ld=lld")
+
+
 def main() -> int:
     compiler = CLANGXX if "++" in Path(sys.argv[0]).name else CLANG
     clang_args, config_path, early_exit = _parse_args(sys.argv[1:])
     if early_exit is not None:
         return early_exit
 
+    is_windows = sys.platform == "win32" or os.name == "nt"
+    _inject_windows_lto_linker(clang_args, is_windows)
+
+    query_action = any(arg in _QUERY_ARGS for arg in clang_args)
     plugin_arg = f"-fpass-plugin={PLUGIN}"
     final_args = [compiler]
-    if plugin_arg not in clang_args:
+    if not query_action and plugin_arg not in clang_args:
         final_args.append(plugin_arg)
     final_args.extend(clang_args)
-
-    link_action = not any(arg in _COMPILE_ONLY_ARGS for arg in clang_args)
-    if not Path(PLUGIN).exists():
+    link_action = not query_action and not any(arg in _COMPILE_ONLY_ARGS for arg in clang_args)
+    if not query_action and not Path(PLUGIN).exists():
         return _fail(f"missing pass plugin: {PLUGIN}")
     if link_action:
         if not Path(RUNTIME_ARCHIVE).exists():

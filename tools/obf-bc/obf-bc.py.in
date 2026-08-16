@@ -1,6 +1,7 @@
 #!@Python3_EXECUTABLE@
 
 import os
+import shutil
 import re
 import signal
 import stat
@@ -71,10 +72,10 @@ class _SignalScope:
         if self._received_signal is not None:
             raise _Interrupted(self._received_signal)
 
-    def run_child(self, command: list[str]) -> int:
+    def run_child(self, command: list[str], environment: dict[str, str] | None = None) -> int:
         self.raise_if_interrupted()
         try:
-            child = subprocess.Popen(command)
+            child = subprocess.Popen(command, env=environment)
         except OSError as error:
             raise _ChildLaunchError(str(error)) from error
 
@@ -250,6 +251,8 @@ def _destination_mode(output_path: Path) -> int:
 
 
 def _pending_terminal_signal() -> int | None:
+    if not hasattr(signal, "sigpending") or os.name != "posix":
+        return None
     pending = signal.sigpending()
     return next((signum for signum in _SIGNAL_NUMBERS if signum in pending), None)
 
@@ -265,10 +268,13 @@ def _snapshot_output(output_path: Path) -> tuple[bool, Path | None]:
     backup = _create_owned_temp(output_path.parent)
     try:
         backup.unlink()
-        os.link(output_path, backup, follow_symlinks=False)
+        try:
+            os.link(output_path, backup, follow_symlinks=False)
+        except (OSError, AttributeError):
+            shutil.copyfile(output_path, backup)
         if not stat.S_ISREG(backup.lstat().st_mode):
             raise OSError("output changed while creating rollback snapshot")
-    except OSError:
+    except (OSError, AttributeError):
         _remove_owned_temp(backup)
         raise
     return True, backup
@@ -361,9 +367,14 @@ def _remove_owned_temp(temp_path: Path) -> None:
         print(f"obf-bc: failed to remove temporary output '{temp_path}': {error}", file=sys.stderr)
 
 
-def _run_child(signal_scope: _SignalScope, command: list[str], stage: str) -> int:
+def _run_child(
+    signal_scope: _SignalScope,
+    command: list[str],
+    stage: str,
+    environment: dict[str, str] | None = None,
+) -> int:
     try:
-        return signal_scope.run_child(command)
+        return signal_scope.run_child(command, environment)
     except _ChildLaunchError as error:
         raise _PreflightError(f"failed to start {stage}: {error}") from error
 
@@ -399,19 +410,37 @@ def main() -> int:
             temp_path = _create_owned_temp(output_parent)
             signal_scope.raise_if_interrupted()
 
-            opt_command = [
-                OPT,
-                "-load-pass-plugin",
-                PLUGIN,
-                f"--obf-config={config_path}",
-            ]
-            if seed is not None:
-                opt_command.append(f"--obf-seed={seed}")
-            opt_command.extend(
-                ["-passes=obf-safe-pipeline", str(input_path), "-o", str(temp_path)]
-            )
+            if os.name == "nt":
+                opt_environment = os.environ.copy()
+                opt_environment["OBF_CONFIG"] = str(config_path)
+                if seed is not None:
+                    opt_environment["OBF_SEED"] = seed
+                else:
+                    opt_environment.pop("OBF_SEED", None)
+                opt_command = [
+                    OPT,
+                    "-load-pass-plugin",
+                    PLUGIN,
+                    "-passes=obf-safe-pipeline",
+                    "-o",
+                    str(temp_path),
+                    str(input_path),
+                ]
+            else:
+                opt_environment = None
+                opt_command = [
+                    OPT,
+                    "-load-pass-plugin",
+                    PLUGIN,
+                    f"--obf-config={config_path}",
+                ]
+                if seed is not None:
+                    opt_command.append(f"--obf-seed={seed}")
+                opt_command.extend(
+                    ["-passes=obf-safe-pipeline", str(input_path), "-o", str(temp_path)]
+                )
 
-            result = _run_child(signal_scope, opt_command, "opt")
+            result = _run_child(signal_scope, opt_command, "opt", opt_environment)
             if os.name == "posix" and result < 0:
                 child_signal = -result
             elif result == 0:

@@ -95,7 +95,12 @@ def check_pair(benchmarks_dir: pathlib.Path, runtime_prefix: str, iterations: in
     baseline_ll = output_dir / f"{spec.name}.baseline.ll"
     obfuscated_ll = output_dir / f"{spec.name}.obfuscated.ll"
     baseline_bin = output_dir / f"{spec.name}.baseline"
+    if not baseline_bin.is_file() and (output_dir / f"{spec.name}.baseline.exe").is_file():
+        baseline_bin = output_dir / f"{spec.name}.baseline.exe"
+
     obfuscated_bin = output_dir / f"{spec.name}.obfuscated"
+    if not obfuscated_bin.is_file() and (output_dir / f"{spec.name}.obfuscated.exe").is_file():
+        obfuscated_bin = output_dir / f"{spec.name}.obfuscated.exe"
 
     for path in (baseline_ll, obfuscated_ll, baseline_bin, obfuscated_bin):
         require_file(path)

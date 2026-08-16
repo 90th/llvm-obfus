@@ -33,11 +33,24 @@ static struct ObfEntropyPair BuildEntropyPair(uint64_t direct, uint64_t indirect
   return pair;
 }
 
-#if defined(_MSC_VER)
-__declspec(noinline)
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__clang__) || defined(__GNUC__)
+#define OBF_ENTROPY_ABI __attribute__((sysv_abi, noinline))
+#elif defined(_MSC_VER)
+#define OBF_ENTROPY_ABI __declspec(noinline)
 #else
-__attribute__((noinline))
+#define OBF_ENTROPY_ABI
 #endif
+#else
+#if defined(__clang__) || defined(__GNUC__)
+#define OBF_ENTROPY_ABI __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define OBF_ENTROPY_ABI __declspec(noinline)
+#else
+#define OBF_ENTROPY_ABI
+#endif
+#endif
+OBF_ENTROPY_ABI
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR(void) {
   const uint64_t direct = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t * const ref_ptr = kEntropyAnchorRef;
@@ -46,11 +59,7 @@ struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR(void) {
   return BuildEntropyPair(direct, indirect);
 }
 
-#if defined(_MSC_VER)
-__declspec(noinline)
-#else
-__attribute__((noinline))
-#endif
+OBF_ENTROPY_ABI
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V1(void) {
   const uint64_t direct = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t * const ref_ptr = kEntropyAnchorRef;
@@ -61,11 +70,7 @@ struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V1(void) {
   return BuildEntropyPair((uint64_t)scratch_direct, (uint64_t)scratch_indirect);
 }
 
-#if defined(_MSC_VER)
-__declspec(noinline)
-#else
-__attribute__((noinline))
-#endif
+OBF_ENTROPY_ABI
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V2(void) {
   const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t * const ref_ptr = kEntropyAnchorRef;
@@ -80,11 +85,7 @@ struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V2(void) {
   return BuildEntropyPair(direct, indirect);
 }
 
-#if defined(_MSC_VER)
-__declspec(noinline)
-#else
-__attribute__((noinline))
-#endif
+OBF_ENTROPY_ABI
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V3(void) {
   const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t * const ref_ptr = kEntropyAnchorRef;
@@ -97,11 +98,7 @@ struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V3(void) {
   return BuildEntropyPair(direct, indirect);
 }
 
-#if defined(_MSC_VER)
-__declspec(noinline)
-#else
-__attribute__((noinline))
-#endif
+OBF_ENTROPY_ABI
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V4(void) {
   const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t * const ref_ptr = kEntropyAnchorRef;
@@ -144,6 +141,9 @@ static int CpuSupportsRdrand(void) {
 }
 
 #if defined(_MSC_VER) && defined(_M_X64)
+#if defined(__clang__)
+__attribute__((target("rdrnd")))
+#endif
 static int TryReadRdrand(uint64_t *entropy_bits) {
   unsigned __int64 value = 0;
   const int success = _rdrand64_step(&value);
@@ -207,8 +207,14 @@ static void InitializeObfEntropyAnchor(void) {
 }
 
 #if defined(_MSC_VER)
+#pragma section(".CRT$XCU", read)
 __declspec(allocate(".CRT$XCU")) void (*const kObfEntropyCtor)(void) =
     InitializeObfEntropyAnchor;
+#if defined(_M_IX86)
+#pragma comment(linker, "/include:_kObfEntropyCtor")
+#else
+#pragma comment(linker, "/include:kObfEntropyCtor")
+#endif
 #else
 __attribute__((constructor)) static void ObfEntropyCtor(void) {
   InitializeObfEntropyAnchor();

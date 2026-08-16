@@ -54,7 +54,7 @@ target_include_directories(obf_core PUBLIC ${PROJECT_SOURCE_DIR}/include
                                           ${CMAKE_CURRENT_BINARY_DIR}/include)
 target_link_libraries(obf_core PRIVATE ${OBF_LLVM_LIBS})
 
-add_llvm_pass_plugin(obf_plugin
+set(OBF_PLUGIN_SOURCES
   lib/plugin/plugin_vm_target_discovery.cpp
   lib/plugin/plugin_vm_binding_prep.cpp
   lib/plugin/plugin_vm_resolvers.cpp
@@ -66,14 +66,30 @@ add_llvm_pass_plugin(obf_plugin
   lib/plugin/plugin_policy.cpp
   lib/plugin/obfuscator_plugin.cpp
 )
-if(TARGET obj.obf_plugin)
-  obf_apply_llvm_target_settings(obj.obf_plugin)
+
+if(WIN32)
+  # LLVM's imported CMake package commonly reports LLVM_ENABLE_PLUGINS=OFF on
+  # Windows even though opt and clang support loadable DLL pass plugins.  Build
+  # the plugin directly so it remains a real file-producing target.
+  add_library(obf_plugin SHARED ${OBF_PLUGIN_SOURCES})
+  target_link_options(obf_plugin PRIVATE "-Xlinker" "/EXPORT:llvmGetPassPluginInfo")
+else()
+  add_llvm_pass_plugin(obf_plugin ${OBF_PLUGIN_SOURCES})
 endif()
-obf_apply_llvm_target_settings(obf_plugin)
-llvm_update_compile_flags(obf_plugin)
-target_include_directories(obf_plugin PRIVATE ${PROJECT_SOURCE_DIR}/include
-                                              ${CMAKE_CURRENT_BINARY_DIR}/include)
-target_link_libraries(obf_plugin PRIVATE obf_core ${OBF_LLVM_LIBS})
+
+get_target_property(OBF_PLUGIN_TARGET_TYPE obf_plugin TYPE)
+if(NOT OBF_PLUGIN_TARGET_TYPE STREQUAL "UTILITY")
+  if(TARGET obj.obf_plugin)
+    obf_apply_llvm_target_settings(obj.obf_plugin)
+  endif()
+  obf_apply_llvm_target_settings(obf_plugin)
+  llvm_update_compile_flags(obf_plugin)
+  target_include_directories(obf_plugin PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                               ${CMAKE_CURRENT_BINARY_DIR}/include)
+  target_link_libraries(obf_plugin PRIVATE obf_core ${OBF_LLVM_LIBS})
+
+  set(OBF_PLUGIN_IS_LOADABLE TRUE)
+endif()
 
 add_executable(obf-driver
   tools/obf-driver/main.cpp

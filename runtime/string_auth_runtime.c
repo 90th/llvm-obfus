@@ -126,8 +126,16 @@ enum {
   (((value) + (alignment) - 1) / (alignment) * (alignment))
 #if defined(__clang__) || defined(__GNUC__)
 #define OBF_NORETURN __attribute__((noreturn))
+#elif defined(_MSC_VER)
+#define OBF_NORETURN __declspec(noreturn)
 #else
 #define OBF_NORETURN
+#endif
+
+#if defined(__clang__) || defined(__GNUC__)
+#define OBF_HIDDEN __attribute__((visibility("hidden")))
+#else
+#define OBF_HIDDEN
 #endif
 
 _Static_assert(offsetof(struct ObfAuthenticatedBufferReferenceV3, cookie) == 0,
@@ -1004,7 +1012,7 @@ static uint8_t *ObfWaitForConstantPoolDecode(
   return NULL;
 }
 
-__attribute__((visibility("hidden")))
+OBF_HIDDEN
 uint8_t *OBF_RT_STRING_AUTH_DECODE_V3(
     const struct ObfStringRuntimeDescriptorV3 *descriptor,
     uint64_t trusted_length,
@@ -1076,7 +1084,7 @@ uint8_t *OBF_RT_STRING_AUTH_DECODE_V3(
   return NULL;
 }
 
-__attribute__((visibility("hidden")))
+OBF_HIDDEN
 uint8_t *OBF_RT_CONSTANT_POOL_DECODE_V3(
     const struct ObfConstantPoolRuntimeDescriptorV3 *descriptor,
     uint64_t trusted_length,

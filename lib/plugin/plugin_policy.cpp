@@ -19,13 +19,27 @@
 #include "llvm/Support/FormatVariadic.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <memory>
 #include <optional>
 #include <string>
-#include <cstdlib>
-
 namespace obf {
 
 namespace {
+
+std::optional<std::string> get_environment_value(const char* name) {
+#if defined(_WIN32)
+  char* value = nullptr;
+  std::size_t length = 0;
+  if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) { return std::nullopt; }
+
+  const std::unique_ptr<char, decltype(&std::free)> owned_value(value, &std::free);
+  return std::string(owned_value.get(), length == 0 ? 0 : length - 1);
+#else
+  if (const char* value = std::getenv(name)) { return std::string(value); }
+  return std::nullopt;
+#endif
+}
 
 bool has_strong_classical(protection_level level) {
   return level == protection_level::strong || level == protection_level::strong_vm;
@@ -254,6 +268,7 @@ void apply_orchestrator_policy_promotions(llvm::SmallVectorImpl<function_pipelin
   }
 }
 
+#if !defined(_WIN32)
 llvm::cl::opt<std::string>
     obf_config_path("obf-config",
                     llvm::cl::desc("Path to llvm-obfus milestone-zero YAML config"),
@@ -264,17 +279,22 @@ llvm::cl::opt<bool>
 
 llvm::cl::opt<std::uint64_t> obf_seed_override(
     "obf-seed", llvm::cl::desc("Overrides the top-level obfuscation seed"), llvm::cl::init(0));
+#endif
 
 }  // namespace
 
 bool is_obfuscation_enabled() {
-  if (const char* env = std::getenv("OBF_ENABLE")) {
-    if (llvm::StringRef(env) == "1" || llvm::StringRef(env) == "true") { return true; }
+  if (const std::optional<std::string> env = get_environment_value("OBF_ENABLE")) {
+    if (llvm::StringRef(*env) == "1" || llvm::StringRef(*env) == "true") { return true; }
   }
-  if (const char* env = std::getenv("OBF_CONFIG")) {
-    if (llvm::StringRef(env) != "") { return true; }
+  if (const std::optional<std::string> env = get_environment_value("OBF_CONFIG")) {
+    if (llvm::StringRef(*env) != "") { return true; }
   }
+#if !defined(_WIN32)
   return obf_enable || !obf_config_path.empty();
+#else
+  return false;
+#endif
 }
 
 std::uint32_t effective_vm_mba_depth(const obfuscation_config& config) {
@@ -286,9 +306,14 @@ obfuscation_config load_active_config() {
   static std::optional<obfuscation_config> cached_config;
   if (cached_config.has_value()) { return *cached_config; }
 
-  std::string config_path = obf_config_path.getValue();
+  std::string config_path;
+#if !defined(_WIN32)
+  config_path = obf_config_path.getValue();
+#endif
   if (config_path.empty()) {
-    if (const char* env = std::getenv("OBF_CONFIG")) { config_path = env; }
+    if (const std::optional<std::string> env = get_environment_value("OBF_CONFIG")) {
+      config_path = *env;
+    }
   }
 
   obfuscation_config config;
@@ -304,13 +329,36 @@ obfuscation_config load_active_config() {
     config = *loaded_config;
   }
 
-  if (obf_seed_override != 0) { config.seed = obf_seed_override; }
+  std::uint64_t effective_seed = 0;
+#if !defined(_WIN32)
+  effective_seed = obf_seed_override;
+#endif
+  if (effective_seed == 0) {
+    if (const std::optional<std::string> env_seed = get_environment_value("OBF_SEED")) {
+      std::uint64_t parsed_seed = 0;
+      if (!llvm::StringRef(*env_seed).getAsInteger(10, parsed_seed) && parsed_seed != 0) {
+        effective_seed = parsed_seed;
+      }
+    }
+  }
+  if (effective_seed != 0) { config.seed = effective_seed; }
   validate_effective_config(config);
   cached_config = config;
   return *cached_config;
 }
 
-std::uint64_t get_obf_seed_override() { return obf_seed_override; }
+std::uint64_t get_obf_seed_override() {
+#if !defined(_WIN32)
+  if (obf_seed_override != 0) { return obf_seed_override; }
+#endif
+  if (const std::optional<std::string> env_seed = get_environment_value("OBF_SEED")) {
+    std::uint64_t parsed_seed = 0;
+    if (!llvm::StringRef(*env_seed).getAsInteger(10, parsed_seed)) {
+      return parsed_seed;
+    }
+  }
+  return 0;
+}
 
 llvm::SmallVector<function_pipeline_state, 32>
 build_pipeline_state(llvm::Module& module, const obfuscation_config& config) {

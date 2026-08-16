@@ -7,6 +7,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfo.h"
@@ -17,6 +18,7 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <algorithm>
@@ -84,10 +86,13 @@ bool RenameGlobalLike(GlobalT& value,
   const std::string original_name = value.getName().str();
   if (original_name.empty()) { return false; }
 
+  llvm::SmallString<128> normalized_module_name(module.getName());
+  llvm::sys::path::convert_to_slash(normalized_module_name);
+
   std::uint64_t salt = ordinal;
   while (true) {
     const std::string candidate = obf::support::obfuscated_symbol_name(
-        module.getName(), original_name, options.seed, salt);
+        normalized_module_name, original_name, options.seed, salt);
     llvm::GlobalValue* existing = module.getNamedValue(candidate);
     if (existing == nullptr || existing == &value) {
       if (candidate == original_name) { return false; }

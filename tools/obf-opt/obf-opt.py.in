@@ -1,0 +1,43 @@
+#!@Python3_EXECUTABLE@
+import os
+import subprocess
+import sys
+
+OPT = r"@OBF_OPT@"
+
+WINDOWS_OPTION_ENVIRONMENT = {
+    "--obf-config": "OBF_CONFIG",
+    "--obf-seed": "OBF_SEED",
+    "--obf-audit-out": "OBF_AUDIT_OUT",
+}
+
+
+def main() -> int:
+    command = [OPT]
+    environment = os.environ.copy()
+
+    if os.name == "nt":
+        arguments = iter(sys.argv[1:])
+        for argument in arguments:
+            option, separator, value = argument.partition("=")
+            environment_variable = WINDOWS_OPTION_ENVIRONMENT.get(option)
+            if environment_variable is not None:
+                if not separator:
+                    try:
+                        value = next(arguments)
+                    except StopIteration:
+                        print(f"error: {option} requires a value", file=sys.stderr)
+                        return 1
+                environment[environment_variable] = value
+            elif argument == "--obf-enable":
+                environment["OBF_ENABLE"] = "1"
+            else:
+                command.append(argument)
+    else:
+        command.extend(sys.argv[1:])
+
+    return subprocess.run(command, env=environment, check=False).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

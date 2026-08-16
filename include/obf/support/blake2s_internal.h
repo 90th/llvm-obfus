@@ -3,8 +3,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 #ifndef OBF_NOINLINE
-#if defined(__clang__) || defined(__GNUC__)
+#if defined(_MSC_VER)
+#define OBF_NOINLINE __declspec(noinline)
+#elif defined(__clang__) || defined(__GNUC__)
 #define OBF_NOINLINE __attribute__((noinline, used))
 #else
 #define OBF_NOINLINE
@@ -32,6 +38,11 @@ static inline OBF_NOINLINE void ObfSecureZeroize(void *buffer, size_t size) {
     ++bytes;
     --size;
   }
+  #if defined(_MSC_VER)
+  _ReadWriteBarrier();
+  #elif defined(__clang__) || defined(__GNUC__)
+  __asm__ __volatile__("" : : "g"(buffer) : "memory");
+  #endif
 }
 
 static inline void ObfBlake2sCopyBytes(uint8_t *dst, const uint8_t *src, size_t size) {

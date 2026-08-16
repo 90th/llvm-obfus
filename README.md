@@ -256,11 +256,25 @@ Requirements:
 - Optional Zig support: Zig 0.16.x
 - Optional Go support: TinyGo 0.41.x, Go 1.23 through 1.26, and LLVM 21 `llc` and LLD on native Linux
 
-Configure and build:
+### Linux
 
 ```sh
 cmake -S . -B build -DLLVM_DIR="$(llvm-config --cmakedir)"
 cmake --build build
+```
+
+### Windows
+
+Use x64 MSVC Build Tools and a matching LLVM development SDK. LLVM 22.1.7 is the verified configuration. Run the commands from an x64 Visual Studio Developer PowerShell:
+
+```powershell
+cmake -S . -B build -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DLLVM_DIR="C:\path\to\llvm\lib\cmake\llvm" `
+  -DCMAKE_C_COMPILER="C:\path\to\llvm\bin\clang.exe" `
+  -DCMAKE_CXX_COMPILER="C:\path\to\llvm\bin\clang++.exe"
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 Useful cache variables:
@@ -279,19 +293,24 @@ Useful cache variables:
 
 ### Compiler Integration (clang/clang++)
 
-The plugin integrates into the standard LLVM New Pass Manager (NPM) optimization pipeline. The plugin runs passively and applies no obfuscation by default. It applies obfuscation only when you enable it with the `OBF_CONFIG` or `OBF_ENABLE` environment variables. It safely handles both unoptimized (`-O0`) and optimized (`-O1` through `-O3`, `-flto`) builds. The build tree provides `build/obf-clang` and `build/obf-clang++` wrappers that inject the pass plugin and append the runtime archive for link actions:
+The plugin integrates into the standard LLVM New Pass Manager (NPM) optimization pipeline. The plugin runs passively and applies no obfuscation by default. It applies obfuscation only when you enable it with `OBF_CONFIG` or `OBF_ENABLE`. It safely handles unoptimized (`-O0`) and optimized (`-O1` through `-O3`, `-flto`) builds.
+
+On Linux, `build/obf-clang` and `build/obf-clang++` inject the pass plugin and append the runtime archive for link actions:
 
 ```sh
 OBF_CONFIG=config.yaml build/obf-clang++ -O3 input.cpp -o output
 ```
 
-To enable annotation-driven obfuscation without a config file, set the explicit enable environment variable:
+On Windows, use `build\obf-clang.cmd` or `build\obf-clang++.cmd` from a Visual Studio Developer PowerShell:
 
-```sh
-OBF_ENABLE=1 build/obf-clang++ -O3 input.cpp -o output
+```powershell
+$env:OBF_CONFIG = "config.yaml"
+build\obf-clang++.cmd -O3 input.cpp -o output.exe
 ```
 
-Manual clang fallback:
+To enable annotation-driven obfuscation without a config file, set `OBF_ENABLE=1`.
+
+Manual `clang++` invocation:
 
 ```sh
 OBF_CONFIG=config.yaml clang++ -O3 \
@@ -299,12 +318,18 @@ OBF_CONFIG=config.yaml clang++ -O3 \
   input.cpp build/libobf_runtime.a -o output
 ```
 
-`build/libobf_runtime.a` contains the entropy anchor and string/constant authentication runtime support. When you invoke raw `clang` or `clang++`, place the archive after transformed inputs and objects on the linker command line.
+```powershell
+$env:OBF_CONFIG = "config.yaml"
+clang++.exe -O3 `
+  -fpass-plugin=build\obf_plugin.dll `
+  input.cpp build\libobf_runtime.lib -o output.exe
+```
+
+`libobf_runtime.a` on Linux and `libobf_runtime.lib` on Windows contain the entropy anchor plus string and constant authentication runtime support. With raw `clang` or `clang++`, place the archive after transformed inputs and objects on the linker command line.
 
 ### LLVM Bitcode (`obf-bc`)
 
-`build/obf-bc` applies `obf-safe-pipeline` to one LLVM bitcode file. It then runs the LLVM verifier.
-The command replaces the output only after both steps succeed. It keeps an existing output after a pre-commit signal.
+`build/obf-bc` on Linux and `build\obf-bc.cmd` on Windows apply `obf-safe-pipeline` to one LLVM bitcode file, then run the LLVM verifier. The command replaces the output only after both steps succeed. It keeps an existing output after a pre-commit signal.
 
 ```sh
 build/obf-bc \
@@ -313,8 +338,14 @@ build/obf-bc \
   input.bc -o output.bc
 ```
 
-The input and output paths must be different. The output must be absent or a regular file.
-The command rejects unknown options and multiple bitcode inputs.
+```powershell
+build\obf-bc.cmd `
+  --obf-config=config.yaml `
+  --obf-seed=31337 `
+  input.bc -o output.bc
+```
+
+The input and output paths must be different. The output must be absent or a regular file. The command rejects unknown options and multiple bitcode inputs.
 
 ### Zig 0.16
 

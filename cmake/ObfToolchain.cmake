@@ -1,21 +1,23 @@
 set(OBF_BENCHMARK_SEED "" CACHE STRING
   "Fixed benchmark obfuscation seed; empty uses a generated seed")
 
-string(RANDOM LENGTH 1 ALPHABET "123456789" OBF_GENERATED_BENCHMARK_SEED_LEAD)
-string(RANDOM LENGTH 15 ALPHABET "0123456789" OBF_GENERATED_BENCHMARK_SEED_TAIL)
-set(OBF_GENERATED_BENCHMARK_SEED
-  "${OBF_GENERATED_BENCHMARK_SEED_LEAD}${OBF_GENERATED_BENCHMARK_SEED_TAIL}")
-
-if(NOT OBF_BENCHMARK_SEED STREQUAL "")
+if(OBF_BENCHMARK_SEED STREQUAL "")
+  if(NOT DEFINED CACHE{OBF_BENCHMARK_GENERATED_SEED})
+    string(RANDOM LENGTH 1 ALPHABET "123456789" OBF_GENERATED_BENCHMARK_SEED_LEAD)
+    string(RANDOM LENGTH 15 ALPHABET "0123456789" OBF_GENERATED_BENCHMARK_SEED_TAIL)
+    set(OBF_BENCHMARK_GENERATED_SEED
+      "${OBF_GENERATED_BENCHMARK_SEED_LEAD}${OBF_GENERATED_BENCHMARK_SEED_TAIL}"
+      CACHE INTERNAL "Generated benchmark obfuscation seed")
+  endif()
+  set(OBF_EFFECTIVE_BENCHMARK_SEED "$CACHE{OBF_BENCHMARK_GENERATED_SEED}")
+  set(OBF_BENCHMARK_SEED_SOURCE "generated")
+else()
   if(NOT OBF_BENCHMARK_SEED MATCHES "^[1-9][0-9]*$")
     message(FATAL_ERROR
       "OBF_BENCHMARK_SEED must be a non-zero base-10 integer without leading zeroes")
   endif()
   set(OBF_EFFECTIVE_BENCHMARK_SEED "${OBF_BENCHMARK_SEED}")
   set(OBF_BENCHMARK_SEED_SOURCE "cache")
-else()
-  set(OBF_EFFECTIVE_BENCHMARK_SEED "${OBF_GENERATED_BENCHMARK_SEED}")
-  set(OBF_BENCHMARK_SEED_SOURCE "generated")
 endif()
 
 set(OBF_BENCHMARK_SEED_STAMP
@@ -26,7 +28,45 @@ file(GENERATE OUTPUT "${OBF_BENCHMARK_SEED_STAMP}"
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_program(OBF_LIT lit REQUIRED)
 
+if(WIN32)
+  set(LLVM_ENABLE_PLUGINS ON CACHE BOOL "Enable LLVM pass plugins" FORCE)
+  set(LLVM_ENABLE_PLUGINS ON)
+endif()
 find_package(LLVM REQUIRED CONFIG)
+if(WIN32)
+  set(LLVM_ENABLE_PLUGINS ON CACHE BOOL "Enable LLVM pass plugins" FORCE)
+  set(LLVM_ENABLE_PLUGINS ON)
+endif()
+find_program(OBF_LLVM_AR NAMES llvm-ar ar HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
+if(WIN32 AND TARGET LLVMDebugInfoPDB)
+  get_target_property(_pdb_libs LLVMDebugInfoPDB INTERFACE_LINK_LIBRARIES)
+  if(_pdb_libs)
+    set(_updated_pdb_libs "")
+    foreach(_lib IN LISTS _pdb_libs)
+      if(_lib MATCHES "diaguids\\.lib" AND NOT EXISTS "${_lib}")
+        find_file(OBF_DIAGUIDS_LIB NAMES diaguids.lib
+          HINTS
+            "$ENV{VSINSTALLDIR}/DIA SDK/lib/amd64"
+            "C:/Program Files/Microsoft Visual Studio/2022/Community/DIA SDK/lib/amd64"
+            "C:/Program Files/Microsoft Visual Studio/2022/Professional/DIA SDK/lib/amd64"
+            "C:/Program Files/Microsoft Visual Studio/2022/BuildTools/DIA SDK/lib/amd64"
+            "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/DIA SDK/lib/amd64"
+            "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/DIA SDK/lib/amd64"
+            "C:/Program Files (x86)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64"
+            "C:/Program Files (x86)/Microsoft Visual Studio/2019/Enterprise/DIA SDK/lib/amd64"
+            "C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/DIA SDK/lib/amd64"
+        )
+        if(OBF_DIAGUIDS_LIB)
+          list(APPEND _updated_pdb_libs "${OBF_DIAGUIDS_LIB}")
+        endif()
+      else()
+        list(APPEND _updated_pdb_libs "${_lib}")
+      endif()
+    endforeach()
+    set_target_properties(LLVMDebugInfoPDB PROPERTIES
+      INTERFACE_LINK_LIBRARIES "${_updated_pdb_libs}")
+  endif()
+endif()
 find_program(OBF_OPT opt HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(OBF_CLANG clang HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(OBF_CLANGXX clang++ HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)

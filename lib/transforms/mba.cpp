@@ -13,6 +13,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -641,8 +642,10 @@ llvm::Function* get_or_create_entropy_thunk(llvm::Module& module,
     prefix = "entropy.thunk.select";
   }
 
-  llvm::Value* pair = builder.CreateCall(
+  llvm::CallInst* pair_call = builder.CreateCall(
       entropy_anchor.getFunctionType(), &entropy_anchor, {}, std::string(prefix) + ".call");
+  pair_call->setCallingConv(entropy_anchor.getCallingConv());
+  llvm::Value* pair = pair_call;
   llvm::Value* result = pair;
   switch (shape) {
     case entropy_thunk_shape::direct:
@@ -768,6 +771,10 @@ llvm::Function* get_or_create_entropy_pair_accessor_variant(llvm::Module& module
   auto* function = llvm::Function::Create(
       function_type, llvm::GlobalValue::ExternalLinkage, accessor_name, module);
   function->setDoesNotThrow();
+  llvm::Triple triple(module.getTargetTriple());
+  if (triple.isOSWindows() && triple.isArch64Bit()) {
+    function->setCallingConv(llvm::CallingConv::X86_64_SysV);
+  }
   return function;
 }
 

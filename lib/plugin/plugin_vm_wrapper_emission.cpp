@@ -11,6 +11,7 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -18,6 +19,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/Path.h"
 
 #include <algorithm>
 #include <string>
@@ -26,10 +28,17 @@ namespace obf {
 
 namespace {
 
-llvm::StringRef get_vm_entry_thunk_balance_scope_name(const llvm::Module& module) {
-  if (!module.getSourceFileName().empty()) { return module.getSourceFileName(); }
-  if (!module.getName().empty()) { return module.getName(); }
-  return "<anonymous-module>";
+llvm::SmallString<128> get_vm_entry_thunk_balance_scope_name(const llvm::Module& module) {
+  llvm::SmallString<128> scope_name;
+  if (!module.getSourceFileName().empty()) {
+    scope_name = module.getSourceFileName();
+  } else if (!module.getName().empty()) {
+    scope_name = module.getName();
+  } else {
+    scope_name = "<anonymous-module>";
+  }
+  llvm::sys::path::convert_to_slash(scope_name);
+  return scope_name;
 }
 
 bool is_weak_vm_entry_thunk_shape(vm_entry_thunk_shape shape) {

@@ -54,6 +54,37 @@ static const uint64_t kCasAcqRelFailDesiredValue = UINT64_C(0x0101010101010101);
 static const uint64_t kReadOnlyU64Value = UINT64_C(0xfedcba9876543210);
 static const uint32_t kReadOnlyU32Value = UINT32_C(0x2468ace1);
 
+static uint64_t g_entropy_anchor = 0;
+
+struct ObfEntropyPair {
+  uint64_t direct;
+  uint64_t indirect;
+};
+
+static struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR(void) {
+  const struct ObfEntropyPair pair = {g_entropy_anchor, g_entropy_anchor};
+  return pair;
+}
+
+static void InitializeObfEntropyAnchor(void) {
+  g_entropy_anchor = UINT64_C(1);
+}
+
+#if defined(_MSC_VER)
+#pragma section(".CRT$XCU", read)
+__declspec(allocate(".CRT$XCU")) void (*const kEntropyCtor)(void) =
+    InitializeObfEntropyAnchor;
+#if defined(_M_IX86)
+#pragma comment(linker, "/include:_kEntropyCtor")
+#else
+#pragma comment(linker, "/include:kEntropyCtor")
+#endif
+#else
+__attribute__((constructor)) static void ObfEntropyCtor(void) {
+  InitializeObfEntropyAnchor();
+}
+#endif
+
 static int g_failures = 0;
 
 static void Fail(const char* message) {
@@ -275,10 +306,19 @@ static void TestReadOnlyLoads(void) {
   FreeTestPage(&page);
 }
 
+static void TestEntropyConstructorRetention(void) {
+  const struct ObfEntropyPair pair = OBF_RT_LOAD_ENTROPY_PAIR();
+
+  ExpectTrue(pair.direct != 0,
+             "entropy constructor must initialize the direct anchor before main");
+  ExpectTrue(pair.indirect != 0,
+             "entropy constructor must initialize the indirect anchor before main");
+}
+
 int main(void) {
+  TestEntropyConstructorRetention();
   TestWritableOperations();
   TestReadOnlyLoads();
-
   if (g_failures != 0) { return EXIT_FAILURE; }
 
   return EXIT_SUCCESS;

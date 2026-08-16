@@ -66,13 +66,23 @@ function(add_obf_benchmark target_name source_file config_file compiler std_flag
     DEPENDS "${source_file}"
     VERBATIM)
 
-  add_custom_command(
-    OUTPUT "${obfuscated_ll}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
-    COMMAND "${CMAKE_COMMAND}" -E rm -f "${obfuscated_ll}"
-    COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}" -passes=obf-safe-pipeline -S "${baseline_ll}" -o "${obfuscated_ll}"
-    DEPENDS obf_plugin "${baseline_ll}" "${config_file}" "${OBF_BENCHMARK_SEED_STAMP}"
-    VERBATIM)
+  if(WIN32)
+    add_custom_command(
+      OUTPUT "${obfuscated_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+      COMMAND "${CMAKE_COMMAND}" -E rm -f "${obfuscated_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E env "OBF_CONFIG=${config_file}" "OBF_SEED=${OBF_EFFECTIVE_BENCHMARK_SEED}" "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" -passes=obf-safe-pipeline -S "${baseline_ll}" -o "${obfuscated_ll}"
+      DEPENDS obf_plugin "${baseline_ll}" "${config_file}" "${OBF_BENCHMARK_SEED_STAMP}"
+      VERBATIM)
+  else()
+    add_custom_command(
+      OUTPUT "${obfuscated_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+      COMMAND "${CMAKE_COMMAND}" -E rm -f "${obfuscated_ll}"
+      COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}" -passes=obf-safe-pipeline -S "${baseline_ll}" -o "${obfuscated_ll}"
+      DEPENDS obf_plugin "${baseline_ll}" "${config_file}" "${OBF_BENCHMARK_SEED_STAMP}"
+      VERBATIM)
+  endif()
 
   _obf_add_native_post_ir_commands(
     final_obfuscated_ll
@@ -115,12 +125,21 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
     DEPENDS ${source_lls}
     VERBATIM)
 
-  add_custom_command(
-    OUTPUT "${linked_obfuscated_ll}"
-    COMMAND "${CMAKE_COMMAND}" -E rm -f "${linked_obfuscated_ll}"
-    COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}" -passes=obf-safe-pipeline -S "${linked_baseline_ll}" -o "${linked_obfuscated_ll}"
-    DEPENDS obf_plugin "${linked_baseline_ll}" "${config_file}" "${OBF_BENCHMARK_SEED_STAMP}"
-    VERBATIM)
+  if(WIN32)
+    add_custom_command(
+      OUTPUT "${linked_obfuscated_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E rm -f "${linked_obfuscated_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E env "OBF_CONFIG=${config_file}" "OBF_SEED=${OBF_EFFECTIVE_BENCHMARK_SEED}" "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" -passes=obf-safe-pipeline -S "${linked_baseline_ll}" -o "${linked_obfuscated_ll}"
+      DEPENDS obf_plugin "${linked_baseline_ll}" "${config_file}" "${OBF_BENCHMARK_SEED_STAMP}"
+      VERBATIM)
+  else()
+    add_custom_command(
+      OUTPUT "${linked_obfuscated_ll}"
+      COMMAND "${CMAKE_COMMAND}" -E rm -f "${linked_obfuscated_ll}"
+      COMMAND "${OBF_OPT}" -load-pass-plugin "$<TARGET_FILE:obf_plugin>" "--obf-config=${config_file}" "--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}" -passes=obf-safe-pipeline -S "${linked_baseline_ll}" -o "${linked_obfuscated_ll}"
+      DEPENDS obf_plugin "${linked_baseline_ll}" "${config_file}" "${OBF_BENCHMARK_SEED_STAMP}"
+      VERBATIM)
+  endif()
 
   _obf_add_native_post_ir_commands(
     linked_final_obfuscated_ll
@@ -152,6 +171,18 @@ function(add_obf_linked_benchmark target_name compiler std_flag config_file)
   set(OBF_MIR_TARGETS "${OBF_MIR_TARGETS}" PARENT_SCOPE)
 endfunction()
 
+if(WIN32)
+  set(OBF_BENCHMARK_OBF_BC_COMMAND
+    "${CMAKE_CURRENT_BINARY_DIR}/obf-bc.cmd")
+  set(OBF_BENCHMARK_OBF_RUSTC_COMMAND
+    "${CMAKE_CURRENT_BINARY_DIR}/obf-rustc.cmd")
+else()
+  set(OBF_BENCHMARK_OBF_BC_COMMAND
+    "${CMAKE_CURRENT_BINARY_DIR}/obf-bc")
+  set(OBF_BENCHMARK_OBF_RUSTC_COMMAND
+    "${CMAKE_CURRENT_BINARY_DIR}/obf-rustc")
+endif()
+
 function(add_obf_rust_benchmark target_name source_file config_file)
   set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/${target_name}")
   set(baseline_ll "${output_dir}/${target_name}.baseline.ll")
@@ -180,7 +211,7 @@ function(add_obf_rust_benchmark target_name source_file config_file)
     OUTPUT "${obfuscated_ll}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
     COMMAND "${CMAKE_COMMAND}" -E rm -f "${obfuscated_ll}"
-    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/obf-rustc"
+    COMMAND "${OBF_BENCHMARK_OBF_RUSTC_COMMAND}"
             --obf-config=${config_file}
             --crate-name=${target_name}
             --crate-type=bin
@@ -220,7 +251,7 @@ function(add_obf_rust_benchmark target_name source_file config_file)
   add_custom_command(
     OUTPUT "${obfuscated_bin}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
-    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/obf-rustc"
+    COMMAND "${OBF_BENCHMARK_OBF_RUSTC_COMMAND}"
             --obf-config=${config_file}
             --crate-name=${target_name}
             --crate-type=bin
@@ -268,7 +299,7 @@ function(add_obf_zig_benchmark target_name component_source main_source config_f
   add_custom_command(
     OUTPUT "${protected_bc}"
     COMMAND "${CMAKE_COMMAND}" -E rm -f "${protected_bc}"
-    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/obf-bc"
+    COMMAND "${OBF_BENCHMARK_OBF_BC_COMMAND}"
             --obf-config=${config_file}
             --obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}
             "${component_bc}"
@@ -378,6 +409,7 @@ set(OBF_CORPUS_E2E_BENCHMARKS
   vm_workflow_demo
   wpo_demo)
 
+if(OBF_PLUGIN_IS_LOADABLE)
 add_obf_benchmark(
   license_demo
   "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/corpus/license_demo.cpp"
@@ -444,3 +476,4 @@ add_custom_target(obf-benchmarks-e2e
   DEPENDS obf-benchmarks
   VERBATIM)
 add_custom_target(obf-benchmarks-mir DEPENDS ${OBF_MIR_TARGETS})
+endif()

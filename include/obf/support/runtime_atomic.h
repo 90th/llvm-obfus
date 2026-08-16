@@ -25,7 +25,16 @@ static inline uint64_t ObfAtomicLoadU64Relaxed(const uint64_t* value) {
 
 static inline void ObfAtomicStoreU64Relaxed(uint64_t* value, uint64_t next) {
 #if defined(_MSC_VER)
+#if defined(_M_IX86)
+  uint64_t cur =
+      (uint64_t)_InterlockedCompareExchange64((volatile __int64*)value, 0, 0);
+  while ((uint64_t)_InterlockedCompareExchange64(
+             (volatile __int64*)value, (__int64)next, (__int64)cur) != cur) {
+    cur = (uint64_t)_InterlockedCompareExchange64((volatile __int64*)value, 0, 0);
+  }
+#else
   (void)_InterlockedExchange64((volatile __int64*)value, (__int64)next);
+#endif
 #else
   __atomic_store_n(value, next, __ATOMIC_RELAXED);
 #endif
@@ -45,7 +54,9 @@ static inline uint64_t ObfAtomicLoadU64Acquire(const uint64_t* value) {
   /* 32-bit x86 fallback: no pure tear-free 64-bit load intrinsic. */
   return (uint64_t)_InterlockedCompareExchange64((volatile __int64*)value, 0, 0);
 #else
-  return (uint64_t)__iso_volatile_load64((const volatile __int64*)value);
+  const uint64_t result = (uint64_t)__iso_volatile_load64((const volatile __int64*)value);
+  _ReadWriteBarrier();
+  return result;
 #endif
 #else
   return __atomic_load_n(value, __ATOMIC_ACQUIRE);
@@ -54,7 +65,16 @@ static inline uint64_t ObfAtomicLoadU64Acquire(const uint64_t* value) {
 
 static inline void ObfAtomicStoreU64Release(uint64_t* value, uint64_t next) {
 #if defined(_MSC_VER)
+#if defined(_M_IX86)
+  uint64_t cur =
+      (uint64_t)_InterlockedCompareExchange64((volatile __int64*)value, 0, 0);
+  while ((uint64_t)_InterlockedCompareExchange64(
+             (volatile __int64*)value, (__int64)next, (__int64)cur) != cur) {
+    cur = (uint64_t)_InterlockedCompareExchange64((volatile __int64*)value, 0, 0);
+  }
+#else
   (void)_InterlockedExchange64((volatile __int64*)value, (__int64)next);
+#endif
 #else
   __atomic_store_n(value, next, __ATOMIC_RELEASE);
 #endif
@@ -72,7 +92,9 @@ static inline uint32_t ObfAtomicLoadU32Acquire(const uint32_t* value) {
   __dmb(_ARM_BARRIER_ISH);
   return observed;
 #else
-  return (uint32_t)__iso_volatile_load32((const volatile __int32*)value);
+  const uint32_t result = (uint32_t)__iso_volatile_load32((const volatile __int32*)value);
+  _ReadWriteBarrier();
+  return result;
 #endif
 #else
   return __atomic_load_n(value, __ATOMIC_ACQUIRE);

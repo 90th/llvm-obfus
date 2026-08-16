@@ -28,7 +28,11 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
+#if __has_include(<llvm/Plugins/PassPlugin.h>)
+#include "llvm/Plugins/PassPlugin.h"
+#else
 #include "llvm/Passes/PassPlugin.h"
+#endif
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -37,21 +41,47 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
 
+#if defined(_WIN32) || defined(__CYGWIN__)
+#define OBF_PLUGIN_EXPORT
+#elif defined(__GNUC__) || defined(__clang__)
+#define OBF_PLUGIN_EXPORT __attribute__((visibility("default")))
+#else
+#define OBF_PLUGIN_EXPORT
+#endif
+
 namespace obf {
 
 namespace {
 
+std::optional<std::string> get_environment_value(const char* name) {
+#if defined(_WIN32)
+  char* value = nullptr;
+  std::size_t length = 0;
+  if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) { return std::nullopt; }
+
+  const std::unique_ptr<char, decltype(&std::free)> owned_value(value, &std::free);
+  return std::string(owned_value.get(), length == 0 ? 0 : length - 1);
+#else
+  if (const char* value = std::getenv(name)) { return std::string(value); }
+  return std::nullopt;
+#endif
+}
+
+#if !defined(_WIN32)
 llvm::cl::opt<std::string> AuditOutPath(
     "obf-audit-out", llvm::cl::desc("Path to write obf-audit JSON output"),
     llvm::cl::init(""));
+#endif
 
 struct AuditRow {
   const llvm::Function* function = nullptr;
@@ -328,7 +358,17 @@ class ObfAuditPass : public llvm::PassInfoMixin<ObfAuditPass> {
     const llvm::SmallVector<AuditRow, 32> rows = resolver.Resolve();
 
     PrintAuditTable(rows);
-    if (!AuditOutPath.empty()) { WriteAuditJson(AuditOutPath, module.getName(), rows); }
+    std::string audit_out;
+#if !defined(_WIN32)
+    audit_out = AuditOutPath.getValue();
+#endif
+    if (audit_out.empty()) {
+      if (const std::optional<std::string> env_audit =
+              get_environment_value("OBF_AUDIT_OUT")) {
+        audit_out = *env_audit;
+      }
+    }
+    if (!audit_out.empty()) { WriteAuditJson(audit_out, module.getName(), rows); }
 
     return llvm::PreservedAnalyses::all();
   }
@@ -503,9 +543,9 @@ class bogus_control_flow_pass : public llvm::PassInfoMixin<bogus_control_flow_pa
   }
 };
 
-bool promote_target_allocas_for_o0(llvm::Function& function, llvm::FunctionAnalysisManager& fam) {
-  auto& dom_tree = fam.getResult<llvm::DominatorTreeAnalysis>(function);
-  auto& assumption_cache = fam.getResult<llvm::AssumptionAnalysis>(function);
+bool promote_target_allocas_for_o0(llvm::Function& function) {
+  llvm::DominatorTree dom_tree(function);
+  llvm::AssumptionCache assumption_cache(function);
   llvm::BasicBlock& entry_block = function.getEntryBlock();
   llvm::SmallVector<llvm::AllocaInst*, 8> promotable_allocas;
   bool changed = false;
@@ -530,7 +570,7 @@ bool promote_target_allocas_for_o0(llvm::Function& function, llvm::FunctionAnaly
 
 class prepare_o0_pass : public llvm::PassInfoMixin<prepare_o0_pass> {
  public:
-  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& mam) {
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
     const obfuscation_config config = load_active_config();
     const llvm::SmallVector<function_pipeline_state, 32> states =
         build_pipeline_state(module, config);
@@ -539,7 +579,6 @@ class prepare_o0_pass : public llvm::PassInfoMixin<prepare_o0_pass> {
     // instrumentation. The O0 obfuscation callback still needs targeted,
     // promotable locals in SSA form before strong_vm lowering, so invoke the
     // mem2reg utility directly on eligible entry-block allocas.
-    auto& fam = mam.getResult<llvm::FunctionAnalysisManagerModuleProxy>(module).getManager();
     bool changed = false;
     for (const function_pipeline_state& state : states) {
       if (state.report.decision.policy.level == protection_level::none ||
@@ -547,7 +586,7 @@ class prepare_o0_pass : public llvm::PassInfoMixin<prepare_o0_pass> {
         continue;
       }
 
-      changed |= promote_target_allocas_for_o0(*state.function, fam);
+      changed |= promote_target_allocas_for_o0(*state.function);
     }
 
     if (!changed) { return llvm::PreservedAnalyses::all(); }
@@ -675,7 +714,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
 
 }  // namespace obf
 
-extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
+extern "C" OBF_PLUGIN_EXPORT ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "obf_plugin", "0.1", [](llvm::PassBuilder& pass_builder) {
             pass_builder.registerPipelineParsingCallback(
                 [](llvm::StringRef name,
