@@ -153,7 +153,12 @@ bool is_supported_string_global(const llvm::GlobalVariable& global, std::size_t 
     return false;
   }
 
-  if (!(global.hasPrivateLinkage() || global.hasInternalLinkage())) { return false; }
+  if (!(global.hasPrivateLinkage() || global.hasInternalLinkage() ||
+        (global.hasLinkOnceODRLinkage() &&
+         (global.hasGlobalUnnamedAddr() || global.hasAtLeastLocalUnnamedAddr() ||
+          global.getName().starts_with("??_C@_"))))) {
+    return false;
+  }
 
   if (global.getName().starts_with("llvm.")) { return false; }
 
