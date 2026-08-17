@@ -60,6 +60,7 @@ struct string_encoding_config {
   bool prefer_lazy_decode = true;
   bool allow_ctor_fallback = true;
   bool authenticated_mode = false;
+  bool enable_ephemeral_slots = true;
 };
 
 struct constant_encoding_config {

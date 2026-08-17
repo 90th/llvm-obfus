@@ -433,6 +433,7 @@ string_encoding_options build_string_encoding_options(const obfuscation_config& 
           .strong_vm_allow_global_plaintext = false,
           .strong_vm_allow_lazy_decode = false,
           .strong_vm_allow_ctor_fallback = false,
+          .enable_ephemeral_slots = config.string_encoding.enable_ephemeral_slots,
           .debug_preserve_generated_names = config.debug_preserve_generated_names};
 }
 

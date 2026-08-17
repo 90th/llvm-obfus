@@ -197,6 +197,20 @@ static uint64_t ReadHardwareEntropy(void) {
   return ReadTimestampEntropy();
 }
 
+/*
+ * Perturb the physical register holding a short-lived plaintext byte without
+ * materializing that byte in an addressable buffer.  Callers consume only the
+ * low byte of the return value.
+ */
+OBF_ENTROPY_ABI
+uint64_t OBF_RT_CORE_SANITIZE_REG(uint64_t val) {
+  volatile uint64_t noise = ReadHardwareEntropy() ^ ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
+  noise ^= noise << 13;
+  noise ^= noise >> 7;
+  noise ^= noise << 17;
+  return (val & 0xffULL) ^ (noise & 0ULL);
+}
+
 static const uint8_t kObfEntropyAnchorDomainV1[17] = {
     'e', 'n', 't', 'r', 'o', 'p', 'y', '_', 'a', 'n', 'c', 'h', 'o', 'r', '_', 'v', '1'};
 

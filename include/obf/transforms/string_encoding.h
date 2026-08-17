@@ -22,6 +22,7 @@ enum class string_encoding_mode {
   global_ctor,
   lazy_decode,
   inline_stack_decode,
+  ephemeral_slot,
 };
 
 enum class string_strategy_kind {
@@ -29,6 +30,7 @@ enum class string_strategy_kind {
   helper_global_ctor,
   helper_lazy_decode,
   inline_stack_decode,
+  ephemeral_micro_slot,
 };
 
 enum class string_helper_shape {
@@ -60,6 +62,8 @@ struct string_encoding_options {
   bool strong_vm_allow_global_plaintext = false;
   bool strong_vm_allow_lazy_decode = false;
   bool strong_vm_allow_ctor_fallback = false;
+  bool enable_ephemeral_slots = true;
+  std::size_t max_ephemeral_unroll_bytes = 64;
   bool debug_preserve_generated_names = false;
 };
 

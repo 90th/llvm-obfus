@@ -99,6 +99,7 @@ struct MappingTraits<obf::string_encoding_config> {
     io.mapOptional("prefer_lazy_decode", config.prefer_lazy_decode, true);
     io.mapOptional("allow_ctor_fallback", config.allow_ctor_fallback, true);
     io.mapOptional("authenticated_mode", config.authenticated_mode, false);
+    io.mapOptional("enable_ephemeral_slots", config.enable_ephemeral_slots, true);
   }
 };
 
