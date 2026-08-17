@@ -16,17 +16,19 @@ The design goal is simple. The passes make static recovery much harder and stay 
 
 ## Visual Comparison
 
-### 1. Hex-Rays Decompiler Comparison (IDA 9.0)
+### 1. Decompiler Comparison
 
-Below is a side-by-side decompiler comparison. It shows baseline C license logic on the left and the obfuscated output on the right (with polynomial MBA expansion, affine transformation loops, and an unrecovered indirect jump):
+The left image shows the original function. The right image shows the obfuscated function.
+
+The obfuscated output contains expanded arithmetic and an indirect dispatch path.
 
 | Baseline Function (`check_license`) | Obfuscated Function (`config_process`) |
 |:---:|:---:|
 | ![Baseline Decompiled Output](images/baseline_decomp.png) | ![Obfuscated Decompiled Output](images/obfuscated_decomp.png) |
 
-### 2. Control-Flow Graph Comparison (IDA 9.0)
+### 2. Control-Flow Graph Comparison
 
-Below is an IDA 9.0 control-flow graph (CFG) comparison:
+The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 
 | Baseline Routine (`main`) | Obfuscated VM Dispatcher (`sub_140003E00`) |
 |:---:|:---:|
@@ -227,7 +229,7 @@ cmake --build build
 
 ## Quick Start
 
-Compile through the wrapper. It loads the pass plugin and links the matching runtime archive for link actions. Place source-file arguments before `--obf-config`:
+Compile through the wrapper. It loads the pass plugin and links the matching runtime archive for link actions:
 
 ```sh
 build/obf-clang -O1 -fno-inline src/auth.c -o auth_app \
@@ -241,7 +243,9 @@ OBF_SEED=20260817 build/obf-clang -O1 -fno-inline src/auth.c -o auth_app \
   --obf-config=path/to/protect.yaml
 ```
 
-For direct Clang use, load the platform-specific plugin file, set the configuration, and link `build/libobf_runtime.a` yourself:
+For direct Clang use, load the plugin, set the configuration, and link `libobf_runtime` yourself.
+
+Use `obf_plugin.so` on Linux. Use `obf_plugin.dll` on Windows.
 
 ```sh
 OBF_CONFIG=path/to/protect.yaml \
@@ -250,6 +254,9 @@ clang -O1 -fno-inline \
   -Iinclude -c src/auth.c -o auth.o
 clang auth.o build/libobf_runtime.a -o auth_app
 ```
+
+On Windows, replace `obf_plugin.so` with `obf_plugin.dll`.
+Use the generated Windows wrapper when possible.
 
 ### Source Annotations
 
@@ -303,13 +310,20 @@ build/obf-rustc \
   --crate-type=bin \
   src/main.rs -o rust_app
 
-# Cargo build integration (requires RUSTC_WORKSPACE_WRAPPER and target selector)
+# Cargo build integration
+#
+# Set these variables to select the crate that the wrapper must protect.
 RUSTC_WORKSPACE_WRAPPER=$(pwd)/build/obf-rustc \
 OBF_CONFIG=$(pwd)/config/rust_protect.yaml \
+OBF_RUST_MANIFEST_DIR=$(pwd) \
+OBF_RUST_CRATE_ROOT=$(pwd)/src/main.rs \
 OBF_RUST_CRATE_NAME=my_app \
-OBF_ENABLE=1 \
+OBF_RUST_CRATE_TYPE=bin \
 cargo build --release
 ```
+
+The Cargo wrapper requires an exact crate name and a crate type of `bin` or `cdylib`.
+It also uses one code generation unit for the selected crate.
 
 ---
 

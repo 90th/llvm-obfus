@@ -33,9 +33,7 @@
 ; UNMATCHED: add nsw i32
 ; UNMATCHED-NOT: call
 ; UNMATCHED: ret i32
-;
-; RUNTIME: @rt_core_ea = external externally_initialized global i64
-;
+; RUNTIME: declare ptr @rt_core_sd3(
 ; RESULT: sum=77
 
 define void @dummy() {
