@@ -81,7 +81,8 @@ const function_override* find_explicit_override(const obfuscation_config& config
 }
 
 bool is_runtime_internal_name(llvm::StringRef name) {
-  return name.starts_with("__obf_") || name.starts_with("llvm.") || name.starts_with("rt_core_");
+  return name.contains("rt_core_") || name.contains("_obf_") || name.contains("ObfEntropy") ||
+         name.contains("ObfBlake") || name.contains("llvm.");
 }
 
 std::optional<protection_level> classify_from_features(const function_features& features,
@@ -193,7 +194,8 @@ function_policy make_function_policy(protection_level level) {
               .allow_flattening = false,
               .allow_split = true,
               .allow_indirect_calls = false,
-              .allow_vm = false};
+              .allow_vm = false,
+              .allow_self_checksum = false};
     case protection_level::strong:
       return {.level = level,
               .allow_string_encoding = true,
@@ -207,7 +209,8 @@ function_policy make_function_policy(protection_level level) {
               .allow_flattening = true,
               .allow_split = true,
               .allow_indirect_calls = true,
-              .allow_vm = false};
+              .allow_vm = false,
+              .allow_self_checksum = true};
     case protection_level::vm:
       return {.level = level,
               .allow_string_encoding = true,
@@ -221,7 +224,8 @@ function_policy make_function_policy(protection_level level) {
               .allow_flattening = false,
               .allow_split = true,
               .allow_indirect_calls = true,
-              .allow_vm = true};
+              .allow_vm = true,
+              .allow_self_checksum = true};
     case protection_level::strong_vm:
       return {.level = level,
               .allow_string_encoding = true,
@@ -235,7 +239,8 @@ function_policy make_function_policy(protection_level level) {
               .allow_flattening = true,
               .allow_split = false,
               .allow_indirect_calls = true,
-              .allow_vm = true};
+              .allow_vm = true,
+              .allow_self_checksum = true};
   }
 
   return {};
@@ -373,6 +378,10 @@ policy_decision select_policy(const llvm::Module& module,
     if (decision.policy.level != protection_level::strong_vm) {
       decision.policy.allow_constant_encoding = true;
     }
+  }
+
+  if (config.self_checksum.enabled && decision.policy.level != protection_level::none) {
+    decision.policy.allow_self_checksum = true;
   }
 
   if (config.frontend == frontend_kind::tinygo) { decision.policy.allow_string_encoding = false; }

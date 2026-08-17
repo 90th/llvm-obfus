@@ -5,6 +5,7 @@
 #include "obf/support/stable_hash.h"
 
 #include "obf/transforms/zero_comparison.h"
+#include "obf/transforms/self_checksum.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/ADT/StringRef.h"
@@ -12,6 +13,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/Error.h"
 
 #include <array>
@@ -974,6 +976,66 @@ void TestZeroComparison() {
   ExpectTrue(!has_strcmp_call, "strcmp call should be lowered to inline zero-reduction");
 }
 
+void TestSelfChecksum(llvm::LLVMContext& context) {
+  llvm::Module module("self_checksum_test_module", context);
+  llvm::Type* i32_ty = llvm::Type::getInt32Ty(context);
+
+  llvm::FunctionType* worker_type = llvm::FunctionType::get(i32_ty, {i32_ty}, false);
+  llvm::Function* worker =
+      llvm::Function::Create(worker_type, llvm::GlobalValue::InternalLinkage, "worker", module);
+  llvm::BasicBlock* worker_entry = llvm::BasicBlock::Create(context, "entry", worker);
+  llvm::IRBuilder<> worker_builder(worker_entry);
+  worker_builder.CreateRet(worker_builder.CreateAdd(
+      worker->getArg(0), llvm::ConstantInt::get(i32_ty, 7), "worker.result"));
+
+  llvm::FunctionType* compute_type = llvm::FunctionType::get(i32_ty, {i32_ty, i32_ty}, false);
+  llvm::Function* compute =
+      llvm::Function::Create(compute_type, llvm::GlobalValue::ExternalLinkage, "compute", module);
+  llvm::BasicBlock* compute_entry = llvm::BasicBlock::Create(context, "entry", compute);
+  llvm::IRBuilder<> compute_builder(compute_entry);
+  llvm::Value* sum =
+      compute_builder.CreateAdd(compute->getArg(0), compute->getArg(1), "compute.sum");
+  llvm::Value* comparison =
+      compute_builder.CreateICmpSGT(sum, llvm::ConstantInt::get(i32_ty, 0), "compute.positive");
+  llvm::Value* selected = compute_builder.CreateSelect(
+      comparison, sum, compute_builder.CreateNeg(sum), "compute.result");
+  compute_builder.CreateRet(selected);
+
+  obf::self_checksum_options options;
+  options.enabled = true;
+  options.max_checksum_sites = 2;
+  options.sample_window_bytes = 32;
+  options.seed = 0xC0DEC0DEULL;
+
+  const obf::self_checksum_result result = obf::transform_self_checksum(*compute, module, options);
+  ExpectTrue(result.checksum_site_count == 2,
+             "self_checksum should transform the configured number of eligible sites");
+  ExpectTrue(result.keyed_value_count == result.checksum_site_count,
+             "self_checksum should derive one keyed value per transformed site");
+
+  std::size_t checksum_calls = 0;
+  bool has_derived_key_logic = false;
+  for (const llvm::BasicBlock& block : *compute) {
+    for (const llvm::Instruction& instruction : block) {
+      if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+        if (const llvm::Function* callee = call->getCalledFunction();
+            callee != nullptr && callee->getName() == OBF_RT_CODE_CHECKSUM_STR) {
+          ++checksum_calls;
+        }
+      }
+      has_derived_key_logic |= instruction.getName().starts_with("obf.selfchk.");
+    }
+  }
+  ExpectTrue(checksum_calls == result.checksum_site_count,
+             "self_checksum should insert one rt_core_cc call per transformed site");
+  ExpectTrue(has_derived_key_logic,
+             "self_checksum should insert checksum-derived key logic into compute");
+  ExpectTrue(!llvm::verifyFunction(*compute, &llvm::errs()),
+             "self_checksum output should remain a valid LLVM function");
+  ExpectTrue(!llvm::verifyModule(module, &llvm::errs()),
+             "self_checksum output should remain a valid LLVM module");
+}
+
 }  // namespace
 
 int main() {
@@ -996,6 +1058,8 @@ int main() {
   TestAuthEncodingDerivationAndTagging();
   TestAuthEncodingConstantTimeEqual();
   TestZeroComparison();
+  llvm::LLVMContext self_checksum_context;
+  TestSelfChecksum(self_checksum_context);
 
   if (g_failures == 0) {
     std::cout << "[ok] obf_unit_tests passed" << '\n';

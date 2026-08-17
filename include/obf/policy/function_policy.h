@@ -26,6 +26,7 @@ struct function_policy {
   bool allow_split = false;
   bool allow_indirect_calls = false;
   bool allow_vm = false;
+  bool allow_self_checksum = false;
 };
 
 constexpr std::string_view to_string(protection_level level) {

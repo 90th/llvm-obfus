@@ -153,6 +153,16 @@ struct MappingTraits<obf::indirect_dispatch_config> {
 };
 
 template <>
+struct MappingTraits<obf::self_checksum_config> {
+  static void mapping(IO& io, obf::self_checksum_config& config) {
+    io.mapOptional("enabled", config.enabled, false);
+    io.mapOptional("window_size", config.window_size, std::uint32_t{64});
+    io.mapOptional("max_sites", config.max_sites, std::uint32_t{4});
+    io.mapOptional("seed", config.seed, std::uint64_t{0});
+  }
+};
+
+template <>
 struct MappingTraits<obf::security_gate_config> {
   static void mapping(IO& io, obf::security_gate_config& config) {
     io.mapOptional("fail_on_public_obf_symbol", config.fail_on_public_obf_symbol, false);
@@ -178,6 +188,7 @@ struct MappingTraits<obf::obfuscation_config> {
     io.mapOptional("mba", config.mba);
     io.mapOptional("vm", config.vm);
     io.mapOptional("indirect_dispatch", config.indirect_dispatch);
+    io.mapOptional("self_checksum", config.self_checksum);
     io.mapOptional("security", config.security);
     io.mapOptional("debug_preserve_generated_names", config.debug_preserve_generated_names, false);
     io.mapOptional("emit_progress_warnings", config.emit_progress_warnings, false);
@@ -206,6 +217,7 @@ struct config_parse_presence {
   bool zero_comparison = false;
   bool vm = false;
   bool indirect_dispatch = false;
+  bool self_checksum = false;
   bool security = false;
   bool debug_preserve_generated_names = false;
   bool emit_progress_warnings = false;
@@ -236,6 +248,8 @@ void mark_config_presence(config_parse_presence& presence, llvm::StringRef key) 
     presence.vm = true;
   } else if (key == "indirect_dispatch") {
     presence.indirect_dispatch = true;
+  } else if (key == "self_checksum") {
+    presence.self_checksum = true;
   } else if (key == "security") {
     presence.security = true;
   } else if (key == "debug_preserve_generated_names") {
@@ -367,6 +381,7 @@ obfuscation_config apply_profile_defaults(const obfuscation_config& raw_config,
   if (presence.mba) { config.mba = raw_config.mba; }
   if (presence.vm) { config.vm = raw_config.vm; }
   if (presence.indirect_dispatch) { config.indirect_dispatch = raw_config.indirect_dispatch; }
+  if (presence.self_checksum) { config.self_checksum = raw_config.self_checksum; }
   if (presence.security) { config.security = raw_config.security; }
   if (presence.debug_preserve_generated_names) {
     config.debug_preserve_generated_names = raw_config.debug_preserve_generated_names;

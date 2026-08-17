@@ -96,6 +96,13 @@ struct indirect_dispatch_config {
   bool target_flattened_headers = true;
 };
 
+struct self_checksum_config {
+  bool enabled = false;
+  std::uint32_t window_size = 64;
+  std::uint32_t max_sites = 4;
+  std::uint64_t seed = 0;
+};
+
 struct security_gate_config {
   bool fail_on_public_obf_symbol = false;
   bool strip_release_markers = false;
@@ -117,6 +124,7 @@ struct obfuscation_config {
   mba_config mba;
   vm_config vm;
   indirect_dispatch_config indirect_dispatch;
+  self_checksum_config self_checksum;
   security_gate_config security;
   bool debug_preserve_generated_names = false;
   bool emit_progress_warnings = false;

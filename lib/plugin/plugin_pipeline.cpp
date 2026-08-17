@@ -515,6 +515,29 @@ bool apply_artifact_cleanup_stage(llvm::Module& module, const obfuscation_config
   return RunArtifactCleanup(module, build_artifact_cleanup_options(config));
 }
 
+bool apply_self_checksum_stage(llvm::Module& module,
+                               const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                               const obfuscation_config& config) {
+  if (!config.self_checksum.enabled) { return false; }
+
+  const self_checksum_options options = {
+      .enabled = true,
+      .sample_window_bytes = config.self_checksum.window_size,
+      .max_checksum_sites = config.self_checksum.max_sites,
+      .seed = config.self_checksum.seed != 0 ? config.self_checksum.seed : config.seed};
+
+  bool changed = false;
+  for (const function_pipeline_state& state : states) {
+    if (should_skip_function(state, nullptr) || !state.report.decision.policy.allow_self_checksum) {
+      continue;
+    }
+
+    changed |= transform_self_checksum(*state.function, module, options).checksum_site_count != 0;
+  }
+
+  return changed;
+}
+
 bool apply_constant_encoding_stage(llvm::Module& module,
                                    const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                    const obfuscation_config& config,

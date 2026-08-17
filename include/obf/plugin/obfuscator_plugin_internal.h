@@ -20,6 +20,7 @@
 #include "obf/transforms/opaque_gep.h"
 #include "obf/transforms/opaque_predicates.h"
 #include "obf/transforms/string_encoding.h"
+#include "obf/transforms/self_checksum.h"
 #include "obf/transforms/zero_comparison.h"
 
 #include "llvm/ADT/SmallVector.h"

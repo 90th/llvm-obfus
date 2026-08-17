@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <stdint.h>
 
 #include "obf/support/runtime_abi_generated.h"
@@ -21,7 +22,28 @@
 #endif
 
 uint64_t OBF_RT_ENTROPY_ANCHOR = 0;
-static uint64_t * const kEntropyAnchorRef = &OBF_RT_ENTROPY_ANCHOR;
+
+#if defined(__clang__) || defined(__GNUC__)
+#define OBF_HIDDEN __attribute__((visibility("hidden")))
+#else
+#define OBF_HIDDEN
+#endif
+
+OBF_HIDDEN
+uint64_t OBF_RT_CODE_CHECKSUM(const void* func_ptr, size_t size, uint64_t seed) {
+  if (func_ptr == NULL) { return seed ^ 0x9e3779b97f4a7c15ULL; }
+
+  if (size > 64U) { size = 64U; }
+
+  const uint8_t* p = (const uint8_t*)func_ptr;
+  uint64_t h = seed ^ 0x9e3779b97f4a7c15ULL;
+  for (size_t i = 0; i < size; ++i) {
+    h = (h ^ p[i]) * 1099511628211ULL;
+    h ^= h >> 27;
+  }
+  return h;
+}
+static uint64_t* const kEntropyAnchorRef = &OBF_RT_ENTROPY_ANCHOR;
 
 struct ObfEntropyPair {
   uint64_t direct;
@@ -53,16 +75,16 @@ static struct ObfEntropyPair BuildEntropyPair(uint64_t direct, uint64_t indirect
 OBF_ENTROPY_ABI
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR(void) {
   const uint64_t direct = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
-  uint64_t * const ref_ptr = kEntropyAnchorRef;
+  uint64_t* const ref_ptr = kEntropyAnchorRef;
   ObfAtomicStoreU64Relaxed(ref_ptr, direct);
   const uint64_t indirect = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   return BuildEntropyPair(direct, indirect);
 }
 
-OBF_ENTROPY_ABI
-struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V1(void) {
+OBF_ENTROPY_ABI struct ObfEntropyPair
+OBF_RT_LOAD_ENTROPY_PAIR_V1(void) {
   const uint64_t direct = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
-  uint64_t * const ref_ptr = kEntropyAnchorRef;
+  uint64_t* const ref_ptr = kEntropyAnchorRef;
   volatile uint64_t scratch_direct = direct;
   volatile uint64_t scratch_indirect = 0;
   ObfAtomicStoreU64Relaxed(ref_ptr, (uint64_t)scratch_direct);
@@ -70,10 +92,10 @@ struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V1(void) {
   return BuildEntropyPair((uint64_t)scratch_direct, (uint64_t)scratch_indirect);
 }
 
-OBF_ENTROPY_ABI
-struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V2(void) {
+OBF_ENTROPY_ABI struct ObfEntropyPair
+OBF_RT_LOAD_ENTROPY_PAIR_V2(void) {
   const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
-  uint64_t * const ref_ptr = kEntropyAnchorRef;
+  uint64_t* const ref_ptr = kEntropyAnchorRef;
   const uint64_t low = base & 0xffffffffULL;
   const uint64_t high = (base >> 32) & 0xffffffffULL;
   const uint64_t direct = low | (high << 32);
@@ -85,10 +107,10 @@ struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V2(void) {
   return BuildEntropyPair(direct, indirect);
 }
 
-OBF_ENTROPY_ABI
-struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V3(void) {
+OBF_ENTROPY_ABI struct ObfEntropyPair
+OBF_RT_LOAD_ENTROPY_PAIR_V3(void) {
   const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
-  uint64_t * const ref_ptr = kEntropyAnchorRef;
+  uint64_t* const ref_ptr = kEntropyAnchorRef;
   volatile uint64_t key = 0x9e3779b97f4a7c15ULL;
   const uint64_t direct_masked = base ^ key;
   const uint64_t direct = direct_masked ^ key;
@@ -98,10 +120,10 @@ struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V3(void) {
   return BuildEntropyPair(direct, indirect);
 }
 
-OBF_ENTROPY_ABI
-struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V4(void) {
+OBF_ENTROPY_ABI struct ObfEntropyPair
+OBF_RT_LOAD_ENTROPY_PAIR_V4(void) {
   const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
-  uint64_t * const ref_ptr = kEntropyAnchorRef;
+  uint64_t* const ref_ptr = kEntropyAnchorRef;
   volatile uint64_t bias = 0x6a09e667f3bcc909ULL;
   const uint64_t direct_biased = base + bias;
   const uint64_t direct = direct_biased - bias;
@@ -111,7 +133,8 @@ struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR_V4(void) {
   return BuildEntropyPair(direct, indirect);
 }
 
-static uint64_t ReadTimestampEntropy(void) {
+static uint64_t
+ReadTimestampEntropy(void) {
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
   return (uint64_t)__rdtsc();
 #else
@@ -131,9 +154,7 @@ static int CpuSupportsRdrand(void) {
   unsigned int ebx = 0;
   unsigned int ecx = 0;
   unsigned int edx = 0;
-  if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0) {
-    return 0;
-  }
+  if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0) { return 0; }
   return (ecx & (1u << 30)) != 0;
 #else
   return 0;
@@ -144,25 +165,21 @@ static int CpuSupportsRdrand(void) {
 #if defined(__clang__)
 __attribute__((target("rdrnd")))
 #endif
-static int TryReadRdrand(uint64_t *entropy_bits) {
+static int TryReadRdrand(uint64_t* entropy_bits) {
   unsigned __int64 value = 0;
   const int success = _rdrand64_step(&value);
-  if (success != 0) {
-    *entropy_bits = (uint64_t)value;
-  }
+  if (success != 0) { *entropy_bits = (uint64_t)value; }
   return success;
 }
 #elif defined(__x86_64__) && (defined(__clang__) || defined(__GNUC__))
-__attribute__((target("rdrnd"))) static int TryReadRdrand(uint64_t *entropy_bits) {
+__attribute__((target("rdrnd"))) static int TryReadRdrand(uint64_t* entropy_bits) {
   unsigned long long value = 0;
   const int success = _rdrand64_step(&value);
-  if (success != 0) {
-    *entropy_bits = (uint64_t)value;
-  }
+  if (success != 0) { *entropy_bits = (uint64_t)value; }
   return success;
 }
 #else
-static int TryReadRdrand(uint64_t *entropy_bits) {
+static int TryReadRdrand(uint64_t* entropy_bits) {
   (void)entropy_bits;
   return 0;
 }
@@ -173,9 +190,7 @@ static uint64_t ReadHardwareEntropy(void) {
 
   if (CpuSupportsRdrand()) {
     for (int attempt = 0; attempt < 10; ++attempt) {
-      if (TryReadRdrand(&entropy_bits) != 0) {
-        return entropy_bits;
-      }
+      if (TryReadRdrand(&entropy_bits) != 0) { return entropy_bits; }
     }
   }
 
@@ -183,7 +198,7 @@ static uint64_t ReadHardwareEntropy(void) {
 }
 
 static const uint8_t kObfEntropyAnchorDomainV1[17] = {
-    'e','n','t','r','o','p','y','_','a','n','c','h','o','r','_','v','1'};
+    'e', 'n', 't', 'r', 'o', 'p', 'y', '_', 'a', 'n', 'c', 'h', 'o', 'r', '_', 'v', '1'};
 
 static uint64_t ObfEntropyCompress(uint64_t current, uint64_t entropy) {
   struct ObfBlake2sState state;
@@ -208,15 +223,12 @@ static void InitializeObfEntropyAnchor(void) {
 
 #if defined(_MSC_VER)
 #pragma section(".CRT$XCU", read)
-__declspec(allocate(".CRT$XCU")) void (*const kObfEntropyCtor)(void) =
-    InitializeObfEntropyAnchor;
+__declspec(allocate(".CRT$XCU")) void (*const kObfEntropyCtor)(void) = InitializeObfEntropyAnchor;
 #if defined(_M_IX86)
 #pragma comment(linker, "/include:_kObfEntropyCtor")
 #else
 #pragma comment(linker, "/include:kObfEntropyCtor")
 #endif
 #else
-__attribute__((constructor)) static void ObfEntropyCtor(void) {
-  InitializeObfEntropyAnchor();
-}
+__attribute__((constructor)) static void ObfEntropyCtor(void) { InitializeObfEntropyAnchor(); }
 #endif

@@ -16,6 +16,7 @@
 #include "obf/transforms/entropy_initialization.h"
 #include "obf/transforms/indirect_dispatch.h"
 #include "obf/transforms/zero_comparison.h"
+#include "obf/transforms/self_checksum.h"
 
 // Note: apply_cfg_state_cleanup_stage() is defined in plugin_pipeline.cpp (no header needed)
 
@@ -422,6 +423,18 @@ class string_encoding_pass : public llvm::PassInfoMixin<string_encoding_pass> {
   }
 };
 
+class self_checksum_pass : public llvm::PassInfoMixin<self_checksum_pass> {
+ public:
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+    return run_stateful_stage(module,
+                              [](llvm::Module& current_module,
+                                 const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                                 const obfuscation_config& config) {
+                                return apply_self_checksum_stage(current_module, states, config);
+                              });
+  }
+};
+
 class indirect_dispatch_pass : public llvm::PassInfoMixin<indirect_dispatch_pass> {
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
@@ -678,6 +691,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     changed |= !flattened_functions.empty();
     changed |= apply_function_outlining_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_bogus_control_flow_stage(post_vm_states, config, &all_vm_virtualized);
+    changed |= apply_self_checksum_stage(module, post_vm_states, config);
 
     llvm::StringSet<> block_split_skips;
     for (const auto& entry : all_vm_virtualized) { block_split_skips.insert(entry.getKey()); }
@@ -751,6 +765,11 @@ extern "C" OBF_PLUGIN_EXPORT ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo
 
                   if (name == "obf-string-encode") {
                     module_pm.addPass(obf::string_encoding_pass());
+                    return true;
+                  }
+
+                  if (name == "obf-self-checksum") {
+                    module_pm.addPass(obf::self_checksum_pass());
                     return true;
                   }
 

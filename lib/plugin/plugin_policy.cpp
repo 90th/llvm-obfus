@@ -56,7 +56,9 @@ bool is_orchestrator_promoted_level(protection_level level) {
 
 bool is_user_pipeline_function(const llvm::Function& function) {
   const llvm::StringRef name = function.getName();
-  return !name.starts_with("__obf_") && !name.starts_with("llvm.") && !name.starts_with("rt_core_");
+  return !name.starts_with("__obf_") && !name.starts_with("llvm.") &&
+         !name.starts_with("rt_core_") && !name.starts_with("_obf_") &&
+         !name.contains("ObfEntropy");
 }
 
 void resolve_non_generic_configured_names(const llvm::Module& module, obfuscation_config& config) {
@@ -121,6 +123,7 @@ function_policy build_orchestrator_promotion_policy(const function_features& fea
   policy.allow_split = false;
   policy.allow_indirect_calls = false;
   policy.allow_vm = false;
+  policy.allow_self_checksum = false;
   return policy;
 }
 

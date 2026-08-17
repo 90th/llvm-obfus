@@ -27,8 +27,10 @@ add_library(obf_core
   lib/transforms/mba.cpp
   lib/transforms/opaque_gep.cpp
   lib/transforms/opaque_predicates.cpp
+  lib/transforms/self_checksum.cpp
   lib/transforms/string_encoding.cpp
   lib/transforms/zero_comparison.cpp
+  lib/transforms/self_checksum.cpp
   lib/vm/candidate_analysis.cpp
   lib/vm/bytecode_decode.cpp
   lib/vm/dispatch_emission.cpp
