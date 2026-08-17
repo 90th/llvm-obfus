@@ -1,4 +1,5 @@
 # llvm-obfus
+
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![LLVM](https://img.shields.io/badge/LLVM-21%2B-262D3A?logo=llvm&logoColor=white)](https://llvm.org/)
 [![C++23](https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/23)
@@ -7,22 +8,55 @@
 
 `llvm-obfus` is an out-of-tree LLVM 21+ pass plugin for policy-driven IR obfuscation.
 
-The project applies native LLVM IR transforms to selected functions. The main production entry point is `obf-safe-pipeline`, which composes virtualization, structural rewrites, string and constant protection, late indirect dispatch, and final artifact cleanup.
+The plugin applies native LLVM IR transforms to selected functions. The main entry point is `obf-safe-pipeline`. It runs virtualization, structural rewrites, string and constant protection, self-checksumming, zero-comparison lowering, late indirect dispatch, and final artifact cleanup.
 
 The design goal is simple. The passes make static recovery much harder and stay inside normal LLVM semantics. The project does not rely on malformed objects, inline-asm traps, EH spoofing, or target-specific parser breaks.
 
+---
+
+## Visual Comparison
+
+### 1. Hex-Rays Decompiler Comparison (IDA 9.0)
+
+Below is a side-by-side decompiler comparison. It shows baseline C license logic on the left and the obfuscated output on the right (with polynomial MBA expansion, affine transformation loops, and an unrecovered indirect jump):
+
+| Baseline Function (`check_license`) | Obfuscated Function (`config_process`) |
+|:---:|:---:|
+| ![Baseline Decompiled Output](images/baseline_decomp.png) | ![Obfuscated Decompiled Output](images/obfuscated_decomp.png) |
+
+### 2. Control-Flow Graph Comparison (IDA 9.0)
+
+Below is an IDA 9.0 control-flow graph (CFG) comparison:
+
+| Baseline Routine (`main`) | Obfuscated VM Dispatcher (`sub_140003E00`) |
+|:---:|:---:|
+| ![Baseline CFG](images/baseline_cfg.png) | ![Obfuscated CFG](images/obfuscated_cfg.png) |
+
+---
+
+## Overview
+
+- **Design Model**: Function-selective policy engine driven by YAML configuration or source-level `__attribute__((annotate(...)))` tags. The direct `opt` interface also accepts command-line configuration flags on non-Windows hosts.
+- **Compiler Compatibility**: Uses LLVM New Pass Manager (NPM) extension points. Clang/Clang++, LLVM bitcode, Rust, Zig, and TinyGo integrations are supplied by wrappers or bitcode workflows.
+- **Platform Support**: The C/C++ plugin, runtime, Clang wrapper, and bitcode wrapper support Linux and Windows x86_64. Rust, Zig, and TinyGo workflows are currently Linux-only.
+- **Profiles**: Five built-in performance-versus-security profiles: `fast`, `standard`, `guarded`, `fortress`, and `lab`.
+- **Clean Artifacts**: Final cleanup strips release markers, annotations, and local SSA names. Security gates verify configured symbol-isolation invariants.
+
+---
+
 ## Main Features
 
-### Strong Virtualization And MBA Flattening
+### Strong Virtualization and MBA Flattening
 
 - Protection levels are `none`, `light`, `strong`, `vm`, and `strong_vm`.
 - `vm` and `strong_vm` lower selected functions into VM-backed execution paths.
 - Later hardening stages also process `strong_vm` implementation bodies, not just the public wrapper.
+- Candidate analysis (`lib/vm/candidate_analysis.cpp`) skips incompatible constructs (varargs, non-integral pointers, complex EH pads) and gives clear diagnostics if instruction limits are exceeded.
 - MBA rewriting diversifies arithmetic identities across `add`, `sub`, `xor`, and `mul`. It also rewrites `udiv` and `urem` by power-of-two constant divisors. It works directly and as part of other transforms such as constant reconstruction and opaque predicates.
 - Shape families include linear identities (`x ^ y = (x | y) - (x & y)`), affine wrappers (`Encode(x) = a*x + b` with odd modular multiplier), polynomial zero terms (depth 3+), and constant-multiplication decomposition.
-- Entropy thunk interfaces use one of two forms per function: aggregate pair or out-parameter. First-hop entropy mixing uses per-site `xor`, `mul_add`, `rotate_xor`, or `bit_split` selection before MBA shape builders run.
-- A private `BudgetTracker` enforces a per-expression IR-instruction cap derived from `mba.depth`. When the budget is exhausted mid-expansion, the engine emits the plain LLVM binary operation instead.
-- `instruction_substitution` rewrites logical `and`, `or`, and `xor` operations into equivalent identities, such as `x & y = (x | y) - (x ^ y)`. Each site selects one of two variants and can pad the result with an MBA opaque zero.
+- A private `BudgetTracker` enforces a per-expression IR-instruction cap derived from `mba.depth`. When the budget runs out mid-expansion, the engine emits the plain LLVM binary operation instead.
+- `instruction_substitution` rewrites logical `and`, `or`, and `xor` operations into equivalent identities. Each site selects one of two variants and can pad the result with an MBA opaque zero.
+- `zero_comparison` converts integer and string equality checks (`strcmp`, `memcmp`, `strncmp`, `bcmp`, `icmpeq`) into non-branching bitwise XOR reduction ladders and entropy-masked comparisons.
 
 ### Seeded Indirect Dispatch
 
@@ -30,12 +64,16 @@ The design goal is simple. The passes make static recovery much harder and stay 
 - It rewrites supported conditional branches and switch dispatch sites into per-site masked `blockaddress` plus arithmetic plus `indirectbr` sequences.
 - Each dispatch site derives its masking material from the protected function seed and site index.
 - The implementation reconstructs targets from same-function deltas in SSA instead of emitting absolute dispatch tables in globals.
-- This pass does not use the authenticated BLAKE2s runtime that strings and constant pools use.
 - The pass skips unsupported shapes conservatively: EH personalities, EH pads, `invoke`, `callbr`, existing `indirectbr`, `catchswitch`, `catchreturn`, `cleanupreturn`, `resume`, `musttail`, and non-integral program address spaces.
 
-### Keyed And Integrity-Checked Runtime Strings
+### Code-as-Data Self-Checksumming
 
-- The `string_encoding` section configures string encoding.
+- `self_checksum` samples small instruction windows (16 to 32 bytes) of sibling functions into derived cryptographic keys via `rt_core_cc`.
+- The derived key threads into downstream calculations. Setting a software breakpoint (`0xCC` / `int 3`) alters the hash output and silently corrupts program state.
+
+### Keyed and Integrity-Checked Runtime Strings
+
+- `string_encoding` handles string encryption.
 - `authenticated_mode` enables the keyed and integrity-checked runtime decode path.
 - The runtime support lives in `runtime/string_auth_runtime.c` and handles keyed string and constant-pool recovery.
 - The transform handles lazy decode, eager decode, constructor fallback, and forwarded-pointer cases.
@@ -46,614 +84,491 @@ The design goal is simple. The passes make static recovery much harder and stay 
 - Constant encoding modes are `off`, `mba_inline`, `keyed_pool`, `auto`, and `all`.
 - `mba_inline` reconstructs constants directly in IR.
 - `keyed_pool` moves constants into keyed, integrity-checked pools that the runtime recovers at use sites.
-- `auto` chooses a strategy per use site.
+- `auto` chooses a strategy per use site based on bit-width and target level.
 
-### Seed And Key Derivation
+### Seed and Key Derivation
 
-- The top-level `seed` is the root build input. Function-selective passes such as `indirect_dispatch` derive per-site seeds from the top-level seed, the function name, and the site index. The keyed string and keyed-pool runtime currently uses the top-level seed directly.
-- `authenticated_mode` and `keyed_pool` use a domain-separated BLAKE2s schedule. The file `include/obf/support/auth_encoding.h` implements this schedule.
-- The schedule is `build_key(seed)` -> `function_key(module_id, function_id)` -> per-site or per-pool key -> labeled `enc` and `mac` subkeys.
-- Authenticated strings derive distinct keys from descriptor metadata including `module_id`, a derived `function_id`, and `site_id`. Keyed constant pools derive distinct keys from `module_id` and `pool_id`.
+- The top-level `seed` is the root build input. Function-selective passes such as `indirect_dispatch` derive per-site seeds from the top-level seed, the function name, and the site index. The keyed string and keyed-pool runtime uses the top-level seed directly.
+- `authenticated_mode` and `keyed_pool` use a domain-separated BLAKE2s schedule in `include/obf/support/auth_encoding.h`:
+  `build_key(seed)` -> `function_key(module_id, function_id)` -> `site_key` -> `(enc_key, mac_key)`
 - Authentication uses a keyed BLAKE2s tag over descriptor metadata plus ciphertext. Encryption uses a BLAKE2s-derived XOR keystream with a derived nonce. The scheme does not use AES, ChaCha20, HMAC, or SipHash.
-- The emitted artifacts store the 32-byte `build_key` in internal globals and reconstruct derived keys at runtime from descriptor metadata. This is an embedded-key, self-contained runtime. It does not use a hardware token, remote service, white-box key split, or entropy-anchor binding.
+- The emitted artifacts store the 32-byte `build_key` in internal globals and reconstruct derived keys at runtime. This is an embedded-key, self-contained runtime. It does not use a hardware token, remote service, white-box key split, or entropy-anchor binding.
 - Integrity verification is fail-closed. Descriptor mismatches, tag mismatches, and length mismatches trap in the runtime. The runtime does not return tampered plaintext.
-- `runtime/entropy_anchor.c` supports opaque arithmetic and MBA-style transforms. It is separate from the keyed string and constant-pool key schedule. It exposes five deterministic accessor variants: `direct`, `stack_roundtrip`, `split_recombine`, `xor_neutral`, and `add_sub_neutral`. The function and salt determine the variant.
+- `runtime/entropy_anchor.c` supports opaque arithmetic and MBA-style transforms. It exposes five deterministic accessor variants: `direct`, `stack_roundtrip`, `split_recombine`, `xor_neutral`, and `add_sub_neutral`.
 
-### Stealth ABI And Artifact Cleanup
+### Stealth ABI and Artifact Cleanup
 
-- The build generates public runtime ABI names in `build/include/obf/support/runtime_abi_generated.h`.
+- The build generates public runtime ABI names in `include/obf/support/runtime_abi_generated.h`.
 - The default public prefix is `rt_core_`.
 - Final cleanup strips marker attributes, removes annotation metadata, anonymizes local and internal obfuscation artifacts, and strips local SSA names.
-- Security gates can fail the build on leaked public `obf` symbols. **Note:** The plugin config preflight fails the build on weakened security configs. To allow a weakened config, set `security.allow_unsafe_config: true`. It rejects `strong_vm` and high-security profiles (`fortress`, `lab`) without `security.fail_on_public_obf_symbol: true`. When VM obfuscation is active, it also rejects `debug_preserve_generated_names: true`.
+- Security gates can fail the build on leaked public `obf` symbols. Set `security.allow_unsafe_config: true` only if you explicitly want to allow a weakened test config.
+
+---
 
 ## Architecture
 
-### Frontend
+```mermaid
+graph TD
+    Config[YAML Config / Profile / Annotations] --> Frontend[lib/frontend - Config Parser & Validator]
+    Source[LLVM IR / Bitcode] --> Analysis[lib/analysis - Feature Extraction]
+    Frontend --> Policy[lib/policy - Policy Engine]
+    Analysis --> Policy
+    Policy --> Pipeline[lib/plugin - Safe Pipeline Orchestrator]
+    
+    subgraph Safe Pipeline Execution Flow
+        Pipeline --> Step1[1. Entropy Init & Dual-Phase VM Lowering]
+        Step1 --> Step2[2. String Encode, Zero-Comparison & Constant Pooling]
+        Step2 --> Step3[3. Opaque GEP, Substitution & Control Flattening]
+        Step3 --> Step4[4. Outlining, Bogus CF, Self-Checksum & Split]
+        Step4 --> Step5[5. Strong VM Implementation Hardening]
+        Step5 --> Step6[6. CFG Cleanup & Indirect Dispatch]
+        Step6 --> Step7[7. Security Gate Enforcement & Artifact Cleanup]
+    end
 
-- YAML loading and config parsing live in `lib/frontend/`.
-- Profiles are `fast`, `standard`, `guarded`, `fortress`, and `lab`.
-- The loader applies profile defaults first. Explicit top-level YAML sections override these defaults. `--obf-seed` overrides the final seed after config loading.
+    Step7 --> Output[Hardened Target Object / Binary]
+    Runtime[runtime/ - libobf_runtime.a] -. Linked .-> Output
+```
 
-### Analysis And Policy
+---
 
-- Per-function feature extraction lives in `lib/analysis/`.
-- Policy selection lives in `lib/policy/`.
-- The pipeline is function-selective rather than blanket-on for the whole module.
+## Supported Frontends
 
-### Transforms
+| Frontend | Integration Method | Configuration Requirements | Platform Support |
+|---|---|---|---|
+| **Clang / Clang++** | `-fpass-plugin=<plugin>` or `obf-clang` / `obf-clang++` wrapper | Generic configuration, annotations, or YAML overrides | Linux, Windows |
+| **LLVM Bitcode** | `obf-bc` CLI wrapper or `opt` pass plugin | Valid `.bc` input/output and explicit configuration | Linux, Windows |
+| **Rust (`rustc`/Cargo)** | `obf-rustc` wrapper via `RUSTC_WORKSPACE_WRAPPER` | `frontend: rust`, `default_level: none`, exact symbol names | Linux only |
+| **Zig** | Bitcode pipeline via `zig build-obj -femit-llvm-bc` | `frontend: zig`, `default_level: none`, exact symbol names | Linux only |
+| **TinyGo** | `obf-tinygo` wrapper | `frontend: tinygo`, `default_level: none`, `string_encoding.max_strings_per_module: 0`, exact symbol names | Linux only |
 
-- Core transforms live in `lib/transforms/`.
-- VM lowering lives in `lib/vm/`.
-- Pass registration and safe-pipeline orchestration live in `lib/plugin/`.
+---
 
-### Runtime
+## Protection Levels
 
-- `runtime/entropy_anchor.c` provides the entropy anchor support object that builds and tests use.
-- `runtime/string_auth_runtime.c` provides keyed and integrity-checked decode support for strings and constant pools.
+Functions are classified into five protection levels:
 
-## Safe Pipeline Order
+| Level | Allow VM | MBA / Sub | CFG Flatten | Strings | Constants | Outlining | Bogus CF | Indirect | Self-Checksum | Split |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `none` | No | No | No | No | No | No | No | No | No | No |
+| `light` | No | No | No | Yes | Yes | No | No | No | No | Yes |
+| `strong` | No | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| `vm` | Yes | No | No | Yes | Yes | No | No | Yes | Yes | Yes |
+| `strong_vm` | Yes | Yes | Yes | Yes | No* | Yes | No | Yes | Yes | No |
 
-`obf-safe-pipeline` is the integrated pipeline that the benchmarks and lit coverage use. Its current high-level order is:
+\* *In `strong_vm`, constant protection is bypassed during initial function policy to avoid interfering with VM dispatch tables; constants are absorbed directly into bytecode tables and hardened VM handlers.*
 
-1. entropy initialization
-2. VM lowering and call rewriting for `vm`
-3. VM lowering and call rewriting for `strong_vm`
-4. post-VM string encoding
-5. constant encoding
-6. opaque GEP
-7. instruction substitution for logical and boolean rewrites
-8. opaque predicates
-9. control flattening
-10. function outlining
-11. bogus control flow
-12. block splitting
-13. additional hardening on `strong_vm` implementation functions
-14. CFG state cleanup
-15. indirect dispatch
-16. security gate enforcement
-17. artifact cleanup
+---
 
-The late ordering matters. Indirect dispatch runs after the major structural passes so it can rewrite the final dispatch-heavy CFG shapes, including VM implementation functions.
+## Profiles
 
-## Configuration
+Built-in profiles configure default heuristic thresholds:
 
-The loader currently supports these top-level sections:
-
-- `frontend`
-- `profile`
-- `seed`
-- `default_level`
-- `overrides`
-- `targets`
-- `block_split`
-- `string_encoding`
-- `constant_encoding`
-- `mba`
-- `vm`
-- `indirect_dispatch`
-- `security`
-- `debug_preserve_generated_names`
-- `emit_progress_warnings`
-
-`overrides` entries match exact function names. `targets` entries support glob-style wildcard patterns (e.g., `"verify_*"`).
-
-`emit_progress_warnings: true` emits stderr progress messages around long `strong_vm` lowering and hardening phases. The default is silent.
-`frontend` defaults to `generic`. The other values are `rust`, `zig`, and `tinygo`.
-
-A non-generic frontend uses stricter policy rules. It requires `default_level: none` and `security.strip_release_markers: true`.
-It rejects `security.allow_unsafe_config: true`. It also requires exact function names and `light` or `strong` protection.
-The module validator rejects duplicate names, target and override overlaps, missing functions, and ambiguous aliases.
-TinyGo also requires `string_encoding.max_strings_per_module: 0`.
-The loader rejects files with more than one nonempty YAML document.
-
-
-### Profile Defaults
-
-| Setting | `fast` | `standard` | `guarded` | `fortress` | `lab` |
-|---|---|---|---|---|---|
+| Profile Setting | `fast` | `standard` | `guarded` | `fortress` | `lab` |
+|---|:---:|:---:|:---:|:---:|:---:|
 | `mba.depth` | 1 | 1 | 2 | 3 | 4 |
-| `mba.enable_polynomial` | derived | derived | derived | derived | true |
-| `mba.enable_multiplication` | derived | derived | derived | derived | true |
-| `mba.max_ir_instructions` | derived | derived | derived | derived | 320 |
+| `mba.enable_polynomial` | unset | unset | unset | unset | `true` |
+| `mba.enable_multiplication` | unset | unset | unset | unset | `true` |
+| `mba.max_ir_instructions` | unset | unset | unset | unset | 320 |
 | `block_split.max_splits_per_function` | 1 | 1 | 2 | 4 | 8 |
+| `block_split.min_instructions_per_block` | 2 | 2 | 2 | 1 | 1 |
 | `string_encoding.min_string_length` | 3 | 2 | 2 | 1 | 1 |
 | `string_encoding.max_strings_per_module` | 32 | 128 | 256 | 512 | 1024 |
-| `string_encoding.prefer_lazy_decode` | true | true | true | false | false |
-| `string_encoding.allow_ctor_fallback` | true | true | false | false | false |
+| `string_encoding.prefer_lazy_decode` | `true` | `true` | `true` | `false` | `false` |
+| `string_encoding.allow_ctor_fallback` | `true` | `true` | `false` | `false` | `false` |
 | `constant_encoding.max_constants_per_function` | 2 | 4 | 8 | 16 | 32 |
-| `security.fail_on_public_obf_symbol` | false | true | true | true | true |
+| `security.fail_on_public_obf_symbol` | `false` | `true` | `true` | `true` | `true` |
 
-All profiles default to `authenticated_mode: false`, `indirect_dispatch.enabled: false`, `min_instructions_per_block: 2` (`fortress` and `lab` use `1`), `min_bit_width: 8`, `default_level: none`, and `constant_encoding.mode: mba_inline`. MBA override fields (`enable_polynomial`, `enable_multiplication`, `max_ir_instructions`) are absent by default. Their values come from `mba.depth`. Polynomial and multiplication families enable at depth 3+. The IR-instruction budget scales with depth: `64` at depth 1, `128` at depth 2, `192` at depth 3, and `256` at depth 4. Explicit top-level YAML keys override profile defaults.
-
-### VM Emission Cost and Build Guidance
-
-`vm` and `strong_vm` lowering intentionally emit large IR.
-A function with about 20 instructions expands to about 100k IR lines at `mba.depth: 0`.
-Depth 0 to depth 1 is the steepest step, about 5x, and reaches about 500k IR lines.
-Higher levels add less: about 1.0M IR lines at depth 2 and about 1.6M at depth 3.
-
-The obfuscation pass itself is fast.
-The native backend that compiles the expanded IR causes the cost.
-`clang -O3` aggressively inlines and unrolls this IR.
-That build mode is not practical for VM-obfuscated functions.
-
-For VM-heavy builds, obfuscate IR built with `-O1 -fno-inline`.
-The benchmark targets use this mode.
-Target small hot functions.
-Lower `mba.depth` for VM code when you need shorter build times.
-
-Two settings bound VM cost.
-`vm.max_mba_depth` clamps the MBA depth used inside VM lowering.
-If you do not set it, the VM uses no clamp.
-`vm.max_virtual_instructions` sets a per-function virtual-instruction budget.
-Its default is `512`.
-If a `strong_vm` function exceeds the budget, the build fails with an actionable diagnostic.
-
-### Per-Function Annotations
-
-You can set protection levels directly in source with LLVM's `annotate` attribute. The canonical annotation value is `"obf:<level>"` where `<level>` is one of `none`, `light`, `strong`, `vm`, or `strong_vm`. The parser also accepts a bare level string such as `"strong"`. The level match ignores case.
-
-```c
-__attribute__((annotate("obf:strong_vm")))
-void sensitive_routine(void) { ... }
-```
-
-Annotations take precedence below explicit `overrides` entries but above `targets` rule matching. The automatic security floor applies independently and may raise the level further.
-
-Minimal example:
-
-```yaml
-profile: fortress
-seed: 20260601
-default_level: none
-
-targets:
-  - match: "verify_*"
-    level: strong_vm
-  - match: "license_*"
-    level: strong_vm
-
-string_encoding:
-  authenticated_mode: true
-  prefer_lazy_decode: true
-  allow_ctor_fallback: false
-
-constant_encoding:
-  mode: auto
-  max_constants_per_function: 8
-  min_bit_width: 8
-
-mba:
-  depth: 3
-  enable_polynomial: true
-  enable_multiplication: true
-  max_ir_instructions: 320
-
-indirect_dispatch:
-  enabled: true
-  max_sites_per_function: 4
-  max_switch_targets: 8
-  target_vm_dispatchers: true
-  target_flattened_headers: true
-
-security:
-  fail_on_public_obf_symbol: true
-  strip_release_markers: true
-```
+---
 
 ## Build
 
-Requirements:
+### Requirements
 
-- CMake 3.24+
-- C++23 compiler
-- LLVM 21+
-- Python 3
-- `lit`
-- LLVM tools: `opt`, `clang`, `clang++`, `llvm-link`, `llc`, `llvm-strip`, `llvm-nm`, `llvm-objdump`
-- Optional: `strings` for benchmark string audits
-- Optional Rust support: nightly or development `rustc` with a matching LLVM major and minor version, plus Cargo
-- Optional Zig support: Zig 0.16.x
-- Optional Go support: TinyGo 0.41.x, Go 1.23 through 1.26, and LLVM 21 `llc` and LLD on native Linux
+- CMake 3.24 or higher
+- C++23 compiler: Clang, GCC, or MSVC 2022. Windows builds use `clang-cl` with the Visual Studio toolchain.
+- LLVM 21 or newer development package. LLVM 22.1.7 is verified.
+- Python 3.10 or newer and `lit`
+- LLVM tools: `clang`, `clang++`, `opt`, `llvm-link`, `llc`, `llvm-strip`, `llvm-nm`, `llvm-objdump`, and `llvm-ar`; `ninja` when using the Ninja generator
+- Optional Linux-only workflows: matching-LLVM nightly/development `rustc` and `cargo`; Zig 0.16.x; TinyGo 0.41.x with Go 1.23–1.26 and LLD 21
 
-### Linux
+### Linux Build
 
 ```sh
-cmake -S . -B build -DLLVM_DIR="$(llvm-config --cmakedir)"
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_DIR="$(llvm-config --cmakedir)"
 cmake --build build
 ```
 
-### Windows
+### Windows Build (MSVC / clang-cl)
 
-Use x64 MSVC Build Tools and a matching LLVM development SDK. LLVM 22.1.7 is the verified configuration. Run the commands from an x64 Visual Studio Developer PowerShell:
+Open an **x64 Native Tools Command Prompt for VS 2022** or Visual Studio Developer PowerShell:
 
 ```powershell
 cmake -S . -B build -G Ninja `
   -DCMAKE_BUILD_TYPE=Release `
   -DLLVM_DIR="C:\path\to\llvm\lib\cmake\llvm" `
-  -DCMAKE_C_COMPILER="C:\path\to\llvm\bin\clang.exe" `
-  -DCMAKE_CXX_COMPILER="C:\path\to\llvm\bin\clang++.exe"
+  -DCMAKE_C_COMPILER="clang-cl" `
+  -DCMAKE_CXX_COMPILER="clang-cl"
 cmake --build build
-ctest --test-dir build --output-on-failure
 ```
 
-Useful cache variables:
+### Key CMake Cache Variables
 
-- `OBF_BENCHMARK_SEED`
-- `OBF_RUNTIME_ABI_PREFIX`
-- `OBF_BENCHMARK_CLEAN_IR`
-- `OBF_BENCHMARK_CLEANUP_PASSES`
-- `OBF_RUSTC`
-- `OBF_CARGO`
-- `OBF_ZIG`
-- `OBF_TINYGO`
-- `OBF_LLD`
+- `LLVM_DIR`: Path to LLVM CMake package.
+- `OBF_RUNTIME_ABI_PREFIX`: Prefix for runtime symbols (default: `rt_core_`).
+- `OBF_BENCHMARK_SEED`: Optional fixed integer seed for benchmark builds.
+- `OBF_RUSTC`: Custom path to `rustc`.
+- `OBF_CARGO`: Custom path to `cargo`.
+- `OBF_ZIG`: Custom path to `zig`.
+- `OBF_TINYGO`: Custom path to `tinygo`.
 
-## Usage
+---
 
-### Compiler Integration (clang/clang++)
+## Quick Start
 
-The plugin integrates into the standard LLVM New Pass Manager (NPM) optimization pipeline. The plugin runs passively and applies no obfuscation by default. It applies obfuscation only when you enable it with `OBF_CONFIG` or `OBF_ENABLE`. It safely handles unoptimized (`-O0`) and optimized (`-O1` through `-O3`, `-flto`) builds.
-
-On Linux, `build/obf-clang` and `build/obf-clang++` inject the pass plugin and append the runtime archive for link actions:
+Compile through the wrapper. It loads the pass plugin and links the matching runtime archive for link actions. Place source-file arguments before `--obf-config`:
 
 ```sh
-OBF_CONFIG=config.yaml build/obf-clang++ -O3 input.cpp -o output
+build/obf-clang -O1 -fno-inline src/auth.c -o auth_app \
+  --obf-config=path/to/protect.yaml
 ```
 
-On Windows, use `build\obf-clang.cmd` or `build\obf-clang++.cmd` from a Visual Studio Developer PowerShell:
-
-```powershell
-$env:OBF_CONFIG = "config.yaml"
-build\obf-clang++.cmd -O3 input.cpp -o output.exe
-```
-
-To enable annotation-driven obfuscation without a config file, set `OBF_ENABLE=1`.
-
-Manual `clang++` invocation:
+The wrapper sets `OBF_CONFIG` for the compiler process. Set `OBF_SEED` to override the YAML `seed`:
 
 ```sh
-OBF_CONFIG=config.yaml clang++ -O3 \
+OBF_SEED=20260817 build/obf-clang -O1 -fno-inline src/auth.c -o auth_app \
+  --obf-config=path/to/protect.yaml
+```
+
+For direct Clang use, load the platform-specific plugin file, set the configuration, and link `build/libobf_runtime.a` yourself:
+
+```sh
+OBF_CONFIG=path/to/protect.yaml \
+clang -O1 -fno-inline \
   -fpass-plugin=build/obf_plugin.so \
-  input.cpp build/libobf_runtime.a -o output
+  -Iinclude -c src/auth.c -o auth.o
+clang auth.o build/libobf_runtime.a -o auth_app
 ```
 
-```powershell
-$env:OBF_CONFIG = "config.yaml"
-clang++.exe -O3 `
-  -fpass-plugin=build\obf_plugin.dll `
-  input.cpp build\libobf_runtime.lib -o output.exe
+### Source Annotations
+
+Mark sensitive routines directly in C/C++ source:
+
+```c
+#if defined(__clang__)
+#define OBF_PROTECT(level) __attribute__((annotate("obf:" level)))
+#else
+#define OBF_PROTECT(level)
+#endif
+
+OBF_PROTECT("strong_vm")
+int verify_license_token(const char* user, const char* token) {
+    return validate_hash(user, token) ^ 0x5A5A;
+}
 ```
 
-`libobf_runtime.a` on Linux and `libobf_runtime.lib` on Windows contain the entropy anchor plus string and constant authentication runtime support. With raw `clang` or `clang++`, place the archive after transformed inputs and objects on the linker command line.
+---
 
-### LLVM Bitcode (`obf-bc`)
+## LLVM Bitcode
 
-`build/obf-bc` on Linux and `build\obf-bc.cmd` on Windows apply `obf-safe-pipeline` to one LLVM bitcode file, then run the LLVM verifier. The command replaces the output only after both steps succeed. It keeps an existing output after a pre-commit signal.
+Process standalone bitcode modules with `obf-bc`:
 
 ```sh
+# Emit bitcode
+clang -O1 -emit-llvm -c module.c -o module.bc
+
+# Apply safe obfuscation pipeline
 build/obf-bc \
-  --obf-config=config.yaml \
-  --obf-seed=31337 \
-  input.bc -o output.bc
+  --obf-config=config/production.yaml \
+  --obf-seed=20260817 \
+  -o module.obf.bc \
+  module.bc
+
+# Compile and link
+clang module.obf.bc build/libobf_runtime.a -o module_binary
 ```
 
-```powershell
-build\obf-bc.cmd `
-  --obf-config=config.yaml `
-  --obf-seed=31337 `
-  input.bc -o output.bc
-```
+---
 
-The input and output paths must be different. The output must be absent or a regular file. The command rejects unknown options and multiple bitcode inputs.
+## Rust Integration
 
-### Zig 0.16
-
-Zig cannot load this pass plugin through its compiler command line. The supported path uses a Zig component bitcode file.
-The component must use a stable exported C ABI name. The Zig config must use `frontend: zig` and that exact name.
-Declare the component seam with `export fn`. Use C-compatible types at its ABI boundary.
-
-```yaml
-frontend: zig
-default_level: none
-targets:
-  - match: protected_component
-    level: strong
-security:
-  strip_release_markers: true
-```
-
-Build and protect the component:
+Protect Rust binaries using `obf-rustc` or Cargo:
 
 ```sh
-zig build-obj protected.zig \
-  -fllvm -O ReleaseFast \
-  -femit-llvm-bc=component.bc -fno-emit-bin
-
-build/obf-bc \
-  --obf-config=zig.yaml \
-  component.bc -o component.protected.bc
-```
-
-Link the protected component and the runtime with Zig:
-
-```sh
-zig build-exe main.zig \
-  component.protected.bc build/libobf_runtime.a \
-  -femit-bin=app
-```
-
-This path supports Zig 0.16.x on the same host as the project LLVM tools.
-The module validator follows a Zig `GlobalAlias` to its defined function.
-It rejects wildcard target names and aliases that do not resolve to one exact function.
-
-### Rust
-
-`build/obf-rustc` supports a nightly or development `rustc`. The Rust LLVM major and minor versions must match the project LLVM.
-The wrapper supports native `bin`, `cdylib`, and `--test` code-generation actions.
-Active commands require an explicit `--crate-type=bin`, `--crate-type=cdylib`, or `--test`.
-The wrapper forces one code-generation unit so module validation can find each selected function.
-It passes queries and metadata-only actions to `rustc` without plugin injection.
-
-Use `frontend: rust` in the config. Give each selected function a stable exact symbol name.
-Use an exported `extern "C"` function with `#[no_mangle]` or `#[export_name]`.
-Use the unsafe attribute form that the selected Rust edition requires.
-
-Direct `rustc` example:
-
-```sh
+# Direct rustc invocation
 build/obf-rustc \
-  --obf-config=rust.yaml \
-  --crate-name=my_app --crate-type=bin \
-  -Copt-level=2 src/main.rs -o my_app
-```
+  --obf-config=$(pwd)/config/rust_protect.yaml \
+  --obf-enable \
+  --crate-type=bin \
+  src/main.rs -o rust_app
 
-An active direct command supports exactly one code-generation `--emit` kind.
-Use Cargo for commands that request code generation and sidecar outputs together.
-Set the direct output path with `-o` or an explicit `--emit=<kind>=<path>` value.
-The wrapper forces `-Csplit-debuginfo=off` and rejects other options that create unplanned sidecar files.
-Direct mode rejects user `-Clink-arg` values. Use Rust `-l` and `-L` options or Cargo instead.
-Active code-generation commands reject Rust response files and `-Cllvm-args` because they can override wrapper policy.
-The wrapper uses a temporary file and replaces the requested path only after `rustc` succeeds.
-
-For Cargo, set `RUSTC_WORKSPACE_WRAPPER`. Do not set `RUSTC_WRAPPER` to `obf-rustc`.
-The four owner variables select one workspace target. Their path values must be canonical absolute paths.
-
-```sh
-ROOT=$(pwd -P)
-RUSTC=/path/to/matching-nightly/rustc \
-RUSTC_WORKSPACE_WRAPPER="$ROOT/build/obf-rustc" \
-OBF_CONFIG="$ROOT/rust.yaml" \
-OBF_RUST_MANIFEST_DIR="$ROOT" \
+# Cargo build integration (requires RUSTC_WORKSPACE_WRAPPER and target selector)
+RUSTC_WORKSPACE_WRAPPER=$(pwd)/build/obf-rustc \
+OBF_CONFIG=$(pwd)/config/rust_protect.yaml \
 OBF_RUST_CRATE_NAME=my_app \
-OBF_RUST_CRATE_TYPE=bin \
-OBF_RUST_CRATE_ROOT="$ROOT/src/main.rs" \
+OBF_ENABLE=1 \
 cargo build --release
 ```
 
-The wrapper matches the manifest directory, normalized crate name, crate type, and crate root.
-It leaves dependencies and unselected workspace targets unchanged.
-Link actions add `build/libobf_runtime.a` after the Rust inputs.
+---
 
-### Go with TinyGo
+## Zig Integration
 
-The standard Go compiler does not emit LLVM IR and is not supported. Use `build/obf-tinygo` for the supported Go path.
+```sh
+# 1. Compile Zig source to bitcode
+zig build-obj -femit-llvm-bc=component.bc component.zig
 
-The wrapper requires project LLVM 21.x `llc` and LLD, TinyGo 0.41.x, Go 1.23 through 1.26, and TinyGo embedded LLVM 20.x.
-It supports native Linux ELF builds on x86-64, AArch64, and ARM.
-It accepts one package or Go file and the default build mode. It requires `-scheduler=none` and an explicit `-gc=conservative` or `-gc=none`.
-It rejects cgo, cross compilation, firmware formats, response files, and ambiguous retained linker commands.
-Write TinyGo configs with block-style YAML mappings and sequences.
-The wrapper rejects flow-style collections and files with multiple nonempty YAML documents.
+# 2. Obfuscate via obf-bc
+build/obf-bc \
+  --obf-config=config/zig_protect.yaml \
+  -o component.obf.bc \
+  component.bc
 
-Use `frontend: tinygo`, exact exported names in `targets` or `overrides`, and disabled string encoding:
-Use `//go:export name` and `//go:noinline` on each selected function.
+# 3. Assemble and link
+clang component.obf.bc main.c build/libobf_runtime.a -o zig_app
+```
+
+---
+
+## TinyGo Integration
+
+```sh
+# Native Linux TinyGo protected compilation
+build/obf-tinygo \
+  --obf-config=$(pwd)/config/tinygo_protect.yaml \
+  build -scheduler=none -gc=conservative \
+  -o app_go \
+  main.go
+```
+
+---
+
+## Configuration
+
+Configuration files use standard YAML syntax:
 
 ```yaml
-frontend: tinygo
+# Target frontend: generic, rust, zig, or tinygo
+frontend: generic
+
+# Base profile: fast, standard, guarded, fortress, lab
+profile: guarded
+
+# Global PRNG seed (64-bit unsigned integer)
+seed: 20260817
+
+# Default fallback protection level: none, light, strong, vm, strong_vm
 default_level: none
+
+# Exact function symbol overrides (takes highest precedence)
+overrides:
+  - name: license_verify
+    level: strong_vm
+  - name: decrypt_payload
+    level: strong
+
+# Pattern-matched target rules (wildcard '*' and '?' supported in generic frontend)
 targets:
-  - match: protected_value
-    level: light
+  - match: "auth_*"
+    level: strong
+  - match: "crypto_*"
+    level: vm
+
+# String encryption settings
 string_encoding:
-  max_strings_per_module: 0
+  min_string_length: 2
+  max_strings_per_module: 256
+  prefer_lazy_decode: true
+  allow_ctor_fallback: false
+  authenticated_mode: true
+
+# Constant protection settings
+constant_encoding:
+  mode: auto                 # off, mba_inline, keyed_pool, auto, all
+  max_constants_per_function: 8
+  min_bit_width: 8
+
+# Mixed Boolean-Arithmetic (MBA)
+mba:
+  depth: 2
+  enable_polynomial: false
+  enable_multiplication: false
+  max_ir_instructions: 128
+
+# Virtual Machine settings
+vm:
+  max_virtual_instructions: 512
+  max_mba_depth: 2
+
+# Indirect control dispatch
+indirect_dispatch:
+  enabled: true
+  max_sites_per_function: 8
+  max_switch_targets: 16
+  target_vm_dispatchers: true
+  target_flattened_headers: true
+
+# Basic block splitting
+block_split:
+  max_splits_per_function: 2
+  min_instructions_per_block: 2
+
+# Zero comparison reduction
+zero_comparison:
+  enabled: true
+  max_sites_per_function: 16
+  max_unroll_bytes: 64
+  transform_string_comparisons: true
+  transform_integer_comparisons: true
+
+# Code-as-data self-checksumming
+self_checksum:
+  enabled: true
+  window_size: 32
+  max_sites: 4
+  seed: 20260817
+
+# Security gates and sanitization
 security:
+  fail_on_public_obf_symbol: true
   strip_release_markers: true
+  allow_unsafe_config: false
+
+debug_preserve_generated_names: false
+emit_progress_warnings: false
 ```
 
-Build a protected native executable:
+---
 
-```sh
-build/obf-tinygo \
-  --obf-config="$PWD/tinygo.yaml" \
-  --obf-save-bc="$PWD/app.protected.bc" \
-  build -scheduler=none -gc=conservative \
-  -o "$PWD/app" ./cmd/app
-```
+## Safe Pipeline
 
-The wrapper gets TinyGo's retained `ld.lld` command. It replaces only the whole-program object and preserves the remaining link arguments.
-It validates the captured or configured linker as LLVM 21 LLD.
-It lowers the protected bitcode with LLVM 21 `llc`. It then links `build/libobf_runtime.a` immediately after the protected object.
-Set `OBF_LLD` to an LLVM 21 `ld.lld` executable when CMake cannot find one. If Zig 0.16 is configured, CMake can use its `zig ld.lld` frontend instead.
-The wrapper verifies each ELF stage. It replaces the requested executable only after the final link succeeds.
-`--obf-save-bc` saves the exact protected bitcode through a separate atomic replacement.
+The safe pipeline execution order runs as follows:
 
-### Manual IR Transforms (opt)
+1. **`obf-entropy-init`**: Injects module-level entropy seeds and links entropy anchor bindings.
+2. **`obf-vm` (Level `vm`)**: Lowers `vm`-targeted functions into bytecode and replaces callsites with VM wrappers.
+3. **`obf-vm` (Level `strong_vm`)**: Synthesizes bytecode and dispatch wrappers for `strong_vm` functions.
+4. **`obf-string-encode`**: Encrypts static global strings across post-VM module state.
+5. **`obf-zero-comparison`**: Lowers integer/string equality checks to arithmetic XOR ladders.
+6. **`obf-constant-encode`**: Transforms constants into inline MBA arithmetic or keyed pools.
+7. **`obf-opaque-gep`**: Encodes global variable access offsets through opaque math.
+8. **`obf-instruction-substitute`**: Rewrites bitwise operations into compound identities.
+9. **`obf-opaque-preds`**: Injects invariant opaque predicate branches.
+10. **`obf-control-flatten`**: Flattens basic-block control flow graphs into switch dispatch loops.
+11. **`obf-function-outline`**: Outlines selected control-flow blocks into helper shards.
+12. **`obf-bogus-cf`**: Injects junk basic blocks and opaque branching loops.
+13. **`obf-self-checksum`**: Injects code-as-data rolling hash verification windows (`rt_core_cc`).
+14. **`obf-block-split`**: Splits eligible linear basic blocks.
+15. **`strong_vm` Implementation Hardening**: Applies secondary hardening passes (`opaque_gep`, `control_flatten`, `outline`, `substitute`, `bogus_cf`) directly to VM interpreter implementations.
+16. **`obf-cfg-state-cleanup`**: Removes dead CFG placeholders and intermediate metadata.
+17. **`obf-indirect-dispatch`**: Replaces remaining control-flow branches and VM dispatch headers with `indirectbr` sequences.
+18. **Security Gate Validation**: Verifies internal symbol isolation and invariants (`enforce_security_gates`).
+19. **`obf-artifact-cleanup`**: Strips release markers, annotations, and internal SSA names.
 
-For debugging, testing, or isolated transforms, you can run the passes manually over LLVM IR with `opt`.
+---
 
-Feature report:
+## Security Model
 
-- `obf-feature-report` is read-only. It emits `obf.feature_report.v3` JSON with per-function policy decisions and per-transform strategy details. For functions that use MBA rewrites, it also adds MBA shape counters under the `mba` payload.
+- **Defense in Depth**: Combines control-flow obscurity, semantic abstraction (VM), dynamic key derivation, and integrity checks.
+- **Fail-Closed Integrity**: Cryptographic string decoding and constant-pool access enforce MAC validation at runtime. Tampered ciphertext or mismatched descriptors cause intentional runtime aborts.
+- **Silent Tamper Divergence**: Self-checksumming passes incorporate instruction hash results directly into downstream calculations. Software breakpoints (`0xCC`) corrupt intermediate values rather than raising identifiable exceptions.
+- **Key Storage Model**: Master build keys and initialization seeds are embedded directly in compiled binaries as internal read-only constants. This project implements a self-contained obfuscation model. It does not rely on external hardware security modules (HSM), remote attestation services, or white-box cryptographic guarantees.
+- **Scope**: Transformations raise the cost and complexity of static reverse engineering, automated symbolic analysis, and binary decompilation. They do not guarantee immunity against manual analysis, dynamic instruction tracing, or memory dump inspection.
 
-```sh
-opt -load-pass-plugin build/obf_plugin.so \
-  --obf-config=config.yaml \
-  -passes=obf-feature-report \
-  -disable-output input.ll
-```
+---
 
-Policy audit:
+## Limitations
 
-- `obf-audit` prints a policy-resolution table and can also write `obf.audit.v1` JSON with `--obf-audit-out`.
+- **Compilation Overhead**: `vm` and `strong_vm` expansion increases compilation time and memory usage. Target functions should be compiled with `-O1 -fno-inline` or targeted selectively.
+- **Exception Handling**: Functions containing complex C++ landing pads, cleanups, or Windows SEH constructs cannot be lowered into VM bytecode and are retained in native code.
+- **Non-Integral Pointers**: Pointers in non-integral address spaces or architecture-specific register frames are excluded from indirect dispatch and VM translation.
+- **Embedded Keys**: Because key schedule root materials reside in the compiled binary, an attacker with full memory inspection capabilities can extract decrypted strings once loaded in memory.
 
-```sh
-opt -load-pass-plugin build/obf_plugin.so \
-  --obf-config=config.yaml \
-  --obf-audit-out=audit.json \
-  -passes=obf-audit \
-  -disable-output input.ll
-```
-
-Full safe pipeline:
-
-```sh
-opt -load-pass-plugin build/obf_plugin.so \
-  --obf-config=config.yaml \
-  -passes=obf-safe-pipeline \
-  -S input.ll -o output.ll
-```
-
-Isolated indirect dispatch:
-
-```sh
-opt -load-pass-plugin build/obf_plugin.so \
-  --obf-config=config.yaml \
-  -passes=obf-indirect-dispatch \
-  -S input.ll -o indirect.ll
-```
-
-Other standalone passes:
-
-- Read-only/reporting: `obf-feature-report`, `obf-audit`.
-- Transform stages: `obf-prepare-o0`, `obf-entropy-init`, `obf-vm`, `obf-block-split`, `obf-string-encode`, `obf-constant-encode`, `obf-opaque-gep`, `obf-instruction-substitute`, `obf-control-flatten`, `obf-function-outline`, `obf-opaque-preds`, `obf-bogus-cf`, `obf-indirect-dispatch`, `obf-cfg-state-cleanup`, and `obf-artifact-cleanup`.
-
-`obf-driver` remains a config-summary and debugging utility. `build/obf-clang` and `build/obf-clang++` are the compile wrappers.
-
-## Visual Examples (Ghidra)
-
-<details>
-<summary>Expand visual examples and analysis</summary>
-
-These screenshots compare one baseline function with one obfuscated function from the `license_demo` benchmark.
-
-- Baseline function: `FUN_004008f0` from `license_demo.baseline`
-- Obfuscated function: `FUN_00400510` from `license_demo.obfuscated`
-
-What the baseline image shows:
-
-- A compact, readable verification-style routine.
-- Clear control flow (simple bounds and loop structure).
-- Data-dependent operations that remain semantically recoverable in the decompiler.
-
-What the obfuscated image shows:
-
-- Large opaque arithmetic chains with mixed rotates/xors/add-masks.
-- Decompiler warnings around jump-table recovery and indirect control transfer.
-- Reduced semantic readability despite valid executable behavior.
-
-Pseudocode comparison:
-
-| Baseline (`license_demo.baseline` / `FUN_004008f0`) | Obfuscated (`license_demo.obfuscated` / `FUN_00400510`) |
-|---|---|
-| ![license_demo baseline pseudocode (FUN_004008f0)](images/baseline_present.png) | ![license_demo obfuscated pseudocode (FUN_00400510)](images/obfuscated_present.png) |
-
-</details>
+---
 
 ## Benchmarks
 
-Benchmark targets build paired baseline and obfuscated artifacts under `build/benchmarks/<name>/`. The C and C++ benchmark pipeline passes `--obf-seed=${OBF_EFFECTIVE_BENCHMARK_SEED}` to `opt`. The generated Rust, Zig, and TinyGo benchmark configs use that same effective seed. So `OBF_BENCHMARK_SEED` controls the whole corpus build tree.
+The `benchmarks/` directory provides baseline versus obfuscated comparison targets:
 
-Build benchmark pairs:
+- **C/C++ Benchmarks**: `license_demo`, `config_demo`, `vm_workflow_demo`, `wpo_demo`
+- **Multi-Language Benchmarks**: `rust_demo` (Rust), `zig_demo` (Zig), `tinygo_demo` (TinyGo)
 
-```sh
-cmake --build build --target obf-benchmarks -- -j1
-```
-
-Run end-to-end corpus parity checks:
+Build and run benchmark verification:
 
 ```sh
-cmake --build build --target obf-benchmarks-e2e -- -j1
+# Build all benchmark target pairs
+cmake --build build --target obf-benchmarks
+
+# Run end-to-end execution and output parity checks
+cmake --build build --target obf-benchmarks-e2e
+
+# Run binary recovery scoring harness
+cmake --build build --target obf-re-harness-binary
 ```
 
-Per-benchmark artifacts:
+## Testing
 
-- `<name>.baseline.ll`
-- `<name>.obfuscated.ll`
-- `<name>.obfuscated.cleaned.ll` when `OBF_BENCHMARK_CLEAN_IR=ON`
-- `<name>.baseline`
-- `<name>.obfuscated`
-
-Benchmark and analysis targets:
-
-- `obf-benchmarks` builds stripped baseline and obfuscated pairs for the four core C and C++ targets, and adds the Rust, Zig, and TinyGo corpus targets when compatible toolchains are configured.
-- `obf-benchmarks-e2e` runs default-mode and `OBF_BENCH_ITERS` parity checks across every built corpus benchmark.
-- `obf-benchmarks-mir` emits MIR snapshots for linked benchmark targets such as `wpo_demo`.
-- `obf-audit-benchmarks` audits stripped obfuscated benchmark binaries for leaked symbols and, when `strings` is available, residual strings.
-- `obf-re-harness` intentionally scores how much VM structure is recoverable from obfuscated benchmark IR only for `license_demo`, `config_demo`, and `vm_workflow_demo`, and writes `build/re-harness/vm_recovery.json`.
-- `obf-re-harness-binary` separately measures automated structural recoverability for the same three final stripped benchmark pairs. It writes the analyzer report to `build/re-harness/binary-recovery.json` and the control verdict to `build/re-harness/binary-recovery-controls.json`. The controller requires `license_demo` and `vm_workflow_demo` to be exactly `vm_candidate`. It permits `config_demo` to be either `interpreter_like` or `vm_candidate`. Each multiseed result still requires an actual `vm_candidate` positive.
-- `obf-re-harness-binary-seeds` is opt-in. It uses isolated builds with seeds `10101`, `20202`, and `30303`, writes `build/re-harness/binary-multiseed-report.json`, and uses `build/re-harness/multiseed/` as its isolated-build root.
-- `obf-seed-diversity` intentionally verifies seed-driven IR diversity only for `license_demo`, `config_demo`, and `vm_workflow_demo`, and writes `build/diversity/diversity.json`.
-
-The binary target supplies only explicitly selected final stripped ELF64 little-endian x86-64 `ET_EXEC` or `ET_DYN` artifacts and `llvm-objdump` to its analyzer. The analyzer does not read source, IR, YAML, configuration, seed values, or benchmark labels. The trusted controller keeps labels outside the analyzer boundary and runs the analyzer on opaque SHA-256 copies. Symbols and relocation metadata can appear under `metadata_exposure`, but their spellings never seed candidates or scores.
-
-The binary reports measure automated structural recoverability from static binary evidence. They do not establish security or semantic recovery. The analyzer never executes an artifact. A `vm_candidate` requires a recurrent dispatcher with at least two selected targets and two reentering handlers. A direct dispatcher also requires at least two conditional selection blocks. At least two reentering handlers must update the same dispatcher-linked state. An exclusive non-pointer dynamic or mapped data read must link to that state through connected relationships. A switch, table, name, or entropy feature alone is insufficient. `semantic_recovery` is always `unavailable`. A classification cannot provide confidence beyond the observed static structure.
-
-Current benchmark corpus:
-
-- Core C and C++ targets: `license_demo`, `config_demo`, `vm_workflow_demo`, `wpo_demo`
-- Optional language targets: `rust_demo`, `zig_demo`, `tinygo_demo`
-
-Measure keyed string decode overhead:
+Run unit tests, runtime validation, and Lit integration tests:
 
 ```sh
-python tools/obf-bench/measure_string_auth_overhead.py --build-dir build
+# 1. Run C++ transform and policy unit tests
+./build/obf-unit-tests
+
+# 2. Run runtime atomic integrity tests
+./build/obf-runtime-atomic-tests
+
+# 3. Run full LLVM Lit integration test suite
+lit -v build/tests
+
+# Or run all test suites via CTest
+ctest --test-dir build --output-on-failure
 ```
 
-The helper writes temporary inputs under `build/string-auth-bench/` and reports lazy first-decode cost, lazy steady-state helper cost, and constructor startup impact.
-
-## Verification
-
-Fast contributor checks:
-
-```sh
-cmake --build build --target obf-clang-wrappers obf-language-tools obf-driver obf-unit-tests obf-runtime-atomic-tests -- -j1
-ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests|obf-runtime-atomic-tests"
-```
-
-Opt-in sequential benchmark, audit, recoverability, diversity, and multiseed checks:
-
-```sh
-cmake --build build --target obf-benchmarks -- -j1
-cmake --build build --target obf-benchmarks-e2e -- -j1
-cmake --build build --target obf-audit-benchmarks -- -j1
-cmake --build build --target obf-re-harness -- -j1
-cmake --build build --target obf-re-harness-binary -- -j1
-cmake --build build --target obf-re-harness-binary-seeds -- -j1
-cmake --build build --target obf-seed-diversity -- -j1
-```
-
-The current lit suite covers 193 tests.
-It covers the transform pipeline, policy rules, security gates, seed behavior, runtime behavior, artifact cleanup, and binary-only recovery analysis.
-Language tests cover bitcode transactions and native Zig, Rust, and TinyGo execution when compatible toolchains are present.
-`obf-runtime-atomic-tests` is a separate CTest entry and is not part of the lit count.
-The lit tests use `opt`, FileCheck, and `lli`.
-The suite links the external runtime objects into `lli` with `--extra-object`.
+---
 
 ## Repository Layout
 
-```text
-include/obf/       public headers
-lib/analysis/      feature extraction
-lib/frontend/      config loading and annotations
-lib/plugin/        pass registration and pipeline wiring
-lib/policy/        function-level policy selection
-lib/report/        reporting
-lib/transforms/    IR transforms
-lib/vm/            VM lowering and dispatch
-runtime/           runtime support objects
-tests/lit/         lit coverage
-tests/unit/        unit tests
-benchmarks/        corpus, configs, and build targets
-tools/             helper tools and scripts
 ```
+llvm-obfus/
+├── benchmarks/         # Multi-language benchmark corpus and sample applications
+├── cmake/              # CMake toolchain, target definitions, and build scripts
+├── images/             # Documentation media and control-flow comparison graphs
+├── include/
+│   └── obf/
+│       ├── analysis/   # Feature analysis and complexity metrics headers
+│       ├── frontend/   # Configuration structures and YAML parser definitions
+│       ├── plugin/     # Pass plugin interfaces and stage declarations
+│       ├── policy/     # Function protection level and policy engine headers
+│       ├── report/     # Function report and audit telemetry headers
+│       ├── support/    # Cryptographic schedules, runtime ABI, and atomic helpers
+│       ├── transforms/ # IR transformation pass interfaces
+│       └── vm/         # Virtual machine compiler and candidate analysis headers
+├── lib/
+│   ├── analysis/       # Function metrics and feature extraction
+│   ├── frontend/       # YAML configuration loader and validation
+│   ├── plugin/         # Pass manager integration and pipeline orchestrator
+│   ├── policy/         # Function policy selection logic
+│   ├── report/         # Function report generation implementation
+│   ├── support/        # Runtime ABI, hashing, and configuration builders
+│   ├── transforms/     # Core LLVM IR transformation implementations
+│   └── vm/             # Bytecode compiler and interpreter emission
+├── runtime/            # Static runtime support library (entropy anchor, auth strings)
+├── tests/
+│   ├── lit/            # End-to-end LLVM Lit regression test suite
+│   └── unit/           # C++ unit tests (obf_unit_tests, runtime_atomic_tests)
+└── tools/              # Tooling and frontend wrappers (obf-clang, obf-bc, obf-rustc, obf-tinygo, obf-opt, obf-driver)
+```
+
+---
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+
+---
+
+<div align="center">
+
+Developed by [@90th](https://github.com/90th)
+
+</div>
