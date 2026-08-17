@@ -76,11 +76,14 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 ### Keyed and Integrity-Checked Runtime Strings
 
 - `string_encoding` handles string encryption.
+- **Ephemeral Micro-Decryption Slots (Zero-Buffer Persistence)**:
+  - Evaluates single-byte character loads and comparisons (`str[i]`, loops, `strcmp`, `memcmp`) directly in SSA virtual registers.
+  - At no point during execution is a contiguous plaintext string or memory buffer (`alloca [N x i8]` or heap buffer) allocated in physical RAM.
+  - Ephemeral registers are immediately consumed in ALU/branch operations and sanitized with hardware register noise (`rt_core_sr0`), preventing memory dump and RAM snooping recovery.
 - `authenticated_mode` enables the keyed and integrity-checked runtime decode path.
 - The runtime support lives in `runtime/string_auth_runtime.c` and handles keyed string and constant-pool recovery.
 - The transform handles lazy decode, eager decode, constructor fallback, and forwarded-pointer cases.
 - Short compare-only, non-escaping authenticated strings decode through `rt_core_sd3` into per-use stack scratch. The decode path volatile-zeroes the scratch after the compare. Escaping, shared, forwarded, or weakly proven uses keep lazy or constructor stable storage.
-
 ### Constant Pooling
 
 - Constant encoding modes are `off`, `mba_inline`, `keyed_pool`, `auto`, and `all`.
