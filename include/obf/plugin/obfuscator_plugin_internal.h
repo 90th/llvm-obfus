@@ -20,6 +20,7 @@
 #include "obf/transforms/opaque_gep.h"
 #include "obf/transforms/opaque_predicates.h"
 #include "obf/transforms/string_encoding.h"
+#include "obf/transforms/zero_comparison.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -63,6 +64,9 @@ string_encoding_options build_string_encoding_options(const obfuscation_config& 
 
 constant_encoding_options build_constant_encoding_options(const obfuscation_config& config,
                                                           const policy_decision& decision);
+
+zero_comparison_options build_zero_comparison_options(const obfuscation_config& config,
+                                                      const policy_decision& decision);
 
 control_flattening_options build_control_flattening_options(const obfuscation_config& config,
                                                             const policy_decision& decision);

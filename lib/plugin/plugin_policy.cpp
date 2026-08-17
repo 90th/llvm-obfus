@@ -56,7 +56,7 @@ bool is_orchestrator_promoted_level(protection_level level) {
 
 bool is_user_pipeline_function(const llvm::Function& function) {
   const llvm::StringRef name = function.getName();
-  return !name.starts_with("__obf_") && !name.starts_with("llvm.");
+  return !name.starts_with("__obf_") && !name.starts_with("llvm.") && !name.starts_with("rt_core_");
 }
 
 void resolve_non_generic_configured_names(const llvm::Module& module, obfuscation_config& config) {
@@ -353,9 +353,7 @@ std::uint64_t get_obf_seed_override() {
 #endif
   if (const std::optional<std::string> env_seed = get_environment_value("OBF_SEED")) {
     std::uint64_t parsed_seed = 0;
-    if (!llvm::StringRef(*env_seed).getAsInteger(10, parsed_seed)) {
-      return parsed_seed;
-    }
+    if (!llvm::StringRef(*env_seed).getAsInteger(10, parsed_seed)) { return parsed_seed; }
   }
   return 0;
 }
@@ -451,6 +449,17 @@ constant_encoding_options build_constant_encoding_options(const obfuscation_conf
   options.mba_max_ir_instructions = config.mba.max_ir_instructions;
   options.mba_enable_polynomial = config.mba.enable_polynomial;
   options.mba_enable_multiplication = config.mba.enable_multiplication;
+  return options;
+}
+
+zero_comparison_options build_zero_comparison_options(const obfuscation_config& config,
+                                                      const policy_decision& decision) {
+  zero_comparison_options options;
+  options.max_sites_per_function = config.zero_comparison.max_sites_per_function;
+  options.max_unroll_bytes = config.zero_comparison.max_unroll_bytes;
+  options.transform_string_comparisons = config.zero_comparison.transform_string_comparisons;
+  options.transform_integer_comparisons = config.zero_comparison.transform_integer_comparisons;
+  options.seed = decision.seed;
   return options;
 }
 

@@ -68,6 +68,14 @@ struct constant_encoding_config {
   std::uint32_t min_bit_width = 8;
 };
 
+struct zero_comparison_config {
+  bool enabled = true;
+  std::uint32_t max_sites_per_function = 16;
+  std::uint32_t max_unroll_bytes = 64;
+  bool transform_string_comparisons = true;
+  bool transform_integer_comparisons = true;
+};
+
 struct mba_config {
   std::uint32_t depth = 1;
   std::optional<std::uint32_t> max_ir_instructions;
@@ -105,6 +113,7 @@ struct obfuscation_config {
   block_split_config block_split;
   string_encoding_config string_encoding;
   constant_encoding_config constant_encoding;
+  zero_comparison_config zero_comparison;
   mba_config mba;
   vm_config vm;
   indirect_dispatch_config indirect_dispatch;

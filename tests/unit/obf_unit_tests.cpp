@@ -4,6 +4,9 @@
 #include "obf/support/generated_names.h"
 #include "obf/support/stable_hash.h"
 
+#include "obf/transforms/zero_comparison.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
@@ -884,6 +887,92 @@ void TestSeedStability() {
   ExpectTrue(mixed1 == mixed2, "mix_seed must be deterministic");
   ExpectTrue(mixed1 != mixed3, "different seeds should produce different mix_seed results");
 }
+void TestZeroComparison() {
+  llvm::LLVMContext context;
+  llvm::Module module("zero_comparison_test_module", context);
+
+  // Define strcmp declaration
+  llvm::FunctionType* strcmp_type = llvm::FunctionType::get(
+      llvm::Type::getInt32Ty(context),
+      {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context)},
+      false);
+  llvm::Function* strcmp_func =
+      llvm::Function::Create(strcmp_type, llvm::GlobalValue::ExternalLinkage, "strcmp", module);
+
+  // Create global string constant for "secret"
+  llvm::Constant* str_constant = llvm::ConstantDataArray::getString(context, "secret", true);
+  auto* global_str = new llvm::GlobalVariable(module,
+                                              str_constant->getType(),
+                                              true,
+                                              llvm::GlobalValue::PrivateLinkage,
+                                              str_constant,
+                                              "secret_str");
+
+  // Create test function: int test_fn(int a, int b, const char* input)
+  llvm::FunctionType* fn_type = llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
+                                                        {llvm::Type::getInt32Ty(context),
+                                                         llvm::Type::getInt32Ty(context),
+                                                         llvm::PointerType::getUnqual(context)},
+                                                        false);
+  llvm::Function* func =
+      llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, "test_fn", module);
+
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", func);
+  llvm::IRBuilder<> builder(entry);
+
+  llvm::Value* arg_a = func->getArg(0);
+  llvm::Value* arg_b = func->getArg(1);
+  llvm::Value* arg_input = func->getArg(2);
+
+  // 1. Integer equality
+  llvm::Value* icmp_int = builder.CreateICmpEQ(arg_a, arg_b, "cmp.int");
+  // 2. Select instruction
+  llvm::Value* select_val =
+      builder.CreateSelect(icmp_int,
+                           llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 10),
+                           llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 20),
+                           "sel.val");
+  // 3. String comparison call
+  llvm::Value* strcmp_call = builder.CreateCall(strcmp_func, {arg_input, global_str}, "cmp.str");
+  llvm::Value* icmp_str = builder.CreateICmpEQ(
+      strcmp_call, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0), "cmp.str.zero");
+  llvm::Value* result =
+      builder.CreateAdd(select_val, builder.CreateZExt(icmp_str, llvm::Type::getInt32Ty(context)));
+  builder.CreateRet(result);
+
+  obf::zero_comparison_options options;
+  options.max_sites_per_function = 16;
+  options.transform_string_comparisons = true;
+  options.transform_integer_comparisons = true;
+
+  const obf::zero_comparison_result analysis = obf::analyze_zero_comparison(*func, options);
+  ExpectTrue(analysis.transformed_site_count >= 2,
+             "analyze_zero_comparison should identify candidate comparison sites");
+
+  const obf::zero_comparison_result exec_res = obf::run_zero_comparison(*func, options);
+  ExpectTrue(exec_res.transformed_site_count >= 2,
+             "run_zero_comparison should transform comparison sites");
+
+  // Verify that all icmp eq and strcmp calls were eliminated
+  bool has_icmp_eq = false;
+  bool has_strcmp_call = false;
+  for (const llvm::BasicBlock& bb : *func) {
+    for (const llvm::Instruction& inst : bb) {
+      if (const auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+        if (icmp->getPredicate() == llvm::ICmpInst::ICMP_EQ) { has_icmp_eq = true; }
+      }
+      if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+        if (call->getCalledFunction() != nullptr &&
+            call->getCalledFunction()->getName() == "strcmp") {
+          has_strcmp_call = true;
+        }
+      }
+    }
+  }
+  ExpectTrue(!has_icmp_eq,
+             "All icmp eq instructions should be lowered to zero-reduction arithmetic");
+  ExpectTrue(!has_strcmp_call, "strcmp call should be lowered to inline zero-reduction");
+}
 
 }  // namespace
 
@@ -906,6 +995,7 @@ int main() {
   TestAuthEncodingBlake2sFailClosed();
   TestAuthEncodingDerivationAndTagging();
   TestAuthEncodingConstantTimeEqual();
+  TestZeroComparison();
 
   if (g_failures == 0) {
     std::cout << "[ok] obf_unit_tests passed" << '\n';

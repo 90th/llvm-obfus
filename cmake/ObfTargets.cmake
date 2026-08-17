@@ -28,6 +28,7 @@ add_library(obf_core
   lib/transforms/opaque_gep.cpp
   lib/transforms/opaque_predicates.cpp
   lib/transforms/string_encoding.cpp
+  lib/transforms/zero_comparison.cpp
   lib/vm/candidate_analysis.cpp
   lib/vm/bytecode_decode.cpp
   lib/vm/dispatch_emission.cpp

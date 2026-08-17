@@ -80,8 +80,13 @@ const function_override* find_explicit_override(const obfuscation_config& config
   return nullptr;
 }
 
+bool is_runtime_internal_name(llvm::StringRef name) {
+  return name.starts_with("__obf_") || name.starts_with("llvm.") || name.starts_with("rt_core_");
+}
+
 std::optional<protection_level> classify_from_features(const function_features& features,
                                                        std::string& detail) {
+  if (is_runtime_internal_name(features.name)) { return std::nullopt; }
   if (features.string_ref_count > 0) {
     detail = "automatic:string-sensitive";
     return protection_level::light;
@@ -98,10 +103,7 @@ std::optional<protection_level> classify_from_features(const function_features& 
 
 std::optional<protection_level> derive_minimum_security_floor(const function_features& features) {
   const llvm::StringRef function_name(features.name);
-  if (function_name.starts_with("__obf_") || function_name.starts_with("llvm.")) {
-    return std::nullopt;
-  }
-
+  if (is_runtime_internal_name(function_name)) { return std::nullopt; }
   if (features.cyclomatic_complexity >= 3 && features.instruction_count <= 128 &&
       !features.address_taken) {
     return protection_level::strong;
@@ -181,6 +183,7 @@ function_policy make_function_policy(protection_level level) {
     case protection_level::light:
       return {.level = level,
               .allow_string_encoding = true,
+              .allow_zero_comparison = true,
               .allow_constant_encoding = true,
               .allow_instruction_substitution = false,
               .allow_opaque_gep = false,
@@ -194,6 +197,7 @@ function_policy make_function_policy(protection_level level) {
     case protection_level::strong:
       return {.level = level,
               .allow_string_encoding = true,
+              .allow_zero_comparison = true,
               .allow_constant_encoding = true,
               .allow_instruction_substitution = true,
               .allow_opaque_gep = true,
@@ -207,6 +211,7 @@ function_policy make_function_policy(protection_level level) {
     case protection_level::vm:
       return {.level = level,
               .allow_string_encoding = true,
+              .allow_zero_comparison = true,
               .allow_constant_encoding = true,
               .allow_instruction_substitution = false,
               .allow_opaque_gep = false,
@@ -220,6 +225,7 @@ function_policy make_function_policy(protection_level level) {
     case protection_level::strong_vm:
       return {.level = level,
               .allow_string_encoding = true,
+              .allow_zero_comparison = true,
               .allow_constant_encoding = false,
               .allow_instruction_substitution = true,
               .allow_opaque_gep = true,
@@ -241,6 +247,13 @@ policy_decision select_policy(const llvm::Module& module,
                               llvm::StringRef annotation_text) {
   policy_decision decision;
   decision.seed = derive_seed(module, features.name, config.seed);
+  if (is_runtime_internal_name(features.name)) {
+    decision.source = policy_source::default_policy;
+    decision.detail = "runtime internal forced none";
+    decision.policy = make_function_policy(protection_level::none);
+    decision.minimum_security_floor = std::nullopt;
+    return decision;
+  }
 
   if (config.frontend == frontend_kind::generic) {
     decision.minimum_security_floor = derive_minimum_security_floor(features);

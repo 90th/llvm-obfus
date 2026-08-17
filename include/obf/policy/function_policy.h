@@ -15,6 +15,7 @@ enum class protection_level {
 struct function_policy {
   protection_level level = protection_level::none;
   bool allow_string_encoding = false;
+  bool allow_zero_comparison = false;
   bool allow_constant_encoding = false;
   bool allow_instruction_substitution = false;
   bool allow_opaque_gep = false;

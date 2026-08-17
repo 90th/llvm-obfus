@@ -57,6 +57,10 @@ bool apply_instruction_substitution_stage(
     const obfuscation_config& config,
     const llvm::StringSet<>* skip_functions = nullptr);
 
+bool apply_zero_comparison_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                                 const obfuscation_config& config,
+                                 const llvm::StringSet<>* skip_functions = nullptr);
+
 bool apply_opaque_gep_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
                             const obfuscation_config& config,
                             const llvm::StringSet<>* skip_functions = nullptr);

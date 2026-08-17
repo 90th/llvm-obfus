@@ -15,6 +15,7 @@
 #include "obf/transforms/string_encoding.h"
 #include "obf/transforms/entropy_initialization.h"
 #include "obf/transforms/indirect_dispatch.h"
+#include "obf/transforms/zero_comparison.h"
 
 // Note: apply_cfg_state_cleanup_stage() is defined in plugin_pipeline.cpp (no header needed)
 
@@ -78,9 +79,9 @@ std::optional<std::string> get_environment_value(const char* name) {
 }
 
 #if !defined(_WIN32)
-llvm::cl::opt<std::string> AuditOutPath(
-    "obf-audit-out", llvm::cl::desc("Path to write obf-audit JSON output"),
-    llvm::cl::init(""));
+llvm::cl::opt<std::string> AuditOutPath("obf-audit-out",
+                                        llvm::cl::desc("Path to write obf-audit JSON output"),
+                                        llvm::cl::init(""));
 #endif
 
 struct AuditRow {
@@ -145,9 +146,8 @@ llvm::StringRef ResolveSourceOfTruth(const policy_decision& decision) {
   llvm::StringRef remaining = decision.detail;
   while (!remaining.empty()) {
     const std::size_t separator = remaining.rfind("; ");
-    const llvm::StringRef clause = separator == llvm::StringRef::npos
-                                       ? remaining
-                                       : remaining.drop_front(separator + 2);
+    const llvm::StringRef clause =
+        separator == llvm::StringRef::npos ? remaining : remaining.drop_front(separator + 2);
     if (const std::optional<llvm::StringRef> label = DescribeLevelDeterminingClause(clause)) {
       return *label;
     }
@@ -330,13 +330,10 @@ class feature_report_pass : public llvm::PassInfoMixin<feature_report_pass> {
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
     const obfuscation_config config = load_active_config();
-    llvm::SmallVector<function_pipeline_state, 32> states =
-        build_pipeline_state(module, config);
+    llvm::SmallVector<function_pipeline_state, 32> states = build_pipeline_state(module, config);
 
     for (auto& state : states) {
-      if (state.function != nullptr) {
-        state.mba_counts = mba::get_mba_counters(*state.function);
-      }
+      if (state.function != nullptr) { state.mba_counts = mba::get_mba_counters(*state.function); }
     }
 
     llvm::SmallVector<function_report_entry, 32> entries;
@@ -363,8 +360,7 @@ class ObfAuditPass : public llvm::PassInfoMixin<ObfAuditPass> {
     audit_out = AuditOutPath.getValue();
 #endif
     if (audit_out.empty()) {
-      if (const std::optional<std::string> env_audit =
-              get_environment_value("OBF_AUDIT_OUT")) {
+      if (const std::optional<std::string> env_audit = get_environment_value("OBF_AUDIT_OUT")) {
         audit_out = *env_audit;
       }
     }
@@ -422,39 +418,36 @@ class string_encoding_pass : public llvm::PassInfoMixin<string_encoding_pass> {
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config) {
                                 return apply_string_encoding_stage(current_module, states, config);
-                               });
+                              });
   }
 };
 
 class indirect_dispatch_pass : public llvm::PassInfoMixin<indirect_dispatch_pass> {
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
-    return run_stateful_stage(
-        module,
-        [](llvm::Module&,
-           const llvm::SmallVectorImpl<function_pipeline_state>& states,
-           const obfuscation_config& config) {
-          return apply_indirect_dispatch_stage(states, config);
-        });
+    return run_stateful_stage(module,
+                              [](llvm::Module&,
+                                 const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                                 const obfuscation_config& config) {
+                                return apply_indirect_dispatch_stage(states, config);
+                              });
   }
 };
 
 class vm_pass : public llvm::PassInfoMixin<vm_pass> {
  public:
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
-    return run_stateful_stage(module,
-                              [](llvm::Module& current_module,
-                                 const llvm::SmallVectorImpl<function_pipeline_state>& states,
-                                 const obfuscation_config& config) {
-                                const virtualized_function_map virtualized_functions =
-                                    apply_vm_stage(states, config);
-                                bool changed = !virtualized_functions.empty();
-                                changed |=
-                                    rewrite_calls_to_virtualized_functions(current_module,
-                                                                          virtualized_functions,
-                                                                          effective_vm_mba_depth(config));
-                                return changed;
-                              });
+    return run_stateful_stage(
+        module,
+        [](llvm::Module& current_module,
+           const llvm::SmallVectorImpl<function_pipeline_state>& states,
+           const obfuscation_config& config) {
+          const virtualized_function_map virtualized_functions = apply_vm_stage(states, config);
+          bool changed = !virtualized_functions.empty();
+          changed |= rewrite_calls_to_virtualized_functions(
+              current_module, virtualized_functions, effective_vm_mba_depth(config));
+          return changed;
+        });
   }
 };
 
@@ -464,8 +457,9 @@ class constant_encoding_pass : public llvm::PassInfoMixin<constant_encoding_pass
     return run_stateful_stage(module,
                               [](llvm::Module& current_module,
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
-                                  const obfuscation_config& config) {
-                                return apply_constant_encoding_stage(current_module, states, config);
+                                 const obfuscation_config& config) {
+                                return apply_constant_encoding_stage(
+                                    current_module, states, config);
                               });
   }
 };
@@ -478,6 +472,18 @@ class instruction_substitution_pass : public llvm::PassInfoMixin<instruction_sub
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config) {
                                 return apply_instruction_substitution_stage(states, config);
+                              });
+  }
+};
+
+class zero_comparison_pass : public llvm::PassInfoMixin<zero_comparison_pass> {
+ public:
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+    return run_stateful_stage(module,
+                              [](llvm::Module&,
+                                 const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                                 const obfuscation_config& config) {
+                                return apply_zero_comparison_stage(states, config);
                               });
   }
 };
@@ -623,31 +629,24 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     const llvm::SmallVector<function_pipeline_state, 32> states =
         build_pipeline_state(module, config);
 
-
-
-
     bool changed = apply_entropy_initialization_stage(module, get_obf_seed_override());
 
     constexpr protection_level vm_level = protection_level::vm;
     const virtualized_function_map vm_only = apply_vm_stage(states, config, &vm_level);
     changed |= !vm_only.empty();
-    changed |= rewrite_calls_to_virtualized_functions(module,
-                                                      vm_only,
-                                                      effective_vm_mba_depth(config));
+    changed |=
+        rewrite_calls_to_virtualized_functions(module, vm_only, effective_vm_mba_depth(config));
 
     constexpr protection_level strong_vm_level = protection_level::strong_vm;
     const std::size_t selected_strong_vm_count =
         count_states_at_level(states, protection_level::strong_vm);
-    emit_progress_warning_if_enabled(config,
-                                     "starting strong_vm lowering",
-                                     selected_strong_vm_count);
+    emit_progress_warning_if_enabled(
+        config, "starting strong_vm lowering", selected_strong_vm_count);
     const virtualized_function_map strong_vm_virtualized =
         apply_vm_stage(states, config, &strong_vm_level);
     changed |= !strong_vm_virtualized.empty();
-    changed |=
-        rewrite_calls_to_virtualized_functions(module,
-                                               strong_vm_virtualized,
-                                               effective_vm_mba_depth(config));
+    changed |= rewrite_calls_to_virtualized_functions(
+        module, strong_vm_virtualized, effective_vm_mba_depth(config));
 
     virtualized_function_map post_vm_virtualized = vm_only;
     for (const auto& entry : strong_vm_virtualized) {
@@ -668,6 +667,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     for (const auto& caller_entry : preserved_site_callers) {
       all_vm_virtualized.insert(caller_entry.getKey());
     }
+    changed |= apply_zero_comparison_stage(post_vm_states, config, &all_vm_virtualized);
 
     changed |= apply_constant_encoding_stage(module, post_vm_states, config, &all_vm_virtualized);
     changed |= apply_opaque_gep_stage(post_vm_states, config, &all_vm_virtualized);
@@ -684,9 +684,8 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     for (const auto& entry : flattened_functions) { block_split_skips.insert(entry.getKey()); }
     changed |= apply_block_split_stage(post_vm_states, config, &block_split_skips);
 
-    emit_progress_warning_if_enabled(config,
-                                     "starting strong_vm hardening",
-                                     strong_vm_virtualized.size());
+    emit_progress_warning_if_enabled(
+        config, "starting strong_vm hardening", strong_vm_virtualized.size());
     changed |= apply_opaque_gep_to_functions(strong_vm_virtualized, config);
     llvm::StringSet<> strong_vm_flattened =
         apply_control_flattening_to_functions(strong_vm_virtualized, config);
@@ -770,6 +769,11 @@ extern "C" OBF_PLUGIN_EXPORT ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo
                     return true;
                   }
 
+                  if (name == "obf-zero-comparison") {
+                    module_pm.addPass(obf::zero_comparison_pass());
+                    return true;
+                  }
+
                   if (name == "obf-instruction-substitute") {
                     module_pm.addPass(obf::instruction_substitution_pass());
                     return true;
@@ -813,13 +817,15 @@ extern "C" OBF_PLUGIN_EXPORT ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo
                   return false;
                 });
 
-            pass_builder.registerOptimizerLastEPCallback(
-                [](llvm::ModulePassManager& module_pm, llvm::OptimizationLevel level, llvm::ThinOrFullLTOPhase phase) {
-                  if (!obf::is_obfuscation_enabled()) { return; }
-                  if (level != llvm::OptimizationLevel::O0 && phase != llvm::ThinOrFullLTOPhase::FullLTOPostLink) {
-                    module_pm.addPass(obf::safe_pipeline_pass());
-                  }
-                });
+            pass_builder.registerOptimizerLastEPCallback([](llvm::ModulePassManager& module_pm,
+                                                            llvm::OptimizationLevel level,
+                                                            llvm::ThinOrFullLTOPhase phase) {
+              if (!obf::is_obfuscation_enabled()) { return; }
+              if (level != llvm::OptimizationLevel::O0 &&
+                  phase != llvm::ThinOrFullLTOPhase::FullLTOPostLink) {
+                module_pm.addPass(obf::safe_pipeline_pass());
+              }
+            });
 
             pass_builder.registerFullLinkTimeOptimizationLastEPCallback(
                 [](llvm::ModulePassManager& module_pm, llvm::OptimizationLevel level) {

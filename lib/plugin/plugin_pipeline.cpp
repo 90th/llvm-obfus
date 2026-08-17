@@ -122,9 +122,9 @@ void enforce_strong_vm_virtualization_gate(
     detail += "; policy_detail=";
     detail += state.report.decision.detail;
     detail += "; reason=";
-    const llvm::StringRef reason =
-        result.detail.empty() ? llvm::StringRef("no whole-function or regional VM target")
-                              : llvm::StringRef(result.detail);
+    const llvm::StringRef reason = result.detail.empty()
+                                       ? llvm::StringRef("no whole-function or regional VM target")
+                                       : llvm::StringRef(result.detail);
     detail += reason.str();
     const llvm::StringRef reason_tag = classify_vm_candidate_reason_tag(reason);
     detail += "; reason_tag=";
@@ -539,8 +539,9 @@ bool apply_constant_encoding_stage(llvm::Module& module,
       continue;
     }
 
-    changed |= run_constant_encoding(*state.function, options, state.report.decision.seed)
-                   .encoded_count > 0;
+    changed |=
+        run_constant_encoding(*state.function, options, state.report.decision.seed).encoded_count >
+        0;
   }
 
   if (uses_module_planner) {
@@ -589,6 +590,26 @@ bool apply_instruction_substitution_stage(
     const instruction_substitution_options options =
         build_instruction_substitution_options(config, state.report.decision);
     changed |= run_instruction_substitution(*state.function, options).substitution_count > 0;
+  }
+
+  return changed;
+}
+
+bool apply_zero_comparison_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                                 const obfuscation_config& config,
+                                 const llvm::StringSet<>* skip_functions) {
+  if (!config.zero_comparison.enabled) { return false; }
+
+  bool changed = false;
+  for (const function_pipeline_state& state : states) {
+    if (should_skip_function(state, skip_functions) ||
+        !state.report.decision.policy.allow_zero_comparison) {
+      continue;
+    }
+
+    const zero_comparison_options options =
+        build_zero_comparison_options(config, state.report.decision);
+    changed |= run_zero_comparison(*state.function, options).transformed_site_count > 0;
   }
 
   return changed;

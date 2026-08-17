@@ -113,6 +113,17 @@ struct MappingTraits<obf::constant_encoding_config> {
 };
 
 template <>
+struct MappingTraits<obf::zero_comparison_config> {
+  static void mapping(IO& io, obf::zero_comparison_config& config) {
+    io.mapOptional("enabled", config.enabled, true);
+    io.mapOptional("max_sites_per_function", config.max_sites_per_function, std::uint32_t{16});
+    io.mapOptional("max_unroll_bytes", config.max_unroll_bytes, std::uint32_t{64});
+    io.mapOptional("transform_string_comparisons", config.transform_string_comparisons, true);
+    io.mapOptional("transform_integer_comparisons", config.transform_integer_comparisons, true);
+  }
+};
+
+template <>
 struct MappingTraits<obf::mba_config> {
   static void mapping(IO& io, obf::mba_config& config) {
     io.mapOptional("depth", config.depth, std::uint32_t{1});
@@ -163,6 +174,7 @@ struct MappingTraits<obf::obfuscation_config> {
     io.mapOptional("block_split", config.block_split);
     io.mapOptional("string_encoding", config.string_encoding);
     io.mapOptional("constant_encoding", config.constant_encoding);
+    io.mapOptional("zero_comparison", config.zero_comparison);
     io.mapOptional("mba", config.mba);
     io.mapOptional("vm", config.vm);
     io.mapOptional("indirect_dispatch", config.indirect_dispatch);
@@ -191,6 +203,7 @@ struct config_parse_presence {
   bool string_encoding = false;
   bool constant_encoding = false;
   bool mba = false;
+  bool zero_comparison = false;
   bool vm = false;
   bool indirect_dispatch = false;
   bool security = false;
@@ -217,6 +230,8 @@ void mark_config_presence(config_parse_presence& presence, llvm::StringRef key) 
     presence.constant_encoding = true;
   } else if (key == "mba") {
     presence.mba = true;
+  } else if (key == "zero_comparison") {
+    presence.zero_comparison = true;
   } else if (key == "vm") {
     presence.vm = true;
   } else if (key == "indirect_dispatch") {
@@ -348,6 +363,7 @@ obfuscation_config apply_profile_defaults(const obfuscation_config& raw_config,
   if (presence.block_split) { config.block_split = raw_config.block_split; }
   if (presence.string_encoding) { config.string_encoding = raw_config.string_encoding; }
   if (presence.constant_encoding) { config.constant_encoding = raw_config.constant_encoding; }
+  if (presence.zero_comparison) { config.zero_comparison = raw_config.zero_comparison; }
   if (presence.mba) { config.mba = raw_config.mba; }
   if (presence.vm) { config.vm = raw_config.vm; }
   if (presence.indirect_dispatch) { config.indirect_dispatch = raw_config.indirect_dispatch; }
@@ -686,6 +702,15 @@ std::string summarize_config(const obfuscation_config& config) {
          << config.constant_encoding.max_constants_per_function << '\n';
   stream << "constant_encoding.mode: " << to_string(config.constant_encoding.mode) << '\n';
   stream << "constant_encoding.min_bit_width: " << config.constant_encoding.min_bit_width << '\n';
+  stream << "zero_comparison.enabled: " << (config.zero_comparison.enabled ? "true" : "false")
+         << '\n';
+  stream << "zero_comparison.max_sites_per_function: "
+         << config.zero_comparison.max_sites_per_function << '\n';
+  stream << "zero_comparison.max_unroll_bytes: " << config.zero_comparison.max_unroll_bytes << '\n';
+  stream << "zero_comparison.transform_string_comparisons: "
+         << (config.zero_comparison.transform_string_comparisons ? "true" : "false") << '\n';
+  stream << "zero_comparison.transform_integer_comparisons: "
+         << (config.zero_comparison.transform_integer_comparisons ? "true" : "false") << '\n';
   stream << "mba.depth: " << config.mba.depth << '\n';
   stream << "mba.max_ir_instructions: ";
   if (config.mba.max_ir_instructions.has_value()) {

@@ -22,7 +22,7 @@ if is_windows:
         os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"
     )
     if not os.path.isfile(git_bash):
-        lit.fatal(
+        lit_config.fatal(
             "Windows Lit requires Git for Windows Bash at {!r}.".format(git_bash)
         )
     # Lit otherwise falls back to cmd.exe on Windows. Pin its external shell to
@@ -43,9 +43,13 @@ filecheck_path = _normalize_path(
 )
 if is_windows:
     if not os.path.isfile(filecheck_path):
-        filecheck_path = _normalize_path(shutil.which("FileCheck"))
+        filecheck_path = _normalize_path(
+            shutil.which("FileCheck")
+            or shutil.which("filecheck")
+            or r"C:/Python314/Scripts/filecheck.exe"
+        )
     if not filecheck_path:
-        lit.fatal(
+        lit_config.fatal(
             "Windows Lit requires FileCheck in the configured LLVM tools directory "
             "or on PATH."
         )
