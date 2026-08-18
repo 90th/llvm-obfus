@@ -5,17 +5,15 @@ const Payload = extern struct {
     scale: u64,
 };
 
-extern fn zig_protected_component(payload: Payload) u64;
+extern fn zig_protected_component(payload: Payload) callconv(.c) u64;
 
 fn benchIters(init: std.process.Init) u64 {
     const text = init.environ_map.get("OBF_BENCH_ITERS") orelse return 0;
     return std.fmt.parseInt(u64, text, 10) catch 0;
 }
 
-fn nowNs() u64 {
-    var ts: std.posix.timespec = undefined;
-    _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * 1000000000 + @as(u64, @intCast(ts.nsec));
+fn nowNs(init: std.process.Init) i128 {
+    return std.Io.Clock.now(.awake, init.io).nanoseconds;
 }
 
 fn foldValue(value: u64) u64 {
@@ -35,13 +33,13 @@ pub fn main(init: std.process.Init) !void {
             sink ^= runOnce(17 +% warmup, 7 +% (warmup & 3));
         }
 
-        const start_ns = nowNs();
+        const start_ns = nowNs(init);
         var iter: u64 = 0;
         while (iter < iters) : (iter += 1) {
             sink ^= runOnce(17 +% iter, 7 +% (iter & 3));
         }
-        const total_ns = nowNs() - start_ns;
-        const ns_per_iter = total_ns / iters;
+        const total_ns = nowNs(init) - start_ns;
+        const ns_per_iter = @as(u64, @intCast(@divFloor(total_ns, @as(i128, iters))));
         var bench_buf: [128]u8 = undefined;
         const bench_line = try std.fmt.bufPrint(&bench_buf, "BENCH zig_demo ns/op={} sink={}\n", .{ ns_per_iter, sink });
         try std.Io.File.stdout().writeStreamingAll(init.io, bench_line);

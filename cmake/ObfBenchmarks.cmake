@@ -189,8 +189,10 @@ function(add_obf_rust_benchmark target_name source_file config_file)
   set(obfuscated_ll "${output_dir}/${target_name}.obfuscated.ll")
   set(cleaned_ll "${output_dir}/${target_name}.obfuscated.cleaned.ll")
   set(extra_ir_outputs)
-  set(baseline_bin "${output_dir}/${target_name}.baseline")
-  set(obfuscated_bin "${output_dir}/${target_name}.obfuscated")
+  set(baseline_bin
+    "${output_dir}/${target_name}.baseline${CMAKE_EXECUTABLE_SUFFIX}")
+  set(obfuscated_bin
+    "${output_dir}/${target_name}.obfuscated${CMAKE_EXECUTABLE_SUFFIX}")
 
   add_custom_command(
     OUTPUT "${baseline_ll}"
@@ -280,18 +282,25 @@ function(add_obf_zig_benchmark target_name component_source main_source config_f
   set(obfuscated_ll "${output_dir}/${target_name}.obfuscated.ll")
   set(cleaned_ll "${output_dir}/${target_name}.obfuscated.cleaned.ll")
   set(extra_ir_outputs)
-  set(baseline_bin "${output_dir}/${target_name}.baseline")
-  set(obfuscated_bin "${output_dir}/${target_name}.obfuscated")
+  set(baseline_bin
+    "${output_dir}/${target_name}.baseline${CMAKE_EXECUTABLE_SUFFIX}")
+  set(obfuscated_bin
+    "${output_dir}/${target_name}.obfuscated${CMAKE_EXECUTABLE_SUFFIX}")
+
+  set(zig_target_args)
+  if(WIN32)
+    set(zig_target_args -target x86_64-windows-msvc)
+  endif()
 
   add_custom_command(
     OUTPUT "${component_bc}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
     COMMAND "${OBF_ZIG_COMMAND}" build-obj "${component_source}"
-            -fllvm
             -O ReleaseFast
+            ${zig_target_args}
             --cache-dir "${cache_dir}"
             --global-cache-dir "${global_cache_dir}"
-            -femit-llvm-bc=${component_bc}
+            "-femit-llvm-bc=${component_bc}"
             -fno-emit-bin
     DEPENDS "${component_source}"
     VERBATIM)
@@ -334,9 +343,10 @@ function(add_obf_zig_benchmark target_name component_source main_source config_f
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
     COMMAND "${OBF_ZIG_COMMAND}" build-exe "${main_source}" "${component_bc}"
             -O ReleaseFast
+            ${zig_target_args}
             --cache-dir "${cache_dir}"
             --global-cache-dir "${global_cache_dir}"
-            -femit-bin=${baseline_bin}
+            "-femit-bin=${baseline_bin}"
     COMMAND "${OBF_STRIP}" --strip-all "${baseline_bin}"
     DEPENDS "${main_source}" "${component_bc}"
     VERBATIM)
@@ -346,9 +356,10 @@ function(add_obf_zig_benchmark target_name component_source main_source config_f
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
     COMMAND "${OBF_ZIG_COMMAND}" build-exe "${main_source}" "${protected_bc}" "${OBF_RUNTIME_ARCHIVE}"
             -O ReleaseFast
+            ${zig_target_args}
             --cache-dir "${cache_dir}"
             --global-cache-dir "${global_cache_dir}"
-            -femit-bin=${obfuscated_bin}
+            "-femit-bin=${obfuscated_bin}"
     COMMAND "${OBF_STRIP}" --strip-all "${obfuscated_bin}"
     DEPENDS "${main_source}" "${protected_bc}" "${OBF_RUNTIME_ARCHIVE}"
     VERBATIM)

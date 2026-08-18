@@ -15,9 +15,55 @@ from typing import Iterable
 
 
 RUSTC = r"@OBF_RUSTC_COMMAND@"
-PLUGIN = r"@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@"
+PLUGIN_DIRECTORY = r"@CMAKE_CURRENT_BINARY_DIR@"
 RUNTIME_ARCHIVE = r"@OBF_RUNTIME_ARCHIVE@"
 CONFIG_DRIVER = r"@CMAKE_CURRENT_BINARY_DIR@/obf-driver@CMAKE_EXECUTABLE_SUFFIX@"
+
+
+def _host_is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _resolve_build_artifact(name: str) -> str:
+    candidates = (
+        Path(PLUGIN_DIRECTORY) / name,
+        Path(PLUGIN_DIRECTORY) / "Release" / name,
+        Path(PLUGIN_DIRECTORY) / "Debug" / name,
+        Path(PLUGIN_DIRECTORY) / "bin" / name,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return _rustc_path(str(candidate))
+    return _rustc_path(str(candidates[0]))
+
+
+def _plugin_path() -> str:
+    if _host_is_windows():
+        name = "obf_plugin.dll"
+    elif sys.platform == "darwin":
+        name = "obf_plugin.dylib"
+    else:
+        name = "obf_plugin.so"
+    return _resolve_build_artifact(name)
+
+
+def _config_driver_path() -> str:
+    return _resolve_build_artifact(f"obf-driver@CMAKE_EXECUTABLE_SUFFIX@")
+
+
+def _rustc_path(value: str) -> str:
+    if not _host_is_windows():
+        return value
+    return os.path.normpath(value).replace("\\", "/")
+
+def _runtime_link_flags() -> list[str]:
+    if _host_is_windows():
+        return [
+            f"-Lnative={_rustc_path(os.path.dirname(RUNTIME_ARCHIVE))}",
+            "-lstatic=obf_runtime",
+        ]
+    return [f"-Clink-arg={_rustc_path(RUNTIME_ARCHIVE)}"]
+
 LLVM_PACKAGE_VERSION = r"@LLVM_PACKAGE_VERSION@"
 LLVM_HOST_TRIPLE = r"@LLVM_HOST_TRIPLE@"
 
@@ -788,12 +834,13 @@ def _check_cargo_wrapper_placement(compiler: str, env: dict[str, str]) -> int | 
 
 
 def _requires_rust_frontend(config_path: str, env: dict[str, str]) -> int | None:
-    if not Path(CONFIG_DRIVER).is_file():
-        return _fail(f"missing config validator: {CONFIG_DRIVER}")
+    driver = _config_driver_path()
+    if not Path(driver).is_file():
+        return _fail(f"missing config validator: {driver}")
     try:
         completed = _run_process(
             [
-                CONFIG_DRIVER,
+                driver,
                 f"--config={config_path}",
                 "--require-frontend=rust",
                 "--quiet",
@@ -816,11 +863,13 @@ def _inject_active_flags(
     rustc_args: list[str], action: active_action, *, direct: bool
 ) -> tuple[list[str] | None, int | None]:
     remove_positions: set[int] = set()
+    plugin = _plugin_path()
+    runtime_archive = _rustc_path(RUNTIME_ARCHIVE)
     runtime_name = Path(RUNTIME_ARCHIVE).name
 
     for setting in action.codegen_settings:
         if setting.family == "Z" and setting.value.startswith("llvm-plugins"):
-            if setting.value != f"llvm-plugins={PLUGIN}":
+            if setting.value != f"llvm-plugins={plugin}":
                 return None, _fail("active Rust invocation has a conflicting llvm-plugins flag")
             remove_positions.update(setting.positions)
         elif (
@@ -865,7 +914,7 @@ def _inject_active_flags(
                     "active Rust invocation does not support linker response files"
                 )
             if runtime_name in link_arg:
-                if link_arg != RUNTIME_ARCHIVE:
+                if link_arg != runtime_archive:
                     return None, _fail("active Rust invocation has a conflicting runtime archive")
                 remove_positions.update(setting.positions)
 
@@ -874,12 +923,12 @@ def _inject_active_flags(
         for index, argument in enumerate(rustc_args)
         if index not in remove_positions
     ]
-    injected = ["-Z", f"llvm-plugins={PLUGIN}", "-Ccodegen-units=1"]
+    injected = ["-Z", f"llvm-plugins={plugin}", "-Ccodegen-units=1"]
     if direct:
         injected.append("-Csplit-debuginfo=off")
     injected.extend(filtered_args)
     if action.link:
-        injected.append(f"-Clink-arg={RUNTIME_ARCHIVE}")
+        injected.extend(_runtime_link_flags())
     return injected, None
 
 
@@ -902,7 +951,7 @@ def _validate_direct_side_effects(action: active_action) -> int | None:
                 )
             if setting.value.startswith("link-arg="):
                 link_arg = setting.value.split("=", 1)[1]
-                if link_arg != RUNTIME_ARCHIVE:
+                if link_arg != _rustc_path(RUNTIME_ARCHIVE):
                     return _fail(
                         "active direct Rust support does not accept user -Clink-arg "
                         "values; use -l/-L or Cargo"
@@ -1287,11 +1336,12 @@ def _run_active_action_in_scope(
         signal_scope.raise_if_received()
         if frontend_error is not None:
             return frontend_error
-        if not Path(PLUGIN).is_file():
-            return _fail(f"missing pass plugin: {PLUGIN}")
-        if action.link and not Path(RUNTIME_ARCHIVE).is_file():
-            return _fail(f"missing runtime archive: {RUNTIME_ARCHIVE}")
-
+        plugin = _plugin_path()
+        runtime_archive = _rustc_path(RUNTIME_ARCHIVE)
+        if not Path(plugin).is_file():
+            return _fail(f"missing pass plugin: {plugin}")
+        if action.link and not Path(runtime_archive).is_file():
+            return _fail(f"missing runtime archive: {runtime_archive}")
         injected_args, error = _inject_active_flags(
             rustc_args, action, direct=not cargo_mode
         )

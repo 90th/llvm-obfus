@@ -165,8 +165,8 @@ endif()
 if(OBF_RUSTC_VERSION_STATUS EQUAL 0
     AND OBF_CARGO
     AND NOT OBF_PROJECT_LLVM_MAJOR_MINOR STREQUAL ""
-    AND OBF_RUSTC_RELEASE MATCHES "(^|[-.])(nightly|dev)([-.]|$)"
-    AND OBF_RUSTC_LLVM_MAJOR_MINOR STREQUAL OBF_PROJECT_LLVM_MAJOR_MINOR)
+    AND OBF_RUSTC_LLVM_MAJOR_MINOR STREQUAL OBF_PROJECT_LLVM_MAJOR_MINOR
+    AND OBF_RUSTC_RELEASE MATCHES "(^|[-.])(nightly|dev)([-.]|$)")
   set(OBF_HAS_RUST_BENCHMARK_TOOLCHAIN ON)
 endif()
 
@@ -181,11 +181,14 @@ string(CONCAT OBF_ZIG_VERSION_OUTPUT
 string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" OBF_HOST_SYSTEM_PROCESSOR_LOWER)
 string(TOLOWER "${LLVM_HOST_TRIPLE}" OBF_LLVM_HOST_TRIPLE_LOWER)
 string(REGEX MATCH "^[^-]+" OBF_LLVM_HOST_ARCH "${OBF_LLVM_HOST_TRIPLE_LOWER}")
-if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux"
-    AND OBF_LLVM_HOST_TRIPLE_LOWER MATCHES "linux"
-    AND OBF_ZIG_VERSION_STATUS EQUAL 0
-    AND OBF_ZIG_VERSION_OUTPUT MATCHES "(^|[\r\n])[ \\t]*0\\.16\\.[0-9]+([-+][^\\r\\n]*)?([\r\n]|$)")
-  set(OBF_HAS_ZIG_BENCHMARK_TOOLCHAIN ON)
+if((CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux"
+      AND OBF_LLVM_HOST_TRIPLE_LOWER MATCHES "linux")
+    OR (WIN32
+      AND OBF_LLVM_HOST_TRIPLE_LOWER MATCHES "windows"))
+  if(OBF_ZIG_VERSION_STATUS EQUAL 0
+      AND OBF_ZIG_VERSION_OUTPUT MATCHES "(^|[\r\n])[ \t]*0\.16\.[0-9]+([-+][^\r\n]*)?([\r\n]|$)")
+    set(OBF_HAS_ZIG_BENCHMARK_TOOLCHAIN ON)
+  endif()
 endif()
 
 set(OBF_TINYGO_HOST_MATCH OFF)
@@ -264,13 +267,13 @@ endif()
 if(OBF_HAS_RUST_BENCHMARK_TOOLCHAIN)
   message(STATUS "Enabled Rust corpus benchmark")
 else()
-  message(STATUS "Rust corpus benchmark disabled: requires nightly or dev rustc with matching LLVM and Cargo")
+  message(STATUS "Rust corpus benchmark disabled: requires Cargo plus a nightly or dev rustc with matching LLVM")
 endif()
 
 if(OBF_HAS_ZIG_BENCHMARK_TOOLCHAIN)
   message(STATUS "Enabled Zig corpus benchmark")
 else()
-  message(STATUS "Zig corpus benchmark disabled: requires Zig 0.16.x on native Linux")
+  message(STATUS "Zig corpus benchmark disabled: requires Zig 0.16.x on native Linux or Windows")
 endif()
 
 if(OBF_HAS_TINYGO_BENCHMARK_TOOLCHAIN)

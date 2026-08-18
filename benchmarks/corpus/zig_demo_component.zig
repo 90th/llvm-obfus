@@ -5,7 +5,7 @@ pub const Payload = extern struct {
     scale: u64,
 };
 
-export fn zig_protected_component(payload: Payload) u64 {
+export fn zig_protected_component(payload: Payload) callconv(.c) u64 {
     const secret = "zig-bench-visible-secret";
     var state = payload.seed *% (payload.scale +% 7);
     var index: usize = 0;
