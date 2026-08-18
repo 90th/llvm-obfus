@@ -13,3 +13,6 @@ CMakeCache.txt
 *.swp
 *.swo
 notes/
+benchmarks/config/rust_demo.yaml
+benchmarks/config/tinygo_demo.yaml
+benchmarks/config/zig_demo.yaml
