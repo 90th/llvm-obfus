@@ -40,7 +40,7 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 
 - **Design Model**: Function-selective policy engine driven by YAML configuration or source-level `__attribute__((annotate(...)))` tags. The direct `opt` interface also accepts command-line configuration flags on non-Windows hosts.
 - **Compiler Compatibility**: Uses LLVM New Pass Manager (NPM) extension points. Clang/Clang++, LLVM bitcode, Rust, Zig, and TinyGo integrations are supplied by wrappers or bitcode workflows.
-- **Platform Support**: The C/C++ plugin, runtime, Clang wrapper, and bitcode wrapper support Linux and Windows x86_64. Rust, Zig, and TinyGo workflows are currently Linux-only.
+- **Platform Support**: The C/C++ plugin, runtime, Clang wrapper, bitcode wrapper, Rust (`obf-rustc`), and Zig workflows support Linux and Windows x86_64. TinyGo workflows are currently Linux-only.
 - **Profiles**: Five built-in performance-versus-security profiles: `fast`, `standard`, `guarded`, `fortress`, and `lab`.
 - **Clean Artifacts**: Final cleanup strips release markers, annotations, and local SSA names. Security gates verify configured symbol-isolation invariants.
 
@@ -142,8 +142,8 @@ graph TD
 |---|---|---|---|
 | **Clang / Clang++** | `-fpass-plugin=<plugin>` or `obf-clang` / `obf-clang++` wrapper | Generic configuration, annotations, or YAML overrides | Linux, Windows |
 | **LLVM Bitcode** | `obf-bc` CLI wrapper or `opt` pass plugin | Valid `.bc` input/output and explicit configuration | Linux, Windows |
-| **Rust (`rustc`/Cargo)** | `obf-rustc` wrapper via `RUSTC_WORKSPACE_WRAPPER` | `frontend: rust`, `default_level: none`, exact symbol names | Linux only |
-| **Zig** | Bitcode pipeline via `zig build-obj -femit-llvm-bc` | `frontend: zig`, `default_level: none`, exact symbol names | Linux only |
+| **Rust (`rustc`/Cargo)** | `obf-rustc` wrapper via `RUSTC_WORKSPACE_WRAPPER` | `frontend: rust`, `default_level: none`, exact symbol names | Linux, Windows |
+| **Zig** | Bitcode pipeline via `zig build-obj -femit-llvm-bc` | `frontend: zig`, `default_level: none`, exact symbol names | Linux, Windows |
 | **TinyGo** | `obf-tinygo` wrapper | `frontend: tinygo`, `default_level: none`, `string_encoding.max_strings_per_module: 0`, exact symbol names | Linux only |
 
 ---
@@ -194,7 +194,7 @@ Built-in profiles configure default heuristic thresholds:
 - LLVM 21 or newer development package. LLVM 22.1.7 is verified.
 - Python 3.10 or newer and `lit`
 - LLVM tools: `clang`, `clang++`, `opt`, `llvm-link`, `llc`, `llvm-strip`, `llvm-nm`, `llvm-objdump`, and `llvm-ar`; `ninja` when using the Ninja generator
-- Optional Linux-only workflows: matching-LLVM nightly/development `rustc` and `cargo`; Zig 0.16.x; TinyGo 0.41.x with Go 1.23–1.26 and LLD 21
+- Optional frontend workflows: matching-LLVM nightly/development `rustc` and `cargo` (Linux, Windows); Zig 0.16.x (Linux, Windows); TinyGo 0.41.x with Go 1.23–1.26 and LLD 21 (Linux only)
 
 ### Linux Build
 
