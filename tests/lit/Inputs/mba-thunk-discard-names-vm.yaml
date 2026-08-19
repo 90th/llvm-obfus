@@ -1,0 +1,9 @@
+seed: 20260818
+default_level: none
+targets:
+  - match: fib
+    level: strong_vm
+profile: fast
+security:
+  fail_on_public_obf_symbol: true
+  strip_release_markers: false

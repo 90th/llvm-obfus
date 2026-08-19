@@ -605,11 +605,6 @@ llvm::Function* get_or_create_entropy_thunk(llvm::Module& module,
                                             std::uint64_t salt,
                                             entropy_thunk_interface interface_type) {
   entropy_thunk_shape shape = select_entropy_thunk_shape(owner, context, salt);
-  const std::uint64_t thunk_id =
-      derive_entropy_thunk_id(owner, context, salt, shape, interface_type);
-  const std::string thunk_name = llvm::formatv("__obf_entropy_thunk_{0:x}", thunk_id).str();
-  if (llvm::Function* existing = module.getFunction(thunk_name)) { return existing; }
-
   llvm::LLVMContext& llvm_context = module.getContext();
   auto* i64_type = llvm::Type::getInt64Ty(llvm_context);
   auto* pair_type = llvm::StructType::get(llvm_context, {i64_type, i64_type});
@@ -622,6 +617,25 @@ llvm::Function* get_or_create_entropy_thunk(llvm::Module& module,
         llvm::Type::getVoidTy(llvm_context), {llvm::PointerType::get(llvm_context, 0)}, false);
   } else {
     thunk_type = llvm::FunctionType::get(pair_type, /*isVarArg=*/false);
+  }
+
+  std::uint64_t effective_salt = salt;
+  std::uint64_t attempt = 0;
+  std::string thunk_name;
+  while (true) {
+    const std::uint64_t thunk_id =
+        derive_entropy_thunk_id(owner, context, effective_salt, shape, interface_type);
+    thunk_name = llvm::formatv("__obf_entropy_thunk_{0:x}", thunk_id).str();
+    if (llvm::Function* existing = module.getFunction(thunk_name)) {
+      if (existing->getFunctionType() == thunk_type) {
+        return existing;
+      }
+      // Symbol collision with incompatible function type; advance attempt and re-derive.
+      ++attempt;
+      effective_salt = mix_seed(salt, attempt * 0x9e3779b97f4a7c15ULL + 1);
+      continue;
+    }
+    break;
   }
 
   auto* thunk = llvm::Function::Create(
@@ -791,7 +805,8 @@ llvm::AllocaInst* get_or_create_function_entropy_pair_cache(llvm::Function& func
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction);
     if (alloca == nullptr) { break; }
 
-    if (alloca->getName() == "obf.entropy.cache" && alloca->getAllocatedType() == pair_type) {
+    if (alloca->getAllocatedType() == pair_type &&
+        alloca->getMetadata("obf.entropy.cache") != nullptr) {
       return alloca;
     }
   }
@@ -801,6 +816,7 @@ llvm::AllocaInst* get_or_create_function_entropy_pair_cache(llvm::Function& func
 
   llvm::IRBuilder<> entry_builder(&entry_block, insert_it);
   auto* cache = entry_builder.CreateAlloca(pair_type, nullptr, "obf.entropy.cache");
+  cache->setMetadata("obf.entropy.cache", llvm::MDNode::get(function.getContext(), {}));
   const llvm::DataLayout& data_layout = function.getParent()->getDataLayout();
   cache->setAlignment(data_layout.getPrefTypeAlign(pair_type));
   llvm::Function* thunk =
