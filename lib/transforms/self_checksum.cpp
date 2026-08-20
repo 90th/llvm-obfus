@@ -3,18 +3,24 @@
 #include "obf/frontend/annotations.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/runtime_abi_generated.h"
+#include "obf/support/self_checksum_record.h"
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/mba.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/Alignment.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -23,8 +29,8 @@ namespace obf {
 namespace {
 
 constexpr std::uint64_t kDefaultSeed = 0x53454c465f434355ULL;
-constexpr std::uint32_t kMinSampleWindowBytes = 16;
-constexpr std::uint32_t kMaxSampleWindowBytes = 32;
+constexpr std::uint32_t kMinSampleWindowBytes = OBF_SC_V1_MIN_SAMPLE_SIZE;
+constexpr std::uint32_t kMaxSampleWindowBytes = OBF_SC_V1_MAX_SAMPLE_SIZE;
 
 struct checksum_site {
   llvm::Instruction* instruction = nullptr;
@@ -159,7 +165,7 @@ llvm::SmallVector<checksum_site, 8> collect_sites(llvm::Function& function,
     for (llvm::Instruction& instruction : block) {
       if (!is_supported_instruction(instruction)) { continue; }
       llvm::IntegerType* type = get_key_type(instruction);
-      if (type == nullptr) { continue; }
+      if (type == nullptr || type->getBitWidth() > 64) { continue; }
       sites.push_back({&instruction,
                        type,
                        obf::mix_seed(function_seed, static_cast<std::uint64_t>(site_index + 1))});
@@ -171,6 +177,112 @@ llvm::SmallVector<checksum_site, 8> collect_sites(llvm::Function& function,
   return sites;
 }
 
+bool supports_bound_checksum_records(const llvm::Module& module) {
+  const llvm::Triple triple(module.getTargetTriple());
+  return triple.isOSLinux() && triple.isOSBinFormatELF() &&
+         triple.getArch() == llvm::Triple::x86_64;
+}
+
+llvm::StructType* get_or_create_record_type(llvm::Module& module) {
+  llvm::LLVMContext& context = module.getContext();
+  if (llvm::StructType* existing =
+          llvm::StructType::getTypeByName(context, "obf.selfchk.record.v1")) {
+    return existing;
+  }
+
+  llvm::StructType* type = llvm::StructType::create(context, "obf.selfchk.record.v1");
+  type->setBody({llvm::Type::getInt32Ty(context),       // magic            @ 0x00
+                 llvm::Type::getInt16Ty(context),       // version          @ 0x04
+                 llvm::Type::getInt16Ty(context),       // record_size      @ 0x06
+                 llvm::Type::getInt32Ty(context),       // flags            @ 0x08
+                 llvm::Type::getInt32Ty(context),       // algorithm        @ 0x0c
+                 llvm::Type::getInt32Ty(context),       // object_format    @ 0x10
+                 llvm::Type::getInt32Ty(context),       // machine          @ 0x14
+                 llvm::Type::getInt64Ty(context),       // site_id          @ 0x18
+                 llvm::Type::getInt64Ty(context),       // target_delta     @ 0x20
+                 llvm::Type::getInt32Ty(context),       // target_kind      @ 0x28
+                 llvm::Type::getInt32Ty(context),       // sample_offset    @ 0x2c
+                 llvm::Type::getInt32Ty(context),       // sample_size      @ 0x30
+                 llvm::Type::getInt32Ty(context),       // reserved0        @ 0x34
+                 llvm::Type::getInt64Ty(context),       // seed             @ 0x38
+                 llvm::Type::getInt64Ty(context),       // expected         @ 0x40
+                 llvm::ArrayType::get(llvm::Type::getInt8Ty(context), 24)}, // reserved1 @ 0x48
+                true);
+  return type;
+}
+
+std::uint64_t derive_site_id(const llvm::Function& protected_function,
+                             const llvm::Function& target,
+                             std::uint64_t site_seed) {
+  std::uint64_t value = obf::mix_seed(
+      site_seed, stable_hash_string(protected_function.getName(), 0x73635f736974655fULL));
+  value = obf::mix_seed(value, stable_hash_string(target.getName(), 0x73635f7461726765ULL));
+  return value == 0 ? UINT64_C(0x6f62665f73635f31) : value;
+}
+
+std::uint64_t choose_unique_site_id(llvm::Module& module,
+                                    const llvm::Function& protected_function,
+                                    const llvm::Function& target,
+                                    std::uint64_t site_seed) {
+  std::uint64_t site_id = derive_site_id(protected_function, target, site_seed);
+  for (std::uint64_t attempt = 0; attempt < 64; ++attempt) {
+    const std::string name = "__obf_selfchk_record_" + std::to_string(site_id);
+    if (module.getNamedGlobal(name) == nullptr) { return site_id; }
+    site_id = obf::mix_seed(site_id, UINT64_C(0x9e3779b97f4a7c15) ^ (attempt + 1));
+    if (site_id == 0) { site_id = UINT64_C(0x6f62665f73635f31) ^ (attempt + 1); }
+  }
+  llvm::report_fatal_error("self_checksum site-id collision budget exhausted");
+}
+
+llvm::GlobalVariable* emit_unbound_checksum_record(llvm::Module& module,
+                                                   llvm::Function& protected_function,
+                                                   llvm::Function& target,
+                                                   std::uint32_t sample_size,
+                                                   std::uint64_t site_seed) {
+  llvm::LLVMContext& context = module.getContext();
+  llvm::StructType* record_type = get_or_create_record_type(module);
+  llvm::Type* i64_ty = llvm::Type::getInt64Ty(context);
+  const std::uint64_t site_id =
+      choose_unique_site_id(module, protected_function, target, site_seed);
+  const std::string record_name = "__obf_selfchk_record_" + std::to_string(site_id);
+
+  auto* record = new llvm::GlobalVariable(module,
+                                          record_type,
+                                          true,
+                                          llvm::GlobalValue::InternalLinkage,
+                                          nullptr,
+                                          record_name);
+  record->setSection(std::string(OBF_SC_ELF_SECTION_PREFIX) + std::to_string(site_id));
+  record->setAlignment(llvm::Align(8));
+  record->setExternallyInitialized(true);
+
+  llvm::Constant* target_address = llvm::ConstantExpr::getPtrToInt(&target, i64_ty);
+  llvm::Constant* record_address = llvm::ConstantExpr::getPtrToInt(record, i64_ty);
+  llvm::Constant* target_delta = llvm::ConstantExpr::getSub(target_address, record_address);
+  llvm::Constant* zero_reserved = llvm::ConstantAggregateZero::get(
+      llvm::ArrayType::get(llvm::Type::getInt8Ty(context), OBF_SC_RESERVED1_SIZE));
+
+  record->setInitializer(llvm::ConstantStruct::get(
+      record_type,
+      {llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_RECORD_MAGIC),
+       llvm::ConstantInt::get(llvm::Type::getInt16Ty(context), OBF_SC_RECORD_VERSION),
+       llvm::ConstantInt::get(llvm::Type::getInt16Ty(context), OBF_SC_RECORD_SIZE),
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_FLAG_REQUIRED),
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_ALGORITHM_RT_CORE_CC_V1),
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_OBJECT_FORMAT_ELF),
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_MACHINE_X86_64),
+       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), site_id),
+       target_delta,
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_TARGET_RECORD_REL64),
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_V1_SAMPLE_OFFSET),
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), sample_size),
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0),
+       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), site_seed),
+       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 0),
+       zero_reserved}));
+  return record;
+}
+
 llvm::FunctionCallee get_or_create_checksum_runtime(llvm::Module& module) {
   llvm::LLVMContext& context = module.getContext();
   llvm::Type* i8_ptr_ty = llvm::PointerType::getUnqual(context);
@@ -179,13 +291,20 @@ llvm::FunctionCallee get_or_create_checksum_runtime(llvm::Module& module) {
   return module.getOrInsertFunction(OBF_RT_CODE_CHECKSUM_STR, type);
 }
 
-llvm::Value* create_checksum_key(llvm::IRBuilder<>& builder,
-                                 llvm::FunctionCallee runtime,
-                                 llvm::Function& target,
-                                 llvm::IntegerType& type,
-                                 std::uint32_t sample_window_bytes,
-                                 std::uint64_t site_seed,
-                                 const mba::builder_context&) {
+llvm::FunctionCallee get_or_create_bound_guard_runtime(llvm::Module& module) {
+  llvm::LLVMContext& context = module.getContext();
+  llvm::FunctionType* type = llvm::FunctionType::get(
+      llvm::Type::getVoidTy(context), {llvm::Type::getInt32Ty(context)}, false);
+  return module.getOrInsertFunction(OBF_RT_SELF_CHECKSUM_REQUIRE_BOUND_STR, type);
+}
+
+llvm::Value* create_neutral_checksum_key(llvm::IRBuilder<>& builder,
+                                         llvm::FunctionCallee runtime,
+                                         llvm::Function& target,
+                                         llvm::IntegerType& type,
+                                         std::uint32_t sample_window_bytes,
+                                         std::uint64_t site_seed,
+                                         const mba::builder_context&) {
   llvm::Value* target_ptr = builder.CreatePointerCast(
       &target, llvm::PointerType::getUnqual(builder.getContext()), "obf.selfchk.target");
   const std::uint32_t sample_size =
@@ -205,6 +324,39 @@ llvm::Value* create_checksum_key(llvm::IRBuilder<>& builder,
   llvm::Value* expected_checksum = builder.CreateXor(
       actual_checksum, llvm::ConstantInt::get(checksum_type, 0), "obf.selfchk.expected");
   return builder.CreateXor(actual_checksum, expected_checksum, "obf.selfchk.delta");
+}
+
+llvm::Value* create_bound_checksum_key(llvm::IRBuilder<>& builder,
+                                       llvm::FunctionCallee runtime,
+                                       llvm::FunctionCallee bound_guard,
+                                       llvm::Function& target,
+                                       llvm::GlobalVariable& record,
+                                       llvm::IntegerType& type,
+                                       std::uint32_t sample_size,
+                                       std::uint64_t site_seed) {
+  llvm::StructType* record_type = llvm::cast<llvm::StructType>(record.getValueType());
+  llvm::Value* flags_ptr = builder.CreateStructGEP(record_type, &record, 3, "obf.selfchk.flags.ptr");
+  llvm::LoadInst* flags = builder.CreateLoad(
+      builder.getInt32Ty(), flags_ptr, "obf.selfchk.flags");
+  flags->setVolatile(true);
+  builder.CreateCall(bound_guard, {flags});
+
+  llvm::Value* target_ptr = builder.CreatePointerCast(
+      &target, llvm::PointerType::getUnqual(builder.getContext()), "obf.selfchk.target");
+  llvm::Value* checksum = builder.CreateCall(
+      runtime,
+      {target_ptr, builder.getInt64(sample_size), builder.getInt64(site_seed)},
+      "obf.selfchk.raw");
+
+  llvm::Value* expected_ptr =
+      builder.CreateStructGEP(record_type, &record, 14, "obf.selfchk.expected.ptr");
+  llvm::LoadInst* expected = builder.CreateLoad(
+      builder.getInt64Ty(), expected_ptr, "obf.selfchk.expected");
+  expected->setVolatile(true);
+
+  llvm::Value* delta64 = builder.CreateXor(checksum, expected, "obf.selfchk.delta64");
+  if (type.getBitWidth() == 64) { return delta64; }
+  return builder.CreateTrunc(delta64, &type, "obf.selfchk.delta");
 }
 
 void inject_keyed_use(llvm::Instruction& instruction,
@@ -254,19 +406,38 @@ self_checksum_result transform_self_checksum(llvm::Function& function,
   if (sites.empty()) { return {.detail = "no eligible checksum sites"}; }
 
   llvm::FunctionCallee runtime = get_or_create_checksum_runtime(module);
+  const bool use_bound_records = supports_bound_checksum_records(module);
+  llvm::FunctionCallee bound_guard;
+  if (use_bound_records) { bound_guard = get_or_create_bound_guard_runtime(module); }
   auto mba_context = obf::support::make_mba_context(function, "obf.selfchk", function_seed, {});
 
   std::size_t applied = 0;
   for (checksum_site& site : sites) {
     if (site.instruction == nullptr || site.type == nullptr) { continue; }
     llvm::IRBuilder<> builder(site.instruction);
-    llvm::Value* key = create_checksum_key(builder,
-                                           runtime,
-                                           *target,
-                                           *site.type,
-                                           options.sample_window_bytes,
-                                           site.site_seed,
-                                           mba_context);
+    const std::uint32_t sample_size =
+        std::clamp(options.sample_window_bytes, kMinSampleWindowBytes, kMaxSampleWindowBytes);
+    llvm::Value* key = nullptr;
+    if (use_bound_records) {
+      llvm::GlobalVariable* record = emit_unbound_checksum_record(
+          module, function, *target, sample_size, site.site_seed);
+      key = create_bound_checksum_key(builder,
+                                      runtime,
+                                      bound_guard,
+                                      *target,
+                                      *record,
+                                      *site.type,
+                                      sample_size,
+                                      site.site_seed);
+    } else {
+      key = create_neutral_checksum_key(builder,
+                                        runtime,
+                                        *target,
+                                        *site.type,
+                                        options.sample_window_bytes,
+                                        site.site_seed,
+                                        mba_context);
+    }
     inject_keyed_use(*site.instruction, builder, key, *site.type);
     ++applied;
   }

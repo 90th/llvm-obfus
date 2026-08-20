@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "obf/support/runtime_abi_generated.h"
+#include "obf/support/self_checksum_record.h"
 #include "obf/support/runtime_atomic.h"
 #include "obf/support/blake2s_internal.h"
 
@@ -28,6 +29,18 @@ uint64_t OBF_RT_ENTROPY_ANCHOR = 0;
 #else
 #define OBF_HIDDEN
 #endif
+
+OBF_HIDDEN
+void OBF_RT_SELF_CHECKSUM_REQUIRE_BOUND(uint32_t flags) {
+  if (flags != (OBF_SC_FLAG_REQUIRED | OBF_SC_FLAG_BOUND)) {
+#if defined(__clang__) || defined(__GNUC__)
+    __builtin_trap();
+    __builtin_unreachable();
+#else
+    abort();
+#endif
+  }
+}
 
 OBF_HIDDEN
 uint64_t OBF_RT_CODE_CHECKSUM(const void* func_ptr, size_t size, uint64_t seed) {

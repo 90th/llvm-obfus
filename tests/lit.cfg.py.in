@@ -93,6 +93,12 @@ config.substitutions.append(("%raw_clang", _shell_quote(_normalize_path("@OBF_CL
 config.substitutions.append(("%raw_clangxx", _shell_quote(_normalize_path("@OBF_CLANGXX@"))))
 config.substitutions.append(("%obf_runtime", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/libobf_runtime.a"))))
 config.substitutions.append(("%obf_build_include", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/include"))))
+checksum_bind_path = _normalize_path("@OBF_CHECKSUM_BIND@")
+if checksum_bind_path and os.path.exists(checksum_bind_path):
+    config.substitutions.append(("%obf_checksum_bind", _shell_quote(checksum_bind_path)))
+    config.available_features.add("has-self-checksum-binder")
+else:
+    config.substitutions.append(("%obf_checksum_bind", "obf-checksum-bind"))
 
 
 

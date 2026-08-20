@@ -3,9 +3,12 @@
 #include "obf/policy/policy_engine.h"
 #include "obf/support/generated_names.h"
 #include "obf/support/stable_hash.h"
+#include "obf/support/self_checksum_record.h"
 
 #include "obf/transforms/zero_comparison.h"
 #include "obf/transforms/self_checksum.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/ADT/StringRef.h"
@@ -15,6 +18,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/Error.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <array>
 #include <cstdint>
@@ -978,6 +982,7 @@ void TestZeroComparison() {
 
 void TestSelfChecksum(llvm::LLVMContext& context) {
   llvm::Module module("self_checksum_test_module", context);
+  module.setTargetTriple(llvm::Triple("x86_64-unknown-linux-gnu"));
   llvm::Type* i32_ty = llvm::Type::getInt32Ty(context);
 
   llvm::FunctionType* worker_type = llvm::FunctionType::get(i32_ty, {i32_ty}, false);
@@ -1014,22 +1019,58 @@ void TestSelfChecksum(llvm::LLVMContext& context) {
              "self_checksum should derive one keyed value per transformed site");
 
   std::size_t checksum_calls = 0;
+  std::size_t bound_guard_calls = 0;
+  std::size_t volatile_record_loads = 0;
   bool has_derived_key_logic = false;
   for (const llvm::BasicBlock& block : *compute) {
     for (const llvm::Instruction& instruction : block) {
       if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
-        if (const llvm::Function* callee = call->getCalledFunction();
-            callee != nullptr && callee->getName() == OBF_RT_CODE_CHECKSUM_STR) {
-          ++checksum_calls;
+        if (const llvm::Function* callee = call->getCalledFunction(); callee != nullptr) {
+          if (callee->getName() == OBF_RT_CODE_CHECKSUM_STR) { ++checksum_calls; }
+          if (callee->getName() == OBF_RT_SELF_CHECKSUM_REQUIRE_BOUND_STR) { ++bound_guard_calls; }
         }
+      }
+      if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction);
+          load != nullptr && load->isVolatile() &&
+          instruction.getName().starts_with("obf.selfchk.")) {
+        ++volatile_record_loads;
       }
       has_derived_key_logic |= instruction.getName().starts_with("obf.selfchk.");
     }
   }
   ExpectTrue(checksum_calls == result.checksum_site_count,
              "self_checksum should insert one rt_core_cc call per transformed site");
+  ExpectTrue(bound_guard_calls == result.checksum_site_count,
+             "ELF self_checksum should fail closed through one bound-state guard per site");
+  ExpectTrue(volatile_record_loads == result.checksum_site_count * 2,
+             "ELF self_checksum should volatile-load flags and expected checksum per site");
   ExpectTrue(has_derived_key_logic,
              "self_checksum should insert checksum-derived key logic into compute");
+
+  std::size_t record_count = 0;
+  for (const llvm::GlobalVariable& global : module.globals()) {
+    if (!global.hasSection() ||
+        !global.getSection().starts_with(OBF_SC_ELF_SECTION_PREFIX)) {
+      continue;
+    }
+    ++record_count;
+    ExpectTrue(global.isConstant(), "ELF self_checksum record should map read-only at runtime");
+    ExpectTrue(global.isExternallyInitialized(),
+               "ELF self_checksum record must permit post-link initialization");
+    const auto* initializer = llvm::dyn_cast<llvm::ConstantStruct>(global.getInitializer());
+    ExpectTrue(initializer != nullptr,
+               "ELF self_checksum record should have a structured initializer");
+    if (initializer != nullptr) {
+      const auto* flags = llvm::dyn_cast<llvm::ConstantInt>(initializer->getOperand(3));
+      const auto* expected = llvm::dyn_cast<llvm::ConstantInt>(initializer->getOperand(14));
+      ExpectTrue(flags != nullptr && flags->getZExtValue() == OBF_SC_FLAG_REQUIRED,
+                 "new ELF self_checksum record should start REQUIRED and UNBOUND");
+      ExpectTrue(expected != nullptr && expected->isZero(),
+                 "new ELF self_checksum record should start with zero expected checksum");
+    }
+  }
+  ExpectTrue(record_count == result.checksum_site_count,
+             "ELF self_checksum should emit one post-link record per transformed site");
   ExpectTrue(!llvm::verifyFunction(*compute, &llvm::errs()),
              "self_checksum output should remain a valid LLVM function");
   ExpectTrue(!llvm::verifyModule(module, &llvm::errs()),

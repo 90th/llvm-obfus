@@ -103,6 +103,16 @@ target_include_directories(obf-driver PRIVATE ${PROJECT_SOURCE_DIR}/include
                                               ${CMAKE_CURRENT_BINARY_DIR}/include)
 target_link_libraries(obf-driver PRIVATE obf_core ${OBF_LLVM_LIBS})
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(obf-checksum-bind
+    tools/obf-checksum-bind/main.cpp
+  )
+  target_include_directories(obf-checksum-bind PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  set(OBF_CHECKSUM_BIND "${CMAKE_CURRENT_BINARY_DIR}/obf-checksum-bind${CMAKE_EXECUTABLE_SUFFIX}")
+else()
+  set(OBF_CHECKSUM_BIND "")
+endif()
+
 add_executable(obf-unit-tests
   tests/unit/obf_unit_tests.cpp
 )
