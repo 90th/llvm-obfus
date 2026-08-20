@@ -25,9 +25,9 @@
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -1311,16 +1311,22 @@ void assign_lazy_descriptor_indices(std::vector<string_strategy_plan>& plans,
     }
   }
 }
-
+bool is_coff_explicit_section(llvm::GlobalVariable& global) {
+  if (!global.hasSection()) { return false; }
+  const llvm::Triple triple(global.getParent()->getTargetTriple());
+  return triple.isOSBinFormatCOFF();
+}
 void privatize_transformed_string_global(llvm::GlobalVariable& global) {
+  const bool had_comdat = global.hasComdat();
+  const bool must_clear_section = had_comdat || is_coff_explicit_section(global);
   global.setConstant(false);
   if (!global.hasLocalLinkage()) {
     global.setLinkage(llvm::GlobalValue::InternalLinkage);
     global.setDSOLocal(true);
     global.setVisibility(llvm::GlobalValue::DefaultVisibility);
   }
-  if (global.hasComdat()) { global.setComdat(nullptr); }
-  if (global.hasSection()) { global.setSection(""); }
+  if (had_comdat) { global.setComdat(nullptr); }
+  if (must_clear_section && global.hasSection()) { global.setSection(""); }
 }
 void encode_global_initializer(llvm::GlobalVariable& global, std::uint64_t seed) {
   const auto* data = llvm::cast<llvm::ConstantDataSequential>(global.getInitializer());

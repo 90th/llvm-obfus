@@ -1,0 +1,8 @@
+frontend: rust
+seed: 9003
+default_level: none
+security:
+  strip_release_markers: true
+targets:
+  - match: check_custom
+    level: light
