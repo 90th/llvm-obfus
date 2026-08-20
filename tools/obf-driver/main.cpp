@@ -6,6 +6,8 @@
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <optional>
+
 int main(int argc, char** argv) {
   llvm::InitLLVM init_llvm(argc, argv);
 
@@ -28,6 +30,11 @@ int main(int argc, char** argv) {
                             llvm::cl::desc("Suppress successful driver output"),
                             llvm::cl::init(false),
                             llvm::cl::cat(driver_category));
+  llvm::cl::opt<bool> query_self_checksum(
+      "query-self-checksum",
+      llvm::cl::desc("Print whether the resolved config enables self_checksum"),
+      llvm::cl::init(false),
+      llvm::cl::cat(driver_category));
   llvm::cl::HideUnrelatedOptions(driver_category);
   llvm::cl::ParseCommandLineOptions(argc, argv, "llvm-obfus driver scaffold\n");
 
@@ -50,11 +57,12 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  if (!quiet) {
+  if (!quiet && !query_self_checksum) {
     llvm::outs() << "llvm-obfus driver scaffold\n";
     llvm::outs() << "LLVM version target: " << LLVM_VERSION_STRING << "\n";
   }
 
+  std::optional<obf::obfuscation_config> loaded_config;
   if (!config_path.empty()) {
     llvm::Expected<obf::obfuscation_config> config = obf::load_config_from_file(config_path);
     if (!config) {
@@ -68,14 +76,22 @@ int main(int argc, char** argv) {
                    << expected_frontend << '\n';
       return 1;
     }
+    loaded_config.emplace(*config);
 
-    if (!quiet) {
+    if (!quiet && !query_self_checksum) {
       llvm::outs() << "Loaded config from " << config_path << "\n";
-      llvm::outs() << obf::summarize_config(*config);
+      llvm::outs() << obf::summarize_config(*loaded_config);
     }
-  } else if (!quiet) {
+  } else if (!quiet && !query_self_checksum) {
     llvm::outs() << "No config provided. Using default milestone-zero policy "
                     "inputs.\n";
+  }
+
+  if (query_self_checksum) {
+    const bool enabled =
+        loaded_config.has_value() && loaded_config->self_checksum.enabled;
+    llvm::outs() << (enabled ? "enabled\n" : "disabled\n");
+    return 0;
   }
 
   if (!quiet) {

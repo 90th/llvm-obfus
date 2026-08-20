@@ -1,0 +1,7 @@
+seed: 424242
+default_level: none
+self_checksum:
+  enabled: true
+  window_size: 16
+  max_sites: 1
+  seed: 991827

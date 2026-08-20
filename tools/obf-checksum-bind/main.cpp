@@ -187,7 +187,9 @@ struct elf_view {
   std::vector<std::size_t> record_section_indices;
 };
 
-elf_view parse_elf(const std::vector<std::uint8_t>& data) {
+elf_view parse_elf(const std::vector<std::uint8_t>& data,
+                   bool require_records = true,
+                   bool reject_build_id = true) {
   if (data.size() < sizeof(Elf64_Ehdr)) { throw bind_error("file is too small to be ELF64"); }
   const Elf64_Ehdr header = checked_struct<Elf64_Ehdr>(data, 0, "ELF header");
   if (std::memcmp(header.e_ident, ELFMAG, SELFMAG) != 0 ||
@@ -240,7 +242,7 @@ elf_view parse_elf(const std::vector<std::uint8_t>& data) {
     const Elf64_Shdr& section = view.sections[index];
     const std::string_view name =
         bounded_c_string(data, strings.sh_offset, strings.sh_size, section.sh_name);
-    if (name == ".note.gnu.build-id") {
+    if (name == ".note.gnu.build-id" && reject_build_id) {
       throw bind_error("ELF v1 binding requires linking with --build-id=none");
     }
     const bool is_record_section =
@@ -259,7 +261,9 @@ elf_view parse_elf(const std::vector<std::uint8_t>& data) {
     }
     view.record_section_indices.push_back(index);
   }
-  if (view.record_section_indices.empty()) { throw bind_error("no .obfsc records found"); }
+  if (view.record_section_indices.empty() && require_records) {
+    throw bind_error("no .obfsc records found");
+  }
 
   for (const std::size_t record_index : view.record_section_indices) {
     const Elf64_Shdr& record_section = view.sections[record_index];
@@ -635,15 +639,29 @@ int run(const std::filesystem::path& path) {
   return 0;
 }
 
+int probe(const std::filesystem::path& path) {
+  struct stat original_stat {};
+  const std::vector<std::uint8_t> image = read_file(path, original_stat);
+  const elf_view view = parse_elf(image, false, false);
+  std::size_t records = 0;
+  for (const std::size_t section_index : view.record_section_indices) {
+    records += static_cast<std::size_t>(
+        view.sections[section_index].sh_size / OBF_SC_RECORD_SIZE);
+  }
+  std::cout << "SELF_CHECKSUM_PROBE: records=" << records << '\n';
+  return records == 0 ? 3 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2) {
-    std::cerr << "usage: obf-checksum-bind <final-elf>\n";
+  const bool probe_only = argc == 3 && std::string_view(argv[1]) == "--probe";
+  if ((!probe_only && argc != 2) || (probe_only && argc != 3)) {
+    std::cerr << "usage: obf-checksum-bind [--probe] <final-elf>\n";
     return 2;
   }
   try {
-    return run(argv[1]);
+    return probe_only ? probe(argv[2]) : run(argv[1]);
   } catch (const bind_error& error) {
     std::cerr << "obf-checksum-bind: " << error.what() << '\n';
     return 1;

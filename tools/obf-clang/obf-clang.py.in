@@ -9,9 +9,40 @@ CLANG = r"@OBF_CLANG@"
 CLANGXX = r"@OBF_CLANGXX@"
 PLUGIN = r"@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@"
 RUNTIME_ARCHIVE = r"@OBF_RUNTIME_ARCHIVE@"
+DRIVER = r"@CMAKE_CURRENT_BINARY_DIR@/obf-driver@CMAKE_EXECUTABLE_SUFFIX@"
+CHECKSUM_BINDER = r"@OBF_CHECKSUM_BIND@"
 
-_QUERY_ARGS = {"--version", "--help"}
-_COMPILE_ONLY_ARGS = {"-c", "-S", "-E", "-M", "-MM"}
+_QUERY_ARGS = {
+    "--help",
+    "--help-hidden",
+    "--version",
+    "-ccc-print-phases",
+    "-dumpmachine",
+    "-dumpversion",
+    "-help",
+    "-print-effective-triple",
+    "-print-enabled-extensions",
+    "--print-enabled-extensions",
+    "-print-libgcc-file-name",
+    "-print-multi-directory",
+    "-print-multi-lib",
+    "-print-resource-dir",
+    "--print-resource-dir",
+    "-print-rocm-search-dirs",
+    "-print-runtime-dir",
+    "-print-search-dirs",
+    "-print-supported-cpus",
+    "--print-supported-cpus",
+    "-print-target-triple",
+    "-print-targets",
+}
+_QUERY_ARG_PREFIXES = ("-print-file-name=", "-print-prog-name=")
+_COMPILE_ONLY_ARGS = {"-c", "-S", "-E", "-M", "-MM", "-fsyntax-only", "--analyze", "-r"}
+_DRY_RUN_ARGS = {"-###"}
+
+
+class _wrapper_error(RuntimeError):
+    pass
 
 
 def _fail(message: str) -> int:
@@ -51,6 +82,195 @@ def _inject_windows_lto_linker(clang_args: list[str], is_windows: bool,
         clang_args.append("-fuse-ld=lld-link" if uses_msvc_linker else "-fuse-ld=lld")
 
 
+def _resolved_config_path(config_path: str | None, env: dict[str, str]) -> str | None:
+    if config_path is not None:
+        return config_path
+    value = env.get("OBF_CONFIG")
+    return value if value else None
+
+
+def _query_self_checksum(config_path: str | None, env: dict[str, str]) -> bool:
+    if config_path is None:
+        return False
+    if not Path(DRIVER).is_file():
+        raise _wrapper_error(f"missing config driver: {DRIVER}")
+    completed = subprocess.run(
+        [DRIVER, f"--config={config_path}", "--query-self-checksum"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "config query failed"
+        raise _wrapper_error(detail)
+    state = completed.stdout.strip()
+    if state == "enabled":
+        return True
+    if state == "disabled":
+        return False
+    raise _wrapper_error(f"unexpected self_checksum config query result: {state!r}")
+
+
+def _explicit_target(clang_args: list[str]) -> str | None:
+    target: str | None = None
+    index = 0
+    while index < len(clang_args):
+        arg = clang_args[index]
+        if arg in {"-target", "--target"}:
+            if index + 1 < len(clang_args):
+                target = clang_args[index + 1]
+                index += 2
+                continue
+        elif arg.startswith("--target=") or arg.startswith("-target="):
+            target = arg.split("=", 1)[1]
+        index += 1
+    return target
+
+
+def _compiler_target_triple(compiler: str,
+                            clang_args: list[str],
+                            env: dict[str, str]) -> str:
+    explicit = _explicit_target(clang_args)
+    if explicit:
+        return explicit
+    completed = subprocess.run(
+        [compiler, "-dumpmachine"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    if completed.returncode != 0 or not completed.stdout.strip():
+        detail = completed.stderr.strip() or "compiler did not report a target triple"
+        raise _wrapper_error(f"failed to determine compiler target: {detail}")
+    return completed.stdout.strip().splitlines()[-1]
+
+
+def _supports_bound_elf_target(target_triple: str, clang_args: list[str]) -> bool:
+    if any(arg in {"-m16", "-m32", "-mx32"} for arg in clang_args):
+        return False
+    parts = target_triple.lower().split("-")
+    return bool(parts) and parts[0] in {"x86_64", "amd64"} and "linux" in parts
+
+
+def _linker_build_id_modes(clang_args: list[str]) -> list[str]:
+    modes: list[str] = []
+
+    def inspect(token: str) -> None:
+        if token == "--build-id":
+            modes.append("default")
+        elif token.startswith("--build-id="):
+            modes.append(token.split("=", 1)[1] or "default")
+
+    index = 0
+    while index < len(clang_args):
+        arg = clang_args[index]
+        if arg.startswith("-Wl,"):
+            for token in arg[4:].split(","):
+                inspect(token)
+        elif arg == "-Xlinker" and index + 1 < len(clang_args):
+            inspect(clang_args[index + 1])
+            index += 1
+        elif arg.startswith("-Xlinker="):
+            inspect(arg.split("=", 1)[1])
+        index += 1
+    return modes
+
+
+def _ensure_no_build_id(clang_args: list[str]) -> None:
+    modes = _linker_build_id_modes(clang_args)
+    if any(mode != "none" for mode in modes):
+        raise _wrapper_error(
+            "self_checksum ELF links require --build-id=none; remove the conflicting --build-id option"
+        )
+    if not modes:
+        clang_args.append("-Wl,--build-id=none")
+
+
+def _link_output_path(clang_args: list[str], require_explicit: bool) -> Path:
+    output: str | None = None
+    index = 0
+    while index < len(clang_args):
+        arg = clang_args[index]
+        if arg == "-o":
+            if index + 1 >= len(clang_args) or clang_args[index + 1] == "":
+                raise _wrapper_error("-o requires an output path")
+            output = clang_args[index + 1]
+            index += 2
+            continue
+        if (arg.startswith("-o") and len(arg) > 2 and
+                not arg.startswith("-objcmt-") and
+                not arg.startswith("-object-file-name=")):
+            output = arg[2:]
+        index += 1
+
+    if output is None:
+        if require_explicit:
+            raise _wrapper_error(
+                "self_checksum ELF auto-binding requires an explicit '-o <path>' final-link output"
+            )
+        output = "a.out"
+    if output == "-":
+        raise _wrapper_error("self_checksum final links cannot bind an output written to stdout")
+    return Path(output)
+
+
+def _probe_checksum_records(output: Path, env: dict[str, str]) -> bool:
+    if not CHECKSUM_BINDER or not Path(CHECKSUM_BINDER).is_file():
+        raise _wrapper_error(f"missing self-checksum binder: {CHECKSUM_BINDER or '<not configured>'}")
+    completed = subprocess.run(
+        [CHECKSUM_BINDER, "--probe", str(output)],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 3:
+        return False
+    detail = completed.stderr.strip() or completed.stdout.strip() or "record probe failed"
+    raise _wrapper_error(detail)
+
+
+def _bind_checksum_records(output: Path, env: dict[str, str]) -> None:
+    completed = subprocess.run(
+        [CHECKSUM_BINDER, str(output)],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "binder failed"
+        raise _wrapper_error(
+            f"self-checksum binding failed for {output} (exit {completed.returncode}): {detail}"
+        )
+
+
+def _compiler_command(compiler: str,
+                      clang_args: list[str],
+                      query_action: bool,
+                      link_action: bool) -> list[str]:
+    plugin_arg = f"-fpass-plugin={PLUGIN}"
+    final_args = [compiler]
+    if not query_action and plugin_arg not in clang_args:
+        final_args.append(plugin_arg)
+    final_args.extend(clang_args)
+    if link_action:
+        final_args.append(RUNTIME_ARCHIVE)
+    return final_args
+
+
 def main() -> int:
     compiler = CLANGXX if "++" in Path(sys.argv[0]).name else CLANG
     clang_args, config_path, early_exit = _parse_args(sys.argv[1:])
@@ -60,26 +280,94 @@ def main() -> int:
     is_windows = sys.platform == "win32" or os.name == "nt"
     _inject_windows_lto_linker(clang_args, is_windows)
 
-    query_action = any(arg in _QUERY_ARGS for arg in clang_args)
-    plugin_arg = f"-fpass-plugin={PLUGIN}"
-    final_args = [compiler]
-    if not query_action and plugin_arg not in clang_args:
-        final_args.append(plugin_arg)
-    final_args.extend(clang_args)
+    query_action = any(
+        arg in _QUERY_ARGS or arg.startswith(_QUERY_ARG_PREFIXES) for arg in clang_args
+    )
+    dry_run = any(arg in _DRY_RUN_ARGS for arg in clang_args)
     link_action = not query_action and not any(arg in _COMPILE_ONLY_ARGS for arg in clang_args)
-    if not query_action and not Path(PLUGIN).exists():
-        return _fail(f"missing pass plugin: {PLUGIN}")
-    if link_action:
-        if not Path(RUNTIME_ARCHIVE).exists():
-            return _fail(f"missing runtime archive: {RUNTIME_ARCHIVE}")
-        final_args.append(RUNTIME_ARCHIVE)
 
     env = os.environ.copy()
     if config_path is not None:
         env["OBF_CONFIG"] = config_path
 
+    self_checksum_requested = False
+    target_supports_bound = False
+    bind_output: Path | None = None
+    binder_available = bool(CHECKSUM_BINDER) and Path(CHECKSUM_BINDER).is_file()
+    try:
+        resolved_config = _resolved_config_path(config_path, env)
+        self_checksum_requested = link_action and _query_self_checksum(resolved_config, env)
+
+        if link_action:
+            try:
+                target_triple = _compiler_target_triple(compiler, clang_args, env)
+                target_supports_bound = _supports_bound_elf_target(target_triple, clang_args)
+            except _wrapper_error:
+                if self_checksum_requested:
+                    raise
+                target_supports_bound = False
+
+        if target_supports_bound and (self_checksum_requested or binder_available):
+            bind_output = _link_output_path(clang_args, require_explicit=self_checksum_requested)
+
+        if self_checksum_requested and target_supports_bound:
+            if not binder_available:
+                raise _wrapper_error(
+                    f"missing self-checksum binder: {CHECKSUM_BINDER or '<not configured>'}"
+                )
+            _ensure_no_build_id(clang_args)
+    except _wrapper_error as error:
+        return _fail(str(error))
+
+    if not query_action and not Path(PLUGIN).exists():
+        return _fail(f"missing pass plugin: {PLUGIN}")
+    if link_action and not Path(RUNTIME_ARCHIVE).exists():
+        return _fail(f"missing runtime archive: {RUNTIME_ARCHIVE}")
+
+    final_args = _compiler_command(compiler, clang_args, query_action, link_action)
     completed = subprocess.run(final_args, env=env)
-    return completed.returncode
+    if completed.returncode != 0 or dry_run or not target_supports_bound or not binder_available:
+        return completed.returncode
+
+    try:
+        if bind_output is None:
+            bind_output = _link_output_path(clang_args, require_explicit=False)
+        if not bind_output.is_file():
+            raise _wrapper_error(
+                f"successful link did not produce expected output for self_checksum probe: {bind_output}"
+            )
+
+        if not _probe_checksum_records(bind_output, env):
+            return 0
+
+        build_id_modes = _linker_build_id_modes(clang_args)
+        if any(mode != "none" for mode in build_id_modes):
+            raise _wrapper_error(
+                "linked ELF contains self_checksum records but a conflicting --build-id option was requested"
+            )
+
+        if not build_id_modes:
+            # Records can arrive from separately compiled objects or archives even
+            # when the final link invocation has no active obfuscation config.
+            # Relink once without a GNU build ID so post-link binding cannot stale it.
+            clang_args.append("-Wl,--build-id=none")
+            relink_args = _compiler_command(compiler, clang_args, query_action, link_action)
+            relinked = subprocess.run(relink_args, env=env)
+            if relinked.returncode != 0:
+                return relinked.returncode
+            if not bind_output.is_file():
+                raise _wrapper_error(
+                    f"self_checksum relink did not produce expected output: {bind_output}"
+                )
+            if not _probe_checksum_records(bind_output, env):
+                raise _wrapper_error(
+                    "self_checksum records disappeared during final --build-id=none relink"
+                )
+
+        _bind_checksum_records(bind_output, env)
+    except _wrapper_error as error:
+        return _fail(str(error))
+    return 0
 
 
 if __name__ == "__main__":

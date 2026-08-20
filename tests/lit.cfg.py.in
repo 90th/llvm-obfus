@@ -120,6 +120,7 @@ config.substitutions.extend(
         ("%llvm_nm", _shell_quote(_normalize_path("@OBF_NM@"))),
         ("%llvm_objdump", _shell_quote(_normalize_path("@OBF_OBJDUMP@"))),
         ("%llvm_strip", _shell_quote(_normalize_path("@OBF_STRIP@"))),
+        ("%llvm_ar", _shell_quote(_normalize_path("@OBF_LLVM_AR@"))),
     ]
 )
 
