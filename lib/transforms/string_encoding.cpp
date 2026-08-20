@@ -341,6 +341,7 @@ bool collect_forwarded_pointer_load_uses(const llvm::Value& value,
 
     handled = true;
     add_use_kind(summary.observed_kinds, string_use_kind::forwarded_pointer_load);
+    summary.all_ephemeral = false;
     if (!is_protected) { continue; }
 
     summary.has_forwarded_pointer_load = true;
@@ -990,19 +991,6 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
       is_strong_vm_candidate && candidate.summary.has_forwarded_pointer_load &&
       ((candidate.global != nullptr && has_generated_vm_forwarding_use(*candidate.global)) ||
        has_generated_vm_owner(candidate));
-  if (options.enable_ephemeral_slots && !authenticated_mode && candidate.summary.all_ephemeral &&
-      !candidate.summary.protected_uses.empty()) {
-    select_ephemeral_micro_slot();
-    return plan;
-  }
-  if (is_strong_vm_candidate && should_inline_stack_decode(*candidate.global, candidate.summary)) {
-    if (authenticated_mode) {
-      select_authenticated_ephemeral_stack_decode();
-    } else {
-      select_inline_stack_decode();
-    }
-    return plan;
-  }
 
   if (!candidate.summary.unprotected_functions.empty()) {
     if (is_strong_vm_candidate &&
@@ -1026,6 +1014,20 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     plan.result.key_schedule = select_key_schedule(plan.result.helper_shape);
     plan.result.detail = "ctor fallback due to unprotected use";
     plan.result.fallback_reason = "shared_with_unprotected_function";
+    return plan;
+  }
+
+  if (options.enable_ephemeral_slots && !authenticated_mode && candidate.summary.all_ephemeral &&
+      !candidate.summary.protected_uses.empty()) {
+    select_ephemeral_micro_slot();
+    return plan;
+  }
+  if (is_strong_vm_candidate && should_inline_stack_decode(*candidate.global, candidate.summary)) {
+    if (authenticated_mode) {
+      select_authenticated_ephemeral_stack_decode();
+    } else {
+      select_inline_stack_decode();
+    }
     return plan;
   }
 
