@@ -70,8 +70,25 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 
 ### Code-as-Data Self-Checksumming
 
-- `self_checksum` samples small instruction windows (16 to 32 bytes) of sibling functions into derived cryptographic keys via `rt_core_cc`.
-- The derived key threads into downstream calculations. Setting a software breakpoint (`0xCC` / `int 3`) alters the hash output and silently corrupts program state.
+- `self_checksum` selects an eligible target function and records a sample range of 16 to 32 bytes.
+- The binder calculates the expected checksum from the final linked bytes.
+- During compilation, the pass creates an **UNBOUND** versioned record.
+- After the final link, `obf-checksum-bind` calculates the checksum of the final file-backed code bytes.
+- The binder then changes the record state to **BOUND**.
+- If execution reaches a protected site with a required UNBOUND record, the program traps.
+- The program does not continue with the protected calculation at that site.
+- `obf-clang` and `obf-clang++` bind records automatically for supported Linux x86-64 ELF final links.
+- They also bind records automatically for native Windows x86-64 PE executable final links.
+- This behavior also applies to records from object files or static archives.
+- At run time, `rt_core_cc` calculates the checksum for the loaded code bytes.
+- A one-byte change in the sampled range changes the v1 checksum.
+- A software breakpoint changes the checksum when it replaces a sampled byte with `0xCC`.
+- The pass XORs `actual` with `expected` and injects the resulting value into the protected calculation.
+- For integer sites below 64 bits, the pass truncates that XOR value to the site width.
+- The v1 rolling hash does not provide cryptographic collision resistance.
+- `self_checksum` does not authenticate the complete binary.
+- An attacker can change the code and the BOUND record if the attacker can rewrite both.
+- See [Self-checksum security contract](SECURITY.md#self-checksum-security-contract) for the security limits.
 
 ### Keyed and Integrity-Checked Runtime Strings
 
@@ -261,6 +278,72 @@ clang auth.o build/libobf_runtime.a -o auth_app
 On Windows, replace `obf_plugin.so` with `obf_plugin.dll`.
 Use the generated Windows wrapper when possible.
 
+### Self-Checksum Binding
+
+`obf-clang` and `obf-clang++` bind self-checksum records automatically for supported final C/C++ links.
+When `self_checksum` is active on a final wrapper link, specify the output with `-o <path>`.
+
+Object files and static archives can contain UNBOUND records.
+Bind these records only after you create the final executable.
+
+Supported v1 targets are:
+
+| Final target | Creates record | Wrapper binds | Binder support |
+|---|:---:|:---:|---|
+| Linux x86-64 ELF executable | Yes | Yes | Supported |
+| Linux x86-64 PIE | Yes | Yes | Supported |
+| Windows x86-64 PE32+ EXE | Yes | Yes on native Windows | Supported |
+| Windows x86-64 DLL | Can create a record | No | Not supported in v1 |
+| Windows x86 / non-x86-64 PE | No v1 BOUND record | No | Not supported |
+| ARM / ARM64 | No v1 BOUND record | No | Not supported |
+| Object file / static archive | Can contain an UNBOUND record | At final link only | Not a final executable |
+| Windows final link from a Linux host | Raw pass can emit a PE record | No | Cross-host finalization is not supported |
+
+The wrapper rejects an active `self_checksum` Windows final link on a non-Windows host.
+It does not auto-finalize inherited PE records during that unsupported cross-host workflow.
+
+If you do not use the C/C++ wrapper, bind the executable after the final link.
+
+On Linux, disable the GNU build ID before you bind the file:
+
+```sh
+clang protected.o build/libobf_runtime.a -Wl,--build-id=none -o protected_app
+build/obf-checksum-bind protected_app
+```
+
+On Windows, bind the final PE executable before Authenticode signing:
+
+```powershell
+build\obf-checksum-bind.exe protected.exe
+# Sign protected.exe after binding.
+```
+
+`obf-checksum-bind --probe <file>` finds self-checksum record slots without modifying the file.
+It does not prove that the file can be bound.
+
+- `0`: The active platform binder recognizes the image and finds one or more self-checksum record slots.
+- `3`: The active platform binder recognizes the image and finds zero self-checksum record slots.
+- `1`: Input reading, image parsing, or record-section validation failed.
+- `2`: Command-line usage error.
+
+Normal binding mode returns:
+
+- `0`: Records were bound successfully, or all existing records were already valid and BOUND.
+- `1`: Binding failed, including when no `.obfsc` records exist.
+- `2`: Command-line usage error.
+
+Important workflow rules:
+
+- **ELF:** Use `--build-id=none` for a manual link.
+- **Windows:** Follow this sequence: `link -> bind -> sign`.
+- **Windows:** Bind before embedded Authenticode signing. The binder rejects a nonzero PE Security directory.
+- **Windows:** DLL binding is not supported in v1.
+- **Frontends:** `obf-bc`, `obf-rustc`, Zig, and `obf-tinygo` do not run the binder automatically.
+- **C++ Selectors:** LLVM function names are used for target matching. Use `extern "C"` or mangled names for C++ functions.
+
+See [`docs/self-checksum.md`](docs/self-checksum.md) for record layouts, relocation validation, and binary format rules.
+See [`SECURITY.md`](SECURITY.md#self-checksum-security-contract) for security guarantees and defect reporting.
+
 ### Source Annotations
 
 Mark sensitive routines directly in C/C++ source:
@@ -299,6 +382,10 @@ build/obf-bc \
 clang module.obf.bc build/libobf_runtime.a -o module_binary
 ```
 
+`obf-bc` transforms bitcode. It does not perform the final link.
+If the configuration creates supported v1 records, bind the final executable manually.
+On Linux, use `--build-id=none` when you create the final executable.
+
 ---
 
 ## Rust Integration
@@ -328,6 +415,9 @@ cargo build --release
 The Cargo wrapper requires an exact crate name and a crate type of `bin` or `cdylib`.
 It also uses one code generation unit for the selected crate.
 
+`obf-rustc` does not bind self-checksum records automatically after the final link.
+Keep `self_checksum` disabled unless you create and bind a supported final executable.
+
 ---
 
 ## Zig Integration
@@ -346,6 +436,10 @@ build/obf-bc \
 clang component.obf.bc main.c build/libobf_runtime.a -o zig_app
 ```
 
+The Zig bitcode workflow does not bind self-checksum records automatically.
+If you enable `self_checksum`, use the manual procedure in [Self-Checksum Binding](#self-checksum-binding).
+Otherwise, keep `self_checksum` disabled.
+
 ---
 
 ## TinyGo Integration
@@ -358,6 +452,9 @@ build/obf-tinygo \
   -o app_go \
   main.go
 ```
+
+`obf-tinygo` does not bind self-checksum records automatically.
+Keep `self_checksum` disabled unless you bind the final file with a supported platform binder.
 
 ---
 
@@ -487,10 +584,22 @@ The safe pipeline execution order runs as follows:
 ## Security Model
 
 - **Defense in Depth**: Combines control-flow obscurity, semantic abstraction (VM), dynamic key derivation, and integrity checks.
-- **Fail-Closed Integrity**: Cryptographic string decoding and constant-pool access enforce MAC validation at runtime. Tampered ciphertext or mismatched descriptors cause intentional runtime aborts.
-- **Silent Tamper Divergence**: Self-checksumming passes incorporate instruction hash results directly into downstream calculations. Software breakpoints (`0xCC`) corrupt intermediate values rather than raising identifiable exceptions.
+- **Fail-Closed Integrity**: String decoding and constant-pool access use MAC validation at run time.
+  The program aborts if ciphertext or a descriptor does not match.
+  If execution reaches a protected site with a required UNBOUND v1 record, the run-time guard traps.
+- **Code-Byte Tamper Dependency**: A BOUND self-checksum site hashes selected loaded instruction bytes.
+  A one-byte change in the sample changes the full v1 checksum.
+  A software breakpoint also changes it when the breakpoint replaces a sampled byte with `0xCC`.
+  Narrow integer sites use a truncated checksum delta in the protected calculation.
+- **No Whole-Binary Authentication**: `self_checksum` does not authenticate the complete executable.
+  It does not stop an attacker who can change both the code and the expected-checksum record.
+  Use signed-code verification if you need binary authentication.
 - **Key Storage Model**: Master build keys and initialization seeds are embedded directly in compiled binaries as internal read-only constants. This project implements a self-contained obfuscation model. It does not rely on external hardware security modules (HSM), remote attestation services, or white-box cryptographic guarantees.
-- **Scope**: Transformations raise the cost and complexity of static reverse engineering, automated symbolic analysis, and binary decompilation. They do not guarantee immunity against manual analysis, dynamic instruction tracing, or memory dump inspection.
+- **Scope**: The transforms make static reverse engineering, symbolic analysis, and binary decompilation more difficult.
+  They do not prevent manual analysis, instruction tracing, memory inspection, or arbitrary binary changes.
+
+See [`SECURITY.md`](SECURITY.md#self-checksum-security-contract) for the threat model and defect reporting.
+See [`docs/self-checksum.md`](docs/self-checksum.md) for technical binding specifications and binary format rules.
 
 ---
 
@@ -500,6 +609,14 @@ The safe pipeline execution order runs as follows:
 - **Exception Handling**: Functions containing complex C++ landing pads, cleanups, or Windows SEH constructs cannot be lowered into VM bytecode and are retained in native code.
 - **Non-Integral Pointers**: Pointers in non-integral address spaces or architecture-specific register frames are excluded from indirect dispatch and VM translation.
 - **Embedded Keys**: Because key schedule root materials reside in the compiled binary, an attacker with full memory inspection capabilities can extract decrypted strings once loaded in memory.
+- **Self-Checksum Scope**: Self-checksum v1 supports Linux x86-64 ELF executables and PIE files.
+  It also supports native Windows x86-64 PE32+ executable files.
+  It does not support Windows DLL binding, x86 targets, ARM targets, Authenticode rebinding, or GNU build-ID recomputation.
+- **Native C++ Selectors**: Generic policy target matching uses LLVM function names.
+  A native C++ function usually has a mangled LLVM name.
+  Use that mangled name in `targets[].match`.
+  You can also use a selector-friendly symbol such as `extern "C"`.
+  This limit applies to policy selection, not to the binder.
 
 ---
 
