@@ -1310,6 +1310,16 @@ void assign_lazy_descriptor_indices(std::vector<string_strategy_plan>& plans,
   }
 }
 
+void privatize_transformed_string_global(llvm::GlobalVariable& global) {
+  global.setConstant(false);
+  if (!global.hasLocalLinkage()) {
+    global.setLinkage(llvm::GlobalValue::InternalLinkage);
+    global.setDSOLocal(true);
+    global.setVisibility(llvm::GlobalValue::DefaultVisibility);
+  }
+  if (global.hasComdat()) { global.setComdat(nullptr); }
+  if (global.hasSection()) { global.setSection(""); }
+}
 void encode_global_initializer(llvm::GlobalVariable& global, std::uint64_t seed) {
   const auto* data = llvm::cast<llvm::ConstantDataSequential>(global.getInitializer());
 
@@ -1320,7 +1330,7 @@ void encode_global_initializer(llvm::GlobalVariable& global, std::uint64_t seed)
     encoded_bytes.push_back(byte ^ derive_key_byte_constant(seed, index));
   }
 
-  global.setConstant(false);
+  privatize_transformed_string_global(global);
   global.setInitializer(llvm::ConstantDataArray::get(global.getContext(), encoded_bytes));
 }
 
@@ -1705,7 +1715,7 @@ create_authenticated_descriptor_bundle(llvm::Module& module,
 }
 
 void prepare_authenticated_destination_global(llvm::GlobalVariable& global) {
-  global.setConstant(false);
+  privatize_transformed_string_global(global);
   global.setInitializer(llvm::ConstantAggregateZero::get(global.getValueType()));
 }
 
