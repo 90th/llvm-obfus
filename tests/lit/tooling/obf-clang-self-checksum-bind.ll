@@ -42,6 +42,7 @@
 ; RUN: not %obf_clang -O0 --obf-config=%S/../Inputs/self-checksum-bound.yaml %S/../Inputs/obf-clang-self-checksum.c -Wl,--build-id=sha1 -o %t.conflict.exe 2>&1 | %FileCheck %s --check-prefix=BUILD-ID-CONFLICT
 ; RUN: not %obf_clang -O0 --obf-config=%S/../Inputs/self-checksum-bound.yaml %S/../Inputs/obf-clang-self-checksum.c 2>&1 | %FileCheck %s --check-prefix=MISSING-OUTPUT
 ; RUN: %obf_clang -### -O0 --obf-config=%S/../Inputs/self-checksum-bound.yaml %S/../Inputs/obf-clang-self-checksum.c -o %t.dry.exe 2>&1 | %FileCheck %s --check-prefix=DRY
+; RUN: not %obf_clang -### --target=x86_64-pc-windows-msvc -O0 --obf-config=%S/../Inputs/self-checksum-bound.yaml %S/../Inputs/obf-clang-self-checksum.c -o %t.cross.exe 2>&1 | %FileCheck %s --check-prefix=CROSS-PE
 ;
 ; QUERY-ON: enabled
 ; QUERY-OFF: disabled
@@ -51,10 +52,11 @@
 ; NO-RECORDS: SELF_CHECKSUM_PROBE: records=0
 ; BUILD-ID-CONFLICT: obf-clang: self_checksum ELF links require --build-id=none
 ; INHERITED-BUILD-ID-CONFLICT: obf-clang: linked ELF contains self_checksum records but a conflicting --build-id option was requested
-; MISSING-OUTPUT: obf-clang: self_checksum ELF auto-binding requires an explicit '-o <path>' final-link output
+; MISSING-OUTPUT: obf-clang: self_checksum auto-binding requires an explicit '-o <path>' final-link output
 ; DRY: "--build-id=none"
 ; NORMAL-DRY: -fpass-plugin=
 ; NORMAL-DRY-NOT: "--build-id=none"
+; CROSS-PE: obf-clang: PE self_checksum auto-binding currently requires a native Windows host
 
 define void @dummy() {
 entry:

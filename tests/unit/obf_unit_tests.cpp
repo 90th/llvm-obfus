@@ -1077,6 +1077,68 @@ void TestSelfChecksum(llvm::LLVMContext& context) {
              "self_checksum output should remain a valid LLVM module");
 }
 
+void TestSelfChecksumPeRecord(llvm::LLVMContext& context) {
+  llvm::Module module("self_checksum_pe_test_module", context);
+  module.setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+  llvm::Type* i32_ty = llvm::Type::getInt32Ty(context);
+
+  llvm::FunctionType* worker_type = llvm::FunctionType::get(i32_ty, {i32_ty}, false);
+  llvm::Function* worker =
+      llvm::Function::Create(worker_type, llvm::GlobalValue::InternalLinkage, "worker_pe", module);
+  llvm::BasicBlock* worker_entry = llvm::BasicBlock::Create(context, "entry", worker);
+  llvm::IRBuilder<> worker_builder(worker_entry);
+  worker_builder.CreateRet(worker_builder.CreateAdd(
+      worker->getArg(0), llvm::ConstantInt::get(i32_ty, 7), "worker.result"));
+
+  llvm::Function* compute =
+      llvm::Function::Create(worker_type, llvm::GlobalValue::ExternalLinkage, "compute_pe", module);
+  llvm::BasicBlock* compute_entry = llvm::BasicBlock::Create(context, "entry", compute);
+  llvm::IRBuilder<> compute_builder(compute_entry);
+  compute_builder.CreateRet(compute_builder.CreateAdd(
+      compute->getArg(0), llvm::ConstantInt::get(i32_ty, 3), "compute.result"));
+
+  obf::self_checksum_options options;
+  options.enabled = true;
+  options.max_checksum_sites = 1;
+  options.sample_window_bytes = 16;
+  options.seed = 0x5045434f4646554cULL;
+
+  const obf::self_checksum_result result = obf::transform_self_checksum(*compute, module, options);
+  ExpectTrue(result.checksum_site_count == 1,
+             "PE self_checksum should transform one eligible site");
+
+  std::size_t record_count = 0;
+  for (const llvm::GlobalVariable& global : module.globals()) {
+    if (!global.hasSection() || global.getSection() != OBF_SC_COFF_SECTION_NAME) { continue; }
+    ++record_count;
+    ExpectTrue(global.isConstant(), "PE self_checksum record should remain read-only");
+    ExpectTrue(global.isExternallyInitialized(),
+               "PE self_checksum record must permit post-link initialization");
+    const auto* initializer = llvm::dyn_cast<llvm::ConstantStruct>(global.getInitializer());
+    ExpectTrue(initializer != nullptr,
+               "PE self_checksum record should have a structured initializer");
+    if (initializer != nullptr) {
+      const auto* object_format = llvm::dyn_cast<llvm::ConstantInt>(initializer->getOperand(5));
+      const auto* target_kind = llvm::dyn_cast<llvm::ConstantInt>(initializer->getOperand(9));
+      const auto* flags = llvm::dyn_cast<llvm::ConstantInt>(initializer->getOperand(3));
+      const auto* expected = llvm::dyn_cast<llvm::ConstantInt>(initializer->getOperand(14));
+      ExpectTrue(object_format != nullptr &&
+                     object_format->getZExtValue() == OBF_SC_OBJECT_FORMAT_PE_COFF,
+                 "PE self_checksum record should advertise PE/COFF object format");
+      ExpectTrue(target_kind != nullptr &&
+                     target_kind->getZExtValue() == OBF_SC_TARGET_RECORD_REL32,
+                 "PE self_checksum record should use COFF record-relative REL32 identity");
+      ExpectTrue(flags != nullptr && flags->getZExtValue() == OBF_SC_FLAG_REQUIRED,
+                 "new PE self_checksum record should start REQUIRED and UNBOUND");
+      ExpectTrue(expected != nullptr && expected->isZero(),
+                 "new PE self_checksum record should start with zero expected checksum");
+    }
+  }
+  ExpectTrue(record_count == 1, "PE self_checksum should emit one .obfsc$M record");
+  ExpectTrue(!llvm::verifyModule(module, &llvm::errs()),
+             "PE self_checksum output should remain a valid LLVM module");
+}
+
 }  // namespace
 
 int main() {
@@ -1101,6 +1163,8 @@ int main() {
   TestZeroComparison();
   llvm::LLVMContext self_checksum_context;
   TestSelfChecksum(self_checksum_context);
+  llvm::LLVMContext self_checksum_pe_context;
+  TestSelfChecksumPeRecord(self_checksum_pe_context);
 
   if (g_failures == 0) {
     std::cout << "[ok] obf_unit_tests passed" << '\n';

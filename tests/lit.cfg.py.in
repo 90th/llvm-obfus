@@ -57,6 +57,15 @@ config.substitutions.append(("%opt", _shell_quote(opt_path)))
 config.substitutions.append(("%FileCheck", _shell_quote(filecheck_path)))
 config.substitutions.append(("%python", _shell_quote(_normalize_path("@Python3_EXECUTABLE@"))))
 
+if is_windows:
+    # Git for Windows provides the shell used by Lit, but not LLVM's `not`
+    # utility.  Python preserves the expected exit-status assertion without
+    # weakening negative tests.
+    config.substitutions.append(
+        ("%expect_failure",
+         _shell_quote(_normalize_path("@Python3_EXECUTABLE@")) +
+         " " + _shell_quote(_normalize_path("@CMAKE_CURRENT_SOURCE_DIR@/tests/lit/Inputs/expect_failure.py"))))
+
 # Try to find lli - not always available
 lli_path = _normalize_path("@OBF_LLI@")
 possible_paths = [
@@ -78,17 +87,26 @@ if found_lli:
 else:
     # lli not found - provide a dummy that will cause graceful test failure
     config.substitutions.append(
-        ("%lli", _shell_quote(_normalize_path("lli@CMAKE_EXECUTABLE_SUFFIX@")))
-    )
-
+        ("%lli", _shell_quote(_normalize_path("lli@CMAKE_EXECUTABLE_SUFFIX@"))))
+wrapper_suffix = ".cmd" if is_windows else ""
+# Keep a direct path to the generated Python wrapper for tests that import its
+# helper functions.  The executable substitution must use the .cmd launcher on
+# Windows, but a batch file is not importable Python source.
+config.substitutions.append(
+    ("%clang_wrapper_script", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/obf-clang")))
+)
+config.substitutions.append(
+    ("%obf_clangxx", _shell_quote(_normalize_path(f"@CMAKE_CURRENT_BINARY_DIR@/obf-clang++{wrapper_suffix}")))
+)
+config.substitutions.append(
+    ("%obf_clang", _shell_quote(_normalize_path(f"@CMAKE_CURRENT_BINARY_DIR@/obf-clang{wrapper_suffix}")))
+)
 config.substitutions.append(
     ("%obf_plugin", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@")))
 )
 config.substitutions.append(
     ("%obf_driver", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/obf-driver@CMAKE_EXECUTABLE_SUFFIX@")))
 )
-config.substitutions.append(("%obf_clangxx", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/obf-clang++@CMAKE_EXECUTABLE_SUFFIX@"))))
-config.substitutions.append(("%obf_clang", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/obf-clang@CMAKE_EXECUTABLE_SUFFIX@"))))
 config.substitutions.append(("%raw_clang", _shell_quote(_normalize_path("@OBF_CLANG@"))))
 config.substitutions.append(("%raw_clangxx", _shell_quote(_normalize_path("@OBF_CLANGXX@"))))
 config.substitutions.append(("%obf_runtime", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/libobf_runtime.a"))))
@@ -99,8 +117,6 @@ if checksum_bind_path and os.path.exists(checksum_bind_path):
     config.available_features.add("has-self-checksum-binder")
 else:
     config.substitutions.append(("%obf_checksum_bind", "obf-checksum-bind"))
-
-
 
 
 config.substitutions.append(("%cmake", _shell_quote(_normalize_path("@CMAKE_COMMAND@"))))

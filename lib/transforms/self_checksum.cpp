@@ -23,6 +23,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace obf {
@@ -177,10 +178,20 @@ llvm::SmallVector<checksum_site, 8> collect_sites(llvm::Function& function,
   return sites;
 }
 
-bool supports_bound_checksum_records(const llvm::Module& module) {
+enum class bound_record_format { elf, pe_coff };
+
+std::optional<bound_record_format> get_bound_record_format(const llvm::Module& module) {
   const llvm::Triple triple(module.getTargetTriple());
-  return triple.isOSLinux() && triple.isOSBinFormatELF() &&
-         triple.getArch() == llvm::Triple::x86_64;
+  if (triple.getArch() != llvm::Triple::x86_64) { return std::nullopt; }
+  if (triple.isOSLinux() && triple.isOSBinFormatELF()) { return bound_record_format::elf; }
+  if (triple.isOSWindows() && triple.isOSBinFormatCOFF()) {
+    return bound_record_format::pe_coff;
+  }
+  return std::nullopt;
+}
+
+bool supports_bound_checksum_records(const llvm::Module& module) {
+  return get_bound_record_format(module).has_value();
 }
 
 llvm::StructType* get_or_create_record_type(llvm::Module& module) {
@@ -252,7 +263,13 @@ llvm::GlobalVariable* emit_unbound_checksum_record(llvm::Module& module,
                                           llvm::GlobalValue::InternalLinkage,
                                           nullptr,
                                           record_name);
-  record->setSection(std::string(OBF_SC_ELF_SECTION_PREFIX) + std::to_string(site_id));
+  const auto format = get_bound_record_format(module);
+  if (!format.has_value()) {
+    llvm::report_fatal_error("self_checksum bound record emitted for unsupported object format");
+  }
+  const bool pe_coff = *format == bound_record_format::pe_coff;
+  record->setSection(pe_coff ? OBF_SC_COFF_SECTION_NAME
+                             : std::string(OBF_SC_ELF_SECTION_PREFIX) + std::to_string(site_id));
   record->setAlignment(llvm::Align(8));
   record->setExternallyInitialized(true);
 
@@ -269,11 +286,15 @@ llvm::GlobalVariable* emit_unbound_checksum_record(llvm::Module& module,
        llvm::ConstantInt::get(llvm::Type::getInt16Ty(context), OBF_SC_RECORD_SIZE),
        llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_FLAG_REQUIRED),
        llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_ALGORITHM_RT_CORE_CC_V1),
-       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_OBJECT_FORMAT_ELF),
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context),
+                              pe_coff ? OBF_SC_OBJECT_FORMAT_PE_COFF
+                                      : OBF_SC_OBJECT_FORMAT_ELF),
        llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_MACHINE_X86_64),
        llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), site_id),
        target_delta,
-       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_TARGET_RECORD_REL64),
+       llvm::ConstantInt::get(llvm::Type::getInt32Ty(context),
+                              pe_coff ? OBF_SC_TARGET_RECORD_REL32
+                                      : OBF_SC_TARGET_RECORD_REL64),
        llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), OBF_SC_V1_SAMPLE_OFFSET),
        llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), sample_size),
        llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0),
