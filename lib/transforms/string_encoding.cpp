@@ -588,12 +588,14 @@ classified_string_use classify_instruction_use(llvm::Instruction& instruction,
   use.operand_index = operand_index;
 
   if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+    const auto* call_inst = llvm::dyn_cast<llvm::CallInst>(&instruction);
+    const bool is_musttail = call_inst != nullptr && call_inst->isMustTailCall();
     use.kind = is_compare_like_call(*call) ? string_use_kind::compare_call_operand
                                            : string_use_kind::call_argument;
     use.rewriteable = !call->isInlineAsm();
     use.inline_candidate = use.kind == string_use_kind::compare_call_operand &&
-                           !call->isInlineAsm() && !instruction.isTerminator() &&
-                           instruction.getNextNode() != nullptr;
+                           !call->isInlineAsm() && !is_musttail &&
+                           !instruction.isTerminator() && instruction.getNextNode() != nullptr;
     return use;
   }
 
@@ -2589,6 +2591,18 @@ void emit_stack_decode_stores(llvm::IRBuilder<>& builder,
   }
 }
 
+void normalize_stack_backed_call_tail_kind(llvm::Instruction& instruction) {
+  auto* call = llvm::dyn_cast<llvm::CallInst>(&instruction);
+  if (call == nullptr) { return; }
+
+  if (call->isMustTailCall()) {
+    llvm::report_fatal_error("musttail call reached stack-backed string rewrite");
+  }
+  if (call->getTailCallKind() == llvm::CallInst::TCK_Tail) {
+    call->setTailCallKind(llvm::CallInst::TCK_None);
+  }
+}
+
 void emit_volatile_zero_stores(llvm::IRBuilder<>& builder, llvm::AllocaInst& buffer) {
   llvm::Module* module = builder.GetInsertBlock()->getModule();
   const llvm::DataLayout& dl = module->getDataLayout();
@@ -2640,6 +2654,7 @@ void rewrite_inline_stack_uses(llvm::GlobalVariable& global,
     }
 
     use.instruction->setOperand(use.operand_index, decoded_ptr);
+    normalize_stack_backed_call_tail_kind(*use.instruction);
 
     if (llvm::Instruction* next = use.instruction->getNextNode()) {
       llvm::IRBuilder<> after_builder(next);
@@ -2795,6 +2810,7 @@ void rewrite_authenticated_inline_stack_uses(llvm::GlobalVariable& global,
                                    before_builder.CreatePointerCast(topo, ptr_type)});
 
     use.instruction->setOperand(use.operand_index, decoded_ptr);
+    normalize_stack_backed_call_tail_kind(*use.instruction);
 
     if (llvm::Instruction* next = use.instruction->getNextNode()) {
       llvm::IRBuilder<> after_builder(next);
