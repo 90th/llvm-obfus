@@ -6,6 +6,8 @@
 #include "obf/support/self_checksum_record.h"
 
 #include "obf/transforms/zero_comparison.h"
+#include "obf/transforms/string_encoding.h"
+#include "llvm/Support/raw_ostream.h"
 #include "obf/transforms/self_checksum.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -1138,7 +1140,462 @@ void TestSelfChecksumPeRecord(llvm::LLVMContext& context) {
   ExpectTrue(!llvm::verifyModule(module, &llvm::errs()),
              "PE self_checksum output should remain a valid LLVM module");
 }
+void TestEphemeralStringEncodingCompares() {
+  llvm::LLVMContext context;
+  auto get_seed = [](llvm::StringRef) -> std::optional<std::uint64_t> { return 0x12345678ULL; };
+  auto get_level = [](llvm::StringRef) -> std::optional<obf::protection_level> {
+    return obf::protection_level::light;
+  };
+  obf::string_encoding_options options;
+  options.enable_ephemeral_slots = true;
+  options.max_ephemeral_unroll_bytes = 64;
+  options.prefer_lazy_decode = true;
+  options.allow_ctor_fallback = true;
 
+  // Main valid and boundary cases
+  {
+    llvm::Module module("ephem_cmp_module", context);
+    module.setDataLayout("e-p:64:64");
+
+    llvm::FunctionType* strcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context)},
+        false);
+    llvm::Function* strcmp_func =
+        llvm::Function::Create(strcmp_type, llvm::GlobalValue::ExternalLinkage, "strcmp", module);
+
+    llvm::FunctionType* memcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context),
+         llvm::Type::getInt64Ty(context)},
+        false);
+    llvm::Function* memcmp_func =
+        llvm::Function::Create(memcmp_type, llvm::GlobalValue::ExternalLinkage, "memcmp", module);
+
+    std::string s64(64, 'A');
+    llvm::Constant* str64_c = llvm::ConstantDataArray::getString(context, s64, true);
+    auto* g_str64 = new llvm::GlobalVariable(module, str64_c->getType(), true,
+                                             llvm::GlobalValue::PrivateLinkage, str64_c, "str64");
+
+    std::string s65(65, 'B');
+    llvm::Constant* str65_c = llvm::ConstantDataArray::getString(context, s65, true);
+    auto* g_str65 = new llvm::GlobalVariable(module, str65_c->getType(), true,
+                                             llvm::GlobalValue::PrivateLinkage, str65_c, "str65");
+
+    llvm::Constant* str_hello_c = llvm::ConstantDataArray::getString(context, "hello", true);
+    auto* g_hello = new llvm::GlobalVariable(module, str_hello_c->getType(), true,
+                                             llvm::GlobalValue::PrivateLinkage, str_hello_c, "str_hello");
+
+    llvm::Constant* str_pair_a_c = llvm::ConstantDataArray::getString(context, "pair_a", true);
+    auto* g_pair_a = new llvm::GlobalVariable(module, str_pair_a_c->getType(), true,
+                                              llvm::GlobalValue::PrivateLinkage, str_pair_a_c, "str_pair_a");
+
+    llvm::Constant* str_pair_b_c = llvm::ConstantDataArray::getString(context, "pair_b", true);
+    auto* g_pair_b = new llvm::GlobalVariable(module, str_pair_b_c->getType(), true,
+                                              llvm::GlobalValue::PrivateLinkage, str_pair_b_c, "str_pair_b");
+
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::Type::getInt64Ty(context)},
+        false);
+    llvm::Function* func =
+        llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, "test_compares", module);
+
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", func);
+    llvm::IRBuilder<> builder(entry);
+
+    llvm::Value* arg_ptr = func->getArg(0);
+    llvm::Value* arg_n = func->getArg(1);
+
+    llvm::Value* c1 = builder.CreateCall(memcmp_func, {g_str64, arg_ptr, builder.getInt64(64)});
+    llvm::Value* c2 = builder.CreateCall(memcmp_func, {g_str65, arg_ptr, builder.getInt64(65)});
+    llvm::Value* c3 = builder.CreateCall(strcmp_func, {arg_ptr, g_hello});
+    llvm::Value* c4 = builder.CreateCall(memcmp_func, {g_hello, arg_ptr, arg_n});
+    llvm::Value* c5 = builder.CreateCall(strcmp_func, {g_pair_a, g_pair_b});
+
+    llvm::Value* sum = builder.CreateAdd(c1, c2);
+    sum = builder.CreateAdd(sum, c3);
+    sum = builder.CreateAdd(sum, c4);
+    sum = builder.CreateAdd(sum, c5);
+    builder.CreateRet(sum);
+
+    const auto analysis = obf::analyze_string_encoding(module, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "str64") {
+        ExpectTrue(res.strategy_kind == obf::string_strategy_kind::ephemeral_micro_slot,
+                   "str64 memcmp 64 should select ephemeral micro slot");
+      } else if (res.global_name == "str65") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "str65 memcmp 65 should NOT select ephemeral micro slot");
+      } else if (res.global_name == "str_pair_a" || res.global_name == "str_pair_b") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "competing encrypted globals should NOT select ephemeral micro slot");
+      }
+    }
+
+    const auto results = obf::run_string_encoding(module, get_seed, get_level, options, 0x999ULL);
+    ExpectTrue(!results.empty(), "run_string_encoding should return results");
+
+    std::string verify_err;
+    llvm::raw_string_ostream os(verify_err);
+    const bool broken = llvm::verifyModule(module, &os);
+    ExpectTrue(!broken, "module must remain valid after ephemeral compare lowering: " + verify_err);
+  }
+
+  // Rejection case 1: vararg strcmp
+  {
+    llvm::Module va_mod("va_mod", context);
+    llvm::FunctionType* va_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context)},
+        true);
+    llvm::Function* va_func =
+        llvm::Function::Create(va_type, llvm::GlobalValue::ExternalLinkage, "strcmp", va_mod);
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "va_test", true);
+    auto* g_str = new llvm::GlobalVariable(va_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c, "va_str");
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, "test_va", va_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value* call = builder.CreateCall(va_func, {g_str, fn->getArg(0)});
+    builder.CreateRet(call);
+
+    const auto analysis = obf::analyze_string_encoding(va_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "va_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "vararg strcmp must reject ephemeral micro slot");
+      }
+    }
+  }
+
+  // Rejection case 2: unexpected return type (i64 strcmp)
+  {
+    llvm::Module ret_mod("ret_mod", context);
+    llvm::FunctionType* ret_type = llvm::FunctionType::get(
+        llvm::Type::getInt64Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context)},
+        false);
+    llvm::Function* ret_func =
+        llvm::Function::Create(ret_type, llvm::GlobalValue::ExternalLinkage, "strcmp", ret_mod);
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "ret_test", true);
+    auto* g_str = new llvm::GlobalVariable(ret_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c, "ret_str");
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt64Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, "test_ret", ret_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value* call = builder.CreateCall(ret_func, {g_str, fn->getArg(0)});
+    builder.CreateRet(call);
+
+    const auto analysis = obf::analyze_string_encoding(ret_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "ret_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "i64 return strcmp must reject ephemeral micro slot");
+      }
+    }
+  }
+
+  // Rejection case 3: address space 1 global
+  {
+    llvm::Module as_mod("as_mod", context);
+    llvm::FunctionType* strcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::get(context, 1), llvm::PointerType::getUnqual(context)},
+        false);
+    llvm::Function* strcmp_func =
+        llvm::Function::Create(strcmp_type, llvm::GlobalValue::ExternalLinkage, "strcmp", as_mod);
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "as_test", true);
+    auto* g_str = new llvm::GlobalVariable(as_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c, "as_str",
+                                           nullptr, llvm::GlobalValue::NotThreadLocal, 1);
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, "test_as", as_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value* call = builder.CreateCall(strcmp_func, {g_str, fn->getArg(0)});
+    builder.CreateRet(call);
+
+    const auto analysis = obf::analyze_string_encoding(as_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "as_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "address-space 1 global must reject ephemeral micro slot");
+      }
+    }
+  }
+
+  // Rejection case 4: byval attribute
+  {
+    llvm::Module attr_mod("attr_mod", context);
+    llvm::FunctionType* strcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context)},
+        false);
+    llvm::Function* strcmp_func =
+        llvm::Function::Create(strcmp_type, llvm::GlobalValue::ExternalLinkage, "strcmp", attr_mod);
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "attr_test", true);
+    auto* g_str = new llvm::GlobalVariable(attr_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c, "attr_str");
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, "test_attr", attr_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::CallInst* call = builder.CreateCall(strcmp_func, {g_str, fn->getArg(0)});
+    call->addParamAttr(0, llvm::Attribute::get(context, llvm::Attribute::ByVal, str_c->getType()));
+    builder.CreateRet(call);
+
+    const auto analysis = obf::analyze_string_encoding(attr_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "attr_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "byval attribute must reject ephemeral micro slot");
+      }
+    }
+  }
+
+  // Rejection case 5: requested size beyond known object size (memcmp length > global length)
+  {
+    llvm::Module beyond_mod("beyond_mod", context);
+    llvm::FunctionType* memcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context),
+         llvm::Type::getInt64Ty(context)},
+        false);
+    llvm::Function* memcmp_func =
+        llvm::Function::Create(memcmp_type, llvm::GlobalValue::ExternalLinkage, "memcmp", beyond_mod);
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "short", true); // 6 bytes
+    auto* g_str = new llvm::GlobalVariable(beyond_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c, "beyond_str");
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, "test_beyond", beyond_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    // Request 10 bytes on a 6-byte object -> must reject ephemeral micro slot and fall back
+    llvm::Value* call = builder.CreateCall(memcmp_func, {g_str, fn->getArg(0), builder.getInt64(10)});
+    builder.CreateRet(call);
+
+    const auto analysis = obf::analyze_string_encoding(beyond_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "beyond_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "memcmp requested size beyond known object must reject ephemeral micro slot");
+      }
+    }
+  }
+
+  // Rejection case 6: nonstandard integer width (i8 length for memcmp)
+  {
+    llvm::Module width_mod("width_mod", context);
+    width_mod.setDataLayout("e-p:64:64");
+    llvm::FunctionType* memcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context),
+         llvm::Type::getInt8Ty(context)},
+        false);
+    llvm::Function* memcmp_func =
+        llvm::Function::Create(memcmp_type, llvm::GlobalValue::ExternalLinkage, "memcmp", width_mod);
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "i8_test", true);
+    auto* g_str = new llvm::GlobalVariable(width_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c, "i8_str");
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, "test_i8", width_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value* call = builder.CreateCall(memcmp_func, {g_str, fn->getArg(0), builder.getInt8(4)});
+    builder.CreateRet(call);
+
+    const auto analysis = obf::analyze_string_encoding(width_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "i8_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "i8 length memcmp must reject ephemeral micro slot");
+      }
+    }
+  }
+
+  // Rejection case 7: i32 length is not native size_t on a 64-bit target.
+  {
+    llvm::Module width32_mod("width32_mod", context);
+    width32_mod.setDataLayout("e-p:64:64");
+    llvm::FunctionType* memcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context),
+         llvm::Type::getInt32Ty(context)},
+        false);
+    llvm::Function* memcmp_func = llvm::Function::Create(
+        memcmp_type, llvm::GlobalValue::ExternalLinkage, "memcmp", width32_mod);
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "i32_test", true);
+    auto* g_str = new llvm::GlobalVariable(width32_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c, "i32_str");
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn = llvm::Function::Create(
+        fn_type, llvm::GlobalValue::ExternalLinkage, "test_i32_width", width32_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value* call =
+        builder.CreateCall(memcmp_func, {g_str, fn->getArg(0), builder.getInt32(4)});
+    builder.CreateRet(call);
+
+    const auto analysis =
+        obf::analyze_string_encoding(width32_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "i32_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "i32 memcmp length must reject ephemeral micro slot on 64-bit targets");
+      }
+    }
+  }
+
+  // Rejection case 8: a local definition named strcmp is not a libc declaration.
+  {
+    llvm::Module custom_mod("custom_mod", context);
+    llvm::FunctionType* strcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context)},
+        false);
+    llvm::Function* strcmp_func = llvm::Function::Create(
+        strcmp_type, llvm::GlobalValue::InternalLinkage, "strcmp", custom_mod);
+    llvm::BasicBlock* strcmp_entry = llvm::BasicBlock::Create(context, "entry", strcmp_func);
+    llvm::IRBuilder<> strcmp_builder(strcmp_entry);
+    strcmp_builder.CreateRet(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 123));
+
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "custom", true);
+    auto* g_str = new llvm::GlobalVariable(custom_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c, "custom_str");
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn = llvm::Function::Create(
+        fn_type, llvm::GlobalValue::ExternalLinkage, "test_custom", custom_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value* call = builder.CreateCall(strcmp_func, {g_str, fn->getArg(0)});
+    builder.CreateRet(call);
+
+    const auto analysis =
+        obf::analyze_string_encoding(custom_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "custom_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "defined strcmp must reject ephemeral micro slot");
+      }
+    }
+  }
+
+  // Rejection case 9: a nobuiltin callsite explicitly forbids libc assumptions.
+  {
+    llvm::Module nobuiltin_call_mod("nobuiltin_call_mod", context);
+    llvm::FunctionType* strcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context)},
+        false);
+    llvm::Function* strcmp_func = llvm::Function::Create(
+        strcmp_type, llvm::GlobalValue::ExternalLinkage, "strcmp", nobuiltin_call_mod);
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "nobuiltin", true);
+    auto* g_str = new llvm::GlobalVariable(nobuiltin_call_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c,
+                                           "nobuiltin_call_str");
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn = llvm::Function::Create(
+        fn_type, llvm::GlobalValue::ExternalLinkage, "test_nobuiltin_call", nobuiltin_call_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::CallInst* call = builder.CreateCall(strcmp_func, {g_str, fn->getArg(0)});
+    call->addFnAttr(llvm::Attribute::NoBuiltin);
+    builder.CreateRet(call);
+
+    const auto analysis = obf::analyze_string_encoding(
+        nobuiltin_call_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "nobuiltin_call_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "nobuiltin strcmp callsite must reject ephemeral micro slot");
+      }
+    }
+  }
+
+  // Rejection case 10: a nobuiltin declaration also forbids libc assumptions.
+  {
+    llvm::Module nobuiltin_decl_mod("nobuiltin_decl_mod", context);
+    llvm::FunctionType* strcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context)},
+        false);
+    llvm::Function* strcmp_func = llvm::Function::Create(
+        strcmp_type, llvm::GlobalValue::ExternalLinkage, "strcmp", nobuiltin_decl_mod);
+    strcmp_func->addFnAttr(llvm::Attribute::NoBuiltin);
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "nobuiltin", true);
+    auto* g_str = new llvm::GlobalVariable(nobuiltin_decl_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c,
+                                           "nobuiltin_decl_str");
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn = llvm::Function::Create(
+        fn_type, llvm::GlobalValue::ExternalLinkage, "test_nobuiltin_decl", nobuiltin_decl_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value* call = builder.CreateCall(strcmp_func, {g_str, fn->getArg(0)});
+    builder.CreateRet(call);
+
+    const auto analysis = obf::analyze_string_encoding(
+        nobuiltin_decl_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "nobuiltin_decl_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "nobuiltin strcmp declaration must reject ephemeral micro slot");
+      }
+    }
+  }
+
+  // Rejection case 11: non-C calling conventions are not libc calls.
+  {
+    llvm::Module cc_mod("cc_mod", context);
+    llvm::FunctionType* strcmp_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context),
+        {llvm::PointerType::getUnqual(context), llvm::PointerType::getUnqual(context)},
+        false);
+    llvm::Function* strcmp_func = llvm::Function::Create(
+        strcmp_type, llvm::GlobalValue::ExternalLinkage, "strcmp", cc_mod);
+    strcmp_func->setCallingConv(llvm::CallingConv::Fast);
+    llvm::Constant* str_c = llvm::ConstantDataArray::getString(context, "fastcc", true);
+    auto* g_str = new llvm::GlobalVariable(cc_mod, str_c->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, str_c, "fastcc_str");
+    llvm::FunctionType* fn_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {llvm::PointerType::getUnqual(context)}, false);
+    llvm::Function* fn = llvm::Function::Create(
+        fn_type, llvm::GlobalValue::ExternalLinkage, "test_fastcc", cc_mod);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::CallInst* call = builder.CreateCall(strcmp_func, {g_str, fn->getArg(0)});
+    call->setCallingConv(llvm::CallingConv::Fast);
+    builder.CreateRet(call);
+
+    const auto analysis =
+        obf::analyze_string_encoding(cc_mod, get_seed, get_level, options, 0x999ULL);
+    for (const auto& res : analysis) {
+      if (res.global_name == "fastcc_str") {
+        ExpectTrue(res.strategy_kind != obf::string_strategy_kind::ephemeral_micro_slot,
+                   "non-C calling convention must reject ephemeral micro slot");
+      }
+    }
+  }
+}
 }  // namespace
 
 int main() {
@@ -1164,6 +1621,7 @@ int main() {
   llvm::LLVMContext self_checksum_context;
   TestSelfChecksum(self_checksum_context);
   llvm::LLVMContext self_checksum_pe_context;
+  TestEphemeralStringEncodingCompares();
   TestSelfChecksumPeRecord(self_checksum_pe_context);
 
   if (g_failures == 0) {

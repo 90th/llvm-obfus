@@ -93,10 +93,10 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 ### Keyed and Integrity-Checked Runtime Strings
 
 - `string_encoding` handles string encryption.
-- **Ephemeral Micro-Decryption Slots (Zero-Buffer Persistence)**:
-  - Evaluates single-byte character loads and comparisons (`str[i]`, loops, `strcmp`, `memcmp`) directly in SSA virtual registers.
-  - At no point during execution is a contiguous plaintext string or memory buffer (`alloca [N x i8]` or heap buffer) allocated in physical RAM.
-  - Ephemeral registers are immediately consumed in ALU/branch operations and sanitized with hardware register noise (`rt_core_sr0`), preventing memory dump and RAM snooping recovery.
+- **Ephemeral Micro-Decryption Slots (No Transform-Created Plaintext Buffer)**:
+  - Evaluates supported single-byte loads and bounded direct comparisons (`str[i]`, `strcmp`, `strncmp`, `memcmp`) as transient SSA values. Direct compare lowering is limited to at most 64 effective bytes; larger or unsupported comparisons fall back to the normal decode strategies.
+  - The micro-slot path does not allocate a transform-created contiguous plaintext string buffer (`alloca [N x i8]` or heap buffer). Compare lowering uses short-circuit control flow so it does not intentionally read past the first mismatch/NUL that terminates `strcmp`/`strncmp`.
+  - This is not a physical-register erasure guarantee. LLVM may map, copy, or spill transient SSA values during code generation, and debuggers, tracing, or process-memory inspection can still observe plaintext while it is live.
 - `authenticated_mode` enables the keyed and integrity-checked runtime decode path.
 - The runtime support lives in `runtime/string_auth_runtime.c` and handles keyed string and constant-pool recovery.
 - The transform handles lazy decode, eager decode, constructor fallback, and forwarded-pointer cases.

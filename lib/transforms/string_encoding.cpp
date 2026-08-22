@@ -41,6 +41,7 @@ namespace {
 enum class string_use_kind {
   call_argument,
   compare_call_operand,
+  ephemeral_compare_call_operand,
   select_operand,
   phi_operand,
   return_operand,
@@ -214,6 +215,8 @@ std::string to_string(string_use_kind kind) {
       return "call_argument";
     case string_use_kind::compare_call_operand:
       return "compare_call_operand";
+    case string_use_kind::ephemeral_compare_call_operand:
+      return "ephemeral_compare_call_operand";
     case string_use_kind::select_operand:
       return "select_operand";
     case string_use_kind::phi_operand:
@@ -465,11 +468,60 @@ classify_ephemeral_byte_load(llvm::Instruction& instruction, const llvm::GlobalV
 
 std::optional<classified_string_use> classify_ephemeral_compare_use(
     llvm::Instruction& instruction, unsigned operand_index, const llvm::GlobalVariable& global) {
-  auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-  if (call == nullptr || !is_compare_like_call(*call)) { return std::nullopt; }
+  auto* call = llvm::dyn_cast<llvm::CallInst>(&instruction);
+  if (call == nullptr || call->isMustTailCall() || call->getNumOperandBundles() != 0 ||
+      operand_index >= call->arg_size() || operand_index > 1 ||
+      !call->getType()->isIntegerTy(32) || !is_compare_like_call(*call)) {
+    return std::nullopt;
+  }
   llvm::Function* callee = call->getCalledFunction();
-  if (callee == nullptr || !is_ephemeral_compare_name(callee->getName())) { return std::nullopt; }
-
+  if (callee == nullptr || !is_ephemeral_compare_name(callee->getName()) ||
+      !callee->isDeclaration() || !callee->hasExternalLinkage() ||
+      call->getCallingConv() != llvm::CallingConv::C ||
+      callee->getCallingConv() != llvm::CallingConv::C ||
+      call->hasFnAttr(llvm::Attribute::NoBuiltin) ||
+      callee->hasFnAttribute(llvm::Attribute::NoBuiltin)) {
+    return std::nullopt;
+  }
+  const llvm::StringRef callee_name = callee->getName();
+  const unsigned required_args = callee_name == "strcmp" ? 2U : 3U;
+  llvm::FunctionType* callee_ft = callee->getFunctionType();
+  const llvm::Module* module = instruction.getModule();
+  if (module == nullptr) { return std::nullopt; }
+  const unsigned size_t_bits = module->getDataLayout().getPointerSizeInBits(0);
+  const auto has_native_size_t_type = [size_t_bits](llvm::Type* type) {
+    const auto* integer_type = llvm::dyn_cast<llvm::IntegerType>(type);
+    return integer_type != nullptr && integer_type->getBitWidth() == size_t_bits;
+  };
+  if (callee_ft->isVarArg() || !callee_ft->getReturnType()->isIntegerTy(32) ||
+      callee_ft->getNumParams() != required_args ||
+      !callee_ft->getParamType(0)->isPointerTy() ||
+      !callee_ft->getParamType(1)->isPointerTy() ||
+      (required_args == 3 && !has_native_size_t_type(callee_ft->getParamType(2)))) {
+    return std::nullopt;
+  }
+  if (call->arg_size() != required_args || !call->getArgOperand(0)->getType()->isPointerTy() ||
+      !call->getArgOperand(1)->getType()->isPointerTy() ||
+      (required_args == 3 && !has_native_size_t_type(call->getArgOperand(2)->getType()))) {
+    return std::nullopt;
+  }
+  if (global.getAddressSpace() != 0 ||
+      call->getArgOperand(0)->getType()->getPointerAddressSpace() != 0 ||
+      call->getArgOperand(1)->getType()->getPointerAddressSpace() != 0) {
+    return std::nullopt;
+  }
+  for (unsigned arg_idx = 0; arg_idx < 2; ++arg_idx) {
+    if (call->paramHasAttr(arg_idx, llvm::Attribute::ByVal) ||
+        call->paramHasAttr(arg_idx, llvm::Attribute::InAlloca) ||
+        call->paramHasAttr(arg_idx, llvm::Attribute::Preallocated) ||
+        call->paramHasAttr(arg_idx, llvm::Attribute::StructRet) ||
+        callee->hasParamAttribute(arg_idx, llvm::Attribute::ByVal) ||
+        callee->hasParamAttribute(arg_idx, llvm::Attribute::InAlloca) ||
+        callee->hasParamAttribute(arg_idx, llvm::Attribute::Preallocated) ||
+        callee->hasParamAttribute(arg_idx, llvm::Attribute::StructRet)) {
+      return std::nullopt;
+    }
+  }
   llvm::SmallVector<std::uint64_t, 4> gep_indices;
   llvm::Value* operand = call->getArgOperand(operand_index);
   if (operand != &global && !collect_gep_index_path(*operand, global, gep_indices)) {
@@ -484,19 +536,44 @@ std::optional<classified_string_use> classify_ephemeral_compare_use(
     if (!gep_indices.empty()) { return std::nullopt; }
   }
 
+  // Avoid competing plans rewriting the same call when both operands are
+  // independently eligible encrypted string globals. Those calls keep the
+  // normal decode path instead.
+  llvm::Value* other_operand = call->getArgOperand(1U - operand_index);
+  llvm::SmallVector<const llvm::Value*, 4> other_objects;
+  llvm::getUnderlyingObjects(other_operand, other_objects);
+  for (const llvm::Value* object : other_objects) {
+    if (llvm::isa<llvm::GlobalAlias>(object)) { return std::nullopt; }
+    const auto* other_global = llvm::dyn_cast<llvm::GlobalVariable>(object);
+    if (other_global != nullptr && other_global->isConstant() &&
+        is_string_like_global(*other_global)) {
+      return std::nullopt;
+    }
+  }
+
+  const std::uint64_t global_length = get_string_length(global);
   std::uint64_t compare_length = 0;
-  if (callee->getName() == "strcmp") {
-    compare_length = get_string_length(global);
+  if (callee_name == "strcmp") {
+    compare_length = global_length;
   } else {
     const auto* length_ci = llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(2));
-    if (length_ci == nullptr) { return std::nullopt; }
-    compare_length = length_ci->getZExtValue();
+    if (length_ci == nullptr || length_ci->getBitWidth() > 64) { return std::nullopt; }
+    const std::uint64_t requested_length = length_ci->getZExtValue();
+    if (callee_name == "memcmp") {
+      // Do not manufacture reads beyond the known object. The normal decode
+      // path preserves the original call for such inputs.
+      if (requested_length > global_length) { return std::nullopt; }
+      compare_length = requested_length;
+    } else {
+      // strncmp cannot observe bytes beyond the known string's terminating NUL.
+      compare_length = std::min(requested_length, global_length);
+    }
   }
 
   classified_string_use use;
   use.instruction = call;
   use.operand_index = operand_index;
-  use.kind = string_use_kind::compare_call_operand;
+  use.kind = string_use_kind::ephemeral_compare_call_operand;
   use.rewriteable = true;
   use.inline_candidate = true;
   use.anchor = call;
@@ -558,7 +635,16 @@ classified_string_use classify_instruction_use(llvm::Instruction& instruction,
 }
 
 bool is_ephemeral_only_kind(string_use_kind kind) {
-  return kind == string_use_kind::ephemeral_byte_load;
+  return kind == string_use_kind::ephemeral_byte_load ||
+         kind == string_use_kind::ephemeral_compare_call_operand;
+}
+
+bool ephemeral_uses_fit_unroll_bound(const string_use_summary& summary,
+                                     std::size_t max_unroll_bytes) {
+  return llvm::all_of(summary.protected_uses, [max_unroll_bytes](const classified_string_use& use) {
+    return use.kind != string_use_kind::ephemeral_compare_call_operand ||
+           use.compare_length <= max_unroll_bytes;
+  });
 }
 
 bool is_compare_like_call(const llvm::CallBase& call) {
@@ -965,7 +1051,7 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     plan.result.rewritten_use_count = candidate.summary.protected_uses.size();
     plan.result.detail =
         std::to_string(plan.result.rewritten_use_count) + " ephemeral micro-slot use(s)";
-    plan.result.inline_detail = "ephemeral SSA byte loads selected";
+    plan.result.inline_detail = "ephemeral SSA byte loads/compare chains selected";
     plan.inline_uses = candidate.summary.protected_uses;
   };
 
@@ -1018,7 +1104,8 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
   }
 
   if (options.enable_ephemeral_slots && !authenticated_mode && candidate.summary.all_ephemeral &&
-      !candidate.summary.protected_uses.empty()) {
+      !candidate.summary.protected_uses.empty() &&
+      ephemeral_uses_fit_unroll_bound(candidate.summary, options.max_ephemeral_unroll_bytes)) {
     select_ephemeral_micro_slot();
     return plan;
   }
@@ -1830,27 +1917,6 @@ llvm::Function* create_authenticated_lazy_helper(llvm::Module& module, llvm::Str
   return helper;
 }
 
-llvm::FunctionCallee get_or_create_reg_sanitizer(llvm::Module& module) {
-  llvm::LLVMContext& context = module.getContext();
-  llvm::FunctionType* type = llvm::FunctionType::get(
-      llvm::Type::getInt64Ty(context), {llvm::Type::getInt64Ty(context)}, false);
-  llvm::FunctionCallee callee = module.getOrInsertFunction(OBF_RT_CORE_SANITIZE_REG_STR, type);
-  if (llvm::Function* function = llvm::dyn_cast<llvm::Function>(callee.getCallee())) {
-    function->setCallingConv(llvm::CallingConv::C);
-  }
-  return callee;
-}
-
-llvm::Value* sanitize_ephemeral_byte(llvm::IRBuilder<>& builder, llvm::Value* byte_value) {
-  llvm::Module* module = builder.GetInsertBlock()->getModule();
-  if (module == nullptr) { return byte_value; }
-  llvm::Value* widened =
-      builder.CreateZExtOrTrunc(byte_value, llvm::Type::getInt64Ty(builder.getContext()));
-  llvm::CallInst* sanitized = builder.CreateCall(get_or_create_reg_sanitizer(*module), widened);
-  sanitized->setCallingConv(llvm::CallingConv::C);
-  return builder.CreateTrunc(sanitized, llvm::Type::getInt8Ty(builder.getContext()));
-}
-
 llvm::Value* create_ephemeral_decrypted_byte(llvm::IRBuilder<>& builder,
                                              llvm::GlobalVariable& global,
                                              std::uint64_t seed,
@@ -1866,8 +1932,7 @@ llvm::Value* create_ephemeral_decrypted_byte(llvm::IRBuilder<>& builder,
       index_value,
       cfg_state_value,
       expected_state_value);
-  llvm::Value* decrypted = builder.CreateXor(enc_byte, key_byte, "obf.str.ephem.byte");
-  return sanitize_ephemeral_byte(builder, decrypted);
+  return builder.CreateXor(enc_byte, key_byte, "obf.str.ephem.byte");
 }
 
 bool rewrite_ephemeral_byte_loads(llvm::GlobalVariable& global,
@@ -1911,31 +1976,49 @@ llvm::Value* build_ephemeral_compare_result(llvm::CallBase& call,
                                             unsigned operand_index,
                                             std::uint64_t compare_length,
                                             std::size_t max_unroll_bytes) {
-  llvm::Function* function = call.getFunction();
+  auto* call_inst = llvm::dyn_cast<llvm::CallInst>(&call);
+  llvm::Function* function = call_inst != nullptr ? call_inst->getFunction() : nullptr;
   llvm::Module* module = function != nullptr ? function->getParent() : nullptr;
-  if (function == nullptr || module == nullptr) { return nullptr; }
+  if (call_inst == nullptr || function == nullptr || module == nullptr ||
+      compare_length > max_unroll_bytes) {
+    return nullptr;
+  }
+  if (compare_length == 0) {
+    return llvm::ConstantInt::get(llvm::Type::getInt32Ty(module->getContext()), 0);
+  }
 
-  llvm::IRBuilder<> builder(&call);
-  llvm::LLVMContext& context = builder.getContext();
-  llvm::Type* i1_type = llvm::Type::getInt1Ty(context);
+  llvm::BasicBlock* entry = call_inst->getParent();
+  llvm::BasicBlock* continuation =
+      entry->splitBasicBlock(call_inst->getIterator(), "obf.str.cmp.cont");
+  entry->getTerminator()->eraseFromParent();
+
+  llvm::LLVMContext& context = module->getContext();
   llvm::Type* i8_type = llvm::Type::getInt8Ty(context);
   llvm::Type* i32_type = llvm::Type::getInt32Ty(context);
   llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
-  llvm::Value* lhs_ptr =
-      builder.CreatePointerCast(call.getArgOperand(0), llvm::PointerType::getUnqual(context));
-  llvm::Value* rhs_ptr =
-      builder.CreatePointerCast(call.getArgOperand(1), llvm::PointerType::getUnqual(context));
+
+  llvm::IRBuilder<> entry_builder(entry);
+  llvm::Value* lhs_ptr = entry_builder.CreatePointerCast(
+      call_inst->getArgOperand(0), llvm::PointerType::getUnqual(context));
+  llvm::Value* rhs_ptr = entry_builder.CreatePointerCast(
+      call_inst->getArgOperand(1), llvm::PointerType::getUnqual(context));
   const bool encrypted_is_lhs = operand_index == 0;
   llvm::Value* other_ptr = encrypted_is_lhs ? rhs_ptr : lhs_ptr;
-  llvm::Value* cfg_state = create_cfg_state_placeholder_call(builder, *module, false);
-  llvm::Value* expected_state = create_cfg_state_placeholder_call(builder, *module, true);
-  llvm::Value* diff = llvm::ConstantInt::get(i32_type, 0);
-  llvm::Value* done = llvm::ConstantInt::getFalse(context);
-  const std::uint64_t limit = std::min<std::uint64_t>(compare_length, max_unroll_bytes);
-  const llvm::StringRef callee_name = call.getCalledFunction()->getName();
-  const bool stop_at_nul = callee_name != "memcmp";
+  llvm::Value* cfg_state = create_cfg_state_placeholder_call(entry_builder, *module, false);
+  llvm::Value* expected_state = create_cfg_state_placeholder_call(entry_builder, *module, true);
 
-  for (std::uint64_t index = 0; index < limit; ++index) {
+  llvm::IRBuilder<> continuation_builder(call_inst);
+  llvm::PHINode* result = continuation_builder.CreatePHI(
+      i32_type, static_cast<unsigned>(compare_length), "obf.str.ephem.cmp");
+
+  const llvm::StringRef callee_name = call_inst->getCalledFunction()->getName();
+  const bool stop_at_nul = callee_name != "memcmp";
+  llvm::BasicBlock* compare_block =
+      llvm::BasicBlock::Create(context, "obf.str.cmp.0", function, continuation);
+  entry_builder.CreateBr(compare_block);
+
+  for (std::uint64_t index = 0; index < compare_length; ++index) {
+    llvm::IRBuilder<> builder(compare_block);
     llvm::Value* idx = llvm::ConstantInt::get(i64_type, index);
     llvm::Value* decrypted =
         create_ephemeral_decrypted_byte(builder, global, seed, idx, cfg_state, expected_state);
@@ -1946,18 +2029,31 @@ llvm::Value* build_ephemeral_compare_result(llvm::CallBase& call,
     llvm::Value* rhs_i32 = builder.CreateZExt(rhs_byte, i32_type);
     llvm::Value* byte_diff = builder.CreateSub(lhs_i32, rhs_i32);
     llvm::Value* chars_differ = builder.CreateICmpNE(lhs_byte, rhs_byte);
-    llvm::Value* lhs_is_nul = builder.CreateICmpEQ(lhs_byte, llvm::ConstantInt::get(i8_type, 0));
-    llvm::Value* rhs_is_nul = builder.CreateICmpEQ(rhs_byte, llvm::ConstantInt::get(i8_type, 0));
-    llvm::Value* saw_nul =
-        stop_at_nul ? builder.CreateOr(lhs_is_nul, rhs_is_nul) : llvm::ConstantInt::get(i1_type, 0);
-    llvm::Value* should_finish =
-        stop_at_nul ? builder.CreateOr(chars_differ, saw_nul) : chars_differ;
-    llvm::Value* active = builder.CreateNot(done);
-    diff = builder.CreateSelect(builder.CreateAnd(active, chars_differ), byte_diff, diff);
-    done = builder.CreateOr(done, should_finish);
+    llvm::Value* result_value =
+        builder.CreateSelect(chars_differ, byte_diff, llvm::ConstantInt::get(i32_type, 0));
+
+    llvm::Value* should_finish = chars_differ;
+    if (stop_at_nul) {
+      llvm::Value* lhs_is_nul =
+          builder.CreateICmpEQ(lhs_byte, llvm::ConstantInt::get(i8_type, 0));
+      llvm::Value* rhs_is_nul =
+          builder.CreateICmpEQ(rhs_byte, llvm::ConstantInt::get(i8_type, 0));
+      should_finish = builder.CreateOr(chars_differ, builder.CreateOr(lhs_is_nul, rhs_is_nul));
+    }
+
+    const bool is_last = index + 1 == compare_length;
+    if (is_last) {
+      builder.CreateBr(continuation);
+    } else {
+      llvm::BasicBlock* next_block = llvm::BasicBlock::Create(
+          context, "obf.str.cmp." + std::to_string(index + 1), function, continuation);
+      builder.CreateCondBr(should_finish, continuation, next_block);
+      compare_block = next_block;
+    }
+    result->addIncoming(result_value, builder.GetInsertBlock());
   }
 
-  return diff;
+  return result;
 }
 
 bool lower_ephemeral_compare_uses(llvm::GlobalVariable& global,
@@ -1967,7 +2063,7 @@ bool lower_ephemeral_compare_uses(llvm::GlobalVariable& global,
   bool changed = false;
   llvm::SmallDenseSet<llvm::Instruction*, 8> rewritten_calls;
   for (const classified_string_use& use : uses) {
-    if (use.kind != string_use_kind::compare_call_operand || use.instruction == nullptr ||
+    if (use.kind != string_use_kind::ephemeral_compare_call_operand || use.instruction == nullptr ||
         !rewritten_calls.insert(use.instruction).second) {
       continue;
     }
