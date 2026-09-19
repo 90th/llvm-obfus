@@ -74,13 +74,36 @@ bool is_string_comparison_name(llvm::StringRef name) {
   return name == "strcmp" || name == "memcmp" || name == "bcmp" || name == "strncmp";
 }
 
+bool all_users_are_zero_equality(const llvm::CallBase& call) {
+  if (call.use_empty()) { return false; }
+  for (const llvm::User* user : call.users()) {
+    const auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(user);
+    if (icmp == nullptr || !is_equality_icmp(*icmp)) { return false; }
+    const auto* const_int1 = llvm::dyn_cast<llvm::ConstantInt>(icmp->getOperand(1));
+    if (const_int1 != nullptr && const_int1->isZero()) { continue; }
+    const auto* const_int0 = llvm::dyn_cast<llvm::ConstantInt>(icmp->getOperand(0));
+    if (const_int0 != nullptr && const_int0->isZero()) { continue; }
+    return false;
+  }
+  return true;
+}
+
 bool is_supported_string_call(const llvm::CallBase& call, const zero_comparison_options& options) {
   if (!options.transform_string_comparisons || call.arg_size() < 2 ||
       !call.getType()->isIntegerTy()) {
     return false;
   }
   const llvm::Function* callee = call.getCalledFunction();
-  return callee != nullptr && is_string_comparison_name(callee->getName());
+  if (callee == nullptr || !callee->isDeclaration() || callee->isIntrinsic()) {
+    return false;
+  }
+  if (!is_string_comparison_name(callee->getName())) {
+    return false;
+  }
+  if (callee->getName() != "bcmp" && !all_users_are_zero_equality(call)) {
+    return false;
+  }
+  return true;
 }
 
 const llvm::ConstantDataArray* extract_string_constant(const llvm::Value* value) {
@@ -97,7 +120,9 @@ std::size_t known_compare_length(const llvm::CallBase& call,
   if (name == "memcmp" || name == "bcmp" || name == "strncmp") {
     if (call.arg_size() < 3) { return 0; }
     const auto* length = llvm::dyn_cast<llvm::ConstantInt>(call.getArgOperand(2));
-    if (length == nullptr || length->getZExtValue() > options.max_unroll_bytes) { return 0; }
+    if (length == nullptr || length->isZero() || length->getZExtValue() > options.max_unroll_bytes) {
+      return 0;
+    }
     return static_cast<std::size_t>(length->getZExtValue());
   }
 
@@ -119,19 +144,19 @@ std::size_t known_compare_length(const llvm::CallBase& call,
 llvm::Value*
 create_unrolled_delta(llvm::IRBuilder<>& builder, llvm::CallBase& call, std::size_t length) {
   llvm::Value* delta = llvm::ConstantInt::get(builder.getInt8Ty(), 0);
-  llvm::Value* lhs =
-      builder.CreateBitCast(call.getArgOperand(0), builder.getPtrTy(), "obf.zero.str.lhs");
-  llvm::Value* rhs =
-      builder.CreateBitCast(call.getArgOperand(1), builder.getPtrTy(), "obf.zero.str.rhs");
+  llvm::Value* lhs = call.getArgOperand(0);
+  llvm::Value* rhs = call.getArgOperand(1);
   for (std::size_t index = 0; index < length; ++index) {
     llvm::Value* offset = llvm::ConstantInt::get(builder.getInt64Ty(), index);
-    llvm::Value* lhs_byte = builder.CreateLoad(
+    llvm::Value* lhs_byte = builder.CreateAlignedLoad(
         builder.getInt8Ty(),
-        builder.CreateInBoundsGEP(builder.getInt8Ty(), lhs, offset, "obf.zero.str.lhs.ptr"),
+        builder.CreateGEP(builder.getInt8Ty(), lhs, offset, "obf.zero.str.lhs.ptr"),
+        llvm::Align(1),
         "obf.zero.str.lhs.byte");
-    llvm::Value* rhs_byte = builder.CreateLoad(
+    llvm::Value* rhs_byte = builder.CreateAlignedLoad(
         builder.getInt8Ty(),
-        builder.CreateInBoundsGEP(builder.getInt8Ty(), rhs, offset, "obf.zero.str.rhs.ptr"),
+        builder.CreateGEP(builder.getInt8Ty(), rhs, offset, "obf.zero.str.rhs.ptr"),
+        llvm::Align(1),
         "obf.zero.str.rhs.byte");
     delta = builder.CreateOr(
         delta, builder.CreateXor(lhs_byte, rhs_byte, "obf.zero.str.xor"), "obf.zero.str.delta");
