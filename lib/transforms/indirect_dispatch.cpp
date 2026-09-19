@@ -268,6 +268,10 @@ site_collection collect_sites(const llvm::Function& function,
     if (options.target_flattened_headers) {
       const auto* branch = llvm::dyn_cast<llvm::BranchInst>(terminator);
       if (branch != nullptr && branch->isConditional()) {
+        if (branch->getSuccessor(0) == &function.getEntryBlock() ||
+            branch->getSuccessor(1) == &function.getEntryBlock()) {
+          continue;
+        }
         dispatch_site site;
         site.kind = dispatch_site_kind::branch;
         site.terminator = const_cast<llvm::Instruction*>(terminator);
@@ -285,6 +289,15 @@ site_collection collect_sites(const llvm::Function& function,
     const auto* switch_inst = llvm::dyn_cast<llvm::SwitchInst>(terminator);
     if (switch_inst == nullptr || switch_inst->getNumCases() == 0) { continue; }
 
+    if (switch_inst->getDefaultDest() == &function.getEntryBlock()) { continue; }
+    bool targets_entry = false;
+    for (const auto& case_handle : switch_inst->cases()) {
+      if (case_handle.getCaseSuccessor() == &function.getEntryBlock()) {
+        targets_entry = true;
+        break;
+      }
+    }
+    if (targets_entry) { continue; }
     if (switch_inst->getNumCases() + 1 > options.max_switch_targets) {
       ++skipped_max_switch_targets;
       if (first_oversized_switch_targets == 0) {
