@@ -113,6 +113,16 @@ const llvm::ConstantDataArray* extract_string_constant(const llvm::Value* value)
   const auto* data = llvm::dyn_cast<llvm::ConstantDataArray>(global->getInitializer());
   return (data != nullptr && data->isString()) ? data : nullptr;
 }
+std::size_t c_string_length(const llvm::ConstantDataArray* data) {
+  if (data == nullptr) { return 0; }
+  for (unsigned i = 0; i < data->getNumElements(); ++i) {
+    if (data->getElementAsInteger(i) == 0) {
+      return i + 1;
+    }
+  }
+  return data->getNumElements();
+}
+
 
 std::size_t known_compare_length(const llvm::CallBase& call,
                                  llvm::StringRef name,
@@ -129,14 +139,16 @@ std::size_t known_compare_length(const llvm::CallBase& call,
   const auto* lhs_data = extract_string_constant(call.getArgOperand(0));
   const auto* rhs_data = extract_string_constant(call.getArgOperand(1));
   if (lhs_data != nullptr && rhs_data != nullptr) {
-    const std::size_t length = std::min(lhs_data->getNumElements(), rhs_data->getNumElements());
+    const std::size_t length = std::min(c_string_length(lhs_data), c_string_length(rhs_data));
     return length <= options.max_unroll_bytes ? length : 0;
   }
   if (lhs_data != nullptr) {
-    return lhs_data->getNumElements() <= options.max_unroll_bytes ? lhs_data->getNumElements() : 0;
+    const std::size_t length = c_string_length(lhs_data);
+    return length <= options.max_unroll_bytes ? length : 0;
   }
   if (rhs_data != nullptr) {
-    return rhs_data->getNumElements() <= options.max_unroll_bytes ? rhs_data->getNumElements() : 0;
+    const std::size_t length = c_string_length(rhs_data);
+    return length <= options.max_unroll_bytes ? length : 0;
   }
   return 0;
 }
