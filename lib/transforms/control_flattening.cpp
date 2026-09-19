@@ -169,11 +169,18 @@ bool instruction_escapes_block(const llvm::Instruction& instruction) {
 
       continue;
     }
-
-    // Original PHIs are carried explicitly. Re-carrying values that only feed
-    // PHIs in another block creates redundant dispatcher PHI chains and can
-    // corrupt the threaded value after flattening.
-    if (llvm::isa<llvm::PHINode>(user_instruction)) { continue; }
+    if (const auto* phi = llvm::dyn_cast<llvm::PHINode>(user_instruction)) {
+      bool fed_from_other_block = false;
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
+        if (phi->getIncomingValue(i) == &instruction &&
+            phi->getIncomingBlock(i) != instruction.getParent()) {
+          fed_from_other_block = true;
+          break;
+        }
+      }
+      if (fed_from_other_block) { return true; }
+      continue;
+    }
 
     if (user_instruction->getParent() != instruction.getParent()) { return true; }
   }
@@ -200,19 +207,37 @@ bool has_supported_terminators_only(const llvm::Function& function,
 
     return false;
   }
-
   return true;
 }
+
+bool is_static_alloca(const llvm::AllocaInst& alloca) {
+  return llvm::isa<llvm::ConstantInt>(alloca.getArraySize()) && !alloca.isUsedWithInAlloca();
+}
+
+bool has_supported_allocas_only(const llvm::Function& function) {
+  if (function.empty()) { return true; }
+  const llvm::BasicBlock& entry = function.getEntryBlock();
+  for (const llvm::BasicBlock& block : function) {
+    for (const llvm::Instruction& instruction : block) {
+      if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction)) {
+        if (&block != &entry || !is_static_alloca(*alloca)) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 
 void hoist_entry_allocas_to_setup(llvm::BasicBlock& entry, llvm::BasicBlock& setup) {
   llvm::Instruction* insert_before = setup.getTerminator();
   llvm::SmallVector<llvm::AllocaInst*, 8> allocas;
-
   for (llvm::Instruction& instruction : entry) {
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction);
-    if (alloca == nullptr) { break; }
-
-    allocas.push_back(alloca);
+    if (alloca != nullptr && is_static_alloca(*alloca)) {
+      allocas.push_back(alloca);
+    }
   }
 
   for (llvm::AllocaInst* alloca : allocas) { alloca->moveBefore(insert_before->getIterator()); }
@@ -679,6 +704,10 @@ control_flattening_result analyze_control_flattening(const llvm::Function& funct
   if (!has_supported_terminators_only(function, conditional_branches)) {
     return {.flattened = false, .detail = "unsupported terminator kind"};
   }
+  if (!has_supported_allocas_only(function)) {
+    return {.flattened = false, .detail = "dynamic or non-entry alloca not supported"};
+  }
+
 
   if (conditional_branches == 0) {
     return {.flattened = false, .detail = "no conditional branches"};
