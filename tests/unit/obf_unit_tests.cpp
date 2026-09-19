@@ -6,6 +6,7 @@
 #include "obf/support/self_checksum_record.h"
 
 #include "obf/transforms/zero_comparison.h"
+#include "obf/transforms/control_flattening.h"
 #include "obf/transforms/string_encoding.h"
 #include "llvm/Support/raw_ostream.h"
 #include "obf/transforms/self_checksum.h"
@@ -981,6 +982,155 @@ void TestZeroComparison() {
              "All icmp eq instructions should be lowered to zero-reduction arithmetic");
   ExpectTrue(!has_strcmp_call, "strcmp call should be lowered to inline zero-reduction");
 }
+void TestControlFlatteningAllocaRejection() {
+  llvm::LLVMContext context;
+  llvm::Module module("cf_alloca_rejection_module", context);
+
+  llvm::Type* i32_ty = llvm::Type::getInt32Ty(context);
+  llvm::FunctionType* fn_ty = llvm::FunctionType::get(i32_ty, {i32_ty}, false);
+
+  // 1. Function with dynamic alloca in entry: alloca i32, i32 %n
+  llvm::Function* dyn_fn =
+      llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "dyn_alloca_fn", module);
+  llvm::BasicBlock* dyn_entry = llvm::BasicBlock::Create(context, "entry", dyn_fn);
+  llvm::BasicBlock* dyn_body = llvm::BasicBlock::Create(context, "body", dyn_fn);
+  llvm::BasicBlock* dyn_exit = llvm::BasicBlock::Create(context, "exit", dyn_fn);
+  llvm::IRBuilder<> dyn_builder(dyn_entry);
+  llvm::Value* dyn_alloca = dyn_builder.CreateAlloca(i32_ty, dyn_fn->getArg(0), "dyn.buf");
+  llvm::Value* dyn_cond = dyn_builder.CreateICmpSGT(dyn_fn->getArg(0), dyn_builder.getInt32(0));
+  dyn_builder.CreateCondBr(dyn_cond, dyn_body, dyn_exit);
+  llvm::IRBuilder<> dyn_body_builder(dyn_body);
+  dyn_body_builder.CreateStore(dyn_builder.getInt32(42), dyn_alloca);
+  dyn_body_builder.CreateBr(dyn_exit);
+  llvm::IRBuilder<> dyn_exit_builder(dyn_exit);
+  dyn_exit_builder.CreateRet(dyn_builder.getInt32(0));
+
+  obf::control_flattening_options options;
+  auto dyn_analysis = obf::analyze_control_flattening(*dyn_fn, options);
+  ExpectTrue(!dyn_analysis.flattened, "Dynamic alloca must be rejected by control flattening");
+  ExpectTrue(dyn_analysis.detail == "dynamic or non-entry alloca not supported",
+             "Detail must indicate dynamic/non-entry alloca rejection");
+
+  // 2. Function with static alloca in non-entry block
+  llvm::Function* non_entry_fn =
+      llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "non_entry_alloca_fn", module);
+  llvm::BasicBlock* ne_entry = llvm::BasicBlock::Create(context, "entry", non_entry_fn);
+  llvm::BasicBlock* ne_body = llvm::BasicBlock::Create(context, "body", non_entry_fn);
+  llvm::BasicBlock* ne_exit = llvm::BasicBlock::Create(context, "exit", non_entry_fn);
+  llvm::IRBuilder<> ne_builder(ne_entry);
+  llvm::Value* ne_cond = ne_builder.CreateICmpSGT(non_entry_fn->getArg(0), ne_builder.getInt32(0));
+  ne_builder.CreateCondBr(ne_cond, ne_body, ne_exit);
+  llvm::IRBuilder<> ne_body_builder(ne_body);
+  llvm::Value* ne_alloca = ne_body_builder.CreateAlloca(i32_ty, nullptr, "static.in.body");
+  ne_body_builder.CreateStore(ne_builder.getInt32(99), ne_alloca);
+  ne_body_builder.CreateBr(ne_exit);
+  llvm::IRBuilder<> ne_exit_builder(ne_exit);
+  ne_exit_builder.CreateRet(ne_builder.getInt32(0));
+
+  auto ne_analysis = obf::analyze_control_flattening(*non_entry_fn, options);
+  ExpectTrue(!ne_analysis.flattened, "Non-entry alloca must be rejected by control flattening");
+  ExpectTrue(ne_analysis.detail == "dynamic or non-entry alloca not supported",
+             "Detail must indicate dynamic/non-entry alloca rejection");
+
+  // 3. Function with static alloca in entry block (valid)
+  llvm::Function* static_fn =
+      llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "static_alloca_fn", module);
+  llvm::BasicBlock* st_entry = llvm::BasicBlock::Create(context, "entry", static_fn);
+  llvm::BasicBlock* st_body = llvm::BasicBlock::Create(context, "body", static_fn);
+  llvm::BasicBlock* st_exit = llvm::BasicBlock::Create(context, "exit", static_fn);
+  llvm::IRBuilder<> st_builder(st_entry);
+  llvm::Value* st_alloca = st_builder.CreateAlloca(i32_ty, nullptr, "static.in.entry");
+  llvm::Value* st_cond = st_builder.CreateICmpSGT(static_fn->getArg(0), st_builder.getInt32(0));
+  st_builder.CreateCondBr(st_cond, st_body, st_exit);
+  llvm::IRBuilder<> st_body_builder(st_body);
+  st_body_builder.CreateStore(st_builder.getInt32(7), st_alloca);
+  st_body_builder.CreateBr(st_exit);
+  llvm::IRBuilder<> st_exit_builder(st_exit);
+  st_exit_builder.CreateRet(st_builder.getInt32(0));
+
+  auto st_analysis = obf::analyze_control_flattening(*static_fn, options);
+  ExpectTrue(st_analysis.flattened, "Static entry alloca must be accepted for control flattening");
+}
+
+void TestZeroComparisonSignedAndZeroLen() {
+  llvm::LLVMContext context;
+  llvm::Module module("zero_cmp_signed_module", context);
+
+  llvm::Type* i32_ty = llvm::Type::getInt32Ty(context);
+  llvm::Type* ptr_ty = llvm::PointerType::getUnqual(context);
+  llvm::Type* i64_ty = llvm::Type::getInt64Ty(context);
+
+  llvm::FunctionType* strcmp_ty = llvm::FunctionType::get(i32_ty, {ptr_ty, ptr_ty}, false);
+  llvm::Function* strcmp_fn =
+      llvm::Function::Create(strcmp_ty, llvm::GlobalValue::ExternalLinkage, "strcmp", module);
+
+  llvm::FunctionType* memcmp_ty = llvm::FunctionType::get(i32_ty, {ptr_ty, ptr_ty, i64_ty}, false);
+  llvm::Function* memcmp_fn =
+      llvm::Function::Create(memcmp_ty, llvm::GlobalValue::ExternalLinkage, "memcmp", module);
+
+  llvm::Constant* str_const = llvm::ConstantDataArray::getString(context, "hello", true);
+  auto* g_str = new llvm::GlobalVariable(module, str_const->getType(), true,
+                                         llvm::GlobalValue::PrivateLinkage, str_const, "g_hello");
+
+  llvm::FunctionType* fn_ty = llvm::FunctionType::get(i32_ty, {ptr_ty}, false);
+  llvm::Function* fn =
+      llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "test_signed_fn", module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+  llvm::IRBuilder<> builder(entry);
+
+  // 1. Signed strcmp (< 0) -> must NOT be transformed
+  llvm::Value* sc1 = builder.CreateCall(strcmp_fn, {fn->getArg(0), g_str}, "sc1");
+  llvm::Value* cmp_slt = builder.CreateICmpSLT(sc1, builder.getInt32(0), "cmp.slt");
+
+  // 2. Zero-length memcmp -> must NOT be transformed
+  llvm::Value* mc0 = builder.CreateCall(memcmp_fn, {fn->getArg(0), g_str, builder.getInt64(0)}, "mc0");
+  llvm::Value* cmp_mc0 = builder.CreateICmpEQ(mc0, builder.getInt32(0), "cmp.mc0");
+
+  // 3. Signed memcmp (< 0) -> must NOT be transformed
+  llvm::Value* mc_signed = builder.CreateCall(memcmp_fn, {fn->getArg(0), g_str, builder.getInt64(4)}, "mc_signed");
+  llvm::Value* cmp_mcs = builder.CreateICmpSLT(mc_signed, builder.getInt32(0), "cmp.mcs");
+
+  // 4. Equality memcmp (== 0, len=4) -> MUST be transformed
+  llvm::Value* mc_eq = builder.CreateCall(memcmp_fn, {fn->getArg(0), g_str, builder.getInt64(4)}, "mc_eq");
+  llvm::Value* cmp_mceq = builder.CreateICmpEQ(mc_eq, builder.getInt32(0), "cmp.mceq");
+
+  llvm::Value* sum = builder.CreateAdd(builder.CreateZExt(cmp_slt, i32_ty),
+                                       builder.CreateZExt(cmp_mc0, i32_ty));
+  sum = builder.CreateAdd(sum, builder.CreateZExt(cmp_mcs, i32_ty));
+  sum = builder.CreateAdd(sum, builder.CreateZExt(cmp_mceq, i32_ty));
+  builder.CreateRet(sum);
+
+  obf::zero_comparison_options options;
+  options.transform_string_comparisons = true;
+  options.transform_integer_comparisons = false;
+  options.max_sites_per_function = 16;
+  options.max_unroll_bytes = 64;
+
+  auto res = obf::run_zero_comparison(*fn, options);
+  ExpectTrue(res.transformed_site_count == 1,
+             "Only equality memcmp with len > 0 should be transformed");
+
+  // Verify that signed strcmp, signed memcmp, and zero-length memcmp remain as calls
+  bool has_sc1 = false;
+  bool has_mc0 = false;
+  bool has_mcs = false;
+  bool has_mceq = false;
+  for (const llvm::BasicBlock& bb : *fn) {
+    for (const llvm::Instruction& inst : bb) {
+      if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+        if (call->getName() == "sc1") has_sc1 = true;
+        if (call->getName() == "mc0") has_mc0 = true;
+        if (call->getName() == "mc_signed") has_mcs = true;
+        if (call->getName() == "mc_eq") has_mceq = true;
+      }
+    }
+  }
+  ExpectTrue(has_sc1, "Signed strcmp must not be lowered to zero-reduction");
+  ExpectTrue(has_mc0, "Zero-length memcmp must not be lowered to zero-reduction");
+  ExpectTrue(has_mcs, "Signed memcmp must not be lowered to zero-reduction");
+  ExpectTrue(!has_mceq, "Equality memcmp must be lowered to zero-reduction");
+}
+
 
 void TestSelfChecksum(llvm::LLVMContext& context) {
   llvm::Module module("self_checksum_test_module", context);
@@ -1618,6 +1768,8 @@ int main() {
   TestAuthEncodingDerivationAndTagging();
   TestAuthEncodingConstantTimeEqual();
   TestZeroComparison();
+  TestControlFlatteningAllocaRejection();
+  TestZeroComparisonSignedAndZeroLen();
   llvm::LLVMContext self_checksum_context;
   TestSelfChecksum(self_checksum_context);
   llvm::LLVMContext self_checksum_pe_context;

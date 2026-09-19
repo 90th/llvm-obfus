@@ -1,0 +1,7 @@
+seed: 4242
+default_level: none
+targets:
+  - match: "vm_int_*"
+    level: vm
+mba:
+  depth: 2

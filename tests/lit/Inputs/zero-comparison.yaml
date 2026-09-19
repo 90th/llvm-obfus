@@ -1,0 +1,8 @@
+seed: 1337
+default_level: strong
+zero_comparison:
+  enabled: true
+  transform_string_comparisons: true
+  transform_integer_comparisons: true
+  max_sites_per_function: 16
+  max_unroll_bytes: 64
