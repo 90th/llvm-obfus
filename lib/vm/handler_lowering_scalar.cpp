@@ -890,26 +890,27 @@ llvm::Value* emit_binary(llvm::IRBuilder<>& builder,
       llvm_unreachable("opcode is not a binary opcode");
   }
 
-  auto* binary = llvm::cast<llvm::BinaryOperator>(result);
-  if (has_instruction_flag(instruction.flags, instruction_flag_nsw)) {
-    binary->setHasNoSignedWrap();
-  }
-  if (has_instruction_flag(instruction.flags, instruction_flag_nuw)) {
-    binary->setHasNoUnsignedWrap();
-  }
-  if (has_instruction_flag(instruction.flags, instruction_flag_exact)) {
-    switch (instruction.op) {
-      case opcode::udiv:
-      case opcode::sdiv:
-      case opcode::lshr:
-      case opcode::ashr:
-        binary->setIsExact();
-        break;
-      default:
-        break;
+  if (auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(result)) {
+    if (has_instruction_flag(instruction.flags, instruction_flag_nsw)) {
+      binary->setHasNoSignedWrap();
     }
+    if (has_instruction_flag(instruction.flags, instruction_flag_nuw)) {
+      binary->setHasNoUnsignedWrap();
+    }
+    if (has_instruction_flag(instruction.flags, instruction_flag_exact)) {
+      switch (instruction.op) {
+        case opcode::udiv:
+        case opcode::sdiv:
+        case opcode::lshr:
+        case opcode::ashr:
+          binary->setIsExact();
+          break;
+        default:
+          break;
+      }
+    }
+    apply_fast_math_flags(binary, instruction.flags);
   }
-  apply_fast_math_flags(binary, instruction.flags);
   return result;
 }
 
@@ -1049,7 +1050,7 @@ llvm::FastMathFlags decode_fast_math_flags(std::uint32_t flags) {
 }
 
 void apply_fast_math_flags(llvm::Instruction* instruction, std::uint32_t flags) {
-  if (instruction == nullptr) { return; }
+  if (instruction == nullptr || !llvm::isa<llvm::FPMathOperator>(instruction)) { return; }
 
   instruction->setFastMathFlags(decode_fast_math_flags(flags));
 }
