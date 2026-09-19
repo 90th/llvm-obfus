@@ -973,7 +973,7 @@ static uint8_t *ObfWaitForStringDecode(
       return destination;
     }
     if ((status == context->statuses.cold && completion == context->statuses.decoding) ||
-        (status == context->statuses.decoding && completion == context->statuses.decoding)) {
+        (status == context->statuses.decoding)) {
       continue;
     }
     ObfTrapAfterZeroize(context, sizeof(*context));
@@ -1003,7 +1003,7 @@ static uint8_t *ObfWaitForConstantPoolDecode(
       return destination;
     }
     if ((status == context->statuses.cold && completion == context->statuses.decoding) ||
-        (status == context->statuses.decoding && completion == context->statuses.decoding)) {
+        (status == context->statuses.decoding)) {
       continue;
     }
     ObfTrapAfterZeroize(context, sizeof(*context));
@@ -1075,7 +1075,7 @@ uint8_t *OBF_RT_STRING_AUTH_DECODE_V3(
       continue;
     }
     if ((status == context.statuses.cold && completion == context.statuses.decoding) ||
-        (status == context.statuses.decoding && completion == context.statuses.decoding)) {
+        (status == context.statuses.decoding)) {
       return ObfWaitForStringDecode(&context, descriptor, trusted_topology);
     }
     ObfTrapAfterZeroize(&context, sizeof(context));
@@ -1148,7 +1148,7 @@ uint8_t *OBF_RT_CONSTANT_POOL_DECODE_V3(
       continue;
     }
     if ((status == context.statuses.cold && completion == context.statuses.decoding) ||
-        (status == context.statuses.decoding && completion == context.statuses.decoding)) {
+        (status == context.statuses.decoding)) {
       return ObfWaitForConstantPoolDecode(&context, descriptor, trusted_topology);
     }
     ObfTrapAfterZeroize(&context, sizeof(context));
