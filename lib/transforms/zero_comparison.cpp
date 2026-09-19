@@ -170,8 +170,7 @@ llvm::Value* replace_select(llvm::SelectInst& select, const zero_comparison_opti
                                                compare->getPredicate() == llvm::ICmpInst::ICMP_EQ);
   if (condition == nullptr) { return nullptr; }
   auto* value_type = llvm::cast<llvm::IntegerType>(select.getType());
-  llvm::Value* mask = builder.CreateNeg(
-      builder.CreateSExt(condition, value_type, "obf.zero.mask.ext"), "obf.zero.mask");
+  llvm::Value* mask = builder.CreateSExt(condition, value_type, "obf.zero.mask");
   llvm::Value* true_arm = builder.CreateAnd(select.getTrueValue(), mask, "obf.zero.select.true");
   llvm::Value* false_arm =
       builder.CreateAnd(select.getFalseValue(), builder.CreateNot(mask), "obf.zero.select.false");
