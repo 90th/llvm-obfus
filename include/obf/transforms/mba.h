@@ -4,7 +4,9 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/IRBuilder.h"
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <optional>
 
 namespace llvm {
@@ -23,6 +25,30 @@ struct mba_config;
 namespace mba {
 
 inline constexpr std::uint32_t max_mba_depth = 5;
+struct mba_shape_counts {
+  std::size_t linear_count = 0;
+  std::size_t affine_count = 0;
+  std::size_t polynomial_count = 0;
+  std::size_t mul_count = 0;
+};
+
+struct atomic_mba_shape_counts {
+  std::atomic<std::size_t> linear_count{0};
+  std::atomic<std::size_t> affine_count{0};
+  std::atomic<std::size_t> polynomial_count{0};
+  std::atomic<std::size_t> mul_count{0};
+
+  atomic_mba_shape_counts() = default;
+  atomic_mba_shape_counts(const atomic_mba_shape_counts&) = delete;
+  atomic_mba_shape_counts& operator=(const atomic_mba_shape_counts&) = delete;
+
+  mba_shape_counts snapshot() const {
+    return {linear_count.load(std::memory_order_relaxed),
+            affine_count.load(std::memory_order_relaxed),
+            polynomial_count.load(std::memory_order_relaxed),
+            mul_count.load(std::memory_order_relaxed)};
+  }
+};
 
 struct builder_context {
   llvm::GlobalVariable* entropy_anchor = nullptr;
@@ -31,6 +57,7 @@ struct builder_context {
   std::optional<std::uint32_t> max_ir_instructions_override = std::nullopt;
   std::optional<bool> enable_polynomial_override = std::nullopt;
   std::optional<bool> enable_multiplication_override = std::nullopt;
+  std::shared_ptr<atomic_mba_shape_counts> counters = nullptr;
 };
 
 llvm::GlobalVariable* get_or_create_entropy_anchor(llvm::Module& module);
@@ -107,15 +134,8 @@ llvm::Value* build_entropy_true_predicate(llvm::IRBuilder<>& builder,
                                           std::optional<bool> poly_override = std::nullopt,
                                           std::optional<bool> mul_override = std::nullopt);
 
-struct mba_shape_counts {
-  std::size_t linear_count = 0;
-  std::size_t affine_count = 0;
-  std::size_t polynomial_count = 0;
-  std::size_t mul_count = 0;
-};
-
-mba_shape_counts& get_mba_counters(llvm::Function& func);
-void clear_mba_counters();
+mba_shape_counts get_mba_counters(const llvm::Function& func);
+void clear_mba_counters(const llvm::Module* module = nullptr);
 
 }  // namespace mba
 

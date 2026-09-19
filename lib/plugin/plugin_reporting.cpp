@@ -361,7 +361,7 @@ build_transform_reports(llvm::Module& module,
     reports.push_back(std::move(entry));
   }
 
-  mba::clear_mba_counters();
+  mba::clear_mba_counters(&module);
 
   return reports;
 }
