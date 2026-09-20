@@ -1333,6 +1333,190 @@ void TestZeroComparisonNonIntegralPointers() {
   ExpectTrue(!has_forbidden_ptrtoint, "Must not introduce ptrtoint for non-integral pointers");
 }
 
+void TestZeroComparisonLibcAbiGuards() {
+  llvm::LLVMContext context;
+  llvm::Module module("zero_cmp_libc_abi_module", context);
+  module.setDataLayout("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+
+  llvm::Type* i32_ty = llvm::Type::getInt32Ty(context);
+  llvm::Type* ptr_ty = llvm::PointerType::getUnqual(context);
+
+  llvm::FunctionType* strcmp_ty = llvm::FunctionType::get(i32_ty, {ptr_ty, ptr_ty}, false);
+  llvm::Function* strcmp_fn =
+      llvm::Function::Create(strcmp_ty, llvm::GlobalValue::ExternalLinkage, "strcmp", module);
+
+  llvm::Function* strcmp_nobuiltin =
+      llvm::Function::Create(strcmp_ty, llvm::GlobalValue::ExternalLinkage, "strcmp_nobuiltin", module);
+  strcmp_nobuiltin->addFnAttr(llvm::Attribute::NoBuiltin);
+
+  llvm::Function* strcmp_fastcc =
+      llvm::Function::Create(strcmp_ty, llvm::GlobalValue::ExternalLinkage, "strcmp_fastcc", module);
+  strcmp_fastcc->setCallingConv(llvm::CallingConv::Fast);
+
+  llvm::FunctionType* memcmp_i32len_ty = llvm::FunctionType::get(i32_ty, {ptr_ty, ptr_ty, i32_ty}, false);
+  llvm::Function* memcmp_i32len =
+      llvm::Function::Create(memcmp_i32len_ty, llvm::GlobalValue::ExternalLinkage, "memcmp_i32len", module);
+
+  llvm::Constant* str_const = llvm::ConstantDataArray::getString(context, "apple", true);
+  auto* g_str = new llvm::GlobalVariable(module, str_const->getType(), true,
+                                         llvm::GlobalValue::PrivateLinkage, str_const, "g_str");
+
+  llvm::FunctionType* fn_ty = llvm::FunctionType::get(i32_ty, {ptr_ty}, false);
+  llvm::Function* fn =
+      llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "test_abi_fn", module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+  llvm::IRBuilder<> builder(entry);
+
+  // 1. Standard call -> SHOULD be candidate and transformed
+  llvm::Value* c_std = builder.CreateCall(strcmp_fn, {fn->getArg(0), g_str}, "call.std");
+  llvm::Value* cmp_std = builder.CreateICmpEQ(c_std, builder.getInt32(0), "cmp.std");
+
+  // 2. Call-site nobuiltin -> MUST NOT be transformed
+  auto* c_nobuiltin_site = builder.CreateCall(strcmp_fn, {fn->getArg(0), g_str}, "call.nobuiltin.site");
+  c_nobuiltin_site->addFnAttr(llvm::Attribute::NoBuiltin);
+  llvm::Value* cmp_nobuiltin_site = builder.CreateICmpEQ(c_nobuiltin_site, builder.getInt32(0), "cmp.nobuiltin.site");
+
+  // 3. Callee nobuiltin -> MUST NOT be transformed
+  llvm::Value* c_callee_nb = builder.CreateCall(strcmp_nobuiltin, {fn->getArg(0), g_str}, "call.callee.nb");
+  llvm::Value* cmp_callee_nb = builder.CreateICmpEQ(c_callee_nb, builder.getInt32(0), "cmp.callee.nb");
+
+  // 4. Non-C calling convention -> MUST NOT be transformed
+  auto* c_fastcc = builder.CreateCall(strcmp_fastcc, {fn->getArg(0), g_str}, "call.fastcc");
+  c_fastcc->setCallingConv(llvm::CallingConv::Fast);
+  llvm::Value* cmp_fastcc = builder.CreateICmpEQ(c_fastcc, builder.getInt32(0), "cmp.fastcc");
+
+  // 5. Wrong length argument type -> MUST NOT be transformed
+  llvm::Value* c_wrong_sig = builder.CreateCall(memcmp_i32len, {fn->getArg(0), g_str, builder.getInt32(4)}, "call.wrong.sig");
+  llvm::Value* cmp_wrong_sig = builder.CreateICmpEQ(c_wrong_sig, builder.getInt32(0), "cmp.wrong.sig");
+
+  // 6. Operand bundle -> MUST NOT be transformed
+  llvm::OperandBundleDef deopt_bundle("deopt", llvm::ArrayRef<llvm::Value*>{});
+  auto* c_bundle = builder.CreateCall(strcmp_fn, {fn->getArg(0), g_str}, {deopt_bundle}, "call.bundle");
+  llvm::Value* cmp_bundle = builder.CreateICmpEQ(c_bundle, builder.getInt32(0), "cmp.bundle");
+  // 7. Musttail call on otherwise-eligible bcmp with constant string & length -> MUST NOT be transformed
+  llvm::Type* i64_ty = llvm::Type::getInt64Ty(context);
+  llvm::FunctionType* bcmp_ty = llvm::FunctionType::get(i32_ty, {ptr_ty, ptr_ty, i64_ty}, false);
+  llvm::Function* bcmp_fn =
+      llvm::Function::Create(bcmp_ty, llvm::GlobalValue::ExternalLinkage, "bcmp", module);
+  llvm::FunctionType* mt_fn_ty = llvm::FunctionType::get(i32_ty, {ptr_ty, ptr_ty, i64_ty}, false);
+  llvm::Function* fn_musttail =
+      llvm::Function::Create(mt_fn_ty, llvm::GlobalValue::ExternalLinkage, "test_musttail_fn", module);
+  llvm::BasicBlock* mt_entry = llvm::BasicBlock::Create(context, "entry", fn_musttail);
+  llvm::IRBuilder<> mt_builder(mt_entry);
+  auto* c_musttail = mt_builder.CreateCall(bcmp_fn, {fn_musttail->getArg(0), g_str, mt_builder.getInt64(4)}, "call.musttail");
+  c_musttail->setTailCallKind(llvm::CallInst::TCK_MustTail);
+  mt_builder.CreateRet(c_musttail);
+  llvm::Value* sum = builder.CreateAdd(builder.CreateZExt(cmp_std, i32_ty),
+                                       builder.CreateZExt(cmp_nobuiltin_site, i32_ty));
+  sum = builder.CreateAdd(sum, builder.CreateZExt(cmp_callee_nb, i32_ty));
+  sum = builder.CreateAdd(sum, builder.CreateZExt(cmp_fastcc, i32_ty));
+  sum = builder.CreateAdd(sum, builder.CreateZExt(cmp_wrong_sig, i32_ty));
+  sum = builder.CreateAdd(sum, builder.CreateZExt(cmp_bundle, i32_ty));
+  builder.CreateRet(sum);
+
+  obf::zero_comparison_options options;
+  options.transform_string_comparisons = true;
+  options.transform_integer_comparisons = false;
+  options.max_sites_per_function = 16;
+  options.max_unroll_bytes = 64;
+
+  const auto analysis = obf::analyze_zero_comparison(*fn, options);
+  ExpectTrue(analysis.transformed_site_count == 1,
+             "analyze_zero_comparison must only identify standard libc call");
+
+  const auto exec_res = obf::run_zero_comparison(*fn, options);
+  ExpectTrue(exec_res.transformed_site_count == 1,
+             "run_zero_comparison must only transform standard libc call");
+
+  const auto mt_analysis = obf::analyze_zero_comparison(*fn_musttail, options);
+  ExpectTrue(mt_analysis.transformed_site_count == 0,
+             "Musttail call must not be identified as candidate");
+  const auto mt_res = obf::run_zero_comparison(*fn_musttail, options);
+  ExpectTrue(mt_res.transformed_site_count == 0,
+             "Musttail call must not be transformed");
+
+  ExpectTrue(!llvm::verifyModule(module, &llvm::errs()),
+             "Module must verify after zero-comparison libc ABI guard tests");
+
+  bool has_nobuiltin_site = false;
+  bool has_callee_nb = false;
+  bool has_fastcc = false;
+  bool has_wrong_sig = false;
+  bool has_bundle = false;
+  bool has_std = false;
+  for (const llvm::BasicBlock& bb : *fn) {
+    for (const llvm::Instruction& inst : bb) {
+      if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+        if (call->getName() == "call.nobuiltin.site") has_nobuiltin_site = true;
+        if (call->getName() == "call.callee.nb") has_callee_nb = true;
+        if (call->getName() == "call.fastcc") has_fastcc = true;
+        if (call->getName() == "call.wrong.sig") has_wrong_sig = true;
+        if (call->getName() == "call.bundle") has_bundle = true;
+        if (call->getName() == "call.std") has_std = true;
+      }
+    }
+  }
+
+  ExpectTrue(has_nobuiltin_site, "Call-site nobuiltin must remain intact");
+  ExpectTrue(has_callee_nb, "Callee nobuiltin must remain intact");
+  ExpectTrue(has_fastcc, "FastCC call must remain intact");
+  ExpectTrue(has_wrong_sig, "Wrong signature call must remain intact");
+  ExpectTrue(has_bundle, "Operand bundle call must remain intact");
+  ExpectTrue(!has_std, "Standard call must have been transformed");
+
+  // Sub-test A: Caller with "no-builtins" attribute calling canonical @strcmp
+  {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("mod_caller_nb", ctx);
+    mod.setDataLayout("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    auto* sc_decl = llvm::Function::Create(strcmp_ty, llvm::GlobalValue::ExternalLinkage, "strcmp", mod);
+    auto* caller_fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "caller_fn", mod);
+    caller_fn->addFnAttr("no-builtins");
+    auto* bb = llvm::BasicBlock::Create(ctx, "entry", caller_fn);
+    llvm::IRBuilder<> b(bb);
+    auto* g = new llvm::GlobalVariable(mod, str_const->getType(), true, llvm::GlobalValue::PrivateLinkage, str_const, "g");
+    auto* c = b.CreateCall(sc_decl, {caller_fn->getArg(0), g});
+    b.CreateRet(b.CreateZExt(b.CreateICmpEQ(c, b.getInt32(0)), i32_ty));
+    auto an = obf::analyze_zero_comparison(*caller_fn, options);
+    ExpectTrue(an.transformed_site_count == 0, "Caller with no-builtins must reject libc transform");
+  }
+
+  // Sub-test B: Canonical @strcmp declaration with nobuiltin attribute
+  {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("mod_decl_nb", ctx);
+    mod.setDataLayout("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    auto* sc_decl = llvm::Function::Create(strcmp_ty, llvm::GlobalValue::ExternalLinkage, "strcmp", mod);
+    sc_decl->addFnAttr(llvm::Attribute::NoBuiltin);
+    auto* caller_fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "caller_fn", mod);
+    auto* bb = llvm::BasicBlock::Create(ctx, "entry", caller_fn);
+    llvm::IRBuilder<> b(bb);
+    auto* g = new llvm::GlobalVariable(mod, str_const->getType(), true, llvm::GlobalValue::PrivateLinkage, str_const, "g");
+    auto* c = b.CreateCall(sc_decl, {caller_fn->getArg(0), g});
+    b.CreateRet(b.CreateZExt(b.CreateICmpEQ(c, b.getInt32(0)), i32_ty));
+    auto an = obf::analyze_zero_comparison(*caller_fn, options);
+    ExpectTrue(an.transformed_site_count == 0, "Callee declaration with nobuiltin must reject libc transform");
+  }
+
+  // Sub-test C: Canonical @strcmp declaration with fastcc
+  {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("mod_fastcc", ctx);
+    mod.setDataLayout("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    auto* sc_decl = llvm::Function::Create(strcmp_ty, llvm::GlobalValue::ExternalLinkage, "strcmp", mod);
+    sc_decl->setCallingConv(llvm::CallingConv::Fast);
+    auto* caller_fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "caller_fn", mod);
+    auto* bb = llvm::BasicBlock::Create(ctx, "entry", caller_fn);
+    llvm::IRBuilder<> b(bb);
+    auto* g = new llvm::GlobalVariable(mod, str_const->getType(), true, llvm::GlobalValue::PrivateLinkage, str_const, "g");
+    auto* c = b.CreateCall(sc_decl, {caller_fn->getArg(0), g});
+    c->setCallingConv(llvm::CallingConv::Fast);
+    b.CreateRet(b.CreateZExt(b.CreateICmpEQ(c, b.getInt32(0)), i32_ty));
+    auto an = obf::analyze_zero_comparison(*caller_fn, options);
+    ExpectTrue(an.transformed_site_count == 0, "Callee declaration with fastcc must reject libc transform");
+  }
+}
+
 
 void TestSelfChecksum(llvm::LLVMContext& context) {
   llvm::Module module("self_checksum_test_module", context);
@@ -1974,6 +2158,7 @@ int main() {
   TestControlFlatteningAllocaRejection();
   TestZeroComparisonSignedAndZeroLen();
   TestZeroComparisonNonIntegralPointers();
+  TestZeroComparisonLibcAbiGuards();
   llvm::LLVMContext self_checksum_context;
   TestSelfChecksum(self_checksum_context);
   llvm::LLVMContext self_checksum_pe_context;

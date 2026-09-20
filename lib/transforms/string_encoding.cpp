@@ -1,4 +1,5 @@
 #include "obf/transforms/string_encoding.h"
+#include "obf/support/libc_comparison.h"
 
 #include "obf/analysis/annotation_utils.h"
 #include "obf/support/auth_encoding.h"
@@ -469,57 +470,17 @@ classify_ephemeral_byte_load(llvm::Instruction& instruction, const llvm::GlobalV
 std::optional<classified_string_use> classify_ephemeral_compare_use(
     llvm::Instruction& instruction, unsigned operand_index, const llvm::GlobalVariable& global) {
   auto* call = llvm::dyn_cast<llvm::CallInst>(&instruction);
-  if (call == nullptr || call->isMustTailCall() || call->getNumOperandBundles() != 0 ||
-      operand_index >= call->arg_size() || operand_index > 1 ||
-      !call->getType()->isIntegerTy(32) || !is_compare_like_call(*call)) {
+  if (call == nullptr || operand_index >= call->arg_size() || operand_index > 1) {
     return std::nullopt;
   }
-  llvm::Function* callee = call->getCalledFunction();
-  if (callee == nullptr || !is_ephemeral_compare_name(callee->getName()) ||
-      !callee->isDeclaration() || !callee->hasExternalLinkage() ||
-      call->getCallingConv() != llvm::CallingConv::C ||
-      callee->getCallingConv() != llvm::CallingConv::C || call->isNoBuiltin() ||
-      callee->hasFnAttribute(llvm::Attribute::NoBuiltin)) {
+  if (!obf::support::is_valid_libc_comparison_call(*call, /*allow_bcmp=*/false)) {
     return std::nullopt;
   }
-  const llvm::StringRef callee_name = callee->getName();
-  const unsigned required_args = callee_name == "strcmp" ? 2U : 3U;
-  llvm::FunctionType* callee_ft = callee->getFunctionType();
-  const llvm::Module* module = instruction.getModule();
-  if (module == nullptr) { return std::nullopt; }
-  const unsigned size_t_bits = module->getDataLayout().getPointerSizeInBits(0);
-  const auto has_native_size_t_type = [size_t_bits](llvm::Type* type) {
-    const auto* integer_type = llvm::dyn_cast<llvm::IntegerType>(type);
-    return integer_type != nullptr && integer_type->getBitWidth() == size_t_bits;
-  };
-  if (callee_ft->isVarArg() || !callee_ft->getReturnType()->isIntegerTy(32) ||
-      callee_ft->getNumParams() != required_args ||
-      !callee_ft->getParamType(0)->isPointerTy() ||
-      !callee_ft->getParamType(1)->isPointerTy() ||
-      (required_args == 3 && !has_native_size_t_type(callee_ft->getParamType(2)))) {
-    return std::nullopt;
-  }
-  if (call->arg_size() != required_args || !call->getArgOperand(0)->getType()->isPointerTy() ||
-      !call->getArgOperand(1)->getType()->isPointerTy() ||
-      (required_args == 3 && !has_native_size_t_type(call->getArgOperand(2)->getType()))) {
-    return std::nullopt;
-  }
+  const llvm::StringRef callee_name = call->getCalledFunction()->getName();
   if (global.getAddressSpace() != 0 ||
       call->getArgOperand(0)->getType()->getPointerAddressSpace() != 0 ||
       call->getArgOperand(1)->getType()->getPointerAddressSpace() != 0) {
     return std::nullopt;
-  }
-  for (unsigned arg_idx = 0; arg_idx < 2; ++arg_idx) {
-    if (call->paramHasAttr(arg_idx, llvm::Attribute::ByVal) ||
-        call->paramHasAttr(arg_idx, llvm::Attribute::InAlloca) ||
-        call->paramHasAttr(arg_idx, llvm::Attribute::Preallocated) ||
-        call->paramHasAttr(arg_idx, llvm::Attribute::StructRet) ||
-        callee->hasParamAttribute(arg_idx, llvm::Attribute::ByVal) ||
-        callee->hasParamAttribute(arg_idx, llvm::Attribute::InAlloca) ||
-        callee->hasParamAttribute(arg_idx, llvm::Attribute::Preallocated) ||
-        callee->hasParamAttribute(arg_idx, llvm::Attribute::StructRet)) {
-      return std::nullopt;
-    }
   }
   llvm::SmallVector<std::uint64_t, 4> gep_indices;
   llvm::Value* operand = call->getArgOperand(operand_index);
@@ -651,9 +612,7 @@ bool ephemeral_uses_fit_unroll_bound(const string_use_summary& summary,
 bool is_compare_like_call(const llvm::CallBase& call) {
   const llvm::Function* callee = call.getCalledFunction();
   if (callee == nullptr) { return false; }
-
-  const llvm::StringRef name = callee->getName();
-  return name == "bcmp" || name == "memcmp" || name == "strcmp" || name == "strncmp";
+  return obf::support::is_libc_comparison_name(callee->getName());
 }
 
 void collect_string_users(const llvm::Value& value,

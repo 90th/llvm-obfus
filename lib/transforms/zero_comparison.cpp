@@ -1,4 +1,5 @@
 #include "obf/transforms/zero_comparison.h"
+#include "obf/support/libc_comparison.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
@@ -104,9 +105,6 @@ create_zero_boolean(llvm::IRBuilder<>& builder, llvm::Value* lhs, llvm::Value* r
   return builder.CreateTrunc(result, builder.getInt1Ty(), "obf.zero.result");
 }
 
-bool is_string_comparison_name(llvm::StringRef name) {
-  return name == "strcmp" || name == "memcmp" || name == "bcmp" || name == "strncmp";
-}
 
 bool all_users_are_zero_equality(const llvm::CallBase& call) {
   if (call.use_empty()) { return false; }
@@ -123,22 +121,13 @@ bool all_users_are_zero_equality(const llvm::CallBase& call) {
 }
 
 bool is_supported_string_call(const llvm::CallBase& call, const zero_comparison_options& options) {
-  if (!options.transform_string_comparisons || !llvm::isa<llvm::CallInst>(call) ||
-      call.arg_size() < 2 || !call.getArgOperand(0)->getType()->isPointerTy() ||
-      !call.getArgOperand(1)->getType()->isPointerTy() || !call.getType()->isIntegerTy(32)) {
+  if (!options.transform_string_comparisons) {
     return false;
   }
-  if (call.getNumOperandBundles() != 0 || llvm::cast<llvm::CallInst>(call).isMustTailCall()) {
+  if (!obf::support::is_valid_libc_comparison_call(call)) {
     return false;
   }
   const llvm::Function* callee = call.getCalledFunction();
-  if (callee == nullptr || !callee->isDeclaration() || callee->isIntrinsic()) {
-    return false;
-  }
-  if (!is_string_comparison_name(callee->getName()) ||
-      call.arg_size() != (callee->getName() == "strcmp" ? 2u : 3u)) {
-    return false;
-  }
   if (callee->getName() != "bcmp" && !all_users_are_zero_equality(call)) {
     return false;
   }
@@ -251,11 +240,14 @@ create_short_circuit_delta(llvm::IRBuilder<>& builder, llvm::CallBase& call, std
 }
 
 llvm::Value* replace_string_call(llvm::CallBase& call, const zero_comparison_options& options) {
+  if (!options.transform_string_comparisons ||
+      !obf::support::is_valid_libc_comparison_call(call)) {
+    return nullptr;
+  }
   llvm::Function* callee = call.getCalledFunction();
   if (callee == nullptr) { return nullptr; }
   const auto length = known_compare_length(call, callee->getName(), options);
   if (!length) { return nullptr; }
-
   llvm::IRBuilder<> builder(&call);
   const bool is_string = callee->getName() == "strcmp" || callee->getName() == "strncmp";
   llvm::Value* delta = is_string ? create_short_circuit_delta(builder, call, *length)
