@@ -1260,6 +1260,79 @@ void TestZeroComparisonSignedAndZeroLen() {
   ExpectTrue(!has_mceq, "Equality memcmp must be lowered to zero-reduction");
 }
 
+void TestZeroComparisonNonIntegralPointers() {
+  llvm::LLVMContext context;
+  llvm::Module module("zero_cmp_non_integral_module", context);
+  module.setDataLayout(
+      "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128-ni:1:2");
+
+  llvm::Type* i1_ty = llvm::Type::getInt1Ty(context);
+  llvm::Type* ptr_as0_ty = llvm::PointerType::get(context, 0);
+  llvm::Type* ptr_as1_ty = llvm::PointerType::get(context, 1);
+  llvm::Type* ptr_as2_ty = llvm::PointerType::get(context, 2);
+
+  llvm::FunctionType* fn_ty = llvm::FunctionType::get(
+      i1_ty,
+      {ptr_as0_ty, ptr_as0_ty, ptr_as1_ty, ptr_as1_ty, ptr_as2_ty, ptr_as2_ty},
+      false);
+  llvm::Function* fn =
+      llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "test_ptr_fn", module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", fn);
+  llvm::IRBuilder<> builder(entry);
+
+  // 1. Ordinary pointer icmp eq (as0) -> MUST be candidate and transformed
+  llvm::Value* cmp_as0_eq = builder.CreateICmpEQ(fn->getArg(0), fn->getArg(1), "cmp.as0.eq");
+  // 2. Ordinary pointer icmp ne (as0) -> MUST be candidate and transformed
+  llvm::Value* cmp_as0_ne = builder.CreateICmpNE(fn->getArg(0), fn->getArg(1), "cmp.as0.ne");
+  // 3. Non-integral pointer icmp eq (as1) -> must NOT be candidate, must NOT be transformed
+  llvm::Value* cmp_as1_eq = builder.CreateICmpEQ(fn->getArg(2), fn->getArg(3), "cmp.as1.eq");
+  // 4. Non-integral pointer icmp ne (as2) -> must NOT be candidate, must NOT be transformed
+  llvm::Value* cmp_as2_ne = builder.CreateICmpNE(fn->getArg(4), fn->getArg(5), "cmp.as2.ne");
+
+  llvm::Value* res1 = builder.CreateXor(cmp_as0_eq, cmp_as0_ne);
+  llvm::Value* res2 = builder.CreateXor(cmp_as1_eq, cmp_as2_ne);
+  llvm::Value* final_res = builder.CreateXor(res1, res2);
+  builder.CreateRet(final_res);
+
+  obf::zero_comparison_options options;
+  options.transform_string_comparisons = false;
+  options.transform_integer_comparisons = true;
+  options.max_sites_per_function = 16;
+
+  const auto analysis = obf::analyze_zero_comparison(*fn, options);
+  ExpectTrue(analysis.transformed_site_count == 2,
+             "analyze_zero_comparison must only identify the 2 integral pointer sites");
+
+  const auto exec_res = obf::run_zero_comparison(*fn, options);
+  ExpectTrue(exec_res.transformed_site_count == 2,
+             "run_zero_comparison must only transform the 2 integral pointer sites");
+
+  ExpectTrue(!llvm::verifyFunction(*fn, &llvm::errs()),
+             "Function must verify after zero-comparison on non-integral pointers");
+
+  bool has_as1_icmp = false;
+  bool has_as2_icmp = false;
+  bool has_forbidden_ptrtoint = false;
+  for (const llvm::BasicBlock& bb : *fn) {
+    for (const llvm::Instruction& inst : bb) {
+      if (const auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+        if (icmp->getOperand(0)->getType() == ptr_as1_ty) has_as1_icmp = true;
+        if (icmp->getOperand(0)->getType() == ptr_as2_ty) has_as2_icmp = true;
+      }
+      if (const auto* p2i = llvm::dyn_cast<llvm::PtrToIntInst>(&inst)) {
+        if (p2i->getOperand(0)->getType() == ptr_as1_ty ||
+            p2i->getOperand(0)->getType() == ptr_as2_ty) {
+          has_forbidden_ptrtoint = true;
+        }
+      }
+    }
+  }
+
+  ExpectTrue(has_as1_icmp, "Non-integral addrspace(1) icmp must be preserved");
+  ExpectTrue(has_as2_icmp, "Non-integral addrspace(2) icmp must be preserved");
+  ExpectTrue(!has_forbidden_ptrtoint, "Must not introduce ptrtoint for non-integral pointers");
+}
+
 
 void TestSelfChecksum(llvm::LLVMContext& context) {
   llvm::Module module("self_checksum_test_module", context);
@@ -1900,6 +1973,7 @@ int main() {
   TestZeroComparison();
   TestControlFlatteningAllocaRejection();
   TestZeroComparisonSignedAndZeroLen();
+  TestZeroComparisonNonIntegralPointers();
   llvm::LLVMContext self_checksum_context;
   TestSelfChecksum(self_checksum_context);
   llvm::LLVMContext self_checksum_pe_context;

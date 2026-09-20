@@ -2,6 +2,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -23,26 +24,57 @@ bool is_equality_icmp(const llvm::ICmpInst& compare) {
          compare.getPredicate() == llvm::ICmpInst::ICMP_NE;
 }
 
+bool is_supported_pointer_type(const llvm::Type* type, const llvm::Module* module) {
+  const auto* pointer_type = llvm::dyn_cast<llvm::PointerType>(type);
+  if (pointer_type == nullptr || module == nullptr) {
+    return false;
+  }
+  const llvm::DataLayout& layout = module->getDataLayout();
+  const unsigned address_space = pointer_type->getAddressSpace();
+  if (layout.isNonIntegralAddressSpace(address_space) ||
+      layout.mustNotIntroducePtrToInt(address_space)) {
+    return false;
+  }
+  auto* int_ptr_type = layout.getIntPtrType(type->getContext(), address_space);
+  return int_ptr_type != nullptr && int_ptr_type->getBitWidth() > 0;
+}
+
 bool is_supported_comparison(const llvm::ICmpInst& compare) {
   if (!is_equality_icmp(compare)) { return false; }
-  const llvm::Type* type = compare.getOperand(0)->getType();
-  return type->isIntegerTy() || type->isPointerTy();
+  const llvm::Type* lhs_type = compare.getOperand(0)->getType();
+  const llvm::Type* rhs_type = compare.getOperand(1)->getType();
+  if (lhs_type != rhs_type) { return false; }
+  if (lhs_type->isIntegerTy()) { return true; }
+  if (lhs_type->isPointerTy()) {
+    return is_supported_pointer_type(lhs_type, compare.getModule());
+  }
+  return false;
 }
 
 llvm::IntegerType* comparison_integer_type(llvm::IRBuilder<>& builder, llvm::Value* value) {
   if (auto* integer_type = llvm::dyn_cast<llvm::IntegerType>(value->getType())) {
     return integer_type;
   }
-  if (!value->getType()->isPointerTy()) { return nullptr; }
-  const llvm::DataLayout& layout = builder.GetInsertBlock()->getModule()->getDataLayout();
-  return llvm::cast<llvm::IntegerType>(layout.getIntPtrType(value->getType()));
+  auto* pointer_type = llvm::dyn_cast<llvm::PointerType>(value->getType());
+  if (pointer_type == nullptr) { return nullptr; }
+  const llvm::BasicBlock* block = builder.GetInsertBlock();
+  if (block == nullptr) { return nullptr; }
+  const llvm::Module* module = block->getModule();
+  if (module == nullptr || !is_supported_pointer_type(pointer_type, module)) {
+    return nullptr;
+  }
+  const llvm::DataLayout& layout = module->getDataLayout();
+  return layout.getIntPtrType(value->getContext(), pointer_type->getAddressSpace());
 }
 
 llvm::Value* as_comparison_integer(llvm::IRBuilder<>& builder,
                                    llvm::Value* value,
                                    llvm::IntegerType* integer_type) {
   if (value->getType()->isIntegerTy()) { return value; }
-  return builder.CreatePtrToInt(value, integer_type, "obf.zero.ptr");
+  if (value->getType()->isPointerTy()) {
+    return builder.CreatePtrToInt(value, integer_type, "obf.zero.ptr");
+  }
+  return nullptr;
 }
 
 llvm::Value*
@@ -63,6 +95,7 @@ create_zero_boolean(llvm::IRBuilder<>& builder, llvm::Value* lhs, llvm::Value* r
 
   llvm::Value* left = as_comparison_integer(builder, lhs, integer_type);
   llvm::Value* right = as_comparison_integer(builder, rhs, integer_type);
+  if (left == nullptr || right == nullptr) { return nullptr; }
   llvm::Value* delta = builder.CreateXor(left, right, "obf.zero.delta");
   llvm::Value* nonzero = create_nonzero(builder, delta, integer_type);
   llvm::Value* result =
