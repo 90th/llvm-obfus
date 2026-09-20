@@ -3,6 +3,7 @@
 ; RUN: %opt -passes=verify -disable-output %t.ll
 
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+target triple = "x86_64-unknown-linux-gnu"
 
 @.str.apple = private unnamed_addr constant [6 x i8] c"apple\00", align 1
 
@@ -178,6 +179,18 @@ entry:
 define i1 @test_negative_callsite_inreg(ptr %s) {
 entry:
   %r = call i32 @strcmp(ptr inreg %s, ptr @.str.apple)
+  %eq = icmp eq i32 %r, 0
+  ret i1 %eq
+}
+
+; 11. ABI-affecting attribute on the third length argument
+; CHECK-LABEL: define i1 @test_negative_callsite_length_inreg
+; CHECK: %r = call i32 @memcmp(ptr %s, ptr @.str.apple, i64 inreg 4)
+; CHECK-NOT: obf.zero.str
+; CHECK: ret i1
+define i1 @test_negative_callsite_length_inreg(ptr %s) {
+entry:
+  %r = call i32 @memcmp(ptr %s, ptr @.str.apple, i64 inreg 4)
   %eq = icmp eq i32 %r, 0
   ret i1 %eq
 }

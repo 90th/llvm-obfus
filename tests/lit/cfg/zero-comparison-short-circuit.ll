@@ -4,6 +4,8 @@
 ; RUN: %opt -passes='default<O2>,verify' -S %t.ll -o %t.opt.ll
 ; RUN: %lli %t.opt.ll
 
+target triple = "x86_64-unknown-linux-gnu"
+
 @a_x = private constant [4 x i8] c"a\00X\00"
 @a_y = private constant [4 x i8] c"a\00Y\00"
 @b_x = private constant [4 x i8] c"b\00X\00"

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DataLayout.h"
@@ -9,6 +10,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <string>
 
@@ -71,13 +73,21 @@ inline bool is_valid_libc_comparison_call(const llvm::CallBase& call, bool allow
     return false;
   }
 
-  const unsigned size_t_bits = module->getDataLayout().getIndexSizeInBits(0);
+  llvm::TargetLibraryInfoImpl tli_impl(llvm::Triple(module->getTargetTriple()));
+  llvm::TargetLibraryInfo tli(tli_impl);
+  llvm::LibFunc lib_func;
+  llvm::FunctionType* callee_ft = callee->getFunctionType();
+  if (!tli.getLibFunc(callee_name, lib_func) ||
+      !tli.isValidProtoForLibFunc(*callee_ft, lib_func, *module) ||
+      !tli.has(lib_func)) {
+    return false;
+  }
+
+  const unsigned size_t_bits = tli.getSizeTSize(*module);
   const auto has_native_size_t_type = [size_t_bits](llvm::Type* type) {
     const auto* integer_type = llvm::dyn_cast<llvm::IntegerType>(type);
     return integer_type != nullptr && integer_type->getBitWidth() == size_t_bits;
   };
-
-  llvm::FunctionType* callee_ft = callee->getFunctionType();
   if (callee_ft->isVarArg() || !callee_ft->getReturnType()->isIntegerTy(32) ||
       callee_ft->getNumParams() != required_args ||
       !callee_ft->getParamType(0)->isPointerTy() ||
@@ -118,7 +128,7 @@ inline bool is_valid_libc_comparison_call(const llvm::CallBase& call, bool allow
            fn->hasParamAttribute(arg_idx, llvm::Attribute::SwiftError);
   };
 
-  for (unsigned arg_idx = 0; arg_idx < 2; ++arg_idx) {
+  for (unsigned arg_idx = 0; arg_idx < required_args; ++arg_idx) {
     if (has_abi_affecting_attr(call, arg_idx) ||
         has_callee_abi_affecting_attr(callee, arg_idx)) {
       return false;
