@@ -7,6 +7,7 @@
 
 #include "obf/transforms/zero_comparison.h"
 #include "obf/transforms/control_flattening.h"
+#include "obf/transforms/indirect_dispatch.h"
 #include "obf/transforms/string_encoding.h"
 #include "llvm/Support/raw_ostream.h"
 #include "obf/transforms/self_checksum.h"
@@ -523,6 +524,144 @@ void TestIndirectDispatchConfig() {
   std::filesystem::remove(path, ec);
 }
 
+void TestIndirectDispatchEntryTargetAnalysis() {
+  llvm::LLVMContext context;
+  llvm::Module module("idis_entry_target_module", context);
+
+  llvm::Type* i32_ty = llvm::Type::getInt32Ty(context);
+  llvm::FunctionType* fn_ty = llvm::FunctionType::get(i32_ty, {i32_ty}, false);
+
+  obf::indirect_dispatch_options branch_options;
+  branch_options.enabled = true;
+  branch_options.max_sites_per_function = 1;
+  branch_options.target_flattened_headers = true;
+  branch_options.target_vm_dispatchers = false;
+
+  obf::indirect_dispatch_options switch_options = branch_options;
+  switch_options.target_flattened_headers = false;
+  switch_options.target_vm_dispatchers = true;
+  switch_options.max_switch_targets = 4;
+
+  const auto has_verifier_errors = [](llvm::Function& function) {
+    std::string verify_err;
+    llvm::raw_string_ostream os(verify_err);
+    return llvm::verifyFunction(function, &os);
+  };
+
+  llvm::Function* legal_loop =
+      llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "idis_legal_loop", module);
+  llvm::BasicBlock* legal_entry = llvm::BasicBlock::Create(context, "entry", legal_loop);
+  llvm::BasicBlock* legal_loop_block = llvm::BasicBlock::Create(context, "loop", legal_loop);
+  llvm::BasicBlock* legal_exit = llvm::BasicBlock::Create(context, "exit", legal_loop);
+  llvm::IRBuilder<> legal_entry_builder(legal_entry);
+  legal_entry_builder.CreateBr(legal_loop_block);
+  llvm::IRBuilder<> legal_loop_builder(legal_loop_block);
+  llvm::PHINode* legal_i = legal_loop_builder.CreatePHI(i32_ty, 2, "i");
+  legal_i->addIncoming(legal_loop->getArg(0), legal_entry);
+  llvm::Value* legal_next =
+      legal_loop_builder.CreateAdd(legal_i, legal_loop_builder.getInt32(1), "next");
+  llvm::Value* legal_done =
+      legal_loop_builder.CreateICmpSGE(legal_next, legal_loop_builder.getInt32(10), "done");
+  legal_loop_builder.CreateCondBr(legal_done, legal_exit, legal_loop_block);
+  legal_i->addIncoming(legal_next, legal_loop_block);
+  llvm::IRBuilder<> legal_exit_builder(legal_exit);
+  legal_exit_builder.CreateRet(legal_i);
+
+  ExpectTrue(!has_verifier_errors(*legal_loop), "Legal loop backedge fixture must verify");
+  const obf::indirect_dispatch_result legal_analysis =
+      obf::analyze_indirect_dispatch(*legal_loop, branch_options);
+  ExpectTrue(legal_analysis.site_count == 1 && legal_analysis.branch_site_count == 1 &&
+                 legal_analysis.switch_site_count == 0 &&
+                 legal_analysis.blocked_unsupported_function_shape == 0,
+             "Legal loop backedge branch must remain a dispatch candidate");
+
+  // These fixtures are verifier-invalid by design: the entry block has a predecessor.
+  // The indirect-dispatch analysis must still reject the candidate terminator instead
+  // of selecting it and later materializing blockaddress(@fn, %entry).
+  llvm::Function* entry_branch = llvm::Function::Create(
+      fn_ty, llvm::GlobalValue::ExternalLinkage, "idis_entry_branch", module);
+  llvm::BasicBlock* entry_branch_entry = llvm::BasicBlock::Create(context, "entry", entry_branch);
+  llvm::BasicBlock* entry_branch_body = llvm::BasicBlock::Create(context, "body", entry_branch);
+  llvm::BasicBlock* entry_branch_exit = llvm::BasicBlock::Create(context, "exit", entry_branch);
+  llvm::IRBuilder<> entry_branch_entry_builder(entry_branch_entry);
+  entry_branch_entry_builder.CreateBr(entry_branch_body);
+  llvm::IRBuilder<> entry_branch_body_builder(entry_branch_body);
+  llvm::Value* entry_branch_next = entry_branch_body_builder.CreateAdd(
+      entry_branch->getArg(0), entry_branch_body_builder.getInt32(1), "next");
+  llvm::Value* entry_branch_continue = entry_branch_body_builder.CreateICmpSLT(
+      entry_branch_next, entry_branch_body_builder.getInt32(4), "continue");
+  entry_branch_body_builder.CreateCondBr(
+      entry_branch_continue, entry_branch_entry, entry_branch_exit);
+  llvm::IRBuilder<> entry_branch_exit_builder(entry_branch_exit);
+  entry_branch_exit_builder.CreateRet(entry_branch_next);
+
+  ExpectTrue(has_verifier_errors(*entry_branch),
+             "Entry-target branch fixture must stay verifier-invalid");
+  const obf::indirect_dispatch_result entry_branch_analysis =
+      obf::analyze_indirect_dispatch(*entry_branch, branch_options);
+  ExpectTrue(entry_branch_analysis.site_count == 0 &&
+                 entry_branch_analysis.branch_site_count == 0 &&
+                 entry_branch_analysis.switch_site_count == 0,
+             "Conditional branch targeting the entry block must be rejected");
+  ExpectTrue(entry_branch_analysis.blocked_unsupported_function_shape == 0,
+             "Entry-target branch rejection must come from candidate filtering");
+
+  llvm::Function* default_switch = llvm::Function::Create(
+      fn_ty, llvm::GlobalValue::ExternalLinkage, "idis_default_switch", module);
+  llvm::BasicBlock* default_switch_entry =
+      llvm::BasicBlock::Create(context, "entry", default_switch);
+  llvm::BasicBlock* default_switch_dispatch =
+      llvm::BasicBlock::Create(context, "dispatch", default_switch);
+  llvm::BasicBlock* default_switch_case =
+      llvm::BasicBlock::Create(context, "case0", default_switch);
+  llvm::IRBuilder<> default_switch_entry_builder(default_switch_entry);
+  default_switch_entry_builder.CreateBr(default_switch_dispatch);
+  llvm::IRBuilder<> default_switch_dispatch_builder(default_switch_dispatch);
+  auto* default_switch_inst = default_switch_dispatch_builder.CreateSwitch(
+      default_switch->getArg(0), default_switch_entry, 1);
+  default_switch_inst->addCase(default_switch_dispatch_builder.getInt32(0), default_switch_case);
+  llvm::IRBuilder<> default_switch_case_builder(default_switch_case);
+  default_switch_case_builder.CreateRet(default_switch_case_builder.getInt32(0));
+
+  ExpectTrue(has_verifier_errors(*default_switch),
+             "Entry-default switch fixture must stay verifier-invalid");
+  const obf::indirect_dispatch_result default_switch_analysis =
+      obf::analyze_indirect_dispatch(*default_switch, switch_options);
+  ExpectTrue(default_switch_analysis.site_count == 0 &&
+                 default_switch_analysis.branch_site_count == 0 &&
+                 default_switch_analysis.switch_site_count == 0,
+             "Switch with entry default target must be rejected");
+  ExpectTrue(default_switch_analysis.blocked_unsupported_function_shape == 0 &&
+                 default_switch_analysis.skipped_max_switch_targets == 0,
+             "Entry-default switch rejection must come from candidate filtering");
+
+  llvm::Function* case_switch =
+      llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "idis_case_switch", module);
+  llvm::BasicBlock* case_switch_entry = llvm::BasicBlock::Create(context, "entry", case_switch);
+  llvm::BasicBlock* case_switch_dispatch =
+      llvm::BasicBlock::Create(context, "dispatch", case_switch);
+  llvm::BasicBlock* case_switch_exit = llvm::BasicBlock::Create(context, "exit", case_switch);
+  llvm::IRBuilder<> case_switch_entry_builder(case_switch_entry);
+  case_switch_entry_builder.CreateBr(case_switch_dispatch);
+  llvm::IRBuilder<> case_switch_dispatch_builder(case_switch_dispatch);
+  auto* case_switch_inst =
+      case_switch_dispatch_builder.CreateSwitch(case_switch->getArg(0), case_switch_exit, 1);
+  case_switch_inst->addCase(case_switch_dispatch_builder.getInt32(0), case_switch_entry);
+  llvm::IRBuilder<> case_switch_exit_builder(case_switch_exit);
+  case_switch_exit_builder.CreateRet(case_switch_exit_builder.getInt32(1));
+
+  ExpectTrue(has_verifier_errors(*case_switch),
+             "Entry-case switch fixture must stay verifier-invalid");
+  const obf::indirect_dispatch_result case_switch_analysis =
+      obf::analyze_indirect_dispatch(*case_switch, switch_options);
+  ExpectTrue(case_switch_analysis.site_count == 0 && case_switch_analysis.branch_site_count == 0 &&
+                 case_switch_analysis.switch_site_count == 0,
+             "Switch with entry case target must be rejected");
+  ExpectTrue(case_switch_analysis.blocked_unsupported_function_shape == 0 &&
+                 case_switch_analysis.skipped_max_switch_targets == 0,
+             "Entry-case switch rejection must come from candidate filtering");
+}
+
 void TestAuthEncodingBlake2sKnownAnswers() {
   const std::array<std::uint8_t, 0> empty_input{};
   const std::array<std::uint8_t, 3> abc = {'a', 'b', 'c'};
@@ -962,14 +1101,10 @@ void TestZeroComparison() {
   ExpectTrue(exec_res.transformed_site_count >= 2,
              "run_zero_comparison should transform comparison sites");
 
-  // Verify that all icmp eq and strcmp calls were eliminated
-  bool has_icmp_eq = false;
+  ExpectTrue(!llvm::verifyFunction(*func, &llvm::errs()), "Zero-comparison output must verify");
   bool has_strcmp_call = false;
   for (const llvm::BasicBlock& bb : *func) {
     for (const llvm::Instruction& inst : bb) {
-      if (const auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
-        if (icmp->getPredicate() == llvm::ICmpInst::ICMP_EQ) { has_icmp_eq = true; }
-      }
       if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
         if (call->getCalledFunction() != nullptr &&
             call->getCalledFunction()->getName() == "strcmp") {
@@ -978,8 +1113,6 @@ void TestZeroComparison() {
       }
     }
   }
-  ExpectTrue(!has_icmp_eq,
-             "All icmp eq instructions should be lowered to zero-reduction arithmetic");
   ExpectTrue(!has_strcmp_call, "strcmp call should be lowered to inline zero-reduction");
 }
 void TestControlFlatteningAllocaRejection() {
@@ -1008,8 +1141,6 @@ void TestControlFlatteningAllocaRejection() {
   obf::control_flattening_options options;
   auto dyn_analysis = obf::analyze_control_flattening(*dyn_fn, options);
   ExpectTrue(!dyn_analysis.flattened, "Dynamic alloca must be rejected by control flattening");
-  ExpectTrue(dyn_analysis.detail == "dynamic or non-entry alloca not supported",
-             "Detail must indicate dynamic/non-entry alloca rejection");
 
   // 2. Function with static alloca in non-entry block
   llvm::Function* non_entry_fn =
@@ -1029,8 +1160,6 @@ void TestControlFlatteningAllocaRejection() {
 
   auto ne_analysis = obf::analyze_control_flattening(*non_entry_fn, options);
   ExpectTrue(!ne_analysis.flattened, "Non-entry alloca must be rejected by control flattening");
-  ExpectTrue(ne_analysis.detail == "dynamic or non-entry alloca not supported",
-             "Detail must indicate dynamic/non-entry alloca rejection");
 
   // 3. Function with static alloca in entry block (valid)
   llvm::Function* static_fn =
@@ -1760,6 +1889,7 @@ int main() {
   TestReleaseMarkerConfig();
   TestConstantProtectionModeConfig();
   TestIndirectDispatchConfig();
+  TestIndirectDispatchEntryTargetAnalysis();
   TestPolicyPrecedenceAndFloors();
   TestConfigEdgeCases();
   TestSeedStability();

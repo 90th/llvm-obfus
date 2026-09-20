@@ -5,13 +5,13 @@
 #include "obf/support/runtime_abi_generated.h"
 #include "obf/support/stable_hash.h"
 
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/TargetParser/Triple.h"
 
@@ -21,35 +21,75 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+
 namespace obf::mba {
 
 namespace {
 
+class function_lifetime_tracker;
+
+struct counter_registry_entry {
+  const llvm::Module* module = nullptr;
+  std::shared_ptr<atomic_mba_shape_counts> counters;
+  std::shared_ptr<function_lifetime_tracker> tracker;
+};
+
+class function_lifetime_tracker final
+    : public llvm::CallbackVH,
+      public std::enable_shared_from_this<function_lifetime_tracker> {
+ public:
+  explicit function_lifetime_tracker(llvm::Function& function)
+      : llvm::CallbackVH(&function), key_(&function) {}
+
+  void deleted() override;
+
+ private:
+  const llvm::Function* key_;
+};
+
 std::mutex g_mba_registry_mutex;
-std::unordered_map<const llvm::Module*,
-                   std::unordered_map<std::string, std::shared_ptr<atomic_mba_shape_counts>>>
-    g_mba_registry;
+std::unordered_map<const llvm::Function*, counter_registry_entry> g_mba_registry;
+
+void function_lifetime_tracker::deleted() {
+  auto keep_alive = shared_from_this();
+  std::lock_guard<std::mutex> lock(g_mba_registry_mutex);
+  llvm::CallbackVH::deleted();
+
+  const auto it = g_mba_registry.find(key_);
+  if (it != g_mba_registry.end() && it->second.tracker.get() == this) { g_mba_registry.erase(it); }
+}
+
+counter_registry_entry& get_or_create_counter_entry_locked(const llvm::Function& func) {
+  auto [it, inserted] = g_mba_registry.try_emplace(&func);
+  if (inserted) {
+    it->second.module = func.getParent();
+    it->second.counters = std::make_shared<atomic_mba_shape_counts>();
+    it->second.tracker =
+        std::make_shared<function_lifetime_tracker>(const_cast<llvm::Function&>(func));
+  }
+  return it->second;
+}
+
+struct counter_sink_ref {
+  atomic_mba_shape_counts* ptr = nullptr;
+  std::shared_ptr<atomic_mba_shape_counts> owner;
+
+  operator atomic_mba_shape_counts*() const { return ptr; }
+};
 
 std::shared_ptr<atomic_mba_shape_counts> get_or_create_counter_sink(const llvm::Function& func) {
   std::lock_guard<std::mutex> lock(g_mba_registry_mutex);
-  const llvm::Module* module = func.getParent();
-  auto& module_map = g_mba_registry[module];
-  auto& sink = module_map[func.getName().str()];
-  if (!sink) {
-    sink = std::make_shared<atomic_mba_shape_counts>();
-  }
-  return sink;
+  return get_or_create_counter_entry_locked(func).counters;
 }
 
-inline atomic_mba_shape_counts* get_counter_sink(const builder_context& context,
-                                                const llvm::Function* fallback_func) {
-  if (context.counters) {
-    return context.counters.get();
-  }
+inline counter_sink_ref get_counter_sink(const builder_context& context,
+                                         const llvm::Function* fallback_func) {
+  if (context.counters) { return {.ptr = context.counters.get()}; }
   if (fallback_func != nullptr) {
-    return get_or_create_counter_sink(*fallback_func).get();
+    std::shared_ptr<atomic_mba_shape_counts> owner = get_or_create_counter_sink(*fallback_func);
+    return {.ptr = owner.get(), .owner = std::move(owner)};
   }
-  return nullptr;
+  return {};
 }
 
 inline void record_linear(atomic_mba_shape_counts* counters) {
@@ -66,6 +106,13 @@ inline void record_polynomial(atomic_mba_shape_counts* counters) {
 
 inline void record_mul(atomic_mba_shape_counts* counters) {
   if (counters != nullptr) { counters->mul_count.fetch_add(1, std::memory_order_relaxed); }
+}
+
+inline void reset_counters(atomic_mba_shape_counts& counters) {
+  counters.linear_count.store(0, std::memory_order_relaxed);
+  counters.affine_count.store(0, std::memory_order_relaxed);
+  counters.polynomial_count.store(0, std::memory_order_relaxed);
+  counters.mul_count.store(0, std::memory_order_relaxed);
 }
 
 enum class opaque_zero_shape {
@@ -1576,11 +1623,9 @@ llvm::Value* create_add_impl(llvm::IRBuilder<>& builder,
       lhs->getType() != rhs->getType()) {
     return builder.CreateAdd(lhs, rhs, name.empty() ? "obf.mba.add" : name);
   }
-
   budget.Deduct(4);
 
-  auto* add_counters = get_counter_sink(context, builder.GetInsertBlock()->getParent());
-
+  auto add_counters = get_counter_sink(context, builder.GetInsertBlock()->getParent());
   switch (select_add_shape(context, salt)) {
     case add_shape::or_and: {
       record_linear(add_counters);
@@ -1711,11 +1756,9 @@ llvm::Value* create_sub_impl(llvm::IRBuilder<>& builder,
       lhs->getType() != rhs->getType()) {
     return builder.CreateSub(lhs, rhs, name.empty() ? "obf.mba.sub" : name);
   }
-
   budget.Deduct(4);
 
-  auto* sub_counters = get_counter_sink(context, builder.GetInsertBlock()->getParent());
-
+  auto sub_counters = get_counter_sink(context, builder.GetInsertBlock()->getParent());
   switch (select_sub_shape(context, salt)) {
     case sub_shape::xor_borrow: {
       record_linear(sub_counters);
@@ -1845,11 +1888,9 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
       lhs->getType() != rhs->getType()) {
     return builder.CreateXor(lhs, rhs, name.empty() ? "obf.mba.xor" : name);
   }
-
   budget.Deduct(4);
 
-  auto* xor_counters = get_counter_sink(context, builder.GetInsertBlock()->getParent());
-
+  auto xor_counters = get_counter_sink(context, builder.GetInsertBlock()->getParent());
   switch (select_xor_shape(context, salt)) {
     case xor_shape::or_and_sub: {
       record_linear(xor_counters);
@@ -1964,21 +2005,22 @@ llvm::Value* create_xor_impl(llvm::IRBuilder<>& builder,
 }  // namespace
 
 mba_shape_counts get_mba_counters(const llvm::Function& func) {
-  std::lock_guard<std::mutex> lock(g_mba_registry_mutex);
-  const llvm::Module* module = func.getParent();
-  auto mod_it = g_mba_registry.find(module);
-  if (mod_it == g_mba_registry.end()) { return {}; }
-  auto fn_it = mod_it->second.find(func.getName().str());
-  if (fn_it == mod_it->second.end() || !fn_it->second) { return {}; }
-  return fn_it->second->snapshot();
+  std::shared_ptr<atomic_mba_shape_counts> counters;
+  {
+    std::lock_guard<std::mutex> lock(g_mba_registry_mutex);
+    const auto it = g_mba_registry.find(&func);
+    if (it == g_mba_registry.end()) { return {}; }
+    counters = it->second.counters;
+  }
+
+  return counters ? counters->snapshot() : mba_shape_counts{};
 }
 
 void clear_mba_counters(const llvm::Module* module) {
   std::lock_guard<std::mutex> lock(g_mba_registry_mutex);
-  if (module != nullptr) {
-    g_mba_registry.erase(module);
-  } else {
-    g_mba_registry.clear();
+  for (auto& [_, entry] : g_mba_registry) {
+    if (!entry.counters || (module != nullptr && entry.module != module)) { continue; }
+    reset_counters(*entry.counters);
   }
 }
 

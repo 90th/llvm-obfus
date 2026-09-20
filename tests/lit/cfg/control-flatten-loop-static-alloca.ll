@@ -11,10 +11,11 @@
 ; CHECK: obf.flat.dispatch:
 
 ; Regression fixture for static alloca hoisting in flattened loops:
-; %acc is allocated in entry. It must be hoisted to setup before the dispatcher,
-; dominating all uses across loop iterations, without re-allocating inside the dispatcher.
+; %acc intentionally sits after a non-alloca entry instruction. Hoisting must
+; scan the full entry block so %acc moves into setup and still dominates the loop.
 define i32 @flat_loop_alloca(i32 %limit) {
 entry:
+  %seed = add i32 %limit, 0
   %acc = alloca i32, align 4
   store i32 0, ptr %acc, align 4
   br label %loop

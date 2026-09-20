@@ -132,25 +132,35 @@ create_handler_temp_slot(llvm::IRBuilder<>& builder, llvm::Type* type, llvm::Str
   return entry_builder.CreateAlloca(type, nullptr, name);
 }
 
-llvm::BinaryOperator* emit_plain_integer_binary(llvm::IRBuilder<>& builder,
-                                                opcode op,
-                                                llvm::Value* lhs,
-                                                llvm::Value* rhs,
-                                                llvm::StringRef name) {
+llvm::Value* emit_plain_integer_binary(llvm::IRBuilder<>& builder,
+                                       opcode op,
+                                       llvm::Value* lhs,
+                                       llvm::Value* rhs,
+                                       llvm::Instruction*& flag_target,
+                                       llvm::StringRef name) {
+  llvm::Value* result = nullptr;
   switch (op) {
     case opcode::add:
-      return llvm::cast<llvm::BinaryOperator>(builder.CreateAdd(lhs, rhs, name));
+      result = builder.CreateAdd(lhs, rhs, name);
+      break;
     case opcode::sub:
-      return llvm::cast<llvm::BinaryOperator>(builder.CreateSub(lhs, rhs, name));
+      result = builder.CreateSub(lhs, rhs, name);
+      break;
     case opcode::and_op:
-      return llvm::cast<llvm::BinaryOperator>(builder.CreateAnd(lhs, rhs, name));
+      result = builder.CreateAnd(lhs, rhs, name);
+      break;
     case opcode::or_op:
-      return llvm::cast<llvm::BinaryOperator>(builder.CreateOr(lhs, rhs, name));
+      result = builder.CreateOr(lhs, rhs, name);
+      break;
     case opcode::xor_op:
-      return llvm::cast<llvm::BinaryOperator>(builder.CreateXor(lhs, rhs, name));
+      result = builder.CreateXor(lhs, rhs, name);
+      break;
     default:
       llvm_unreachable("opcode is not a polymorphic integer binary opcode");
   }
+
+  flag_target = llvm::dyn_cast<llvm::Instruction>(result);
+  return result;
 }
 
 llvm::Value* emit_current_integer_binary(llvm::IRBuilder<>& builder,
@@ -169,21 +179,18 @@ llvm::Value* emit_current_integer_binary(llvm::IRBuilder<>& builder,
           !has_instruction_flag(flags, instruction_flag_nuw)) {
         return mba::create_add(builder, lhs, rhs, mba_context, salt + 3, name);
       }
-      flag_target = emit_plain_integer_binary(builder, op, lhs, rhs, name);
-      return flag_target;
+      return emit_plain_integer_binary(builder, op, lhs, rhs, flag_target, name);
     case opcode::sub:
       if (!has_instruction_flag(flags, instruction_flag_nsw) &&
           !has_instruction_flag(flags, instruction_flag_nuw)) {
         return mba::create_sub(builder, lhs, rhs, mba_context, salt + 4, name);
       }
-      flag_target = emit_plain_integer_binary(builder, op, lhs, rhs, name);
-      return flag_target;
+      return emit_plain_integer_binary(builder, op, lhs, rhs, flag_target, name);
     case opcode::xor_op:
       return mba::create_xor(builder, lhs, rhs, mba_context, salt + 5, name);
     case opcode::and_op:
     case opcode::or_op:
-      flag_target = emit_plain_integer_binary(builder, op, lhs, rhs, name);
-      return flag_target;
+      return emit_plain_integer_binary(builder, op, lhs, rhs, flag_target, name);
     default:
       llvm_unreachable("opcode is not a polymorphic integer binary opcode");
   }
@@ -300,7 +307,7 @@ llvm::Value* emit_fcmp_result(llvm::IRBuilder<>& builder,
     predicate = llvm::CmpInst::getInversePredicate(predicate);
   }
 
-  auto* compare = llvm::cast<llvm::Instruction>(builder.CreateFCmp(
+  llvm::Value* compare = builder.CreateFCmp(
       predicate,
       materialize_value(builder,
                         function_context.slot_allocas,
@@ -320,8 +327,8 @@ llvm::Value* emit_fcmp_result(llvm::IRBuilder<>& builder,
                         function_context.opaque_seed_base,
                         function_context.mba_context,
                         salt + 0x20 + instruction_index),
-      shape == compare_handler_shape::inverted_predicate ? "obf.vm.fcmp.inv" : "obf.vm.fcmp"));
-  apply_fast_math_flags(compare, instruction.flags);
+      shape == compare_handler_shape::inverted_predicate ? "obf.vm.fcmp.inv" : "obf.vm.fcmp");
+  apply_fast_math_flags(llvm::dyn_cast<llvm::Instruction>(compare), instruction.flags);
   if (shape == compare_handler_shape::inverted_predicate) {
     return builder.CreateXor(compare, builder.getTrue(), compare_shape_marker(shape));
   }
@@ -1249,18 +1256,17 @@ bool lower_scalar_instruction(llvm::IRBuilder<>& builder,
       return true;
 
     case opcode::fneg: {
-      auto* neg = llvm::cast<llvm::Instruction>(
-          builder.CreateFNeg(materialize_value(builder,
-                                               function_context.slot_allocas,
-                                               context.current_slot_mapping,
-                                               function_context.program,
-                                               instruction.operands[0],
-                                               function_context.opaque_seed_slot,
-                                               function_context.opaque_seed_base,
-                                               function_context.mba_context,
-                                               0xd080 + instruction_index),
-                             "obf.vm.fneg"));
-      apply_fast_math_flags(neg, instruction.flags);
+      llvm::Value* neg = builder.CreateFNeg(materialize_value(builder,
+                                                              function_context.slot_allocas,
+                                                              context.current_slot_mapping,
+                                                              function_context.program,
+                                                              instruction.operands[0],
+                                                              function_context.opaque_seed_slot,
+                                                              function_context.opaque_seed_base,
+                                                              function_context.mba_context,
+                                                              0xd080 + instruction_index),
+                                            "obf.vm.fneg");
+      apply_fast_math_flags(llvm::dyn_cast<llvm::Instruction>(neg), instruction.flags);
       finish_value(builder, context, neg);
       return true;
     }

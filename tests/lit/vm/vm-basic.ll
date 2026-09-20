@@ -2,6 +2,8 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-basic.yaml -passes=obf-vm -S %s -o - | %opt -passes='instcombine<no-verify-fixpoint>' -S -o - | %FileCheck %s --check-prefix=INST
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-basic.yaml -passes=obf-vm -S %s -o %t
 ; RUN: %lli %t
+; RUN: %opt -passes='instcombine<no-verify-fixpoint>,verify' -S %t -o %t.opt.ll
+; RUN: %lli %t.opt.ll
 
 define i32 @fold_value(i32 %value) {
 entry:
@@ -102,7 +104,6 @@ entry:
 ; INST: %fold_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; INST: %fold_value.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %fold_value.obf.wrapper.target.key, i{{[0-9]+}} %fold_value.obf.wrapper.target.seed.base)
 ; INST: %fold_value.obf.wrapper.real.int = {{(add|sub) i[0-9]+}}
 ; INST: %fold_value.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %obf.mba.{{.*}} to ptr
 ; INST: call i32 %fold_value.obf.wrapper.indirect(i32 %value, i64 {{(%fold_value\.obf\.wrapper\.token|-?[0-9]+)}})

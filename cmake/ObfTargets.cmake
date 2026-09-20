@@ -137,3 +137,24 @@ set_target_properties(obf-runtime-atomic-tests PROPERTIES
 )
 target_include_directories(obf-runtime-atomic-tests PRIVATE ${PROJECT_SOURCE_DIR}/include
                                                             ${CMAKE_CURRENT_BINARY_DIR}/include)
+
+find_package(Threads REQUIRED)
+
+add_executable(obf-runtime-decode-concurrency-tests
+  tests/unit/runtime_decode_concurrency_tests.c
+)
+set_target_properties(obf-runtime-decode-concurrency-tests PROPERTIES
+  C_STANDARD 17
+  C_STANDARD_REQUIRED ON
+)
+target_include_directories(obf-runtime-decode-concurrency-tests PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_BINARY_DIR}/include)
+target_link_libraries(obf-runtime-decode-concurrency-tests PRIVATE Threads::Threads)
+
+add_executable(obf-mba-lifetime-tests
+  tests/unit/mba_lifetime_tests.cpp
+)
+obf_apply_llvm_target_settings(obf-mba-lifetime-tests)
+llvm_update_compile_flags(obf-mba-lifetime-tests)
+target_link_libraries(obf-mba-lifetime-tests PRIVATE obf_core ${OBF_LLVM_LIBS} Threads::Threads)

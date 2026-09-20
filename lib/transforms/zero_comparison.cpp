@@ -9,6 +9,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 
+#include <optional>
 #include <string>
 
 namespace obf {
@@ -89,15 +90,20 @@ bool all_users_are_zero_equality(const llvm::CallBase& call) {
 }
 
 bool is_supported_string_call(const llvm::CallBase& call, const zero_comparison_options& options) {
-  if (!options.transform_string_comparisons || call.arg_size() < 2 ||
-      !call.getType()->isIntegerTy()) {
+  if (!options.transform_string_comparisons || !llvm::isa<llvm::CallInst>(call) ||
+      call.arg_size() < 2 || !call.getArgOperand(0)->getType()->isPointerTy() ||
+      !call.getArgOperand(1)->getType()->isPointerTy() || !call.getType()->isIntegerTy(32)) {
+    return false;
+  }
+  if (call.getNumOperandBundles() != 0 || llvm::cast<llvm::CallInst>(call).isMustTailCall()) {
     return false;
   }
   const llvm::Function* callee = call.getCalledFunction();
   if (callee == nullptr || !callee->isDeclaration() || callee->isIntrinsic()) {
     return false;
   }
-  if (!is_string_comparison_name(callee->getName())) {
+  if (!is_string_comparison_name(callee->getName()) ||
+      call.arg_size() != (callee->getName() == "strcmp" ? 2u : 3u)) {
     return false;
   }
   if (callee->getName() != "bcmp" && !all_users_are_zero_equality(call)) {
@@ -109,48 +115,42 @@ bool is_supported_string_call(const llvm::CallBase& call, const zero_comparison_
 const llvm::ConstantDataArray* extract_string_constant(const llvm::Value* value) {
   if (value == nullptr) { return nullptr; }
   const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(value->stripPointerCasts());
-  if (global == nullptr || !global->hasInitializer()) { return nullptr; }
+  if (global == nullptr || !global->isConstant() || !global->hasDefinitiveInitializer()) {
+    return nullptr;
+  }
   const auto* data = llvm::dyn_cast<llvm::ConstantDataArray>(global->getInitializer());
   return (data != nullptr && data->isString()) ? data : nullptr;
 }
-std::size_t c_string_length(const llvm::ConstantDataArray* data) {
-  if (data == nullptr) { return 0; }
+std::optional<std::size_t> c_string_length(const llvm::ConstantDataArray* data) {
+  if (data == nullptr) { return std::nullopt; }
   for (unsigned i = 0; i < data->getNumElements(); ++i) {
     if (data->getElementAsInteger(i) == 0) {
       return i + 1;
     }
   }
-  return data->getNumElements();
+  return std::nullopt;
 }
 
-
-std::size_t known_compare_length(const llvm::CallBase& call,
-                                 llvm::StringRef name,
-                                 const zero_comparison_options& options) {
+std::optional<std::size_t> known_compare_length(const llvm::CallBase& call,
+                                                llvm::StringRef name,
+                                                const zero_comparison_options& options) {
   if (name == "memcmp" || name == "bcmp" || name == "strncmp") {
-    if (call.arg_size() < 3) { return 0; }
+    if (call.arg_size() < 3) { return std::nullopt; }
     const auto* length = llvm::dyn_cast<llvm::ConstantInt>(call.getArgOperand(2));
-    if (length == nullptr || length->isZero() || length->getZExtValue() > options.max_unroll_bytes) {
-      return 0;
+    if (length == nullptr || length->getValue().getActiveBits() > 64 ||
+        length->getZExtValue() > options.max_unroll_bytes ||
+        (length->isZero() && name != "strncmp")) {
+      return std::nullopt;
     }
     return static_cast<std::size_t>(length->getZExtValue());
   }
 
-  const auto* lhs_data = extract_string_constant(call.getArgOperand(0));
-  const auto* rhs_data = extract_string_constant(call.getArgOperand(1));
-  if (lhs_data != nullptr && rhs_data != nullptr) {
-    const std::size_t length = std::min(c_string_length(lhs_data), c_string_length(rhs_data));
-    return length <= options.max_unroll_bytes ? length : 0;
-  }
-  if (lhs_data != nullptr) {
-    const std::size_t length = c_string_length(lhs_data);
-    return length <= options.max_unroll_bytes ? length : 0;
-  }
-  if (rhs_data != nullptr) {
-    const std::size_t length = c_string_length(rhs_data);
-    return length <= options.max_unroll_bytes ? length : 0;
-  }
-  return 0;
+  const auto lhs_length = c_string_length(extract_string_constant(call.getArgOperand(0)));
+  const auto rhs_length = c_string_length(extract_string_constant(call.getArgOperand(1)));
+  const auto length = lhs_length && rhs_length ? std::min(*lhs_length, *rhs_length)
+                      : lhs_length             ? lhs_length
+                                               : rhs_length;
+  return length && *length <= options.max_unroll_bytes ? length : std::nullopt;
 }
 
 llvm::Value*
@@ -176,22 +176,58 @@ create_unrolled_delta(llvm::IRBuilder<>& builder, llvm::CallBase& call, std::siz
   return delta;
 }
 
+llvm::Value*
+create_short_circuit_delta(llvm::IRBuilder<>& builder, llvm::CallBase& call, std::size_t length) {
+  if (length == 0) { return builder.getInt8(0); }
+
+  llvm::BasicBlock* block = call.getParent();
+  llvm::BasicBlock* continuation = block->splitBasicBlock(call.getIterator(), "obf.zero.str.end");
+  block->getTerminator()->eraseFromParent();
+  builder.SetInsertPoint(&call);
+  auto* result = builder.CreatePHI(builder.getInt8Ty(), length, "obf.zero.str.delta");
+  builder.SetInsertPoint(block);
+  for (std::size_t index = 0; index < length; ++index) {
+    llvm::Value* offset = builder.getInt64(index);
+    llvm::Value* lhs = builder.CreateAlignedLoad(
+        builder.getInt8Ty(),
+        builder.CreateGEP(builder.getInt8Ty(), call.getArgOperand(0), offset),
+        llvm::Align(1),
+        "obf.zero.str.lhs.byte");
+    llvm::Value* rhs = builder.CreateAlignedLoad(
+        builder.getInt8Ty(),
+        builder.CreateGEP(builder.getInt8Ty(), call.getArgOperand(1), offset),
+        llvm::Align(1),
+        "obf.zero.str.rhs.byte");
+    llvm::Value* delta = builder.CreateXor(lhs, rhs, "obf.zero.str.xor");
+    result->addIncoming(delta, builder.GetInsertBlock());
+    if (index + 1 == length) {
+      builder.CreateBr(continuation);
+      break;
+    }
+
+    // A later byte is accessible only while both strings continue and still match.
+    llvm::Value* more = builder.CreateAnd(builder.CreateICmpEQ(delta, builder.getInt8(0)),
+                                          builder.CreateICmpNE(lhs, builder.getInt8(0)));
+    auto* next = llvm::BasicBlock::Create(
+        call.getContext(), "obf.zero.str.next", block->getParent(), continuation);
+    builder.CreateCondBr(more, next, continuation);
+    builder.SetInsertPoint(next);
+  }
+  builder.SetInsertPoint(&call);
+  return result;
+}
+
 llvm::Value* replace_string_call(llvm::CallBase& call, const zero_comparison_options& options) {
   llvm::Function* callee = call.getCalledFunction();
   if (callee == nullptr) { return nullptr; }
-  const std::size_t length = known_compare_length(call, callee->getName(), options);
-  if (length == 0) { return nullptr; }
+  const auto length = known_compare_length(call, callee->getName(), options);
+  if (!length) { return nullptr; }
 
   llvm::IRBuilder<> builder(&call);
-  llvm::Value* delta = create_unrolled_delta(builder, call, length);
-  llvm::Type* result_type = call.getType();
-  if (result_type->getIntegerBitWidth() > 8) {
-    return builder.CreateZExt(delta, result_type, "obf.zero.str.result");
-  }
-  if (result_type->getIntegerBitWidth() < 8) {
-    return builder.CreateTrunc(delta, result_type, "obf.zero.str.result");
-  }
-  return delta;
+  const bool is_string = callee->getName() == "strcmp" || callee->getName() == "strncmp";
+  llvm::Value* delta = is_string ? create_short_circuit_delta(builder, call, *length)
+                                 : create_unrolled_delta(builder, call, *length);
+  return builder.CreateZExt(delta, call.getType(), "obf.zero.str.result");
 }
 
 llvm::Value* replace_select(llvm::SelectInst& select, const zero_comparison_options& options) {
@@ -208,9 +244,12 @@ llvm::Value* replace_select(llvm::SelectInst& select, const zero_comparison_opti
   if (condition == nullptr) { return nullptr; }
   auto* value_type = llvm::cast<llvm::IntegerType>(select.getType());
   llvm::Value* mask = builder.CreateSExt(condition, value_type, "obf.zero.mask");
-  llvm::Value* true_arm = builder.CreateAnd(select.getTrueValue(), mask, "obf.zero.select.true");
+  // Unlike select, bitwise masking propagates poison from either arm.
+  llvm::Value* true_value = builder.CreateFreeze(select.getTrueValue(), "obf.zero.true");
+  llvm::Value* false_value = builder.CreateFreeze(select.getFalseValue(), "obf.zero.false");
+  llvm::Value* true_arm = builder.CreateAnd(true_value, mask, "obf.zero.select.true");
   llvm::Value* false_arm =
-      builder.CreateAnd(select.getFalseValue(), builder.CreateNot(mask), "obf.zero.select.false");
+      builder.CreateAnd(false_value, builder.CreateNot(mask), "obf.zero.select.false");
   return builder.CreateOr(true_arm, false_arm, "obf.zero.select");
 }
 
@@ -220,7 +259,7 @@ bool is_candidate(const llvm::Instruction& instruction, const zero_comparison_op
   }
   if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
     return is_supported_string_call(*call, options) &&
-           known_compare_length(*call, call->getCalledFunction()->getName(), options) != 0;
+           known_compare_length(*call, call->getCalledFunction()->getName(), options).has_value();
   }
   if (const auto* select = llvm::dyn_cast<llvm::SelectInst>(&instruction)) {
     const auto* compare = llvm::dyn_cast<llvm::ICmpInst>(select->getCondition());

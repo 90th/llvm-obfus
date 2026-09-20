@@ -31,7 +31,7 @@ struct ObfBlake2sState {
   size_t outlen;
 };
 
-static inline OBF_NOINLINE void ObfSecureZeroize(void *buffer, size_t size) {
+static OBF_NOINLINE void ObfSecureZeroize(void *buffer, size_t size) {
   volatile uint8_t *bytes = (volatile uint8_t *)buffer;
   while (size != 0) {
     *bytes = 0;

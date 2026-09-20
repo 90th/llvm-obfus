@@ -952,14 +952,31 @@ static uint64_t ObfConstantPoolCompletion(
                                      descriptor->nonce);
 }
 
+/*
+ * Status is the phase authority.
+ * The phase moves cold -> decoding -> decoded.
+ * The writer can publish completion before the next status value.
+ * Read status, then completion, then status again.
+ * If status changes, retry. A stable decoded status authorizes the hash check.
+ */
+static int ObfLoadStableStatusCompletion(const struct ObfAuthenticatedStateReferenceV3* state_ref,
+                                         uint64_t* status,
+                                         uint64_t* completion) {
+  const uint64_t initial_status = ObfAtomicLoadU64Acquire(&state_ref->status);
+  *completion = ObfAtomicLoadU64Acquire(&state_ref->completion);
+  *status = ObfAtomicLoadU64Acquire(&state_ref->status);
+  return initial_status == *status;
+}
+
 static uint8_t *ObfWaitForStringDecode(
     struct ObfStringValidationContext *context,
     const struct ObfStringRuntimeDescriptorV3 *descriptor,
     const struct ObfAuthenticatedDecodeTopologyV3 *topology) {
   uint32_t poll;
   for (poll = 0; poll < kObfDecodePollLimit; ++poll) {
-    const uint64_t status = ObfAtomicLoadU64Acquire(&descriptor->state->status);
-    const uint64_t completion = ObfAtomicLoadU64Acquire(&descriptor->state->completion);
+    uint64_t status;
+    uint64_t completion;
+    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) { continue; }
     if (!ObfVerifyStringTag(context, descriptor)) {
       ObfTrapAfterZeroize(context, sizeof(*context));
     }
@@ -988,8 +1005,9 @@ static uint8_t *ObfWaitForConstantPoolDecode(
     const struct ObfAuthenticatedDecodeTopologyV3 *topology) {
   uint32_t poll;
   for (poll = 0; poll < kObfDecodePollLimit; ++poll) {
-    const uint64_t status = ObfAtomicLoadU64Acquire(&descriptor->state->status);
-    const uint64_t completion = ObfAtomicLoadU64Acquire(&descriptor->state->completion);
+    uint64_t status;
+    uint64_t completion;
+    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) { continue; }
     if (!ObfVerifyConstantPoolTag(context, descriptor)) {
       ObfTrapAfterZeroize(context, sizeof(*context));
     }
@@ -1037,11 +1055,12 @@ uint8_t *OBF_RT_STRING_AUTH_DECODE_V3(
   }
 
   for (uint32_t poll = 0; poll < kObfDecodePollLimit; ++poll) {
+    uint64_t status;
+    uint64_t completion;
     if (!ObfVerifyStringTag(&context, descriptor)) {
       ObfTrapAfterZeroize(&context, sizeof(context));
     }
-    const uint64_t status = ObfAtomicLoadU64Acquire(&descriptor->state->status);
-    const uint64_t completion = ObfAtomicLoadU64Acquire(&descriptor->state->completion);
+    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) { continue; }
     if (status == context.statuses.decoded) {
       const uint64_t expected_completion = ObfStringCompletion(&context, descriptor, trusted_topology);
       if (!ObfVerifyStringTag(&context, descriptor)) {
@@ -1109,11 +1128,12 @@ uint8_t *OBF_RT_CONSTANT_POOL_DECODE_V3(
   }
 
   for (uint32_t poll = 0; poll < kObfDecodePollLimit; ++poll) {
+    uint64_t status;
+    uint64_t completion;
     if (!ObfVerifyConstantPoolTag(&context, descriptor)) {
       ObfTrapAfterZeroize(&context, sizeof(context));
     }
-    const uint64_t status = ObfAtomicLoadU64Acquire(&descriptor->state->status);
-    const uint64_t completion = ObfAtomicLoadU64Acquire(&descriptor->state->completion);
+    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) { continue; }
     if (status == context.statuses.decoded) {
       const uint64_t expected_completion =
           ObfConstantPoolCompletion(&context, descriptor, trusted_topology);

@@ -20,7 +20,7 @@ declare i32 @memcmp(ptr, ptr, i64)
 ; CHECK: call i32 @strcmp
 define i32 @test_strcmp_signed(ptr %s1, ptr %s2) {
 entry:
-  %res = call i32 @strcmp(ptr %s1, ptr %s2)
+  %res = call i32 @strcmp(ptr @.str.apple, ptr %s2)
   %cmp = icmp slt i32 %res, 0
   %val = select i1 %cmp, i32 1, i32 2
   ret i32 %val

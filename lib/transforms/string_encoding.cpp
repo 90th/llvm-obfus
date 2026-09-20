@@ -478,8 +478,7 @@ std::optional<classified_string_use> classify_ephemeral_compare_use(
   if (callee == nullptr || !is_ephemeral_compare_name(callee->getName()) ||
       !callee->isDeclaration() || !callee->hasExternalLinkage() ||
       call->getCallingConv() != llvm::CallingConv::C ||
-      callee->getCallingConv() != llvm::CallingConv::C ||
-      call->hasFnAttr(llvm::Attribute::NoBuiltin) ||
+      callee->getCallingConv() != llvm::CallingConv::C || call->isNoBuiltin() ||
       callee->hasFnAttribute(llvm::Attribute::NoBuiltin)) {
     return std::nullopt;
   }

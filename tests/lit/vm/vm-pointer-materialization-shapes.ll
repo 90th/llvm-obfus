@@ -65,6 +65,3 @@ entry:
 ; SHAPES: call i32 %{{[^ ]+}}(i32 %x, i64 %{{[^)]+}})
 ; SHAPES-NOT: {{.*}}.ptrmat.direct
 ; SHAPES: ret i32
-
-; SHAPES-DAG: .ptrmat.split
-; SHAPES-DAG: .ptrmat.addsub

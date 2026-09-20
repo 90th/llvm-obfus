@@ -19,3 +19,15 @@ add_test(
   NAME obf-runtime-atomic-tests
   COMMAND obf-runtime-atomic-tests
 )
+
+add_test(
+  NAME obf-runtime-decode-concurrency-tests
+  COMMAND obf-runtime-decode-concurrency-tests
+)
+
+add_test(
+  NAME obf-mba-lifetime-tests
+  COMMAND obf-mba-lifetime-tests
+)
+set_tests_properties(obf-runtime-decode-concurrency-tests obf-mba-lifetime-tests
+  PROPERTIES TIMEOUT 120)
