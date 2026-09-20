@@ -201,7 +201,8 @@ entry:
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(ptr %base, i32 %index, i64 %obf.hidden_token)
 ; CHECK: store i64 %obf.vm.ptr.carrier{{[0-9]*}}, ptr %obf.vm.state.slot.{{[0-9]+}}.{{[0-9]+}}
 ; CHECK: %obf.vm.slot.ptr.raw{{[0-9]*}} = load i64, ptr %obf.vm.state.slot.{{[0-9]+}}.{{[0-9]+}}
-; CHECK: %obf.vm.slot.ptr.value{{[0-9]*}} = inttoptr i64 %obf.vm.slot.ptr.raw{{[0-9]*}} to ptr
+; CHECK: [[BASE_PTR:%[A-Za-z0-9_.]+]] = inttoptr i64 %obf.vm.slot.ptr.raw{{[0-9]*}} to ptr
+; CHECK: {{(getelementptr [^,]+|store ptr|ptrtoint ptr|select [^,]+)}}, ptr [[BASE_PTR]]
 ; CHECK: %obf.vm.ptr.carrier{{[0-9]*}} =
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %tag, i32 %base, i64 %obf.hidden_token)
 ; CHECK: vm.switch.default.

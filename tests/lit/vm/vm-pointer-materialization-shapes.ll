@@ -49,7 +49,7 @@ entry:
 ; STRUCTURE-DAG: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 
 ; SHAPES-LABEL: define i32 @strong_target_a(i32 %x)
-; SHAPES: {{.*}}.ptrmat.{{split|addsub}}
+; SHAPES: {{.*}}.ptrmat.split
 ; SHAPES: call i32 %{{[^ ]+}}(i32 %x, i64 %{{[^)]+}})
 ; SHAPES-NOT: {{.*}}.ptrmat.direct
 ; SHAPES: ret i32
@@ -61,7 +61,9 @@ entry:
 ; SHAPES: ret i32
 
 ; SHAPES-LABEL: define i32 @strong_target_c(i32 %x)
-; SHAPES: {{.*}}.ptrmat.{{split|addsub}}
+; SHAPES: {{.*}}.ptrmat.addsub
 ; SHAPES: call i32 %{{[^ ]+}}(i32 %x, i64 %{{[^)]+}})
 ; SHAPES-NOT: {{.*}}.ptrmat.direct
 ; SHAPES: ret i32
+
+; SHAPES-LABEL: define i32 @main()
