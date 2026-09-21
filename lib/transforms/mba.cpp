@@ -4,6 +4,7 @@
 #include "obf/support/affine_helpers.h"
 #include "obf/support/runtime_abi_generated.h"
 #include "obf/support/stable_hash.h"
+#include "obf/support/value_utils.h"
 
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -1040,9 +1041,8 @@ llvm::Value* build_opaque_zero_xor_pair(llvm::IRBuilder<>& builder,
                                         llvm::Value* entropy_b,
                                         llvm::Constant* mask) {
   llvm::Value* delta = builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.xor_pair.delta");
-  llvm::Value* stable_delta = builder.CreateFreeze(delta, "obf.mba.zero.xor_pair.delta.stable");
   llvm::Value* lhs = builder.CreateXor(delta, mask, "obf.mba.zero.xor_pair.lhs");
-  llvm::Value* rhs = builder.CreateXor(stable_delta, mask, "obf.mba.zero.xor_pair.rhs");
+  llvm::Value* rhs = builder.CreateXor(delta, mask, "obf.mba.zero.xor_pair.rhs");
   return builder.CreateXor(lhs, rhs, "obf.mba.zero.xor_pair");
 }
 
@@ -1051,10 +1051,9 @@ llvm::Value* build_opaque_zero_sub_pair(llvm::IRBuilder<>& builder,
                                         llvm::Value* entropy_b,
                                         llvm::Constant* mask) {
   llvm::Value* delta = builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.sub_pair.delta");
-  llvm::Value* stable_delta = builder.CreateFreeze(delta, "obf.mba.zero.sub_pair.delta.stable");
   llvm::Value* masked = builder.CreateXor(delta, mask, "obf.mba.zero.sub_pair.masked");
   llvm::Value* unmasked = builder.CreateXor(masked, mask, "obf.mba.zero.sub_pair.unmasked");
-  return builder.CreateSub(unmasked, stable_delta, "obf.mba.zero.sub_pair");
+  return builder.CreateSub(unmasked, delta, "obf.mba.zero.sub_pair");
 }
 
 llvm::Value* build_opaque_zero_affine_cancel_pair(llvm::IRBuilder<>& builder,
@@ -1121,9 +1120,8 @@ llvm::Value* build_opaque_zero_polynomial_binomial_pair(llvm::IRBuilder<>& build
   }
 
   const unsigned bit_width = target_type->getIntegerBitWidth();
-  llvm::Value* term = builder.CreateFreeze(
-      builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.poly_binomial.term.raw"),
-      "obf.mba.zero.poly_binomial.term");
+  llvm::Value* term =
+      builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.poly_binomial.term");
   const llvm::APInt c1(bit_width,
                        derive_shape_seed(context, "mba.zero.poly_binomial.c1", salt, target_type),
                        /*isSigned=*/false,
@@ -1160,9 +1158,8 @@ llvm::Value* build_opaque_zero_polynomial_affine_pair(llvm::IRBuilder<>& builder
   }
 
   const unsigned bit_width = target_type->getIntegerBitWidth();
-  llvm::Value* term = builder.CreateFreeze(
-      builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.poly_affine.term.raw"),
-      "obf.mba.zero.poly_affine.term");
+  llvm::Value* term =
+      builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.poly_affine.term");
   const llvm::APInt coeff_a = support::make_odd_affine_multiplier(
       bit_width, derive_shape_seed(context, "mba.zero.poly_affine.coeff_a", salt, target_type));
   const llvm::APInt coeff_b = support::make_affine_bias(
@@ -1198,6 +1195,11 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
                                          const builder_context& context,
                                          llvm::Constant* mask,
                                          std::uint64_t salt) {
+  // Entropy is introduced by the obfuscator, not by the source program. Freeze
+  // it here so every zero identity sees one non-poison value per input.
+  entropy_a = builder.CreateFreeze(entropy_a, "obf.mba.zero.input.a");
+  entropy_b = builder.CreateFreeze(entropy_b, "obf.mba.zero.input.b");
+
   // Every family must reduce to semantic zero on its own. That keeps opaque
   // predicates and constant masks correct even if future entropy accessors stop
   // returning identical pair components.
@@ -1207,10 +1209,8 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
     case opaque_zero_shape::add_sub_pair: {
       llvm::Value* delta =
           builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.add_sub_pair.delta");
-      llvm::Value* stable_delta =
-          builder.CreateFreeze(delta, "obf.mba.zero.add_sub_pair.delta.stable");
       llvm::Value* lhs = builder.CreateAdd(delta, mask, "obf.mba.zero.add_sub_pair.lhs");
-      llvm::Value* rhs = builder.CreateAdd(stable_delta, mask, "obf.mba.zero.add_sub_pair.rhs");
+      llvm::Value* rhs = builder.CreateAdd(delta, mask, "obf.mba.zero.add_sub_pair.rhs");
       return builder.CreateSub(lhs, rhs, "obf.mba.zero.add_sub_pair");
     }
     case opaque_zero_shape::sub_pair:
@@ -1222,12 +1222,10 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
 
       llvm::Value* delta =
           builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.rotate_xor_pair.delta");
-      llvm::Value* stable_delta =
-          builder.CreateFreeze(delta, "obf.mba.zero.rotate_xor_pair.delta.stable");
       llvm::Value* lhs_seed =
           builder.CreateXor(delta, mask, "obf.mba.zero.rotate_xor_pair.lhs.seed");
       llvm::Value* rhs_seed =
-          builder.CreateXor(stable_delta, mask, "obf.mba.zero.rotate_xor_pair.rhs.seed");
+          builder.CreateXor(delta, mask, "obf.mba.zero.rotate_xor_pair.rhs.seed");
       const unsigned bit_width = target_type->getIntegerBitWidth();
       if (bit_width <= 1) {
         return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
@@ -1248,10 +1246,8 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
           builder.CreateICmpEQ(entropy_a, entropy_b, "obf.mba.zero.cmp_select_pair.eq");
       llvm::Value* delta =
           builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.cmp_select_pair.delta");
-      llvm::Value* stable_delta =
-          builder.CreateFreeze(delta, "obf.mba.zero.cmp_select_pair.delta.stable");
       llvm::Value* zero_alt =
-          builder.CreateSub(delta, stable_delta, "obf.mba.zero.cmp_select_pair.zero.alt");
+          builder.CreateSub(delta, delta, "obf.mba.zero.cmp_select_pair.zero.alt");
       return builder.CreateSelect(equal,
                                   llvm::Constant::getNullValue(target_type),
                                   zero_alt,
@@ -1268,15 +1264,13 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
       }
 
       // (x | y) + (x & y) and (x ^ y) + ((x & y) << 1) are both x + y.
-      llvm::Value* stable_a = builder.CreateFreeze(entropy_a, "obf.mba.zero.linear_equiv_pair.a");
-      llvm::Value* stable_b = builder.CreateFreeze(entropy_b, "obf.mba.zero.linear_equiv_pair.b");
       llvm::Value* or_part =
-          builder.CreateOr(stable_a, stable_b, "obf.mba.zero.linear_equiv_pair.or");
+          builder.CreateOr(entropy_a, entropy_b, "obf.mba.zero.linear_equiv_pair.or");
       llvm::Value* and_part =
-          builder.CreateAnd(stable_a, stable_b, "obf.mba.zero.linear_equiv_pair.and");
+          builder.CreateAnd(entropy_a, entropy_b, "obf.mba.zero.linear_equiv_pair.and");
       llvm::Value* lhs = builder.CreateAdd(or_part, and_part, "obf.mba.zero.linear_equiv_pair.lhs");
       llvm::Value* xor_part =
-          builder.CreateXor(stable_a, stable_b, "obf.mba.zero.linear_equiv_pair.xor");
+          builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.linear_equiv_pair.xor");
       llvm::Constant* one = constant_i64_to_type(target_type, 1);
       llvm::Value* carry = builder.CreateShl(and_part, one, "obf.mba.zero.linear_equiv_pair.carry");
       llvm::Value* rhs = builder.CreateAdd(xor_part, carry, "obf.mba.zero.linear_equiv_pair.rhs");
@@ -1451,11 +1445,8 @@ llvm::Value* create_mul_impl(llvm::IRBuilder<>& builder,
 
   const llvm::APInt constant = constant_operand->getValue();
   if (constant.isZero()) {
-    return entangle_value_impl(builder,
-                               llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(lhs->getType()), constant),
-                               context,
-                               salt,
-                               result_name);
+    return entangle_value_impl(
+        builder, builder.CreateMul(lhs, rhs, result_name), context, salt, result_name);
   }
   if (constant == llvm::APInt(constant.getBitWidth(), 1)) {
     return entangle_value_impl(builder, variable, context, salt, result_name);
@@ -2139,7 +2130,21 @@ llvm::Value* create_add(llvm::IRBuilder<>& builder,
                         std::uint64_t salt,
                         llvm::StringRef name) {
   auto budget = BudgetTracker::FromContext(context);
-  return create_add_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context), budget);
+  const std::uint32_t depth = clamped_depth(context);
+  if (depth == 0 || budget.Exhausted() || !is_supported_type(lhs->getType()) ||
+      lhs->getType() != rhs->getType()) {
+    return create_add_impl(builder, lhs, rhs, context, salt, name, depth, budget);
+  }
+
+  const llvm::StringRef prefix = name.empty() ? "obf.mba.add" : name;
+  const support::stabilized_value stable_lhs =
+      support::stabilize_value_for_reuse(builder, lhs, (prefix + ".lhs").str());
+  const support::stabilized_value stable_rhs =
+      support::stabilize_value_for_reuse(builder, rhs, (prefix + ".rhs").str());
+  llvm::Value* result = create_add_impl(
+      builder, stable_lhs.value, stable_rhs.value, context, salt, name, depth, budget);
+  const support::stabilized_value operands[] = {stable_lhs, stable_rhs};
+  return support::restore_poison_from_stabilized_values(builder, result, operands, prefix);
 }
 
 llvm::Value* create_sub(llvm::IRBuilder<>& builder,
@@ -2149,7 +2154,21 @@ llvm::Value* create_sub(llvm::IRBuilder<>& builder,
                         std::uint64_t salt,
                         llvm::StringRef name) {
   auto budget = BudgetTracker::FromContext(context);
-  return create_sub_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context), budget);
+  const std::uint32_t depth = clamped_depth(context);
+  if (depth == 0 || budget.Exhausted() || !is_supported_type(lhs->getType()) ||
+      lhs->getType() != rhs->getType()) {
+    return create_sub_impl(builder, lhs, rhs, context, salt, name, depth, budget);
+  }
+
+  const llvm::StringRef prefix = name.empty() ? "obf.mba.sub" : name;
+  const support::stabilized_value stable_lhs =
+      support::stabilize_value_for_reuse(builder, lhs, (prefix + ".lhs").str());
+  const support::stabilized_value stable_rhs =
+      support::stabilize_value_for_reuse(builder, rhs, (prefix + ".rhs").str());
+  llvm::Value* result = create_sub_impl(
+      builder, stable_lhs.value, stable_rhs.value, context, salt, name, depth, budget);
+  const support::stabilized_value operands[] = {stable_lhs, stable_rhs};
+  return support::restore_poison_from_stabilized_values(builder, result, operands, prefix);
 }
 
 llvm::Value* create_xor(llvm::IRBuilder<>& builder,
@@ -2159,7 +2178,21 @@ llvm::Value* create_xor(llvm::IRBuilder<>& builder,
                         std::uint64_t salt,
                         llvm::StringRef name) {
   auto budget = BudgetTracker::FromContext(context);
-  return create_xor_impl(builder, lhs, rhs, context, salt, name, clamped_depth(context), budget);
+  const std::uint32_t depth = clamped_depth(context);
+  if (depth == 0 || budget.Exhausted() || !is_supported_type(lhs->getType()) ||
+      lhs->getType() != rhs->getType()) {
+    return create_xor_impl(builder, lhs, rhs, context, salt, name, depth, budget);
+  }
+
+  const llvm::StringRef prefix = name.empty() ? "obf.mba.xor" : name;
+  const support::stabilized_value stable_lhs =
+      support::stabilize_value_for_reuse(builder, lhs, (prefix + ".lhs").str());
+  const support::stabilized_value stable_rhs =
+      support::stabilize_value_for_reuse(builder, rhs, (prefix + ".rhs").str());
+  llvm::Value* result = create_xor_impl(
+      builder, stable_lhs.value, stable_rhs.value, context, salt, name, depth, budget);
+  const support::stabilized_value operands[] = {stable_lhs, stable_rhs};
+  return support::restore_poison_from_stabilized_values(builder, result, operands, prefix);
 }
 
 llvm::Value* create_mul(llvm::IRBuilder<>& builder,
@@ -2169,7 +2202,36 @@ llvm::Value* create_mul(llvm::IRBuilder<>& builder,
                         std::uint64_t salt,
                         llvm::StringRef name) {
   auto budget = BudgetTracker::FromContext(context);
-  return create_mul_impl(builder, lhs, rhs, context, salt, name, budget);
+  const llvm::ConstantInt* constant_operand = llvm::dyn_cast<llvm::ConstantInt>(rhs);
+  if (constant_operand == nullptr) {
+    constant_operand = llvm::dyn_cast<llvm::ConstantInt>(lhs);
+  }
+
+  bool duplicates_variable = false;
+  if (derive_features(context).enable_multiplication && lhs->getType()->isIntegerTy() &&
+      lhs->getType() == rhs->getType() && constant_operand != nullptr) {
+    const llvm::APInt constant = constant_operand->getValue();
+    const llvm::APInt magnitude = constant.isNegative() ? -constant : constant;
+    const unsigned term_count = magnitude.popcount();
+    const bool negation_duplicates =
+        constant.isNegative() && clamped_depth(context) > 1;
+    duplicates_variable =
+        budget.HasBudget(18) && term_count > 0 && term_count <= 3 &&
+        (term_count > 1 || negation_duplicates);
+  }
+  if (!duplicates_variable) {
+    return create_mul_impl(builder, lhs, rhs, context, salt, name, budget);
+  }
+
+  const llvm::StringRef prefix = name.empty() ? "obf.mba.mul" : name;
+  const support::stabilized_value stable_lhs =
+      support::stabilize_value_for_reuse(builder, lhs, (prefix + ".lhs").str());
+  const support::stabilized_value stable_rhs =
+      support::stabilize_value_for_reuse(builder, rhs, (prefix + ".rhs").str());
+  llvm::Value* result =
+      create_mul_impl(builder, stable_lhs.value, stable_rhs.value, context, salt, name, budget);
+  const support::stabilized_value operands[] = {stable_lhs, stable_rhs};
+  return support::restore_poison_from_stabilized_values(builder, result, operands, prefix);
 }
 
 llvm::Value* create_udiv(llvm::IRBuilder<>& builder,

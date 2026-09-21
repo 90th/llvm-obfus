@@ -27,5 +27,5 @@ entry:
 ; be emitted and must preserve branch behavior
 ; CHECK: %obf.opaque.pair = load
 ; CHECK: %obf.opaque.entropy.mix{{.*}} = {{.*}}
-; CHECK: %obf.opaque.guard.true = icmp eq i64 %obf.opaque.expr.a, %obf.opaque.expr.b
+; CHECK: %obf.opaque.guard.true = icmp eq i64 %obf.opaque.expr.a{{(\.poison)?}}, %obf.opaque.expr.b{{(\.poison)?}}
 

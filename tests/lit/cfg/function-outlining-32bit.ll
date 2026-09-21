@@ -67,4 +67,4 @@ entry:
 
 ; CHECK-LABEL: define i32 @shardy32(i32 %x)
 ; CHECK: %obf.shard.addr.base{{[0-9]*}} = ptrtoint ptr @__obf_shard_{{[0-9a-f]+}} to i32
-; CHECK: %obf.shard.indirect{{[0-9]*}} = inttoptr i32 %obf.shard.addr{{[0-9]*}} to ptr
+; CHECK: %obf.shard.indirect{{[0-9]*}} = inttoptr i32 %obf.shard.addr{{[0-9]*(\.poison[0-9]*)?}} to ptr

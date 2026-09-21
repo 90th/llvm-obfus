@@ -69,10 +69,10 @@ entry:
 ; CHECK-DAG: %obf.gep.field
 ; CHECK-DAG: %obf.gep.scale
 ; CHECK-DAG: %obf.gep.pad
-; CHECK: %field = inttoptr i64 %obf.gep.addr to ptr
+; CHECK: %field = inttoptr i64 %obf.gep.addr{{(\.poison[0-9]*)?}} to ptr
 ; CHECK-LABEL: define i64 @read_global_field()
 ; CHECK: %obf.gep.base = ptrtoint ptr @glob to i64
-; CHECK: inttoptr i64 %obf.gep.addr to ptr
+; CHECK: inttoptr i64 %obf.gep.addr{{(\.poison[0-9]*)?}} to ptr
 ; CHECK-LABEL: define i64 @phi_field(i1 %cond, ptr %a, ptr %b)
 ; CHECK: left:
 ; CHECK: ptrtoint ptr %a to i64

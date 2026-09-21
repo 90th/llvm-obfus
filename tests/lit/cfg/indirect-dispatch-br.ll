@@ -47,8 +47,8 @@ entry:
 ; CHECK: %obf.idis.delta =
 ; CHECK: %obf.idis.affine.sub =
 ; CHECK: %obf.idis.affine.dec =
+; CHECK: freeze i64 ptrtoint (ptr blockaddress(@branch_dispatch, %gt) to i64)
 ; CHECK: %obf.mba.add
-; CHECK: ptrtoint (ptr blockaddress(@branch_dispatch, %gt) to i64)
-; CHECK: %obf.idis.dest = inttoptr i64 %obf.idis.addr to ptr
+; CHECK: %obf.idis.dest = inttoptr i64 %obf.idis.addr{{(\.poison[0-9]*)?}} to ptr
 ; CHECK: indirectbr ptr %obf.idis.dest, [label %gt, label %le]
 ; CHECK-NOT: br i1 %cmp

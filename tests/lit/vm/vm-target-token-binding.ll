@@ -13,13 +13,13 @@
 ; CHECK: %token_bound_normal.obf.wrapper.target.token.delta = xor i{{[0-9]+}} %token_bound_normal.obf.wrapper.target.token,
 ; CHECK: %token_bound_normal.obf.wrapper.target.token.mask = xor i{{[0-9]+}} %token_bound_normal.obf.wrapper.target.token.delta,
 ; CHECK: %token_bound_normal.obf.wrapper.target.key.bound = xor i{{[0-9]+}} %token_bound_normal.obf.wrapper.target.key, %token_bound_normal.obf.wrapper.target.token.mask
-; CHECK: store i{{[0-9]+}} %token_bound_normal.obf.wrapper.resolved, ptr @[[NORMAL_TARGET]]
+; CHECK: store i{{[0-9]+}} %token_bound_normal.obf.wrapper.resolved{{(\.poison[0-9]*)?}}, ptr @[[NORMAL_TARGET]]
 ; CHECK: %token_bound_normal.obf.wrapper.key = load i{{[0-9]+}}, ptr @[[NORMAL_KEY]]
 ; CHECK: %token_bound_normal.obf.wrapper.decode.token = {{(add|sub|xor)}} i{{[0-9]+}}
 ; CHECK: %token_bound_normal.obf.wrapper.decode.token.delta = xor i{{[0-9]+}} %token_bound_normal.obf.wrapper.decode.token,
 ; CHECK: %token_bound_normal.obf.wrapper.decode.token.mask = xor i{{[0-9]+}} %token_bound_normal.obf.wrapper.decode.token.delta,
 ; CHECK: %token_bound_normal.obf.wrapper.key.bound = xor i{{[0-9]+}} %token_bound_normal.obf.wrapper.key, %token_bound_normal.obf.wrapper.decode.token.mask
-; CHECK: %token_bound_normal.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %token_bound_normal.obf.wrapper.decoded to ptr
+; CHECK: %token_bound_normal.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %token_bound_normal.obf.wrapper.decoded{{(\.poison[0-9]*)?}} to ptr
 
 ; CHECK-LABEL: define i32 @token_bound_strong(i32 %x)
 ; CHECK-NOT: token_bound_strong.obf.wrapper.check

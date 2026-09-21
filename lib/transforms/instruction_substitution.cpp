@@ -2,6 +2,7 @@
 
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
+#include "obf/support/value_utils.h"
 #include "obf/transforms/mba.h"
 
 #include "llvm/ADT/APInt.h"
@@ -137,16 +138,26 @@ run_instruction_substitution(llvm::Function& function,
     const bool family = (site_seed & 1ULL) != 0ULL;
 
     llvm::IRBuilder<> builder(binary);
+    support::stabilized_value stable_lhs{.value = binary->getOperand(0)};
+    support::stabilized_value stable_rhs{.value = binary->getOperand(1)};
+    const bool duplicates_operands = binary->getOpcode() == llvm::Instruction::Xor || family;
+    if (duplicates_operands) {
+      stable_lhs =
+          support::stabilize_value_for_reuse(builder, stable_lhs.value, "obf.subst.lhs");
+      stable_rhs =
+          support::stabilize_value_for_reuse(builder, stable_rhs.value, "obf.subst.rhs");
+    }
+
     llvm::Value* replacement = nullptr;
     switch (binary->getOpcode()) {
       case llvm::Instruction::And:
-        replacement = substitute_and(builder, binary->getOperand(0), binary->getOperand(1), family);
+        replacement = substitute_and(builder, stable_lhs.value, stable_rhs.value, family);
         break;
       case llvm::Instruction::Or:
-        replacement = substitute_or(builder, binary->getOperand(0), binary->getOperand(1), family);
+        replacement = substitute_or(builder, stable_lhs.value, stable_rhs.value, family);
         break;
       case llvm::Instruction::Xor:
-        replacement = substitute_xor(builder, binary->getOperand(0), binary->getOperand(1), family);
+        replacement = substitute_xor(builder, stable_lhs.value, stable_rhs.value, family);
         break;
       default:
         break;
@@ -165,6 +176,11 @@ run_instruction_substitution(llvm::Function& function,
               ? mba::create_xor(builder, replacement, zero, ctx, site_seed, "obf.subst.pad")
               : mba::create_add(builder, replacement, zero, ctx, site_seed, "obf.subst.pad");
       ++padded;
+    }
+    if (duplicates_operands) {
+      const support::stabilized_value operands[] = {stable_lhs, stable_rhs};
+      replacement = support::restore_poison_from_stabilized_values(
+          builder, replacement, operands, "obf.subst");
     }
 
     replacement->takeName(binary);

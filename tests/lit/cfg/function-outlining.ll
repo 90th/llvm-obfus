@@ -85,7 +85,7 @@ entry:
 ; CHECK-LABEL: define i32 @shardy(i32 %x)
 ; CHECK: obf.flat.dispatch:
 ; CHECK: %obf.shard.addr.base = ptrtoint ptr @__obf_shard_{{[0-9a-f]+}} to i64
-; CHECK: %obf.shard.indirect = inttoptr i64 %obf.shard.addr to ptr
+; CHECK: %obf.shard.indirect = inttoptr i64 %obf.shard.addr{{(\.poison[0-9]*)?}} to ptr
 ; CHECK: call {{.*}} %obf.shard.indirect
 ; CHECK: define internal {{.*}} @__obf_shard_{{[0-9a-f]+}}
 ; CHECK: switch i32 %obf.outline.route{{[0-9]*}}, label %{{[^ ]+}} [

@@ -31,4 +31,4 @@ entry:
 ; CHECK-DAG: %obf.gep.field
 ; CHECK-DAG: %obf.gep.scale
 ; CHECK-DAG: %obf.gep.pad
-; CHECK: %field = inttoptr i32 %obf.gep.addr to ptr
+; CHECK: %field = inttoptr i32 %obf.gep.addr{{(\.poison[0-9]*)?}} to ptr

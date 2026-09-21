@@ -35,7 +35,7 @@ entry:
 ; CHECK-LABEL: define i32 @normal_vm_value(i32 %x)
 ; CHECK: %normal_vm_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @[[NORMAL_TARGET]]
 ; CHECK: %normal_vm_value.obf.wrapper.unresolved = icmp eq
-; CHECK: store i{{[0-9]+}} %normal_vm_value.obf.wrapper.resolved, ptr @[[NORMAL_TARGET]]
+; CHECK: store i{{[0-9]+}} %normal_vm_value.obf.wrapper.resolved{{(\.poison[0-9]*)?}}, ptr @[[NORMAL_TARGET]]
 ; CHECK: %normal_vm_value.obf.wrapper.encoded = phi i{{[0-9]+}}
 ; CHECK: call i32 %normal_vm_value.obf.wrapper.indirect(i32 %x, i64 %normal_vm_value.obf.wrapper.token)
 

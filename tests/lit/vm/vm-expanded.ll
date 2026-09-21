@@ -162,10 +162,10 @@ entry:
 ; CHECK: %branch_phi.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; CHECK: %branch_phi.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %branch_phi.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; CHECK: %branch_phi.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %branch_phi.obf.wrapper.target.key, i{{[0-9]+}} %branch_phi.obf.wrapper.target.base)
-; CHECK: %branch_phi.obf.wrapper.real.int = sub i{{[0-9]+}} %branch_phi.obf.wrapper.target.value, %branch_phi.obf.wrapper.target.base
+; CHECK: %branch_phi.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %branch_phi.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
+; CHECK: %branch_phi.obf.wrapper.real.int = sub i{{[0-9]+}}
 ; CHECK: %branch_phi.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
-; CHECK: %branch_phi.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %branch_phi.obf.wrapper.decoded to ptr
+; CHECK: %branch_phi.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %branch_phi.obf.wrapper.decoded{{(\.poison[0-9]*)?}} to ptr
 ; CHECK: %branch_phi.obf.wrapper.call{{[0-9]*}} = call i32 %branch_phi.obf.wrapper.indirect(i32 %x, i64 %branch_phi.obf.wrapper.token)
 ; CHECK: %branch_phi.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; CHECK-LABEL: define <2 x i32> @vector_mix(<2 x i32> %a, <2 x i32> %b)
@@ -173,10 +173,10 @@ entry:
 ; CHECK: %vector_mix.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; CHECK: %vector_mix.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %vector_mix.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; CHECK: %vector_mix.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %vector_mix.obf.wrapper.target.key, i{{[0-9]+}} %vector_mix.obf.wrapper.target.base)
-; CHECK: %vector_mix.obf.wrapper.real.int = sub i{{[0-9]+}} %vector_mix.obf.wrapper.target.value, %vector_mix.obf.wrapper.target.base
+; CHECK: %vector_mix.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %vector_mix.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
+; CHECK: %vector_mix.obf.wrapper.real.int = sub i{{[0-9]+}}
 ; CHECK: %vector_mix.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
-; CHECK: %vector_mix.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %vector_mix.obf.wrapper.decoded to ptr
+; CHECK: %vector_mix.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %vector_mix.obf.wrapper.decoded{{(\.poison[0-9]*)?}} to ptr
 ; CHECK: %vector_mix.obf.wrapper.call{{[0-9]*}} = call <2 x i32> %vector_mix.obf.wrapper.indirect(<2 x i32> %a, <2 x i32> %b, i64 %vector_mix.obf.wrapper.token)
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK: entry.obf.vm:
@@ -208,13 +208,13 @@ entry:
 ; CHECK: vm.switch.default.
 ; CHECK-LABEL: define internal i16 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i8 %x, i32 %y, i64 %obf.hidden_token)
 ; CHECK-DAG: %obf.vm.zext.bias =
-; CHECK-DAG: %obf.vm.zext.wide = zext i8 %obf.vm.zext.bias to i32
+; CHECK-DAG: %obf.vm.zext.wide = zext i8 %obf.vm.zext.bias{{(\.poison[0-9]*)?}} to i32
 ; CHECK-DAG: %obf.vm.zext.signed.shl = shl i32 %{{[^,]+}}, 24
 ; CHECK-DAG: %obf.vm.zext.signed = ashr i32 %obf.vm.zext.signed.shl, 24
-; CHECK-DAG: %obf.vm.zext = add i32
+; CHECK-DAG: %obf.vm.zext = {{(add|or) i32}}
 ; CHECK-DAG: vm.cast.exec.{{[0-9]+}}:
 ; CHECK-DAG: %obf.vm.trunc.mask = and i32 %{{[^,]+}}, 65535
-; CHECK-DAG: %obf.vm.trunc = trunc i32 %obf.vm.trunc.mask to i16
+; CHECK-DAG: %obf.vm.trunc = trunc i32 %obf.vm.trunc.mask{{(\.poison[0-9]*)?}} to i16
 ; CHECK-LABEL: define internal float @__obf_vm_i_{{[A-Za-z0-9_]+}}(float %x, float %y, i64 %obf.hidden_token)
 ; CHECK: fcmp {{[a-z]+}} float
 ; CHECK-LABEL: define internal <2 x i32> @__obf_vm_i_{{[A-Za-z0-9_]+}}(<2 x i32> %a, <2 x i32> %b, i64 %obf.hidden_token)

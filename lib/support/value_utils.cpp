@@ -2,7 +2,6 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/ValueTracking.h"
-#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Value.h"
@@ -10,6 +9,30 @@
 #include <algorithm>
 
 namespace obf::support {
+stabilized_value
+stabilize_value_for_reuse(llvm::IRBuilder<>& builder, llvm::Value* value, llvm::StringRef name) {
+  if (llvm::isGuaranteedNotToBeUndef(value)) { return {.value = value}; }
+
+  llvm::Value* stable = llvm::isa<llvm::FreezeInst>(value)
+                            ? value
+                            : builder.CreateFreeze(value, (name + ".stable").str());
+  if (llvm::isGuaranteedNotToBePoison(value)) { return {.value = stable}; }
+
+  llvm::Value* poison_guard = builder.CreateMul(
+      value, llvm::Constant::getNullValue(value->getType()), (name + ".poison").str());
+  return {.value = stable, .poison_guard = poison_guard};
+}
+
+llvm::Value* restore_poison_from_stabilized_values(llvm::IRBuilder<>& builder,
+                                                   llvm::Value* result,
+                                                   llvm::ArrayRef<stabilized_value> values,
+                                                   llvm::StringRef name) {
+  for (const stabilized_value& value : values) {
+    if (value.poison_guard == nullptr) { continue; }
+    result = builder.CreateOr(result, value.poison_guard, (name + ".poison").str());
+  }
+  return result;
+}
 
 void add_unique_function(llvm::SmallVectorImpl<llvm::Function*>& functions,
                          llvm::Function* function) {

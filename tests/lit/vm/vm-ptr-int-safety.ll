@@ -38,7 +38,7 @@ entry:
 }
 
 ; INTEGRAL-LABEL: define i32 @integral_vm(i32 %x)
-; INTEGRAL: inttoptr i{{[0-9]+}} %integral_vm.obf.wrapper.decoded to ptr
+; INTEGRAL: inttoptr i{{[0-9]+}} %integral_vm.obf.wrapper.decoded{{(\.poison[0-9]*)?}} to ptr
 
 ; REPORT: nonintegral_vm|skipped|non-integral pointer space unsupported by VM lowering
 

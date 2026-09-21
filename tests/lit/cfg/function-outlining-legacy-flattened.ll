@@ -55,11 +55,11 @@ stale.default:
 
 ; CHECK-LABEL: define i32 @legacy_no_metadata(i32 %x)
 ; CHECK: %obf.shard.addr.base = ptrtoint ptr @__obf_shard_{{[0-9a-f]+}} to i64
-; CHECK: %obf.shard.indirect = inttoptr i64 %obf.shard.addr to ptr
+; CHECK: %obf.shard.indirect = inttoptr i64 %obf.shard.addr{{(\.poison[0-9]*)?}} to ptr
 ; CHECK: call {{.*}} %obf.shard.indirect
 ; CHECK-LABEL: define i32 @stale_block_metadata(i32 %x)
 ; CHECK: %obf.shard.addr.base = ptrtoint ptr @__obf_shard_{{[0-9a-f]+}} to i64
-; CHECK: %obf.shard.indirect = inttoptr i64 %obf.shard.addr to ptr
+; CHECK: %obf.shard.indirect = inttoptr i64 %obf.shard.addr{{(\.poison[0-9]*)?}} to ptr
 ; CHECK: call {{.*}} %obf.shard.indirect
 ; CHECK-DAG: define internal {{.*}} @__obf_shard_{{[0-9a-f]+}}
 ; CHECK-DAG: define internal {{.*}} @__obf_shard_{{[0-9a-f]+}}

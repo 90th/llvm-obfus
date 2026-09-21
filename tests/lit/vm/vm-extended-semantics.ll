@@ -48,10 +48,10 @@ entry:
 ; CHECK: %extended_semantics.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; CHECK: %extended_semantics.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %extended_semantics.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; CHECK: %extended_semantics.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %extended_semantics.obf.wrapper.target.key, i{{[0-9]+}} %extended_semantics.obf.wrapper.target.base)
-; CHECK: %extended_semantics.obf.wrapper.real.int = sub i{{[0-9]+}} %extended_semantics.obf.wrapper.target.value, %extended_semantics.obf.wrapper.target.base
+; CHECK: %extended_semantics.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %extended_semantics.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
+; CHECK: %extended_semantics.obf.wrapper.real.int = sub i{{[0-9]+}}
 ; CHECK: %extended_semantics.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
-; CHECK: %extended_semantics.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %extended_semantics.obf.wrapper.decoded to ptr
+; CHECK: %extended_semantics.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %extended_semantics.obf.wrapper.decoded{{(\.poison[0-9]*)?}} to ptr
 ; CHECK: call i32 %extended_semantics.obf.wrapper.indirect(i32 %x, float %f, ptr %dst, i64 %extended_semantics.obf.wrapper.token)
 ; CHECK: %extended_semantics.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, float %f, ptr %dst, i64 %obf.hidden_token)

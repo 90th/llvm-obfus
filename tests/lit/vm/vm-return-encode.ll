@@ -61,32 +61,32 @@ entry:
 ; CHECK: %encode_i32.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i32.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i32.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; CHECK: %encode_i32.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i32.obf.wrapper.target.key, i{{[0-9]+}} %encode_i32.obf.wrapper.target.base)
-; CHECK: %encode_i32.obf.wrapper.real.int = sub i{{[0-9]+}} %encode_i32.obf.wrapper.target.value, %encode_i32.obf.wrapper.target.base
+; CHECK: %encode_i32.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i32.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
+; CHECK: %encode_i32.obf.wrapper.real.int = sub i{{[0-9]+}}
 ; CHECK: %encode_i32.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: call i32 %encode_i32.obf.wrapper.indirect(i32 %x, i64 %encode_i32.obf.wrapper.token)
 ; CHECK: %encode_i32.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
-; CHECK: %encode_i32.obf.retkey.cast = trunc i64 %encode_i32.obf.retkey.bound to i32
+; CHECK: %encode_i32.obf.retkey.cast = trunc i64 %encode_i32.obf.retkey.bound{{(\.poison[0-9]*)?}} to i32
 ; CHECK: %encode_i32.obf.retdec = {{(add|sub) i32}}
 ; CHECK-LABEL: define i1 @encode_i1(i32 %x)
 ; CHECK: %encode_i1.obf.wrapper.token = {{(add|sub|xor) i64}}
 ; CHECK: %encode_i1.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i1.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i1.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; CHECK: %encode_i1.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i1.obf.wrapper.target.key, i{{[0-9]+}} %encode_i1.obf.wrapper.target.base)
-; CHECK: %encode_i1.obf.wrapper.real.int = sub i{{[0-9]+}} %encode_i1.obf.wrapper.target.value, %encode_i1.obf.wrapper.target.base
+; CHECK: %encode_i1.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i1.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
+; CHECK: %encode_i1.obf.wrapper.real.int = sub i{{[0-9]+}}
 ; CHECK: %encode_i1.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: call i1 %encode_i1.obf.wrapper.indirect(i32 %x, i64 %encode_i1.obf.wrapper.token)
 ; CHECK: %encode_i1.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
-; CHECK: %encode_i1.obf.retkey.cast = trunc i64 %encode_i1.obf.retkey.bound to i1
+; CHECK: %encode_i1.obf.retkey.cast = trunc i64 %encode_i1.obf.retkey.bound{{(\.poison[0-9]*)?}} to i1
 ; CHECK: %encode_i1.obf.retdec = {{(add|sub|xor) i1}}
 ; CHECK-LABEL: define i64 @encode_i64(i64 %x)
 ; CHECK: %encode_i64.obf.wrapper.token = {{(add|sub|xor) i64}}
 ; CHECK: %encode_i64.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i64.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i64.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; CHECK: %encode_i64.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i64.obf.wrapper.target.key, i{{[0-9]+}} %encode_i64.obf.wrapper.target.base)
-; CHECK: %encode_i64.obf.wrapper.real.int = sub i{{[0-9]+}} %encode_i64.obf.wrapper.target.value, %encode_i64.obf.wrapper.target.base
+; CHECK: %encode_i64.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i64.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
+; CHECK: %encode_i64.obf.wrapper.real.int = sub i{{[0-9]+}}
 ; CHECK: %encode_i64.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: call i64 %encode_i64.obf.wrapper.indirect(i64 %x, i64 %encode_i64.obf.wrapper.token)
 ; CHECK: %encode_i64.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
@@ -99,15 +99,15 @@ entry:
 ; CHECK: call i32 %encode_i32.obf.indirect(i32 5, i64 %encode_i32.obf.call.token)
 ; CHECK: %encode_i32.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i32.obf.retkey.bound = {{(add|sub) i64}}
-; CHECK: %encode_i32.obf.retkey.cast = trunc i64 %encode_i32.obf.retkey.bound to i32
+; CHECK: %encode_i32.obf.retkey.cast = trunc i64 %encode_i32.obf.retkey.bound{{(\.poison[0-9]*)?}} to i32
 ; CHECK: %encode_i32.obf.retdec = {{(add|sub) i32}}
-; CHECK: icmp eq i32 %encode_i32.obf.retdec, 105
+; CHECK: icmp eq i32 %encode_i32.obf.retdec{{(\.poison[0-9]*)?}}, 105
 ; i1 decode:
 ; CHECK: %encode_i1.obf.call.token = {{(add|sub|xor) i64}}
 ; CHECK: call i1 %encode_i1.obf.indirect(i32 100, i64 %encode_i1.obf.call.token)
 ; CHECK: %encode_i1.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i1.obf.retkey.bound = {{(add|sub) i64}}
-; CHECK: %encode_i1.obf.retkey.cast = trunc i64 %encode_i1.obf.retkey.bound to i1
+; CHECK: %encode_i1.obf.retkey.cast = trunc i64 %encode_i1.obf.retkey.bound{{(\.poison[0-9]*)?}} to i1
 ; CHECK: %encode_i1.obf.retdec = {{(add|sub|xor) i1}}
 ; i64 decode:
 ; CHECK: %encode_i64.obf.call.token = {{(add|sub|xor) i64}}
@@ -116,7 +116,7 @@ entry:
 ; CHECK: %encode_i64.obf.retkey.bound = {{(add|sub) i64}}
 ; CHECK-NOT: %encode_i64.obf.retkey.cast
 ; CHECK: %encode_i64.obf.retdec = {{(add|sub) i64}}
-; CHECK: icmp eq i64 %encode_i64.obf.retdec, 1234567890123456789
+; CHECK: icmp eq i64 %encode_i64.obf.retdec{{(\.poison[0-9]*)?}}, 1234567890123456789
 
 ; --- VM body: no plaintext return ---
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
@@ -124,7 +124,7 @@ entry:
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; CHECK: %obf.vm.ret.tokenkey = {{(add|sub) i64}}
-; CHECK: %obf.vm.ret.{{(key|token)}}.cast = trunc i64 %obf.vm.ret.{{(fullkey|tokenkey)}} to i32
+; CHECK: %obf.vm.ret.{{(key|token)}}.cast = trunc i64 %obf.vm.ret.{{(fullkey|tokenkey)}}{{(\.poison[0-9]*)?}} to i32
 ; CHECK: ret i32 %obf.vm.ret.encoded
 
 ; CHECK-LABEL: define internal i1 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
@@ -132,7 +132,7 @@ entry:
 ; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; CHECK: %obf.vm.ret.tokenkey = {{(add|sub) i64}}
-; CHECK: %obf.vm.ret.{{(key|token)}}.cast = trunc i64 %obf.vm.ret.{{(fullkey|tokenkey)}} to i1
+; CHECK: %obf.vm.ret.{{(key|token)}}.cast = trunc i64 %obf.vm.ret.{{(fullkey|tokenkey)}}{{(\.poison[0-9]*)?}} to i1
 ; CHECK: ret i1 %obf.vm.ret.encoded
 
 ; CHECK-LABEL: define internal i64 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i64 %x, i64 %obf.hidden_token)

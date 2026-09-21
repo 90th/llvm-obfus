@@ -123,8 +123,8 @@ entry:
 ; CHECK: %obf.idis.delta =
 ; CHECK: %obf.idis.affine.sub =
 ; CHECK: %obf.idis.affine.dec =
+; CHECK: freeze i64 ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64)
 ; CHECK: %obf.mba.add
-; CHECK: ptrtoint (ptr blockaddress(@switch_dispatch, %default) to i64)
-; CHECK: %obf.idis.dest = inttoptr i64 %obf.idis.addr to ptr
+; CHECK: %obf.idis.dest = inttoptr i64 %obf.idis.addr{{(\.poison[0-9]*)?}} to ptr
 ; CHECK: indirectbr ptr %obf.idis.dest, [label %default, label %c0, label %c1, label %c2, label %c3, label %c4, label %c5]
 ; CHECK-NOT: switch i32 %x
