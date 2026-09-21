@@ -1,6 +1,7 @@
 #include "obf/transforms/zero_comparison.h"
 #include "obf/support/libc_comparison.h"
 
+#include "llvm/Config/llvm-config.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
@@ -32,10 +33,14 @@ bool is_supported_pointer_type(const llvm::Type* type, const llvm::Module* modul
   }
   const llvm::DataLayout& layout = module->getDataLayout();
   const unsigned address_space = pointer_type->getAddressSpace();
-  if (layout.isNonIntegralAddressSpace(address_space) ||
-      layout.mustNotIntroducePtrToInt(address_space)) {
+  if (layout.isNonIntegralAddressSpace(address_space)) {
     return false;
   }
+#if LLVM_VERSION_MAJOR >= 22
+  if (layout.mustNotIntroducePtrToInt(address_space)) {
+    return false;
+  }
+#endif
   auto* int_ptr_type = layout.getIntPtrType(type->getContext(), address_space);
   return int_ptr_type != nullptr && int_ptr_type->getBitWidth() > 0;
 }
@@ -127,8 +132,7 @@ bool is_supported_string_call(const llvm::CallBase& call, const zero_comparison_
   if (!obf::support::is_valid_libc_comparison_call(call)) {
     return false;
   }
-  const llvm::Function* callee = call.getCalledFunction();
-  if (callee->getName() != "bcmp" && !all_users_are_zero_equality(call)) {
+  if (!all_users_are_zero_equality(call)) {
     return false;
   }
   return true;
@@ -220,6 +224,8 @@ create_short_circuit_delta(llvm::IRBuilder<>& builder, llvm::CallBase& call, std
         builder.CreateGEP(builder.getInt8Ty(), call.getArgOperand(1), offset),
         llvm::Align(1),
         "obf.zero.str.rhs.byte");
+    lhs = builder.CreateFreeze(lhs, "obf.zero.str.lhs.stable");
+    rhs = builder.CreateFreeze(rhs, "obf.zero.str.rhs.stable");
     llvm::Value* delta = builder.CreateXor(lhs, rhs, "obf.zero.str.xor");
     result->addIncoming(delta, builder.GetInsertBlock());
     if (index + 1 == length) {

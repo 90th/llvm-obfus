@@ -32,6 +32,10 @@ inline bool is_valid_libc_comparison_call(const llvm::CallBase& call, bool allow
       !callee->hasExternalLinkage()) {
     return false;
   }
+  if (call.doesNotReturn() || call_inst->canReturnTwice() || callee->doesNotReturn() ||
+      callee->hasFnAttribute(llvm::Attribute::ReturnsTwice)) {
+    return false;
+  }
 
   const llvm::StringRef callee_name = callee->getName();
   if (!is_libc_comparison_name(callee_name)) {
