@@ -31,6 +31,8 @@ struct virtualization_result {
   std::string detail;
 };
 
+// Virtualized bodies use noinline optnone instead of alwaysinline, minsize,
+// optsize, or optdebug. Rejected candidates remain unchanged.
 virtualization_result run_virtualization(llvm::Function& function,
                                          const virtualization_options& options = {});
 

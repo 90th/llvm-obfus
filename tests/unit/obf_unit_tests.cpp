@@ -11,6 +11,8 @@
 #include "obf/transforms/string_encoding.h"
 #include "llvm/Support/raw_ostream.h"
 #include "obf/transforms/self_checksum.h"
+#include "obf/vm/virtualize.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
@@ -396,6 +398,48 @@ void TestVmConfigDefaults() {
 
   std::error_code ec;
   std::filesystem::remove(path, ec);
+}
+
+void TestVmOptimizationAttributeConflicts() {
+  using AttrKind = llvm::Attribute::AttrKind;
+  const struct {
+    const char* name;
+    std::array<AttrKind, 2> attributes;
+  } cases[] = {
+      {"alwaysinline", {llvm::Attribute::AlwaysInline, llvm::Attribute::None}},
+      {"optsize", {llvm::Attribute::OptimizeForSize, llvm::Attribute::None}},
+      {"minsize", {llvm::Attribute::MinSize, llvm::Attribute::None}},
+      {"optdebug", {llvm::Attribute::OptimizeForDebugging, llvm::Attribute::None}},
+      {"minsize optsize", {llvm::Attribute::MinSize, llvm::Attribute::OptimizeForSize}},
+  };
+
+  for (const auto& test_case : cases) {
+    llvm::LLVMContext context;
+    llvm::Module module("vm_optimization_attributes", context);
+    llvm::Type* i32_type = llvm::Type::getInt32Ty(context);
+    llvm::FunctionType* function_type = llvm::FunctionType::get(i32_type, {i32_type}, false);
+    llvm::Function* function =
+        llvm::Function::Create(function_type, llvm::GlobalValue::ExternalLinkage, "target", module);
+    for (AttrKind attribute : test_case.attributes) {
+      if (attribute != llvm::Attribute::None) { function->addFnAttr(attribute); }
+    }
+    llvm::IRBuilder<> builder(llvm::BasicBlock::Create(context, "entry", function));
+    builder.CreateRet(builder.CreateAdd(function->getArg(0), builder.getInt32(7)));
+
+    const std::string name = test_case.name;
+    ExpectTrue(!llvm::verifyModule(module, &llvm::errs()), name + ": input module must verify");
+
+    obf::vm::virtualization_options options;
+    options.decision_seed = 1337;
+    const obf::vm::virtualization_result result = obf::vm::run_virtualization(*function, options);
+    ExpectTrue(result.virtualized,
+               name + ": optimization attributes must not prevent virtualization");
+    ExpectTrue(!llvm::verifyModule(module, &llvm::errs()),
+               name + ": virtualized module must verify");
+    ExpectTrue(function->hasFnAttribute(llvm::Attribute::NoInline) &&
+                   function->hasFnAttribute(llvm::Attribute::OptimizeNone),
+               name + ": virtualized body must retain the noinline optnone barrier");
+  }
 }
 
 void TestAuthenticatedStringConfig() {
@@ -2142,6 +2186,7 @@ int main() {
   TestConfigLoader();
   TestVmConfig();
   TestVmConfigDefaults();
+  TestVmOptimizationAttributeConflicts();
   TestAuthenticatedStringConfig();
   TestReleaseMarkerConfig();
   TestConstantProtectionModeConfig();

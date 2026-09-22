@@ -34,17 +34,25 @@ bool should_preserve_function_attribute(llvm::Attribute attribute) {
 
   if (!attribute.hasKindAsEnum()) { return false; }
 
+  switch (attribute.getKindAsEnum()) {
+    case llvm::Attribute::AlwaysInline:
+    case llvm::Attribute::MinSize:
+    case llvm::Attribute::OptimizeForDebugging:
+    case llvm::Attribute::OptimizeForSize:
+      return false;
+    default:
+      break;
+  }
+
   if (llvm::Attribute::intersectMustPreserve(attribute.getKindAsEnum())) { return true; }
 
   switch (attribute.getKindAsEnum()) {
-    case llvm::Attribute::AlwaysInline:
     case llvm::Attribute::Cold:
     case llvm::Attribute::Convergent:
     case llvm::Attribute::DisableSanitizerInstrumentation:
     case llvm::Attribute::Hot:
     case llvm::Attribute::InlineHint:
     case llvm::Attribute::JumpTable:
-    case llvm::Attribute::MinSize:
     case llvm::Attribute::MustProgress:
     case llvm::Attribute::NoFree:
     case llvm::Attribute::NoInline:
@@ -52,8 +60,6 @@ bool should_preserve_function_attribute(llvm::Attribute attribute) {
     case llvm::Attribute::NoSync:
     case llvm::Attribute::NoUnwind:
     case llvm::Attribute::NullPointerIsValid:
-    case llvm::Attribute::OptimizeForDebugging:
-    case llvm::Attribute::OptimizeForSize:
     case llvm::Attribute::OptimizeNone:
     case llvm::Attribute::SafeStack:
     case llvm::Attribute::SanitizeAddress:
