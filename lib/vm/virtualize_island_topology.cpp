@@ -556,6 +556,8 @@ std::uint32_t outline_vm_islands(rewrite_function_context& context) {
           *context.function.getParent(), context, 0x100ULL + island_index));
       helper->setLinkage(llvm::GlobalValue::InternalLinkage);
       helper->setDSOLocal(true);
+      helper->addFnAttr(llvm::Attribute::NoInline);
+      helper->addFnAttr(llvm::Attribute::OptimizeNone);
       helper->addFnAttr("vm.island.helper");
       ++extracted_count;
       dom_tree.recalculate(context.function);

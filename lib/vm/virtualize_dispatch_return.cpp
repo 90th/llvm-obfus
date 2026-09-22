@@ -711,6 +711,7 @@ void emit_state_island_helper(llvm::Function& helper,
         module);
     subhelper->setDSOLocal(true);
     subhelper->addFnAttr(llvm::Attribute::NoInline);
+    subhelper->addFnAttr(llvm::Attribute::OptimizeNone);
     subhelper->addFnAttr("instcombine-no-verify-fixpoint");
     subhelper->addFnAttr("vm.dispatch.shape.switch");
     subhelper->addFnAttr("vm.island.helper");
@@ -937,6 +938,7 @@ void rewrite_function_body_state_islands(llvm::Function& function,
                                module);
     helper->setDSOLocal(true);
     helper->addFnAttr(llvm::Attribute::NoInline);
+    helper->addFnAttr(llvm::Attribute::OptimizeNone);
     helper->addFnAttr("instcombine-no-verify-fixpoint");
     helper->addFnAttr("vm.dispatch.shape.switch");
     helper->addFnAttr("vm.island.helper");
@@ -955,6 +957,7 @@ void rewrite_function_body_state_islands(llvm::Function& function,
                                module);
     decoy_helper->setDSOLocal(true);
     decoy_helper->addFnAttr(llvm::Attribute::NoInline);
+    decoy_helper->addFnAttr(llvm::Attribute::OptimizeNone);
     decoy_helper->addFnAttr("instcombine-no-verify-fixpoint");
     decoy_helper->addFnAttr("vm.island.helper");
     decoy_helper->addFnAttr("vm.island.helper.decoy");

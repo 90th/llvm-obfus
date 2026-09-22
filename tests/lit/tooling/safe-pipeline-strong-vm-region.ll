@@ -2,6 +2,8 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=SAFE
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region.yaml -passes=obf-safe-pipeline -S %s -o %t
 ; RUN: %lli %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region-strip.yaml -passes=obf-safe-pipeline -S %s -o %t.strip
+; RUN: %lli %t.strip
 
 define i32 @strong_vm_region(ptr %out, i32 %x) {
 entry:
@@ -105,7 +107,7 @@ entry:
 ; VM: load i64, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; VM: load i64, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; VM: call void %{{[^ ]+}}(i32 %x, ptr %v.ce.ce.loc, i64
-; VM-LABEL: define dso_local void @__obf_vm_g_{{[A-Za-z0-9_]+}}(i32 %x, ptr %v.ce.ce.out) {
+; VM-LABEL: define internal void @__obf_vm_g_{{[A-Za-z0-9_]+}}(i32 %x, ptr %v.ce.ce.out) {
 ; VM: load i64, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; VM: load i64, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; VM: call void %{{[^ ]+}}(i32 %x, ptr %v.ce.ce.out, i64

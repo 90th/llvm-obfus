@@ -120,8 +120,9 @@ void rewrite_function_body(llvm::Function& function,
   const llvm::AttributeList preserved_attributes = build_preserved_function_attributes(function);
 
   function.setAttributes(preserved_attributes);
+  function.addFnAttr(llvm::Attribute::NoInline);
+  function.addFnAttr(llvm::Attribute::OptimizeNone);
   function.addFnAttr("instcombine-no-verify-fixpoint");
-
   llvm::SmallVector<llvm::BasicBlock*, 8> old_blocks;
   old_blocks.reserve(function.size());
   for (llvm::BasicBlock& block : function) { old_blocks.push_back(&block); }

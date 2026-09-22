@@ -329,6 +329,7 @@ void sanitize_vm_implementation_attributes(llvm::Function& implementation_functi
   implementation_function.setAttributes(build_vm_abi_attribute_list(interface_function));
   implementation_function.setDSOLocal(true);
   implementation_function.addFnAttr(llvm::Attribute::NoInline);
+  implementation_function.addFnAttr(llvm::Attribute::OptimizeNone);
 }
 
 void sanitize_vm_wrapper_attributes(llvm::Function& interface_function) {
