@@ -263,7 +263,7 @@ void enforce_strong_vm_implementation_gate(const virtualized_function_map& virtu
   }
 }
 
-bool function_calls_named(llvm::Function* function, llvm::StringRef callee_name) {
+bool function_calls_with_prefix(llvm::Function* function, llvm::StringRef callee_prefix) {
   if (function == nullptr || function->isDeclaration()) { return false; }
 
   for (llvm::BasicBlock& block : *function) {
@@ -271,7 +271,7 @@ bool function_calls_named(llvm::Function* function, llvm::StringRef callee_name)
       auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
       if (call == nullptr) { continue; }
       const llvm::Function* callee = call->getCalledFunction();
-      if (callee != nullptr && callee->getName() == callee_name) { return true; }
+      if (callee != nullptr && callee->getName().starts_with(callee_prefix)) { return true; }
     }
   }
 
@@ -321,8 +321,8 @@ void enforce_strong_vm_shared_seed_gate(
       report_strong_vm_invariant_violation(name.str() + " used shared seed resolver");
     }
 
-    if (function_calls_named(binding.interface_function, "__obf_vm_seed_resolve") ||
-        function_calls_named(binding.implementation_function, "__obf_vm_seed_resolve")) {
+    if (function_calls_with_prefix(binding.interface_function, "__obf_vm_seed_resolve") ||
+        function_calls_with_prefix(binding.implementation_function, "__obf_vm_seed_resolve")) {
       const llvm::StringRef name = interface_function != nullptr ? interface_function->getName()
                                                                  : llvm::StringRef(entry.getKey());
       report_strong_vm_invariant_violation(name.str() + " used shared seed resolver");

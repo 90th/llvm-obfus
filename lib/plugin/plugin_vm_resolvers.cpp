@@ -321,7 +321,10 @@ llvm::Function* get_or_create_vm_target_seed_init_function(llvm::Module& module)
 
 llvm::Function* get_or_create_vm_target_seed_resolver(llvm::Module& module,
                                                       llvm::IntegerType* ptr_int_type) {
-  constexpr llvm::StringRef resolver_name = "__obf_vm_seed_resolve";
+  std::string resolver_name = "__obf_vm_seed_resolve";
+  if (ptr_int_type != module.getDataLayout().getIntPtrType(module.getContext())) {
+    resolver_name += ".i" + std::to_string(ptr_int_type->getBitWidth());
+  }
   if (llvm::Function* existing = module.getFunction(resolver_name)) { return existing; }
 
   auto* resolver_type =

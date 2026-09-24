@@ -53,6 +53,7 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 - Protection levels are `none`, `light`, `strong`, `vm`, and `strong_vm`.
 - `vm` and `strong_vm` lower selected functions into VM-backed execution paths.
 - The VM wrapper keeps the selected function's linkage and visibility. Its implementation has internal linkage and default visibility.
+- Shared VM seed resolvers use separate integer widths when selected functions have different function-pointer sizes.
 - Later hardening stages also process `strong_vm` implementation bodies, not just the public wrapper.
 - Candidate analysis (`lib/vm/candidate_analysis.cpp`) skips incompatible constructs (varargs, non-integral pointers, complex EH pads) and gives clear diagnostics if instruction limits are exceeded.
 - MBA rewriting diversifies arithmetic identities across `add`, `sub`, `xor`, and `mul`. It also rewrites `udiv` and `urem` by power-of-two constant divisors. It works directly and as part of other transforms such as constant reconstruction and opaque predicates.
