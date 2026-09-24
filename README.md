@@ -572,7 +572,7 @@ The safe pipeline execution order runs as follows:
 8. **`obf-instruction-substitute`**: Rewrites bitwise operations into compound identities.
 9. **`obf-opaque-preds`**: Injects invariant opaque predicate branches.
 10. **`obf-control-flatten`**: Flattens basic-block control flow graphs into switch dispatch loops.
-11. **`obf-function-outline`**: Outlines selected control-flow blocks into helper shards.
+11. **`obf-function-outline`**: Outlines selected control-flow blocks into helper shards and preserves handler PHI values on rerouted edges.
 12. **`obf-bogus-cf`**: Injects junk basic blocks and opaque branching loops.
 13. **`obf-self-checksum`**: Injects code-as-data rolling hash verification windows (`rt_core_cc`).
 14. **`obf-block-split`**: Splits eligible linear basic blocks.

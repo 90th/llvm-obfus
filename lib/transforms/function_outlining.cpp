@@ -314,10 +314,50 @@ bool try_extract_cluster(llvm::Function& function,
       route_blocks.push_back(route_block);
     }
   }
+  struct rerouted_phi {
+    llvm::PHINode* node;
+    llvm::SmallVector<std::pair<llvm::Value*, llvm::BasicBlock*>, 4> incoming;
+  };
+  llvm::SmallVector<rerouted_phi, 4> rerouted_phis;
+  for (const handler_info& handler : cluster_handlers) {
+    for (llvm::PHINode& phi : handler.block->phis()) {
+      auto* route_value = llvm::PHINode::Create(
+          phi.getType(), route_count, "obf.outline.value", route_selector->getIterator());
+      rerouted_phis.push_back({&phi, {}});
+      std::size_t route_index = 0;
+      for (const handler_info& routed_handler : cluster_handlers) {
+        for (const dispatch_route& route : routed_handler.routes) {
+          llvm::Value* value = llvm::PoisonValue::get(phi.getType());
+          if (routed_handler.block == handler.block) {
+            llvm::BasicBlock* predecessor = route.branch->getParent();
+            const int index = phi.getBasicBlockIndex(predecessor);
+            if (index < 0) { llvm_unreachable("handler PHI missing dispatch edge"); }
+            value = phi.getIncomingValue(index);
+            rerouted_phis.back().incoming.emplace_back(value, predecessor);
+            phi.removeIncomingValue(static_cast<unsigned>(index), false);
+          }
+          route_value->addIncoming(value, route_blocks[route_index++]);
+        }
+      }
+      const std::size_t incoming_edges =
+          handler.routes.size() + (&handler == &cluster_handlers.front() ? 1U : 0U);
+      for (std::size_t edge = 0; edge < incoming_edges; ++edge) {
+        phi.addIncoming(route_value, cluster_entry);
+      }
+    }
+  }
 
   auto discard_cluster = [&]() {
     restore_cluster_routes(cluster_handlers);
-
+    for (rerouted_phi& record : rerouted_phis) {
+      for (int index = record.node->getBasicBlockIndex(cluster_entry); index >= 0;
+           index = record.node->getBasicBlockIndex(cluster_entry)) {
+        record.node->removeIncomingValue(static_cast<unsigned>(index), false);
+      }
+      for (auto [value, predecessor] : record.incoming) {
+        record.node->addIncoming(value, predecessor);
+      }
+    }
     for (llvm::BasicBlock* route_block : route_blocks) {
       if (route_block == nullptr || route_block->getParent() == nullptr) { continue; }
 
