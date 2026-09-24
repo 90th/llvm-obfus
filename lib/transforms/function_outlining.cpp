@@ -19,6 +19,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Utils/CodeExtractor.h"
 
 #include <algorithm>
@@ -450,6 +451,14 @@ function_outlining_result run_function_outlining(llvm::Function& function,
   std::vector<handler_info> handlers = collect_handler_infos(function, options.seed);
   if (handlers.size() < options.min_cluster_size) {
     return {.shard_count = 0, .detail = "not enough flattened handlers to outline"};
+  }
+  llvm::Module* module = function.getParent();
+  if (module != nullptr &&
+      module->getDataLayout().isNonIntegralAddressSpace(function.getAddressSpace())) {
+    const std::string message =
+        "function outlining cannot encode shard pointers for non-integral address space " +
+        std::to_string(function.getAddressSpace()) + " in " + function.getName().str();
+    llvm::report_fatal_error(llvm::StringRef(message));
   }
 
   llvm::CodeExtractorAnalysisCache cache(function);

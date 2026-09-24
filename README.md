@@ -610,7 +610,7 @@ See [`docs/self-checksum.md`](docs/self-checksum.md) for technical binding speci
 
 - **Compilation Overhead**: `vm` and `strong_vm` expansion increases compilation time and memory usage. Target functions should be compiled with `-O1 -fno-inline` or targeted selectively.
 - **Exception Handling**: Functions containing complex C++ landing pads, cleanups, or Windows SEH constructs cannot be lowered into VM bytecode and are retained in native code.
-- **Non-Integral Pointers**: Pointers in non-integral address spaces or architecture-specific register frames are excluded from indirect dispatch and VM translation.
+- **Non-Integral Pointers**: VM translation and indirect dispatch exclude pointers in non-integral address spaces. Outlining stops with an error when a shard function uses a non-integral address space.
 - **Embedded Keys**: Because key schedule root materials reside in the compiled binary, an attacker with full memory inspection capabilities can extract decrypted strings once loaded in memory.
 - **Self-Checksum Scope**: Self-checksum v1 supports Linux x86-64 ELF executables and PIE files.
   It also supports native Windows x86-64 PE32+ executable files.
