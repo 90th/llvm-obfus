@@ -147,7 +147,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
                                          0x720000ULL,
                                          mba_depth);
       llvm::Value* indirect_target = builder.CreateIntToPtr(decoded_target,
-                                                            call->getCalledOperand()->getType(),
+                                                            thunk_function.getType(),
                                                             function.getName() + ".obf.indirect");
 
       llvm::SmallVector<llvm::Use*, 16> original_uses;
@@ -261,7 +261,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
                                        0x720000ULL,
                                        mba_depth);
     llvm::Value* indirect_target = call_builder.CreateIntToPtr(
-        decoded_target, call->getCalledOperand()->getType(), function.getName() + ".obf.indirect");
+        decoded_target, thunk_function.getType(), function.getName() + ".obf.indirect");
 
     llvm::SmallVector<llvm::Use*, 16> original_uses;
     for (llvm::Use& use : call->uses()) { original_uses.push_back(&use); }

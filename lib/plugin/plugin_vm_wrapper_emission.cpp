@@ -380,6 +380,7 @@ llvm::Function* create_vm_entry_thunk(llvm::Function& interface_function,
 
   auto* thunk = llvm::Function::Create(implementation_function.getFunctionType(),
                                        llvm::GlobalValue::InternalLinkage,
+                                       implementation_function.getAddressSpace(),
                                        thunk_name,
                                        module);
   thunk->setCallingConv(interface_function.getCallingConv());

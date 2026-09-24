@@ -350,8 +350,12 @@ llvm::Function* clone_vm_implementation(llvm::Function& interface_function,
 
   auto* implementation_type = llvm::FunctionType::get(
       interface_function.getReturnType(), parameter_types, /*isVarArg=*/false);
-  auto* implementation_function = llvm::Function::Create(
-      implementation_type, llvm::GlobalValue::InternalLinkage, implementation_name, module);
+  auto* implementation_function =
+      llvm::Function::Create(implementation_type,
+                             llvm::GlobalValue::InternalLinkage,
+                             interface_function.getAddressSpace(),
+                             implementation_name,
+                             module);
   implementation_function->setCallingConv(interface_function.getCallingConv());
   implementation_function->setDSOLocal(true);
 
