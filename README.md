@@ -55,6 +55,7 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 - The VM wrapper keeps the selected function's linkage and visibility. Its implementation has internal linkage and default visibility.
 - Shared VM seed resolvers use separate integer widths when selected functions have different function-pointer sizes.
 - Generated VM thunks and implementations use the selected function's address space. The pointer encoding uses that space's pointer width.
+- VM island, decoy, and split helpers accept state pointers in the module's alloca address space.
 - Later hardening stages also process `strong_vm` implementation bodies, not just the public wrapper.
 - Candidate analysis (`lib/vm/candidate_analysis.cpp`) skips incompatible constructs (varargs, non-integral pointers, complex EH pads) and gives clear diagnostics if instruction limits are exceeded.
 - MBA rewriting diversifies arithmetic identities across `add`, `sub`, `xor`, and `mul`. It also rewrites `udiv` and `urem` by power-of-two constant divisors. It works directly and as part of other transforms such as constant reconstruction and opaque predicates.
@@ -120,6 +121,7 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 - The emitted artifacts store the 32-byte `build_key` in internal globals and reconstruct derived keys at runtime. This is an embedded-key, self-contained runtime. It does not use a hardware token, remote service, white-box key split, or entropy-anchor binding.
 - Integrity verification is fail-closed. Descriptor mismatches, tag mismatches, and length mismatches trap in the runtime. The runtime does not return tampered plaintext.
 - `runtime/entropy_anchor.c` supports opaque arithmetic and MBA-style transforms. It exposes five deterministic accessor variants: `direct`, `stack_roundtrip`, `split_recombine`, `xor_neutral`, and `add_sub_neutral`.
+- MBA entropy out-parameter thunks accept cache pointers in the module's alloca address space.
 
 ### Stealth ABI and Artifact Cleanup
 

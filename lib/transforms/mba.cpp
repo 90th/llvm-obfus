@@ -700,13 +700,14 @@ llvm::Function* get_or_create_entropy_thunk(llvm::Module& module,
   llvm::LLVMContext& llvm_context = module.getContext();
   auto* i64_type = llvm::Type::getInt64Ty(llvm_context);
   auto* pair_type = llvm::StructType::get(llvm_context, {i64_type, i64_type});
+  const llvm::DataLayout& data_layout = module.getDataLayout();
 
   llvm::FunctionType* thunk_type = nullptr;
   if (interface_type == entropy_thunk_interface::scalar_i64) {
     thunk_type = llvm::FunctionType::get(i64_type, /*isVarArg=*/false);
   } else if (interface_type == entropy_thunk_interface::out_parameter) {
     thunk_type = llvm::FunctionType::get(
-        llvm::Type::getVoidTy(llvm_context), {llvm::PointerType::get(llvm_context, 0)}, false);
+        llvm::Type::getVoidTy(llvm_context), {data_layout.getAllocaPtrType(llvm_context)}, false);
   } else {
     thunk_type = llvm::FunctionType::get(pair_type, /*isVarArg=*/false);
   }
@@ -845,10 +846,10 @@ llvm::Function* get_or_create_entropy_thunk(llvm::Module& module,
         builder.CreateExtractValue(result, {0}, llvm::Twine(prefix) + ".out.d");
     llvm::Value* indirect =
         builder.CreateExtractValue(result, {1}, llvm::Twine(prefix) + ".out.i");
-    auto* d_ptr = builder.CreateGEP(i64_type, out_buf, {llvm::ConstantInt::get(i64_type, 0)},
-                                     llvm::Twine(prefix) + ".out.d.ptr");
-    auto* i_ptr = builder.CreateGEP(i64_type, out_buf, {llvm::ConstantInt::get(i64_type, 1)},
-                                     llvm::Twine(prefix) + ".out.i.ptr");
+    auto* d_ptr = builder.CreateStructGEP(
+        pair_type, out_buf, 0, llvm::Twine(prefix) + ".out.d.ptr");
+    auto* i_ptr = builder.CreateStructGEP(
+        pair_type, out_buf, 1, llvm::Twine(prefix) + ".out.i.ptr");
     builder.CreateStore(direct, d_ptr);
     builder.CreateStore(indirect, i_ptr);
     builder.CreateRetVoid();
@@ -928,10 +929,8 @@ llvm::AllocaInst* get_or_create_function_entropy_pair_cache(llvm::Function& func
     auto* store = entry_builder.CreateStore(pair, cache);
     store->setAlignment(cache->getAlign());
   } else if (interface_type == entropy_thunk_interface::out_parameter) {
-    // thunk takes out-buffer pointer; write directly into the cache
-    llvm::Value* cache_ptr = entry_builder.CreateBitCast(
-        cache, llvm::PointerType::get(function.getContext(), 0), "obf.entropy.cache.init.buf");
-    entry_builder.CreateCall(thunk->getFunctionType(), thunk, {cache_ptr});
+    // thunk takes an alloca-address-space out-buffer; write directly into the cache
+    entry_builder.CreateCall(thunk->getFunctionType(), thunk, {cache});
   } else {
     // thunk returns {i64, i64}; store into cache
     llvm::Value* pair = entry_builder.CreateCall(

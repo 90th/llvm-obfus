@@ -690,7 +690,7 @@ void emit_state_island_helper(llvm::Function& helper,
 
   llvm::LLVMContext& context = helper.getContext();
   llvm::Module* module = helper.getParent();
-  auto* state_pointer_type = llvm::PointerType::get(context, 0);
+  llvm::Type* state_pointer_type = helper.getArg(0)->getType();
   auto* helper_type =
       llvm::FunctionType::get(llvm::Type::getInt32Ty(context), {state_pointer_type}, false);
   llvm::SmallVector<llvm::Function*, 8> subhelpers;
@@ -925,7 +925,7 @@ void rewrite_function_body_state_islands(llvm::Function& function,
   llvm::SmallVector<llvm::Function*, 8> decoy_helpers;
   helpers.resize(island_count, nullptr);
   decoy_helpers.resize(island_count, nullptr);
-  auto* state_pointer_type = llvm::PointerType::get(context, 0);
+  llvm::Type* state_pointer_type = state_storage->getType();
   auto* helper_type =
       llvm::FunctionType::get(entry_builder.getInt32Ty(), {state_pointer_type}, false);
   const llvm::SmallVector<std::uint32_t, 8> helper_emission_order = build_vm_index_emission_order(
