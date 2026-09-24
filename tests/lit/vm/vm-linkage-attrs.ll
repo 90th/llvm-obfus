@@ -1,8 +1,11 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-linkage-attrs.yaml -passes=obf-vm -S %s -o - | %FileCheck %s
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-linkage-attrs.yaml -passes=obf-vm -S %s -o %t
+; RUN: %opt -passes=verify -disable-output %t
 ; RUN: %lli %t
 
 @readonly_data = private constant [2 x i32] [i32 7, i32 11], align 4
+
+$attr_hidden = comdat any
 
 define i32 @attr_readnone(i32 %x) #0 {
 entry:
@@ -19,13 +22,22 @@ entry:
   ret i32 %sum
 }
 
+define weak_odr hidden i32 @attr_hidden(i32 %x) comdat {
+entry:
+  %value = add i32 %x, 7
+  ret i32 %value
+}
+
 define i32 @main() {
 entry:
   %a = call i32 @attr_readnone(i32 4)
   %b = call i32 @attr_readonly(ptr @readonly_data, i32 1)
+  %c = call i32 @attr_hidden(i32 9)
   %ok.a = icmp eq i32 %a, 17
   %ok.b = icmp eq i32 %b, 20
-  %ok = and i1 %ok.a, %ok.b
+  %ok.c = icmp eq i32 %c, 16
+  %ok.ab = and i1 %ok.a, %ok.b
+  %ok = and i1 %ok.ab, %ok.c
   %ret = select i1 %ok, i32 0, i32 1
   ret i32 %ret
 }
@@ -47,9 +59,13 @@ attributes #1 = { mustprogress nofree norecurse nosync willreturn memory(read) }
 ; CHECK-LABEL: define i32 @attr_readonly(ptr %base, i32 %index) {
 ; CHECK: %attr_readonly.obf.wrapper.call{{[0-9]*}} = call i32 %attr_readonly.obf.wrapper.indirect(ptr %base, i32 %index, i64 %attr_readonly.obf.wrapper.token)
 
+; CHECK-LABEL: define weak_odr hidden i32 @attr_hidden(i32 %x) comdat {
+; CHECK: %attr_hidden.obf.wrapper.call{{[0-9]*}} = call i32 %attr_hidden.obf.wrapper.indirect(i32 %x, i64 %attr_hidden.obf.wrapper.token)
+
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK-SAME: #[[IMPL:[0-9]+]] {
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(ptr %base, i32 %index, i64 %obf.hidden_token)
 ; CHECK-SAME: #[[IMPL2:[0-9]+]] {
+; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK-DAG: attributes #[[IMPL]] = { {{.*}}noinline{{.*}}"instcombine-no-verify-fixpoint"{{.*}} }
 ; CHECK-DAG: attributes #[[IMPL2]] = { {{.*}}noinline{{.*}}"instcombine-no-verify-fixpoint"{{.*}} }

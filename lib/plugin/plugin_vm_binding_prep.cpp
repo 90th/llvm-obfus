@@ -369,6 +369,8 @@ llvm::Function* clone_vm_implementation(llvm::Function& interface_function,
                           value_map,
                           llvm::CloneFunctionChangeType::LocalChangesOnly,
                           returns);
+  // Cloning copies the interface visibility, which is invalid with internal linkage.
+  implementation_function->setVisibility(llvm::GlobalValue::DefaultVisibility);
   if (interface_function.hasPersonalityFn()) {
     implementation_function->setPersonalityFn(interface_function.getPersonalityFn());
   }

@@ -5,3 +5,5 @@ targets:
     level: vm
   - match: attr_readonly
     level: vm
+  - match: attr_hidden
+    level: vm
