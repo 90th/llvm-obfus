@@ -1,5 +1,6 @@
 #include "obf/transforms/zero_comparison.h"
 #include "obf/support/libc_comparison.h"
+#include "obf/support/flattening_metadata.h"
 
 #include "llvm/Config/llvm-config.h"
 #include "llvm/ADT/SmallVector.h"
@@ -308,6 +309,7 @@ zero_comparison_result analyze_impl(const llvm::Function& function,
   }
   std::size_t count = 0;
   for (const llvm::BasicBlock& block : function) {
+    if (flattening::is_generated_block(block)) { continue; }
     for (const llvm::Instruction& instruction : block) {
       if (!is_candidate(instruction, options)) { continue; }
       ++count;
@@ -336,6 +338,7 @@ zero_comparison_result run_zero_comparison(llvm::Function& function,
 
   llvm::SmallVector<llvm::Instruction*, 16> candidates;
   for (llvm::BasicBlock& block : function) {
+    if (flattening::is_generated_block(block)) { continue; }
     for (llvm::Instruction& instruction : block) {
       if (is_candidate(instruction, options)) { candidates.push_back(&instruction); }
     }

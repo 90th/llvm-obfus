@@ -30,6 +30,8 @@ enum class block_role : uint32_t {
   terminal = 9,
 };
 
+bool is_generated_block(const llvm::BasicBlock& block);
+
 llvm::MDNode* tag_block(llvm::BasicBlock& block, block_role role);
 
 llvm::MDNode* tag_function(llvm::Function& function);

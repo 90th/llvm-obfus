@@ -1,5 +1,9 @@
 #pragma once
 
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/ValueHandle.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -25,13 +29,24 @@ struct instruction_substitution_result {
   std::size_t substitution_count = 0;
   std::string detail;
 };
+using instruction_substitution_site = llvm::WeakVH;
+using instruction_substitution_sites = llvm::SmallVector<instruction_substitution_site, 16>;
 
 instruction_substitution_result
 analyze_instruction_substitution(const llvm::Function& function,
                                  const instruction_substitution_options& options);
 
+instruction_substitution_sites
+collect_instruction_substitution_sites(llvm::Function& function,
+                                       const instruction_substitution_options& options);
+
 instruction_substitution_result
 run_instruction_substitution(llvm::Function& function,
                              const instruction_substitution_options& options);
+
+instruction_substitution_result
+run_instruction_substitution(llvm::Function& function,
+                             const instruction_substitution_options& options,
+                             llvm::ArrayRef<instruction_substitution_site> candidates);
 
 }  // namespace obf

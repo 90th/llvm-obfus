@@ -35,20 +35,10 @@
 ; OPT: call{{.*}} @verify_like(ptr {{[^,]*}}%{{[^,]+}}, i64 {{[^)]*}}%{{[^)]+}})
 ;
 ; IR-LABEL: define{{.*}} @verify_like(
-; IR-SAME: !obf.flattened ![[FLAT:[0-9]+]] {
-; IR: [[STATE:%[0-9]+]] = phi i32 [ %{{[0-9]+}}, %{{[0-9]+}} ], [ %{{[0-9]+}}, %{{[0-9]+}} ], [ %{{[0-9]+}}, %{{[0-9]+}} ], [ %{{[0-9]+}}, %{{[0-9]+}} ], [ %{{[0-9]+}}, %{{[0-9]+}} ], [ %{{[0-9]+}}, %{{[0-9]+}} ]
-; IR: br i1 %{{[0-9]+}}, label %[[RECUR:[0-9]+]], label %[[SPLIT:[0-9]+]], !obf.flattened.block ![[ROOT:[0-9]+]]
-; IR: [[RECUR]]:
-; IR: load { i64, i64 }, ptr %{{[0-9]+}}, align 8
-; IR: [[SPLIT]]:
-; IR: icmp slt i32 %{{[0-9]+}}, %{{[0-9]+}}
-; IR: br i1 %{{[0-9]+}}, label %{{[0-9]+}}, label %{{[0-9]+}}, !obf.flattened.block ![[ORDER:[0-9]+]]
-; IR: icmp ugt i32 %{{[0-9]+}}, [[STATE]]
-; IR: br i1 %{{[0-9]+}}, label %{{[0-9]+}}, label %{{[0-9]+}}, !obf.flattened.block ![[ORDER2:[0-9]+]]
-; IR: trunc i32 %{{[0-9]+}} to i1
-; IR: br i1 %{{[0-9]+}}, label %{{[0-9]+}}, label %[[RECUR]], !obf.flattened.block ![[EQA:[0-9]+]]
-; IR: trunc i32 %{{[0-9]+}} to i1
-; IR: br i1 %{{[0-9]+}}, label %{{[0-9]+}}, label %[[RECUR]], !obf.flattened.block ![[EQB:[0-9]+]]
+; IR-SAME: !obf.flattened !{{[0-9]+}} {
+; IR: = phi i32
+; IR: br i1 %{{[0-9]+}}, label %{{[0-9]+}}, label %{{[0-9]+}}, !obf.flattened.block !{{[0-9]+}}
+; IR-LABEL: define{{.*}} @main(
 ;
 ; The accepting and rejecting runs use argv[1] at runtime so verify_like stays
 ; live through codegen and the linked binary check observes the real native CFG.

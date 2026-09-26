@@ -21,7 +21,6 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Alignment.h"
 
@@ -170,41 +169,6 @@ bool is_supported_constant_operand(const llvm::Instruction& instruction,
   }
 
   return true;
-}
-
-std::optional<flattening::block_role> get_flattened_block_role(const llvm::BasicBlock& block) {
-  const llvm::Instruction* terminator = block.getTerminator();
-  if (terminator == nullptr) { return std::nullopt; }
-
-  const llvm::MDNode* node = terminator->getMetadata(flattening::kFlattenedBlockMD);
-  if (node == nullptr || node->getNumOperands() < 2) { return std::nullopt; }
-
-  const auto* role_value = llvm::mdconst::dyn_extract<llvm::ConstantInt>(node->getOperand(1));
-  if (role_value == nullptr) { return std::nullopt; }
-
-  return static_cast<flattening::block_role>(role_value->getZExtValue());
-}
-
-bool is_flattening_generated_block(const llvm::BasicBlock& block) {
-  const std::optional<flattening::block_role> role = get_flattened_block_role(block);
-  if (!role.has_value()) { return false; }
-
-  switch (*role) {
-    case flattening::block_role::root_dispatch:
-    case flattening::block_role::dispatch_split:
-    case flattening::block_role::dispatch_left:
-    case flattening::block_role::dispatch_right:
-    case flattening::block_role::dispatch_leaf:
-    case flattening::block_role::edge:
-    case flattening::block_role::decoy:
-    case flattening::block_role::setup:
-      return true;
-    case flattening::block_role::handler:
-    case flattening::block_role::terminal:
-      return false;
-  }
-
-  return false;
 }
 
 bool expand_constant_expressions_referencing_global(llvm::Function& function,
@@ -457,7 +421,7 @@ constant_encoding_result analyze_impl(const llvm::Function& function,
 
   std::size_t encoded_count = 0;
   for (const llvm::BasicBlock& block : function) {
-    if (is_flattening_generated_block(block)) { continue; }
+    if (flattening::is_generated_block(block)) { continue; }
 
     for (const llvm::Instruction& instruction : block) {
       for (unsigned operand_index = 0; operand_index < instruction.getNumOperands();
@@ -1060,7 +1024,7 @@ llvm::SmallVector<planned_constant_use, 32> collect_planned_constant_uses(
     if (!function_seed.has_value()) { continue; }
 
     for (llvm::BasicBlock& block : function) {
-      if (is_flattening_generated_block(block)) { continue; }
+      if (flattening::is_generated_block(block)) { continue; }
 
       for (llvm::Instruction& instruction : block) {
         for (unsigned operand_index = 0; operand_index < instruction.getNumOperands();
@@ -1202,7 +1166,7 @@ constant_encoding_result run_constant_encoding(llvm::Function& function,
 
   llvm::SmallVector<llvm::Instruction*, 64> original_instructions;
   for (llvm::BasicBlock& block : function) {
-    if (is_flattening_generated_block(block)) { continue; }
+    if (flattening::is_generated_block(block)) { continue; }
     for (llvm::Instruction& instruction : block) { original_instructions.push_back(&instruction); }
   }
 

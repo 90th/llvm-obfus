@@ -568,11 +568,11 @@ The safe pipeline execution order runs as follows:
 2. **`obf-vm` (Level `vm`)**: Lowers `vm`-targeted functions into bytecode and replaces callsites with VM wrappers.
 3. **`obf-vm` (Level `strong_vm`)**: Synthesizes bytecode and dispatch wrappers for `strong_vm` functions.
 4. **`obf-string-encode`**: Encrypts static global strings across post-VM module state.
-5. **`obf-control-flatten`**: Flattens eligible basic-block CFGs into state-driven dispatch loops before later instruction-expanding stages.
-6. **`obf-zero-comparison`**: Lowers integer/string equality checks to arithmetic XOR ladders.
+5. **`obf-control-flatten`**: Flattens eligible basic-block CFGs into state-driven dispatch loops before later source-site-consuming stages.
+6. **`obf-zero-comparison`**: Lowers source integer/string equality checks to arithmetic XOR ladders.
 7. **`obf-constant-encode`**: Transforms constants into inline MBA arithmetic or keyed pools.
-8. **`obf-opaque-gep`**: Encodes global variable access offsets through opaque math.
-9. **`obf-instruction-substitute`**: Rewrites bitwise operations into compound identities.
+8. **`obf-instruction-substitute`**: Rewrites source bitwise operations into compound identities after zero-comparison and constant encoding.
+9. **`obf-opaque-gep`**: Encodes global variable access offsets through opaque math.
 10. **`obf-opaque-preds`**: Injects invariant opaque predicate branches.
 11. **`obf-function-outline`**: Outlines selected control-flow blocks into helper shards and preserves handler PHI values on rerouted edges.
 12. **`obf-bogus-cf`**: Injects junk basic blocks and opaque branching loops.

@@ -1,0 +1,19 @@
+seed: 8080
+default_level: none
+targets:
+  - match: probe
+    level: strong
+  - match: eq_source
+    level: strong
+  - match: const_source
+    level: strong
+constant_encoding:
+  mode: mba_inline
+  max_constants_per_function: 1
+  min_bit_width: 8
+mba:
+  depth: 2
+zero_comparison:
+  enabled: true
+  transform_integer_comparisons: true
+  max_sites_per_function: 1

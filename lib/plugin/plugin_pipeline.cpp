@@ -16,8 +16,8 @@
 
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
-
 namespace obf {
 
 namespace {
@@ -596,11 +596,13 @@ bool apply_constant_encoding_stage(llvm::Module& module,
 
   return changed;
 }
+namespace {
 
-bool apply_instruction_substitution_stage(
+bool apply_instruction_substitution_stage_impl(
     const llvm::SmallVectorImpl<function_pipeline_state>& states,
     const obfuscation_config& config,
-    const llvm::StringSet<>* skip_functions) {
+    const llvm::StringSet<>* skip_functions,
+    const instruction_substitution_stage_candidates* candidates_by_function) {
   bool changed = false;
 
   for (const function_pipeline_state& state : states) {
@@ -612,10 +614,61 @@ bool apply_instruction_substitution_stage(
 
     const instruction_substitution_options options =
         build_instruction_substitution_options(config, state.report.decision);
-    changed |= run_instruction_substitution(*state.function, options).substitution_count > 0;
+    if (candidates_by_function == nullptr) {
+      changed |= run_instruction_substitution(*state.function, options).substitution_count > 0;
+      continue;
+    }
+
+    const auto candidate_it = candidates_by_function->find(state.function);
+    if (candidate_it == candidates_by_function->end()) { continue; }
+
+    changed |= run_instruction_substitution(*state.function, options, candidate_it->second)
+                   .substitution_count > 0;
   }
 
   return changed;
+}
+
+}  // namespace
+
+instruction_substitution_stage_candidates snapshot_instruction_substitution_stage_candidates(
+    const llvm::SmallVectorImpl<function_pipeline_state>& states,
+    const obfuscation_config& config,
+    const llvm::StringSet<>* skip_functions) {
+  instruction_substitution_stage_candidates candidates_by_function;
+
+  for (const function_pipeline_state& state : states) {
+    if (should_skip_function(state, skip_functions) ||
+        !state.report.decision.policy.allow_instruction_substitution ||
+        state.report.decision.policy.level == protection_level::strong_vm) {
+      continue;
+    }
+
+    const instruction_substitution_options options =
+        build_instruction_substitution_options(config, state.report.decision);
+    instruction_substitution_sites candidates =
+        collect_instruction_substitution_sites(*state.function, options);
+    if (candidates.empty()) { continue; }
+
+    candidates_by_function[state.function] = std::move(candidates);
+  }
+
+  return candidates_by_function;
+}
+
+bool apply_instruction_substitution_stage(
+    const llvm::SmallVectorImpl<function_pipeline_state>& states,
+    const obfuscation_config& config,
+    const llvm::StringSet<>* skip_functions) {
+  return apply_instruction_substitution_stage_impl(states, config, skip_functions, nullptr);
+}
+
+bool apply_instruction_substitution_stage(
+    const llvm::SmallVectorImpl<function_pipeline_state>& states,
+    const obfuscation_config& config,
+    const instruction_substitution_stage_candidates& candidates,
+    const llvm::StringSet<>* skip_functions) {
+  return apply_instruction_substitution_stage_impl(states, config, skip_functions, &candidates);
 }
 
 bool apply_zero_comparison_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,

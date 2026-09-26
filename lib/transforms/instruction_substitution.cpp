@@ -1,5 +1,6 @@
 #include "obf/transforms/instruction_substitution.h"
 
+#include "obf/support/flattening_metadata.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
 #include "obf/support/value_utils.h"
@@ -27,6 +28,46 @@ bool is_supported_instruction(const llvm::BinaryOperator& instruction) {
   }
 }
 
+template <typename FunctionT, typename CallbackT>
+std::size_t
+visit_candidate_instructions(FunctionT& function, std::size_t limit, CallbackT&& callback) {
+  if (limit == 0) { return 0; }
+
+  std::size_t count = 0;
+  for (auto& block : function) {
+    if (obf::flattening::is_generated_block(block)) { continue; }
+    for (auto& instruction : block) {
+      auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(&instruction);
+      if (binary == nullptr || !is_supported_instruction(*binary)) { continue; }
+
+      callback(binary);
+      ++count;
+      if (count >= limit) { return count; }
+    }
+  }
+
+  return count;
+}
+
+instruction_substitution_result make_candidate_detail(std::size_t count) {
+  if (count == 0) { return {.substitution_count = 0, .detail = "no eligible binary operators"}; }
+
+  return {.substitution_count = count,
+          .detail = std::to_string(count) + " substitution(s) available"};
+}
+
+llvm::BinaryOperator* resolve_candidate_site(llvm::Function& function,
+                                             const instruction_substitution_site& candidate) {
+  auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(candidate);
+  if (binary == nullptr || binary->getParent() == nullptr || binary->getFunction() != &function ||
+      obf::flattening::is_generated_block(*binary->getParent()) ||
+      !is_supported_instruction(*binary)) {
+    return nullptr;
+  }
+
+  return binary;
+}
+
 instruction_substitution_result analyze_impl(const llvm::Function& function,
                                              const instruction_substitution_options& options) {
   if (function.isDeclaration()) { return {.substitution_count = 0, .detail = "declaration"}; }
@@ -35,24 +76,9 @@ instruction_substitution_result analyze_impl(const llvm::Function& function,
     return {.substitution_count = 0, .detail = "max_substitutions_per_function is zero"};
   }
 
-  std::size_t count = 0;
-  for (const llvm::BasicBlock& block : function) {
-    for (const llvm::Instruction& instruction : block) {
-      const auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(&instruction);
-      if (binary == nullptr || !is_supported_instruction(*binary)) { continue; }
-
-      ++count;
-      if (count >= options.max_substitutions_per_function) {
-        return {.substitution_count = count,
-                .detail = std::to_string(count) + " substitution(s) available"};
-      }
-    }
-  }
-
-  if (count == 0) { return {.substitution_count = 0, .detail = "no eligible binary operators"}; }
-
-  return {.substitution_count = count,
-          .detail = std::to_string(count) + " substitution(s) available"};
+  const std::size_t count = visit_candidate_instructions(
+      function, options.max_substitutions_per_function, [](const auto*) {});
+  return make_candidate_detail(count);
 }
 
 llvm::Value* substitute_and(llvm::IRBuilder<>& builder, llvm::Value* lhs, llvm::Value* rhs,
@@ -103,36 +129,51 @@ analyze_instruction_substitution(const llvm::Function& function,
   return analyze_impl(function, options);
 }
 
+instruction_substitution_sites
+collect_instruction_substitution_sites(llvm::Function& function,
+                                       const instruction_substitution_options& options) {
+  instruction_substitution_sites sites;
+  if (function.isDeclaration() || options.max_substitutions_per_function == 0) { return sites; }
+
+  visit_candidate_instructions(
+      function, options.max_substitutions_per_function, [&](llvm::BinaryOperator* candidate) {
+        sites.push_back(candidate);
+      });
+  return sites;
+}
+
 instruction_substitution_result
 run_instruction_substitution(llvm::Function& function,
                              const instruction_substitution_options& options) {
   const instruction_substitution_result analysis = analyze_impl(function, options);
   if (analysis.substitution_count == 0) { return analysis; }
 
-  llvm::SmallVector<llvm::BinaryOperator*, 16> candidates;
-  for (llvm::BasicBlock& block : function) {
-    for (llvm::Instruction& instruction : block) {
-      auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(&instruction);
-      if (binary != nullptr && is_supported_instruction(*binary)) { candidates.push_back(binary); }
-    }
+  const instruction_substitution_sites candidates =
+      collect_instruction_substitution_sites(function, options);
+  return run_instruction_substitution(function, options, candidates);
+}
+
+instruction_substitution_result
+run_instruction_substitution(llvm::Function& function,
+                             const instruction_substitution_options& options,
+                             llvm::ArrayRef<instruction_substitution_site> candidates) {
+  if (function.isDeclaration()) { return {.substitution_count = 0, .detail = "declaration"}; }
+
+  if (options.max_substitutions_per_function == 0) {
+    return {.substitution_count = 0, .detail = "max_substitutions_per_function is zero"};
   }
 
   const std::uint64_t function_seed =
       mix_seed(options.seed, stable_hash_string(function.getName()));
-  auto ctx = obf::support::make_mba_context(
-      function,
-      "obf.subst",
-      function_seed,
-      {options.mba_depth,
-       options.mba_max_ir_instructions,
-       options.mba_enable_polynomial,
-       options.mba_enable_multiplication});
+  std::optional<mba::builder_context> ctx;
 
   std::size_t count = 0;
   std::size_t padded = 0;
   for (std::size_t i = 0; i < candidates.size(); ++i) {
-    llvm::BinaryOperator* binary = candidates[i];
-    if (count >= options.max_substitutions_per_function || binary == nullptr) { break; }
+    if (count >= options.max_substitutions_per_function) { break; }
+
+    llvm::BinaryOperator* binary = resolve_candidate_site(function, candidates[i]);
+    if (binary == nullptr) { continue; }
 
     const std::uint64_t site_seed = mix_seed(function_seed, i + 1);
     const bool family = (site_seed & 1ULL) != 0ULL;
@@ -167,14 +208,27 @@ run_instruction_substitution(llvm::Function& function,
 
     if (padded < options.max_padded_sites && options.mba_depth >= 1 &&
         replacement->getType()->isIntegerTy()) {
+      if (!ctx.has_value()) {
+        ctx = obf::support::make_mba_context(function,
+                                             "obf.subst",
+                                             function_seed,
+                                             {options.mba_depth,
+                                              options.mba_max_ir_instructions,
+                                              options.mba_enable_polynomial,
+                                              options.mba_enable_multiplication});
+      }
+
       auto* padded_type = llvm::cast<llvm::IntegerType>(replacement->getType());
-      llvm::Value* zero = mba::create_opaque_integer(
-          builder, padded_type, ctx, llvm::APInt(padded_type->getBitWidth(), 0), site_seed,
-          "obf.subst.pad.zero");
+      llvm::Value* zero = mba::create_opaque_integer(builder,
+                                                     padded_type,
+                                                     *ctx,
+                                                     llvm::APInt(padded_type->getBitWidth(), 0),
+                                                     site_seed,
+                                                     "obf.subst.pad.zero");
       replacement =
           ((site_seed >> 1) & 1ULL) != 0ULL
-              ? mba::create_xor(builder, replacement, zero, ctx, site_seed, "obf.subst.pad")
-              : mba::create_add(builder, replacement, zero, ctx, site_seed, "obf.subst.pad");
+              ? mba::create_xor(builder, replacement, zero, *ctx, site_seed, "obf.subst.pad")
+              : mba::create_add(builder, replacement, zero, *ctx, site_seed, "obf.subst.pad");
       ++padded;
     }
     if (duplicates_operands) {
@@ -188,6 +242,8 @@ run_instruction_substitution(llvm::Function& function,
     binary->eraseFromParent();
     ++count;
   }
+
+  if (count == 0) { return make_candidate_detail(0); }
 
   return {.substitution_count = count,
           .detail = std::to_string(count) + " substitution(s) applied"};

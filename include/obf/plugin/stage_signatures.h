@@ -1,12 +1,13 @@
 #pragma once
 
 #include "obf/plugin/internal/plugin_vm_types.h"
+#include "obf/transforms/instruction_substitution.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Module.h"
 #include "obf/frontend/config.h"
-
 #include <cstdint>
 
 namespace llvm {
@@ -20,6 +21,9 @@ struct function_pipeline_state;
 struct obfuscation_config;
 struct function_report_entry;
 // Note: protection_level is defined in config.h (included above), no forward needed
+
+using instruction_substitution_stage_candidates =
+    llvm::DenseMap<llvm::Function*, instruction_substitution_sites>;
 
 // Core pipeline functions
 llvm::SmallVector<function_pipeline_state, 32>
@@ -56,9 +60,20 @@ bool apply_constant_encoding_stage(llvm::Module& module,
                                    const obfuscation_config& config,
                                    const llvm::StringSet<>* skip_functions = nullptr);
 
+instruction_substitution_stage_candidates snapshot_instruction_substitution_stage_candidates(
+    const llvm::SmallVectorImpl<function_pipeline_state>& states,
+    const obfuscation_config& config,
+    const llvm::StringSet<>* skip_functions = nullptr);
+
 bool apply_instruction_substitution_stage(
     const llvm::SmallVectorImpl<function_pipeline_state>& states,
     const obfuscation_config& config,
+    const llvm::StringSet<>* skip_functions = nullptr);
+
+bool apply_instruction_substitution_stage(
+    const llvm::SmallVectorImpl<function_pipeline_state>& states,
+    const obfuscation_config& config,
+    const instruction_substitution_stage_candidates& candidates,
     const llvm::StringSet<>* skip_functions = nullptr);
 
 bool apply_zero_comparison_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
