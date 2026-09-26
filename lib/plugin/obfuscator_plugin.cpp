@@ -680,15 +680,17 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     for (const auto& caller_entry : preserved_site_callers) {
       all_vm_virtualized.insert(caller_entry.getKey());
     }
+    // Flatten before later instruction-expanding native stages so strong
+    // pipeline eligibility still reflects the optimized source CFG.
+    const llvm::StringSet<> flattened_functions =
+        apply_control_flattening_stage(post_vm_states, config, &all_vm_virtualized);
+    changed |= !flattened_functions.empty();
     changed |= apply_zero_comparison_stage(post_vm_states, config, &all_vm_virtualized);
 
     changed |= apply_constant_encoding_stage(module, post_vm_states, config, &all_vm_virtualized);
     changed |= apply_opaque_gep_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_instruction_substitution_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_opaque_predicate_stage(post_vm_states, config, &all_vm_virtualized);
-    const llvm::StringSet<> flattened_functions =
-        apply_control_flattening_stage(post_vm_states, config, &all_vm_virtualized);
-    changed |= !flattened_functions.empty();
     changed |= apply_function_outlining_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_bogus_control_flow_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_self_checksum_stage(module, post_vm_states, config);

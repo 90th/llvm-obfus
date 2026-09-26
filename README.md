@@ -568,12 +568,12 @@ The safe pipeline execution order runs as follows:
 2. **`obf-vm` (Level `vm`)**: Lowers `vm`-targeted functions into bytecode and replaces callsites with VM wrappers.
 3. **`obf-vm` (Level `strong_vm`)**: Synthesizes bytecode and dispatch wrappers for `strong_vm` functions.
 4. **`obf-string-encode`**: Encrypts static global strings across post-VM module state.
-5. **`obf-zero-comparison`**: Lowers integer/string equality checks to arithmetic XOR ladders.
-6. **`obf-constant-encode`**: Transforms constants into inline MBA arithmetic or keyed pools.
-7. **`obf-opaque-gep`**: Encodes global variable access offsets through opaque math.
-8. **`obf-instruction-substitute`**: Rewrites bitwise operations into compound identities.
-9. **`obf-opaque-preds`**: Injects invariant opaque predicate branches.
-10. **`obf-control-flatten`**: Flattens basic-block control flow graphs into switch dispatch loops.
+5. **`obf-control-flatten`**: Flattens eligible basic-block CFGs into state-driven dispatch loops before later instruction-expanding stages.
+6. **`obf-zero-comparison`**: Lowers integer/string equality checks to arithmetic XOR ladders.
+7. **`obf-constant-encode`**: Transforms constants into inline MBA arithmetic or keyed pools.
+8. **`obf-opaque-gep`**: Encodes global variable access offsets through opaque math.
+9. **`obf-instruction-substitute`**: Rewrites bitwise operations into compound identities.
+10. **`obf-opaque-preds`**: Injects invariant opaque predicate branches.
 11. **`obf-function-outline`**: Outlines selected control-flow blocks into helper shards and preserves handler PHI values on rerouted edges.
 12. **`obf-bogus-cf`**: Injects junk basic blocks and opaque branching loops.
 13. **`obf-self-checksum`**: Injects code-as-data rolling hash verification windows (`rt_core_cc`).
