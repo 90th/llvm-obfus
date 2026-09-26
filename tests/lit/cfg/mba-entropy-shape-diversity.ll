@@ -30,7 +30,7 @@ entry:
 ; CHECK-DAG: %obf.entropy.a.mix.a.rot.pack = or i64 %obf.entropy.a.mix.a.rot, %obf.entropy.a.mix.a.rot2
 ; CHECK-DAG: %obf.entropy.a.mix.rotx = xor i64 %obf.entropy.a.mix.a.rot.pack, %obf.entropy.a.mix.b.rot.pack
 ; CHECK-DAG: %obf.entropy.b.mix.rotx = xor i64 %obf.entropy.b.mix.a.rot.pack, %obf.entropy.b.mix.b.rot.pack
-; CHECK-DAG: obf.mba.zero.xor_pair.delta
+; CHECK-DAG: obf.mba.zero.bit_partition_pair
 ; CHECK-DAG: obf.mba.zero.cmp_select_pair
 ; CHECK-DAG: obf.mba.zero.cmp_select_pair.zero.alt
 ; CHECK-DAG: obf.mba.zero.rotate_xor_pair

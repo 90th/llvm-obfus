@@ -117,7 +117,7 @@ inline void reset_counters(atomic_mba_shape_counts& counters) {
 }
 
 enum class opaque_zero_shape {
-  xor_pair,
+  bit_partition_pair,
   add_sub_pair,
   sub_pair,
   rotate_xor_pair,
@@ -324,7 +324,7 @@ opaque_zero_shape select_opaque_zero_shape(const builder_context& context, std::
   if (enable_polynomial) {
     switch (mix_seed(context.seed_base, salt ^ 0x4f7c2d1b9a031ULL) % 10U) {
       case 0:
-        return opaque_zero_shape::xor_pair;
+        return opaque_zero_shape::bit_partition_pair;
       case 1:
         return opaque_zero_shape::add_sub_pair;
       case 2:
@@ -349,7 +349,7 @@ opaque_zero_shape select_opaque_zero_shape(const builder_context& context, std::
   if (enable_linear) {
     switch (mix_seed(context.seed_base, salt ^ 0x4f7c2d1b9a031ULL) % 8U) {
       case 0:
-        return opaque_zero_shape::xor_pair;
+        return opaque_zero_shape::bit_partition_pair;
       case 1:
         return opaque_zero_shape::add_sub_pair;
       case 2:
@@ -369,7 +369,7 @@ opaque_zero_shape select_opaque_zero_shape(const builder_context& context, std::
 
   switch (mix_seed(context.seed_base, salt ^ 0x4f7c2d1b9a031ULL) % 7U) {
     case 0:
-      return opaque_zero_shape::xor_pair;
+      return opaque_zero_shape::bit_partition_pair;
     case 1:
       return opaque_zero_shape::add_sub_pair;
     case 2:
@@ -1035,14 +1035,38 @@ llvm::Value* entangle_value_impl(llvm::IRBuilder<>& builder,
                                  std::uint64_t salt,
                                  llvm::StringRef name);
 
-llvm::Value* build_opaque_zero_xor_pair(llvm::IRBuilder<>& builder,
-                                        llvm::Value* entropy_a,
-                                        llvm::Value* entropy_b,
-                                        llvm::Constant* mask) {
-  llvm::Value* delta = builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.xor_pair.delta");
-  llvm::Value* lhs = builder.CreateXor(delta, mask, "obf.mba.zero.xor_pair.lhs");
-  llvm::Value* rhs = builder.CreateXor(delta, mask, "obf.mba.zero.xor_pair.rhs");
-  return builder.CreateXor(lhs, rhs, "obf.mba.zero.xor_pair");
+llvm::Value* build_opaque_zero_bit_partition_pair(llvm::IRBuilder<>& builder,
+                                                  llvm::Value* entropy_a,
+                                                  llvm::Value* entropy_b,
+                                                  llvm::Constant* mask) {
+  // ((x | y) - (x & y)) ^ (x ^ y) == 0 over Z/(2^n).
+  llvm::Value* input = builder.CreateXor(entropy_a, mask, "obf.mba.zero.bit_partition_pair.input");
+  llvm::Value* lhs_or =
+      builder.CreateOr(input, entropy_b, "obf.mba.zero.bit_partition_pair.lhs.or");
+  llvm::Value* lhs_and =
+      builder.CreateAnd(input, entropy_b, "obf.mba.zero.bit_partition_pair.lhs.and");
+  llvm::Value* lhs = builder.CreateSub(lhs_or, lhs_and, "obf.mba.zero.bit_partition_pair.lhs");
+  llvm::Value* rhs = builder.CreateXor(input, entropy_b, "obf.mba.zero.bit_partition_pair.rhs");
+  return builder.CreateXor(lhs, rhs, "obf.mba.zero.bit_partition_pair");
+}
+
+llvm::Value* build_opaque_zero_cmp_select_pair(llvm::IRBuilder<>& builder,
+                                               llvm::Value* entropy_a,
+                                               llvm::Value* entropy_b) {
+  llvm::Value* equal =
+      builder.CreateICmpEQ(entropy_a, entropy_b, "obf.mba.zero.cmp_select_pair.eq");
+  // On the equality edge, a | b == a. The inequality arm is zero for
+  // arbitrary inputs, so the whole select is zero even when a and b differ.
+  llvm::Value* equal_union =
+      builder.CreateOr(entropy_a, entropy_b, "obf.mba.zero.cmp_select_pair.eq.union");
+  llvm::Value* zero_eq =
+      builder.CreateSub(equal_union, entropy_a, "obf.mba.zero.cmp_select_pair.zero.eq");
+  llvm::Value* delta =
+      builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.cmp_select_pair.delta");
+  llvm::Value* not_delta = builder.CreateNot(delta, "obf.mba.zero.cmp_select_pair.not.delta");
+  llvm::Value* zero_alt =
+      builder.CreateAnd(delta, not_delta, "obf.mba.zero.cmp_select_pair.zero.alt");
+  return builder.CreateSelect(equal, zero_eq, zero_alt, "obf.mba.zero.cmp_select_pair");
 }
 
 llvm::Value* build_opaque_zero_sub_pair(llvm::IRBuilder<>& builder,
@@ -1061,7 +1085,7 @@ llvm::Value* build_opaque_zero_affine_cancel_pair(llvm::IRBuilder<>& builder,
                                                   llvm::Type* target_type,
                                                   std::uint64_t salt) {
   if (!is_affine_scalar_type(target_type)) {
-    return build_opaque_zero_xor_pair(
+    return build_opaque_zero_bit_partition_pair(
         builder, entropy_a, entropy_b, constant_i64_to_type(target_type, salt));
   }
 
@@ -1203,8 +1227,8 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
   // predicates and constant masks correct even if future entropy accessors stop
   // returning identical pair components.
   switch (shape) {
-    case opaque_zero_shape::xor_pair:
-      return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
+    case opaque_zero_shape::bit_partition_pair:
+      return build_opaque_zero_bit_partition_pair(builder, entropy_a, entropy_b, mask);
     case opaque_zero_shape::add_sub_pair: {
       llvm::Value* delta =
           builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.add_sub_pair.delta");
@@ -1216,7 +1240,7 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
       return build_opaque_zero_sub_pair(builder, entropy_a, entropy_b, mask);
     case opaque_zero_shape::rotate_xor_pair: {
       if (!target_type->isIntegerTy()) {
-        return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
+        return build_opaque_zero_bit_partition_pair(builder, entropy_a, entropy_b, mask);
       }
 
       llvm::Value* delta =
@@ -1227,7 +1251,7 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
           builder.CreateXor(delta, mask, "obf.mba.zero.rotate_xor_pair.rhs.seed");
       const unsigned bit_width = target_type->getIntegerBitWidth();
       if (bit_width <= 1) {
-        return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
+        return build_opaque_zero_bit_partition_pair(builder, entropy_a, entropy_b, mask);
       }
 
       const unsigned amount = static_cast<unsigned>((salt % (bit_width - 1)) + 1);
@@ -1236,22 +1260,12 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
       llvm::Value* rhs =
           support::rotate_left_scalar(builder, rhs_seed, amount, "obf.mba.zero.rotate_xor_pair.rhs");
       if (lhs == nullptr || rhs == nullptr) {
-        return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
+        return build_opaque_zero_bit_partition_pair(builder, entropy_a, entropy_b, mask);
       }
       return builder.CreateXor(lhs, rhs, "obf.mba.zero.rotate_xor_pair");
     }
-    case opaque_zero_shape::cmp_select_pair: {
-      llvm::Value* equal =
-          builder.CreateICmpEQ(entropy_a, entropy_b, "obf.mba.zero.cmp_select_pair.eq");
-      llvm::Value* delta =
-          builder.CreateXor(entropy_a, entropy_b, "obf.mba.zero.cmp_select_pair.delta");
-      llvm::Value* zero_alt =
-          builder.CreateSub(delta, delta, "obf.mba.zero.cmp_select_pair.zero.alt");
-      return builder.CreateSelect(equal,
-                                  llvm::Constant::getNullValue(target_type),
-                                  zero_alt,
-                                  "obf.mba.zero.cmp_select_pair");
-    }
+    case opaque_zero_shape::cmp_select_pair:
+      return build_opaque_zero_cmp_select_pair(builder, entropy_a, entropy_b);
     case opaque_zero_shape::affine_cancel_pair:
       return build_opaque_zero_affine_cancel_pair(builder, entropy_a, entropy_b, target_type, salt);
     case opaque_zero_shape::affine_self_diff:
@@ -1283,7 +1297,7 @@ llvm::Value* build_opaque_zero_for_shape(llvm::IRBuilder<>& builder,
           builder, entropy_a, entropy_b, target_type, context, salt);
   }
 
-  return build_opaque_zero_xor_pair(builder, entropy_a, entropy_b, mask);
+  return build_opaque_zero_bit_partition_pair(builder, entropy_a, entropy_b, mask);
 }
 
 llvm::Value* build_opaque_zero(llvm::IRBuilder<>& builder,

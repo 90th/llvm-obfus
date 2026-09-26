@@ -622,6 +622,8 @@ See [`docs/self-checksum.md`](docs/self-checksum.md) for technical binding speci
   Use that mangled name in `targets[].match`.
   You can also use a selector-friendly symbol such as `extern "C"`.
   This limit applies to policy selection, not to the binder.
+- **MBA Post-Pass Optimization**: Optimized plugin builds place obfuscation late in the optimizer or full-LTO pipeline; `-O0` runs it at pipeline start, and `obf-bc` invokes it explicitly. A second, unconfigured scalar optimization pipeline (such as full `instcombine` or `-O2`) can fold bit-partition, compare-select, and linear opaque-zero identities before code generation.
+- **MBA Native Footprint**: Backend-surviving opaque zeros add instructions to protected functions. Strong and VM targets can grow binaries and increase hot-path latency; select target functions or lower MBA depth when footprint matters.
 
 ---
 
