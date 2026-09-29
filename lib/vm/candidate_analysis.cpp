@@ -169,24 +169,30 @@ std::optional<opcode> map_intrinsic_opcode(const llvm::IntrinsicInst& instructio
   }
 }
 
-bool is_integer_min_intrinsic(const llvm::IntrinsicInst& instruction) {
+bool is_integer_extremum_intrinsic(const llvm::IntrinsicInst& instruction) {
   switch (instruction.getIntrinsicID()) {
     case llvm::Intrinsic::umin:
     case llvm::Intrinsic::smin:
+    case llvm::Intrinsic::umax:
+    case llvm::Intrinsic::smax:
       return instruction.getType()->isIntegerTy() && instruction.arg_size() == 2;
     default:
       return false;
   }
 }
 
-opcode min_compare_opcode(const llvm::IntrinsicInst& instruction) {
+opcode extremum_compare_opcode(const llvm::IntrinsicInst& instruction) {
   switch (instruction.getIntrinsicID()) {
     case llvm::Intrinsic::umin:
       return opcode::icmp_ult;
     case llvm::Intrinsic::smin:
       return opcode::icmp_slt;
+    case llvm::Intrinsic::umax:
+      return opcode::icmp_ugt;
+    case llvm::Intrinsic::smax:
+      return opcode::icmp_sgt;
     default:
-      llvm_unreachable("unexpected integer min intrinsic");
+      llvm_unreachable("unexpected integer extremum intrinsic");
   }
 }
 
@@ -489,26 +495,42 @@ candidate_result build_program(const llvm::Function& function,
       vm_instruction.flags = encode_instruction_flags(instruction);
 
       if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction);
-          intrinsic != nullptr && is_integer_min_intrinsic(*intrinsic)) {
+          intrinsic != nullptr && is_integer_extremum_intrinsic(*intrinsic)) {
+        if (intrinsic->getType()->getIntegerBitWidth() == llvm::IntegerType::MAX_INT_BITS) {
+          return reject("integer comparison width exceeds VM widening limit");
+        }
         const std::optional<value_ref> lhs = lower_value(*intrinsic->getArgOperand(0), detail);
         const std::optional<value_ref> rhs = lower_value(*intrinsic->getArgOperand(1), detail);
         if (!lhs || !rhs) { return reject(detail); }
+        // One frozen choice per operand keeps undef consistent across VM instructions
+        // and prevents a poison comparison from reaching the select handler's branch.
+        const auto freeze_operand = [&](const value_ref& operand) {
+          const std::uint32_t slot = add_slot(program, intrinsic->getType());
+          micro_instruction frozen;
+          frozen.op = opcode::freeze;
+          frozen.result_slot = slot;
+          frozen.operands.push_back(operand);
+          program.instructions.push_back(std::move(frozen));
+          return value_ref{.kind = value_ref_kind::slot, .slot = slot};
+        };
+        const value_ref stable_lhs = freeze_operand(*lhs);
+        const value_ref stable_rhs = freeze_operand(*rhs);
 
         const std::uint32_t compare_slot =
             add_slot(program, llvm::Type::getInt1Ty(function.getContext()));
 
         micro_instruction compare_instruction;
         compare_instruction.result_slot = compare_slot;
-        compare_instruction.op = min_compare_opcode(*intrinsic);
-        compare_instruction.operands.push_back(*lhs);
-        compare_instruction.operands.push_back(*rhs);
+        compare_instruction.op = extremum_compare_opcode(*intrinsic);
+        compare_instruction.operands.push_back(stable_lhs);
+        compare_instruction.operands.push_back(stable_rhs);
         program.instructions.push_back(std::move(compare_instruction));
 
         vm_instruction.op = opcode::select;
         vm_instruction.operands.push_back(
             value_ref{.kind = value_ref_kind::slot, .slot = compare_slot});
-        vm_instruction.operands.push_back(*lhs);
-        vm_instruction.operands.push_back(*rhs);
+        vm_instruction.operands.push_back(stable_lhs);
+        vm_instruction.operands.push_back(stable_rhs);
         program.instructions.push_back(std::move(vm_instruction));
         continue;
       }
@@ -552,6 +574,12 @@ candidate_result build_program(const llvm::Function& function,
       } else if (const auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(&instruction)) {
         const std::optional<opcode> lowered_opcode = map_icmp_opcode(*icmp);
         if (!lowered_opcode) { return reject("unsupported icmp predicate"); }
+        if (icmp->getOperand(0)->getType()->isIntegerTy() &&
+            icmp->getOperand(0)->getType()->getIntegerBitWidth() ==
+                llvm::IntegerType::MAX_INT_BITS &&
+            *lowered_opcode != opcode::icmp_eq && *lowered_opcode != opcode::icmp_ne) {
+          return reject("integer comparison width exceeds VM widening limit");
+        }
 
         vm_instruction.op = *lowered_opcode;
         const std::optional<value_ref> lhs = lower_value(*icmp->getOperand(0), detail);

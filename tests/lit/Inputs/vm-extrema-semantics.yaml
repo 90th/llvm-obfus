@@ -1,0 +1,13 @@
+seed: 271828
+default_level: none
+targets:
+  - match: vm_undef_umax
+    level: vm
+  - match: vm_undef_smin
+    level: vm
+  - match: vm_discard_poison
+    level: vm
+  - match: vm_freeze_poison
+    level: vm
+vm:
+  max_virtual_instructions: 6

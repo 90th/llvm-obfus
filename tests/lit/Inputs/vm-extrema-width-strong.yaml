@@ -1,0 +1,7 @@
+seed: 271828
+default_level: none
+overrides:
+  - name: vm_wide_max
+    level: strong_vm
+security:
+  fail_on_public_obf_symbol: true

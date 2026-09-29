@@ -1,0 +1,7 @@
+seed: 314159
+default_level: none
+targets:
+  - match: cpp_smax
+    level: vm
+  - match: cpp_umax
+    level: vm

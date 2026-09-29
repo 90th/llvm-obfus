@@ -58,6 +58,8 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 - VM island, decoy, and split helpers accept state pointers in the module's alloca address space.
 - Later hardening stages also process `strong_vm` implementation bodies, not just the public wrapper.
 - Candidate analysis (`lib/vm/candidate_analysis.cpp`) skips incompatible constructs (varargs, non-integral pointers, complex EH pads) and gives clear diagnostics if instruction limits are exceeded.
+- The VM lowers scalar `llvm.umin`, `llvm.smin`, `llvm.umax`, and `llvm.smax` through frozen operands, integer comparison, and select handlers. Each intrinsic costs four virtual instructions; vector forms remain unsupported.
+- The VM rejects ordered comparisons at LLVM's maximum integer width rather than constructing an invalid widened type. `strong_vm` reports this as an admission failure.
 - MBA rewriting diversifies arithmetic identities across `add`, `sub`, `xor`, and `mul`. It also rewrites `udiv` and `urem` by power-of-two constant divisors. It works directly and as part of other transforms such as constant reconstruction and opaque predicates.
 - Shape families include linear identities (`x ^ y = (x | y) - (x & y)`), affine wrappers (`Encode(x) = a*x + b` with odd modular multiplier), polynomial zero terms (depth 3+), and constant-multiplication decomposition.
 - A private `BudgetTracker` enforces a per-expression IR-instruction cap derived from `mba.depth`. When the budget runs out mid-expansion, the engine emits the plain LLVM binary operation instead.

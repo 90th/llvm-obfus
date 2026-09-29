@@ -1,0 +1,7 @@
+seed: 271828
+default_level: none
+targets:
+  - match: vm_wide_max
+    level: vm
+  - match: vm_wide_ordered_cmp
+    level: vm

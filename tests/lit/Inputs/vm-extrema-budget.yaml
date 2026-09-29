@@ -1,0 +1,9 @@
+seed: 314159
+default_level: none
+targets:
+  - match: vm_smax8
+    level: vm
+  - match: vm_umax64
+    level: vm
+vm:
+  max_virtual_instructions: 4
