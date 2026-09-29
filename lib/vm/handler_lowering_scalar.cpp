@@ -278,7 +278,7 @@ llvm::Value* emit_icmp_result(llvm::IRBuilder<>& builder,
         lhs,
         rhs,
         "obf.vm.icmp.inv");
-    return builder.CreateXor(inverted, builder.getTrue(), compare_shape_marker(shape));
+    return builder.CreateNot(inverted, compare_shape_marker(shape));
   }
 
   llvm::Value* result = nullptr;
@@ -330,7 +330,7 @@ llvm::Value* emit_fcmp_result(llvm::IRBuilder<>& builder,
       shape == compare_handler_shape::inverted_predicate ? "obf.vm.fcmp.inv" : "obf.vm.fcmp");
   apply_fast_math_flags(llvm::dyn_cast<llvm::Instruction>(compare), instruction.flags);
   if (shape == compare_handler_shape::inverted_predicate) {
-    return builder.CreateXor(compare, builder.getTrue(), compare_shape_marker(shape));
+    return builder.CreateNot(compare, compare_shape_marker(shape));
   }
 
   return apply_compare_handler_shape(builder, shape, compare);
@@ -1366,6 +1366,8 @@ bool lower_scalar_instruction(llvm::IRBuilder<>& builder,
                                                    function_context.opaque_seed_base,
                                                    function_context.mba_context,
                                                    0x10000 + instruction_index);
+        // A select permits poison here, but a synthesized branch does not.
+        condition = builder.CreateFreeze(condition, "obf.vm.select.cond");
         builder.CreateCondBr(condition, true_block, false_block);
 
         llvm::IRBuilder<> true_builder(true_block);
@@ -1426,7 +1428,9 @@ bool lower_scalar_instruction(llvm::IRBuilder<>& builder,
                       next_target,
                       0x10400 + instruction_index,
                       static_cast<std::uint32_t>(instruction_index + 1));
-      } else if (select_handler_variant(instruction.op,
+      } else if (!value_ref_type(function_context.program, instruction.operands[0])
+                      ->isIntegerTy(1) ||
+                 select_handler_variant(instruction.op,
                                         function_context.opaque_seed_base,
                                         0x10000 + instruction_index) == 0) {
         finish_value(builder,
@@ -1481,6 +1485,7 @@ bool lower_scalar_instruction(llvm::IRBuilder<>& builder,
                                                    function_context.opaque_seed_base,
                                                    function_context.mba_context,
                                                    0x10000 + instruction_index);
+        condition = builder.CreateFreeze(condition, "obf.vm.select.cond");
         builder.CreateCondBr(condition, true_block, false_block);
 
         llvm::IRBuilder<> true_builder(true_block);

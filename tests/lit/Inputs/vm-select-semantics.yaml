@@ -1,0 +1,11 @@
+seed: 1
+default_level: none
+targets:
+  - match: vm_select_*
+    level: strong_vm
+mba:
+  depth: 0
+vm:
+  max_virtual_instructions: 26
+security:
+  fail_on_public_obf_symbol: true
