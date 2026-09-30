@@ -3,6 +3,7 @@
 #include "obf/vm/internal/virtualize_anchor_scattering.h"
 #include "obf/vm/virtualize_internal.h"
 
+#include "obf/support/function_attrs.h"
 #include "obf/support/generated_names.h"
 #include "obf/vm/candidate_analysis.h"
 
@@ -709,6 +710,8 @@ void emit_state_island_helper(llvm::Function& helper,
         llvm::GlobalValue::InternalLinkage,
         make_vm_subisland_helper_name(*module, bytecode_seed, island_index, subhelper_index),
         module);
+    subhelper->setAttributes(
+        support::build_preserved_source_function_attributes(helper, *subhelper));
     subhelper->setDSOLocal(true);
     subhelper->addFnAttr(llvm::Attribute::NoInline);
     subhelper->addFnAttr(llvm::Attribute::OptimizeNone);
@@ -936,6 +939,7 @@ void rewrite_function_body_state_islands(llvm::Function& function,
                                llvm::GlobalValue::InternalLinkage,
                                make_vm_island_helper_name(*module, bytecode_seed, island_index),
                                module);
+    helper->setAttributes(support::build_preserved_source_function_attributes(function, *helper));
     helper->setDSOLocal(true);
     helper->addFnAttr(llvm::Attribute::NoInline);
     helper->addFnAttr(llvm::Attribute::OptimizeNone);
@@ -955,6 +959,8 @@ void rewrite_function_body_state_islands(llvm::Function& function,
                                llvm::GlobalValue::InternalLinkage,
                                MakeVmIslandDecoyHelperName(*module, bytecode_seed, island_index),
                                module);
+    decoy_helper->setAttributes(
+        support::build_preserved_source_function_attributes(function, *decoy_helper));
     decoy_helper->setDSOLocal(true);
     decoy_helper->addFnAttr(llvm::Attribute::NoInline);
     decoy_helper->addFnAttr(llvm::Attribute::OptimizeNone);

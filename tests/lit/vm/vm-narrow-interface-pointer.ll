@@ -14,11 +14,17 @@ entry:
   ret i32 %result
 }
 
+; CHECK-DAG: @[[TARGET:__obf_vm_t_[A-Za-z0-9_]+]] = private global i32 {{-?[0-9]+}}, align 4
+
 ; CHECK-LABEL: define i32 @attr_readonly(i32 %x) addrspace(1)
+; CHECK: %attr_readonly.obf.wrapper.check = load atomic i32, ptr @[[TARGET]] monotonic, align 4
 ; CHECK: %attr_readonly.obf.wrapper.target.seed.value = call i32 @__obf_vm_seed_resolve.i32(i32
+; CHECK: store atomic i32 %attr_readonly.obf.wrapper.resolved{{(\.poison[0-9]*)?}}, ptr @[[TARGET]] monotonic, align 4
 ; CHECK: %attr_readonly.obf.wrapper.indirect = inttoptr i32 {{.*}} to ptr addrspace(1)
 ; CHECK: call addrspace(1) i32 %attr_readonly.obf.wrapper.indirect(i32 %x, i64
 ; CHECK-LABEL: define i32 @caller()
+; CHECK: %attr_readonly.obf.check = load atomic i32, ptr @[[TARGET]] monotonic, align 4
+; CHECK: store atomic i32 %attr_readonly.obf.resolved{{(\.poison[0-9]*)?}}, ptr @[[TARGET]] monotonic, align 4
 ; CHECK: %attr_readonly.obf.indirect = inttoptr i32 {{.*}} to ptr addrspace(1)
 ; CHECK: call addrspace(1) i32 %attr_readonly.obf.indirect(i32 5, i64
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token) addrspace(1)

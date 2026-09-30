@@ -46,7 +46,6 @@ entry:
 ; VM: ptrtoint (ptr @[[VERIFY_THUNK:__obf_vm_e_[A-Za-z0-9_]+]] to i{{[0-9]+}})
 ; VM: call i32 %verify_license.obf.wrapper.indirect(i32 %x, i64 %verify_license.obf.wrapper.token)
 ; VM-LABEL: define i32 @parse_secret_token(i32 %x)
-; VM: %parse_secret_token.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
 ; VM: %parse_secret_token.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve
 ; VM: call i32 %parse_secret_token.obf.wrapper.indirect(i32 %x, i64 %parse_secret_token.obf.wrapper.token)
 ; VM-DAG: define internal i32 @[[VERIFY_THUNK]](i32 {{.*}}, i64 %obf.hidden_token)

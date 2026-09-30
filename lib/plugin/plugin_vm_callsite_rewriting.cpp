@@ -53,10 +53,9 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
   llvm::Module* module = function.getParent();
   if (module == nullptr) { return false; }
 
-  const vm_resolver_shape resolver_shape =
-      binding.state == nullptr
-          ? vm_resolver_shape::cached_sentinel_global
-          : select_vm_resolver_shape(binding.state->report.decision.policy.level);
+  const protection_level resolver_level =
+      binding.state ? binding.state->report.decision.policy.level : protection_level::vm;
+  const vm_resolver_shape resolver_shape = select_vm_resolver_shape(resolver_level, function);
   const vm_seed_resolver_shape seed_resolver_shape =
       binding.state == nullptr
           ? vm_seed_resolver_shape::shared_switch_resolver
@@ -215,8 +214,8 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
                                  site.hidden_token,
                                  mba_depth,
                                  0x700000ULL + static_cast<std::uint64_t>(callsite_index++));
-    auto* encoded_check =
-        entry_builder.CreateLoad(ptr_int_type, target_global, function.getName() + ".obf.check");
+    auto* encoded_check = create_vm_target_cache_load(
+        entry_builder, *target_global, function.getName() + ".obf.check");
     auto* sentinel_const = llvm::ConstantInt::get(ptr_int_type, sentinel);
     auto* is_unresolved = entry_builder.CreateICmpEQ(
         encoded_check, sentinel_const, function.getName() + ".obf.unresolved");
@@ -239,7 +238,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
                                                              site.hidden_token,
                                                              0x710000ULL,
                                                              mba_depth);
-    resolve_builder.CreateStore(new_encoded, target_global);
+    create_vm_target_cache_store(resolve_builder, new_encoded, *target_global);
     resolve_builder.CreateBr(call_bb);
 
     llvm::IRBuilder<> call_builder(call);

@@ -1,0 +1,11 @@
+default_level: none
+seed: 515151
+targets:
+  - match: local_attr_target
+    level: vm
+  - match: constrained_target
+    level: vm
+mba:
+  depth: 0
+security:
+  fail_on_public_obf_symbol: true

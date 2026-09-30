@@ -2,6 +2,7 @@
 #include "obf/vm/internal/virtualize_anchor_scattering.h"
 #include "obf/vm/virtualize_internal.h"
 
+#include "obf/support/function_attrs.h"
 #include "obf/support/generated_names.h"
 
 #include "llvm/Analysis/AssumptionCache.h"
@@ -552,6 +553,8 @@ std::uint32_t outline_vm_islands(rewrite_function_context& context) {
         continue;
       }
 
+      helper->setAttributes(
+          support::build_preserved_source_function_attributes(context.function, *helper));
       helper->setName(make_vm_island_helper_name(
           *context.function.getParent(), context, 0x100ULL + island_index));
       helper->setLinkage(llvm::GlobalValue::InternalLinkage);

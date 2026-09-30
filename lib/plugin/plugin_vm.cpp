@@ -118,7 +118,8 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
         binding.entry_thunk_function = entry_thunk_function;
 
         const vm_resolver_shape resolver_shape =
-            select_vm_resolver_shape(binding.state->report.decision.policy.level);
+            select_vm_resolver_shape(binding.state->report.decision.policy.level,
+                                     *binding.interface_function);
         const vm_seed_resolver_shape seed_resolver_shape =
             select_vm_seed_resolver_shape(binding.state->report.decision.policy.level);
         binding.uses_target_cache = resolver_shape == vm_resolver_shape::cached_sentinel_global;

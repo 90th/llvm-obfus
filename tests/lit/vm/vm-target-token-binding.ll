@@ -2,7 +2,7 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-target-token-binding.yaml -passes=obf-vm -S %s -o %t
 ; RUN: %lli %t
 
-; CHECK-DAG: @[[NORMAL_TARGET:__obf_vm_t_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
+; CHECK-DAG: @[[NORMAL_TARGET:__obf_vm_t_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}, align [[NORMAL_TARGET_ALIGN:[0-9]+]]
 ; CHECK-DAG: @[[NORMAL_KEY:__obf_vm_k_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
 ; CHECK-DAG: @[[STRONG_KEY:__obf_vm_k_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
 
@@ -13,7 +13,7 @@
 ; CHECK: %token_bound_normal.obf.wrapper.target.token.delta = xor i{{[0-9]+}} %token_bound_normal.obf.wrapper.target.token,
 ; CHECK: %token_bound_normal.obf.wrapper.target.token.mask = xor i{{[0-9]+}} %token_bound_normal.obf.wrapper.target.token.delta,
 ; CHECK: %token_bound_normal.obf.wrapper.target.key.bound = xor i{{[0-9]+}} %token_bound_normal.obf.wrapper.target.key, %token_bound_normal.obf.wrapper.target.token.mask
-; CHECK: store i{{[0-9]+}} %token_bound_normal.obf.wrapper.resolved{{(\.poison[0-9]*)?}}, ptr @[[NORMAL_TARGET]]
+; CHECK: store atomic i{{[0-9]+}} %token_bound_normal.obf.wrapper.resolved{{(\.poison[0-9]*)?}}, ptr @[[NORMAL_TARGET]] monotonic, align [[NORMAL_TARGET_ALIGN]]
 ; CHECK: %token_bound_normal.obf.wrapper.key = load i{{[0-9]+}}, ptr @[[NORMAL_KEY]]
 ; CHECK: %token_bound_normal.obf.wrapper.decode.token = {{(add|sub|xor)}} i{{[0-9]+}}
 ; CHECK: %token_bound_normal.obf.wrapper.decode.token.delta = xor i{{[0-9]+}} %token_bound_normal.obf.wrapper.decode.token,
@@ -37,7 +37,7 @@
 
 ; CHECK-LABEL: define i32 @normal_site_a()
 ; CHECK: %token_bound_normal.obf.call.token = {{(add|sub|xor)}} i64
-; CHECK: %token_bound_normal.obf.check = load i{{[0-9]+}}, ptr @[[NORMAL_TARGET]]
+; CHECK: %token_bound_normal.obf.check = load atomic i{{[0-9]+}}, ptr @[[NORMAL_TARGET]] monotonic, align [[NORMAL_TARGET_ALIGN]]
 ; CHECK: %token_bound_normal.obf.target.key = load i{{[0-9]+}}, ptr @[[NORMAL_KEY]]
 ; CHECK: %token_bound_normal.obf.target.key.bound = xor i{{[0-9]+}} %token_bound_normal.obf.target.key, %token_bound_normal.obf.target.token.mask
 ; CHECK: %token_bound_normal.obf.key = load i{{[0-9]+}}, ptr @[[NORMAL_KEY]]
@@ -46,7 +46,7 @@
 
 ; CHECK-LABEL: define i32 @main()
 ; CHECK: %token_bound_normal.obf.call.token = {{(add|sub|xor)}} i64
-; CHECK: %token_bound_normal.obf.check = load i{{[0-9]+}}, ptr @[[NORMAL_TARGET]]
+; CHECK: %token_bound_normal.obf.check = load atomic i{{[0-9]+}}, ptr @[[NORMAL_TARGET]] monotonic, align [[NORMAL_TARGET_ALIGN]]
 ; CHECK: %token_bound_normal.obf.target.key.bound = xor i{{[0-9]+}} %token_bound_normal.obf.target.key, %token_bound_normal.obf.target.token.mask
 ; CHECK: %token_bound_normal.obf.key.bound = xor i{{[0-9]+}} %token_bound_normal.obf.key, %token_bound_normal.obf.decode.token.mask
 ; CHECK: call i32 %token_bound_normal.obf.indirect(i32 7, i64 %token_bound_normal.obf.call.token)

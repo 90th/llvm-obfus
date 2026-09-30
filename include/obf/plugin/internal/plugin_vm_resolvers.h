@@ -4,14 +4,17 @@
 #include "obf/plugin/internal/plugin_vm_internal.h"
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/IRBuilder.h"
 
 namespace obf {
 
-vm_resolver_shape select_vm_resolver_shape(protection_level level);
+vm_resolver_shape select_vm_resolver_shape(protection_level level,
+                                           const llvm::Function& function);
 
 vm_seed_resolver_shape select_vm_seed_resolver_shape(protection_level level);
 
@@ -66,6 +69,13 @@ std::uint64_t derive_vm_target_salt(std::uint64_t decision_seed, llvm::StringRef
 llvm::GlobalVariable* get_or_create_vm_target_global(llvm::Function& function,
                                                      std::uint64_t decision_seed,
                                                      llvm::StringRef global_name);
+llvm::LoadInst* create_vm_target_cache_load(llvm::IRBuilder<>& builder,
+                                            llvm::GlobalVariable& target_global,
+                                            const llvm::Twine& name);
+
+llvm::StoreInst* create_vm_target_cache_store(llvm::IRBuilder<>& builder,
+                                              llvm::Value* encoded_target,
+                                              llvm::GlobalVariable& target_global);
 
 llvm::GlobalVariable*
 get_or_create_vm_target_seed_global(llvm::Function& interface_function,

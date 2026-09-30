@@ -385,7 +385,7 @@ llvm::Function* create_vm_entry_thunk(llvm::Function& interface_function,
                                        module);
   thunk->setCallingConv(interface_function.getCallingConv());
   thunk->setDSOLocal(true);
-  thunk->setAttributes(build_vm_abi_attribute_list(interface_function));
+  thunk->setAttributes(build_vm_boundary_attribute_list(interface_function));
   thunk->addFnAttr(llvm::Attribute::NoInline);
   thunk->addFnAttr("obf.vm.entry.thunk");
   thunk->addFnAttr(vm_entry_thunk_shape_marker(shape));
@@ -516,7 +516,9 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
   if (binding.state == nullptr) { llvm_unreachable("vm wrapper missing binding state"); }
   const protection_level level = binding.state->report.decision.policy.level;
   const std::uint64_t decision_seed = binding.state->report.decision.seed;
-  if (resolver_shape != select_vm_resolver_shape(level)) { llvm_unreachable("Shape mismatch"); }
+  if (resolver_shape != select_vm_resolver_shape(level, interface_function)) {
+    llvm_unreachable("Shape mismatch");
+  }
   if (seed_resolver_shape != select_vm_seed_resolver_shape(level)) {
     llvm_unreachable("Shape mismatch");
   }
@@ -647,7 +649,8 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
                                (interface_function.getName() + ".obf.wrapper.call").str(),
                                &interface_function);
 
-  auto* encoded_check = builder.CreateLoad(ptr_int_type, target_global, wrapper_prefix + ".check");
+  auto* encoded_check = create_vm_target_cache_load(
+      builder, *target_global, wrapper_prefix + ".check");
   auto* sentinel_const = llvm::ConstantInt::get(ptr_int_type, sentinel);
   auto* is_unresolved =
       builder.CreateICmpEQ(encoded_check, sentinel_const, wrapper_prefix + ".unresolved");
@@ -670,7 +673,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
                                                            wrapper_token,
                                                            0x610000ULL,
                                                            mba_depth);
-  resolve_builder.CreateStore(new_encoded, target_global);
+  create_vm_target_cache_store(resolve_builder, new_encoded, *target_global);
   resolve_builder.CreateBr(call_bb);
 
   llvm::IRBuilder<> call_builder(call_bb);

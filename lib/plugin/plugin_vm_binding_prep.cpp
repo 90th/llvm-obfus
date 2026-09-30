@@ -3,6 +3,7 @@
 #include "obf/plugin/obfuscator_plugin_internal.h"
 #include "obf/frontend/config.h"
 
+#include "obf/support/function_attrs.h"
 #include "obf/support/generated_names.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/transforms/mba.h"
@@ -172,6 +173,11 @@ llvm::AttributeList build_vm_abi_attribute_list(const llvm::Function& function) 
   return sanitized;
 }
 
+llvm::AttributeList build_vm_boundary_attribute_list(const llvm::Function& function) {
+  return support::merge_preserved_source_function_attributes(
+      build_vm_abi_attribute_list(function), function);
+}
+
 vm_boundary_analysis analyze_vm_boundary(const llvm::Function& target,
                                          llvm::ArrayRef<llvm::CallBase*> sites) {
   vm_boundary_analysis analysis;
@@ -321,19 +327,27 @@ llvm::IntegerType* get_vm_pointer_int_type(llvm::Function& function) {
 }
 
 llvm::AttributeList build_vm_safe_callsite_attributes(const llvm::Function& callee_function) {
-  return build_vm_abi_attribute_list(callee_function);
+  llvm::LLVMContext& context = callee_function.getContext();
+  llvm::AttributeList sanitized = build_vm_abi_attribute_list(callee_function);
+  for (llvm::Attribute attribute : callee_function.getAttributes().getFnAttrs()) {
+    if (!attribute.hasKindAsEnum() || attribute.getKindAsEnum() != llvm::Attribute::StrictFP) {
+      continue;
+    }
+    sanitized = sanitized.addFnAttribute(context, attribute);
+  }
+  return sanitized;
 }
 
 void sanitize_vm_implementation_attributes(llvm::Function& implementation_function,
                                            const llvm::Function& interface_function) {
-  implementation_function.setAttributes(build_vm_abi_attribute_list(interface_function));
+  implementation_function.setAttributes(build_vm_boundary_attribute_list(interface_function));
   implementation_function.setDSOLocal(true);
   implementation_function.addFnAttr(llvm::Attribute::NoInline);
   implementation_function.addFnAttr(llvm::Attribute::OptimizeNone);
 }
 
 void sanitize_vm_wrapper_attributes(llvm::Function& interface_function) {
-  interface_function.setAttributes(build_vm_abi_attribute_list(interface_function));
+  interface_function.setAttributes(build_vm_boundary_attribute_list(interface_function));
 }
 
 llvm::Function* clone_vm_implementation(llvm::Function& interface_function,

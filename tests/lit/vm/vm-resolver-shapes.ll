@@ -28,14 +28,14 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @[[NORMAL_TARGET:__obf_vm_t_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
+; CHECK-DAG: @[[NORMAL_TARGET:__obf_vm_t_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}, align [[NORMAL_TARGET_ALIGN:[0-9]+]]
 ; CHECK-DAG: @[[NORMAL_SEED:__obf_vm_s_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} 0
 ; CHECK-DAG: @[[STRONG_SEED:__obf_vm_s_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} 0
 
 ; CHECK-LABEL: define i32 @normal_vm_value(i32 %x)
-; CHECK: %normal_vm_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @[[NORMAL_TARGET]]
+; CHECK: %normal_vm_value.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @[[NORMAL_TARGET]] monotonic, align [[NORMAL_TARGET_ALIGN]]
 ; CHECK: %normal_vm_value.obf.wrapper.unresolved = icmp eq
-; CHECK: store i{{[0-9]+}} %normal_vm_value.obf.wrapper.resolved{{(\.poison[0-9]*)?}}, ptr @[[NORMAL_TARGET]]
+; CHECK: store atomic i{{[0-9]+}} %normal_vm_value.obf.wrapper.resolved{{(\.poison[0-9]*)?}}, ptr @[[NORMAL_TARGET]] monotonic, align [[NORMAL_TARGET_ALIGN]]
 ; CHECK: %normal_vm_value.obf.wrapper.encoded = phi i{{[0-9]+}}
 ; CHECK: call i32 %normal_vm_value.obf.wrapper.indirect(i32 %x, i64 %normal_vm_value.obf.wrapper.token)
 
@@ -50,7 +50,9 @@ entry:
 ; CHECK: call i32 %strong_vm_value.obf.wrapper.indirect(i32 %x, i64 %strong_vm_value.obf.wrapper.token)
 
 ; CHECK-LABEL: define i32 @main()
-; CHECK: %normal_vm_value.obf.check = load i{{[0-9]+}}, ptr @[[NORMAL_TARGET]]
+; CHECK: %normal_vm_value.obf.check = load atomic i{{[0-9]+}}, ptr @[[NORMAL_TARGET]] monotonic, align [[NORMAL_TARGET_ALIGN]]
+; CHECK: store atomic i{{[0-9]+}} %normal_vm_value.obf.resolved{{(\.poison[0-9]*)?}}, ptr @[[NORMAL_TARGET]] monotonic, align [[NORMAL_TARGET_ALIGN]]
+
 ; CHECK: %normal_vm_value.obf.encoded = phi i{{[0-9]+}}
 ; CHECK: call i32 %normal_vm_value.obf.indirect(i32 10, i64 %normal_vm_value.obf.call.token)
 ; CHECK-NOT: strong_vm_value.obf.check

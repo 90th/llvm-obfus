@@ -1,0 +1,9 @@
+seed: 1601
+default_level: none
+targets:
+  - match: cache_width_64
+    level: vm
+  - match: cache_width_24
+    level: vm
+security:
+  fail_on_public_obf_symbol: true

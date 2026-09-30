@@ -3,6 +3,7 @@
 
 #include "obf/plugin/obfuscator_plugin_internal.h"
 
+#include "obf/support/function_attrs.h"
 #include "obf/support/generated_names.h"
 #include "obf/vm/candidate_analysis.h"
 
@@ -266,6 +267,7 @@ llvm::Function* extract_regional_vm_helper(llvm::Function& function,
   llvm::Function* helper = extractor.extractCodeRegion(cache);
   if (helper == nullptr) { return nullptr; }
 
+  helper->setAttributes(support::build_preserved_source_function_attributes(function, *helper));
   helper->setName(build_vm_region_helper_name(function, helper_ordinal, seed, preserve_generated_names));
   helper->setLinkage(llvm::GlobalValue::InternalLinkage);
   helper->setDSOLocal(true);

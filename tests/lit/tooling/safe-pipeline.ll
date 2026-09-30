@@ -55,7 +55,7 @@ entry:
 ; CHECK: call {{.*}} @{{[^ ]+}}({{.*}})
 ; CHECK: ret i32
 ; CHECK-LABEL: define i32 @fold_value(i32
-; CHECK: load i64, ptr @[[VMTARGET]]
+; CHECK: load atomic i64, ptr @[[VMTARGET]] monotonic, align 8
 ; CHECK: load i64, ptr @[[VMKEY]]
 ; CHECK: load i64, ptr @[[VMTARGETSEED]]
 ; CHECK: inttoptr i64
@@ -63,8 +63,8 @@ entry:
 ; CHECK: load i64, ptr @[[VMRETKEY]]
 ; CHECK-LABEL: define i32 @main()
 ; CHECK: call ptr @[[STRHELPER:_[0-9a-f]+]](ptr
-; CHECK: load i64, ptr @[[VMTARGET]]
-; CHECK: store i64 %{{[^,]+}}, ptr @[[VMTARGET]]
+; CHECK: load atomic i64, ptr @[[VMTARGET]] monotonic, align 8
+; CHECK: store atomic i64 %{{[^,]+}}, ptr @[[VMTARGET]] monotonic, align 8
 ; CHECK: load i64, ptr @[[VMKEY]]
 ; CHECK: call i32 %{{[^ ]+}}(i32 %{{[^,]+}}, i64 %{{[^)]+}})
 ; CHECK: load i64, ptr @[[VMRETKEY]]

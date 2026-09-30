@@ -4,6 +4,7 @@
 #include "obf/vm/internal/virtualize_anchor_scattering.h"
 #include "obf/vm/virtualize_internal.h"
 
+#include "obf/support/function_attrs.h"
 #include "obf/support/generated_names.h"
 #include "obf/vm/candidate_analysis.h"
 
@@ -29,63 +30,7 @@
 
 namespace obf::vm {
 
-bool should_preserve_function_attribute(llvm::Attribute attribute) {
-  if (attribute.isStringAttribute()) { return true; }
-
-  if (!attribute.hasKindAsEnum()) { return false; }
-
-  switch (attribute.getKindAsEnum()) {
-    case llvm::Attribute::AlwaysInline:
-    case llvm::Attribute::MinSize:
-    case llvm::Attribute::OptimizeForDebugging:
-    case llvm::Attribute::OptimizeForSize:
-      return false;
-    default:
-      break;
-  }
-
-  if (llvm::Attribute::intersectMustPreserve(attribute.getKindAsEnum())) { return true; }
-
-  switch (attribute.getKindAsEnum()) {
-    case llvm::Attribute::Cold:
-    case llvm::Attribute::Convergent:
-    case llvm::Attribute::DisableSanitizerInstrumentation:
-    case llvm::Attribute::Hot:
-    case llvm::Attribute::InlineHint:
-    case llvm::Attribute::JumpTable:
-    case llvm::Attribute::MustProgress:
-    case llvm::Attribute::NoFree:
-    case llvm::Attribute::NoInline:
-    case llvm::Attribute::NoRedZone:
-    case llvm::Attribute::NoSync:
-    case llvm::Attribute::NoUnwind:
-    case llvm::Attribute::NullPointerIsValid:
-    case llvm::Attribute::OptimizeNone:
-    case llvm::Attribute::SafeStack:
-    case llvm::Attribute::SanitizeAddress:
-    case llvm::Attribute::SanitizeHWAddress:
-    case llvm::Attribute::SanitizeMemTag:
-    case llvm::Attribute::SanitizeMemory:
-    case llvm::Attribute::SanitizeNumericalStability:
-    case llvm::Attribute::SanitizeRealtime:
-    case llvm::Attribute::SanitizeRealtimeBlocking:
-    case llvm::Attribute::SanitizeThread:
-    case llvm::Attribute::SanitizeType:
-    case llvm::Attribute::ShadowCallStack:
-    case llvm::Attribute::SpeculativeLoadHardening:
-    case llvm::Attribute::StackProtect:
-    case llvm::Attribute::StackProtectReq:
-    case llvm::Attribute::StackProtectStrong:
-    case llvm::Attribute::StrictFP:
-    case llvm::Attribute::UWTable:
-    case llvm::Attribute::WillReturn:
-      return true;
-    default:
-      return false;
-  }
-}
-
-llvm::AttributeList build_preserved_function_attributes(llvm::Function& function) {
+llvm::AttributeList build_rewritten_function_attributes(const llvm::Function& function) {
   llvm::LLVMContext& context = function.getContext();
   const llvm::AttributeList original = function.getAttributes();
   llvm::AttributeList preserved;
@@ -94,7 +39,7 @@ llvm::AttributeList build_preserved_function_attributes(llvm::Function& function
     preserved = preserved.addRetAttribute(context, attribute);
   }
 
-  for (llvm::Argument& argument : function.args()) {
+  for (const llvm::Argument& argument : function.args()) {
     const unsigned argument_index = argument.getArgNo();
     for (llvm::Attribute attribute : original.getParamAttrs(argument_index)) {
       preserved = preserved.addAttributeAtIndex(
@@ -102,19 +47,7 @@ llvm::AttributeList build_preserved_function_attributes(llvm::Function& function
     }
   }
 
-  for (llvm::Attribute attribute : original.getFnAttrs()) {
-    if (should_preserve_function_attribute(attribute)) {
-      if (attribute.isStringAttribute()) {
-        preserved = preserved.addFnAttribute(
-            context, attribute.getKindAsString(), attribute.getValueAsString());
-        continue;
-      }
-
-      preserved = preserved.addFnAttribute(context, attribute);
-    }
-  }
-
-  return preserved;
+  return support::merge_preserved_source_function_attributes(preserved, function);
 }
 
 void rewrite_function_body(llvm::Function& function,
@@ -123,7 +56,7 @@ void rewrite_function_body(llvm::Function& function,
   llvm::LLVMContext& context = function.getContext();
   const std::string symbol_tag =
       options.symbol_tag.empty() ? function.getName().str() : options.symbol_tag;
-  const llvm::AttributeList preserved_attributes = build_preserved_function_attributes(function);
+  const llvm::AttributeList preserved_attributes = build_rewritten_function_attributes(function);
 
   function.setAttributes(preserved_attributes);
   function.addFnAttr(llvm::Attribute::NoInline);

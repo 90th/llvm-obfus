@@ -1,6 +1,7 @@
 #include "obf/transforms/function_outlining.h"
 
 #include "obf/support/flattening_metadata.h"
+#include "obf/support/function_attrs.h"
 #include "obf/support/ir_name.h"
 #include "obf/support/mba_config_builder.h"
 #include "obf/support/stable_hash.h"
@@ -402,6 +403,7 @@ bool try_extract_cluster(llvm::Function& function,
     return false;
   }
 
+  shard->setAttributes(support::build_preserved_source_function_attributes(function, *shard));
   shard->setName(support::shard_name(options.seed, cluster_index));
   shard->setLinkage(llvm::GlobalValue::InternalLinkage);
   shard->setDSOLocal(true);

@@ -159,7 +159,7 @@ entry:
 ; CHECK-NOT: @__obf_vm_retkey_vector_mix
 ; CHECK-LABEL: define i32 @branch_phi(i32 %x)
 ; CHECK: entry.obf.vm.wrapper:
-; CHECK: %branch_phi.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
+; CHECK: %branch_phi.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}} monotonic, align {{[0-9]+}}
 ; CHECK: %branch_phi.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %branch_phi.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; CHECK: %branch_phi.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %branch_phi.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
@@ -170,7 +170,7 @@ entry:
 ; CHECK: %branch_phi.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; CHECK-LABEL: define <2 x i32> @vector_mix(<2 x i32> %a, <2 x i32> %b)
 ; CHECK: entry.obf.vm.wrapper:
-; CHECK: %vector_mix.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
+; CHECK: %vector_mix.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}} monotonic, align {{[0-9]+}}
 ; CHECK: %vector_mix.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %vector_mix.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; CHECK: %vector_mix.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %vector_mix.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})

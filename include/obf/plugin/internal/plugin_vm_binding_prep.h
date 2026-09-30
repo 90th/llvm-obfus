@@ -60,6 +60,8 @@ llvm::IntegerType* get_vm_pointer_int_type(llvm::Function& function);
 
 llvm::AttributeList build_vm_abi_attribute_list(const llvm::Function& function);
 
+llvm::AttributeList build_vm_boundary_attribute_list(const llvm::Function& function);
+
 llvm::AttributeList build_vm_safe_callsite_attributes(const llvm::Function& callee_function);
 
 void sanitize_vm_implementation_attributes(llvm::Function& implementation_function,

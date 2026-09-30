@@ -54,8 +54,12 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 - `vm` and `strong_vm` lower selected functions into VM-backed execution paths.
 - The VM wrapper keeps the selected function's linkage and visibility. Its implementation has internal linkage and default visibility.
 - Shared VM seed resolvers use separate integer widths when selected functions have different function-pointer sizes.
+- Ordinary `vm` caches encoded targets with naturally aligned, monotonic atomic loads and stores. The cache does not publish other runtime state.
+- Pointer widths that cannot use LLVM integer atomics use local decoding. `strong_vm` always uses local decoding.
 - Generated VM thunks and implementations use the selected function's address space. The pointer encoding uses that space's pointer width.
 - VM island, decoy, and split helpers accept state pointers in the module's alloca address space.
+- VM wrappers, implementations, thunks, and helpers keep audited execution and subtarget attributes, including denormal modes, target features, and stack-probe settings.
+- Helper extraction keeps attributes for the helper's own ABI. Body replacement removes invalidated memory, synchronization, progress, and inlining promises.
 - Later hardening stages also process `strong_vm` implementation bodies, not just the public wrapper.
 - Candidate analysis (`lib/vm/candidate_analysis.cpp`) skips incompatible constructs (varargs, non-integral pointers, complex EH pads) and gives clear diagnostics if instruction limits are exceeded.
 - The VM lowers scalar `llvm.umin`, `llvm.smin`, `llvm.umax`, and `llvm.smax` through frozen operands, integer comparison, and select handlers. Each intrinsic costs four virtual instructions; vector forms remain unsupported.

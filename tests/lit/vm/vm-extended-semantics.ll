@@ -45,7 +45,7 @@ entry:
 ; CHECK-DAG: @__obf_vm_s_{{[A-Za-z0-9_]+}} = private global i{{[0-9]+}} 0
 ; CHECK-DAG: @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}} = private global i64 {{-?[0-9]+}}
 ; CHECK-LABEL: define i32 @extended_semantics(i32 %x, float %f, ptr %dst)
-; CHECK: %extended_semantics.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
+; CHECK: %extended_semantics.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}} monotonic, align {{[0-9]+}}
 ; CHECK: %extended_semantics.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %extended_semantics.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; CHECK: %extended_semantics.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %extended_semantics.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})

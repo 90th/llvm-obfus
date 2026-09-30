@@ -23,7 +23,7 @@ entry:
 ; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; CHECK-DAG: @[[VMBC:__obf_vm_bc_i_[A-Za-z0-9_]+]] = private unnamed_addr constant [{{[0-9]+}} x i8] c"
 ; CHECK-DAG: @[[RETKEY:__obf_vm_retkey_i_[A-Za-z0-9_]+]] = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @[[TARGET:__obf_vm_t_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
+; CHECK-DAG: @[[TARGET:__obf_vm_t_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}, align [[TARGET_ALIGN:[0-9]+]]
 ; CHECK-DAG: @[[TARGETSEED:__obf_vm_s_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} 0
 ; CHECK-DAG: @[[KEY:__obf_vm_k_[A-Za-z0-9_]+]] = private global i{{[0-9]+}} {{-?[0-9]+}}
 ; CHECK-DAG: @llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]
@@ -32,14 +32,14 @@ entry:
 ; CHECK: %obf.entropy.pair = load { i64, i64 }, ptr %obf.entropy.cache, align 8
 ; CHECK: %obf.entropy.direct = extractvalue { i64, i64 } %obf.entropy.pair, 0
 ; CHECK: %fold_value.obf.wrapper.token = {{(add|sub|xor) i64}}
-; CHECK: %fold_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @[[TARGET]]
+; CHECK: %fold_value.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @[[TARGET]] monotonic, align [[TARGET_ALIGN]]
 ; CHECK: br i1 %fold_value.obf.wrapper.unresolved, label %fold_value.obf.wrapper.resolve, label %fold_value.obf.wrapper.call
 ; CHECK: fold_value.obf.wrapper.resolve:
 ; CHECK: %fold_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @[[KEY]]
 ; CHECK: %fold_value.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @[[TARGETSEED]]
 ; CHECK: %fold_value.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %fold_value.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
 ; CHECK: %fold_value.obf.wrapper.real.int = sub i{{[0-9]+}}
-; CHECK: store i{{[0-9]+}} %fold_value.obf.wrapper.resolved{{(\.poison[0-9]*)?}}, ptr @[[TARGET]]
+; CHECK: store atomic i{{[0-9]+}} %fold_value.obf.wrapper.resolved{{(\.poison[0-9]*)?}}, ptr @[[TARGET]] monotonic, align [[TARGET_ALIGN]]
 ; CHECK: fold_value.obf.wrapper.call:
 ; CHECK: %fold_value.obf.wrapper.key = load i{{[0-9]+}}, ptr @[[KEY]]
 ; CHECK: %fold_value.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %fold_value.obf.wrapper.decoded{{(\.poison[0-9]*)?}} to ptr
@@ -49,12 +49,12 @@ entry:
 ; CHECK: %fold_value.obf.retdec = {{(add|sub) i32}}
 ; CHECK-LABEL: define i32 @main()
 ; CHECK: %fold_value.obf.call.token = {{(add|sub|xor) i64}}
-; CHECK: %fold_value.obf.check = load i{{[0-9]+}}, ptr @[[TARGET]]
+; CHECK: %fold_value.obf.check = load atomic i{{[0-9]+}}, ptr @[[TARGET]] monotonic, align [[TARGET_ALIGN]]
 ; CHECK: %fold_value.obf.unresolved = icmp eq i{{[0-9]+}} %fold_value.obf.check,
 ; CHECK: br i1 %fold_value.obf.unresolved, label %fold_value.obf.resolve, label %fold_value.obf.call
 ; CHECK: fold_value.obf.resolve:
 ; CHECK-NOT: llvm.returnaddress
-; CHECK: store i{{[0-9]+}} %fold_value.obf.resolved{{(\.poison[0-9]*)?}}, ptr @[[TARGET]]
+; CHECK: store atomic i{{[0-9]+}} %fold_value.obf.resolved{{(\.poison[0-9]*)?}}, ptr @[[TARGET]] monotonic, align [[TARGET_ALIGN]]
 ; CHECK: fold_value.obf.call:
 ; CHECK: %fold_value.obf.encoded = phi i{{[0-9]+}}
 ; CHECK: %fold_value.obf.key = load i{{[0-9]+}}, ptr @[[KEY]]
@@ -101,7 +101,7 @@ entry:
 
 ; INST-DAG: @rt_core_ea = external externally_initialized global i64, align 8
 ; INST-LABEL: define i32 @fold_value(i32 %value)
-; INST: %fold_value.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
+; INST: %fold_value.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}} monotonic, align {{[0-9]+}}
 ; INST: %fold_value.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} {{%[^,]+}}, i{{[0-9]+}} {{%[^)]+}})
@@ -109,7 +109,7 @@ entry:
 ; INST: %fold_value.obf.wrapper.indirect = inttoptr i{{[0-9]+}} {{(%fold_value\.obf\.wrapper\.decoded(\.poison[0-9]*)?|%obf\.mba\..*)}} to ptr
 ; INST: call i32 %fold_value.obf.wrapper.indirect(i32 %value, i64 {{(%fold_value\.obf\.wrapper\.token|-?[0-9]+)}})
 ; INST-LABEL: define i32 @main()
-; INST: %fold_value.obf.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
+; INST: %fold_value.obf.check = load atomic i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}} monotonic, align {{[0-9]+}}
 ; INST: br i1
 ; INST: %fold_value.obf.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; INST: %fold_value.obf.indirect = inttoptr i{{[0-9]+}} {{(%fold_value\.obf\.decoded(\.poison[0-9]*)?|%obf\.mba\..*)}} to ptr

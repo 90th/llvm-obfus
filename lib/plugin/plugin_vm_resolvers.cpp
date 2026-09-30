@@ -9,16 +9,26 @@
 #include "obf/transforms/mba.h"
 
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+
+#include <algorithm>
 
 namespace obf {
 
-vm_resolver_shape select_vm_resolver_shape(protection_level level) {
-  if (level == protection_level::strong_vm) { return vm_resolver_shape::local_always_decode; }
+vm_resolver_shape select_vm_resolver_shape(protection_level level,
+                                           const llvm::Function& function) {
+  const unsigned bit_width =
+      function.getParent()->getDataLayout().getPointerSizeInBits(function.getAddressSpace());
+  if (level == protection_level::strong_vm || bit_width < 8 ||
+      !llvm::isPowerOf2_32(bit_width)) {
+    return vm_resolver_shape::local_always_decode;
+  }
 
   return vm_resolver_shape::cached_sentinel_global;
 }
@@ -64,6 +74,19 @@ select_vm_pointer_materialization_shape(protection_level level,
 }
 
 namespace {
+
+llvm::Align get_vm_target_cache_atomic_alignment(const llvm::GlobalVariable& target_global) {
+  const llvm::Module* module = target_global.getParent();
+  if (module == nullptr) { llvm_unreachable("vm target cache global missing parent module"); }
+  const llvm::DataLayout& layout = module->getDataLayout();
+  return llvm::Align(std::max(layout.getABITypeAlign(target_global.getValueType()).value(),
+                              layout.getTypeStoreSize(target_global.getValueType()).getFixedValue()));
+}
+
+void configure_vm_target_cache_global(llvm::GlobalVariable& target_global) {
+  target_global.setDSOLocal(true);
+  target_global.setAlignment(get_vm_target_cache_atomic_alignment(target_global));
+}
 
 llvm::Value* build_vm_target_token_mask(llvm::IRBuilder<>& builder,
                                         llvm::Function& owner,
@@ -236,7 +259,10 @@ llvm::GlobalVariable* get_or_create_vm_target_global(llvm::Function& function,
   const llvm::APInt key = derive_vm_target_key(decision_seed, function, ptr_int_type);
   const llvm::APInt sentinel = derive_vm_target_sentinel(key);
 
-  if (llvm::GlobalVariable* existing = module->getNamedGlobal(global_name)) { return existing; }
+  if (llvm::GlobalVariable* existing = module->getNamedGlobal(global_name)) {
+    configure_vm_target_cache_global(*existing);
+    return existing;
+  }
 
   auto* target_global = new llvm::GlobalVariable(*module,
                                                  ptr_int_type,
@@ -244,7 +270,29 @@ llvm::GlobalVariable* get_or_create_vm_target_global(llvm::Function& function,
                                                  llvm::GlobalValue::PrivateLinkage,
                                                  llvm::ConstantInt::get(ptr_int_type, sentinel),
                                                  global_name);
+  configure_vm_target_cache_global(*target_global);
   return target_global;
+}
+
+llvm::LoadInst* create_vm_target_cache_load(llvm::IRBuilder<>& builder,
+                                            llvm::GlobalVariable& target_global,
+                                            const llvm::Twine& name) {
+  auto* load = builder.CreateAlignedLoad(target_global.getValueType(),
+                                         &target_global,
+                                         get_vm_target_cache_atomic_alignment(target_global),
+                                         name);
+  load->setAtomic(llvm::AtomicOrdering::Monotonic);
+  return load;
+}
+
+llvm::StoreInst* create_vm_target_cache_store(llvm::IRBuilder<>& builder,
+                                              llvm::Value* encoded_target,
+                                              llvm::GlobalVariable& target_global) {
+  auto* store = builder.CreateAlignedStore(encoded_target,
+                                           &target_global,
+                                           get_vm_target_cache_atomic_alignment(target_global));
+  store->setAtomic(llvm::AtomicOrdering::Monotonic);
+  return store;
 }
 
 llvm::GlobalVariable*

@@ -58,7 +58,7 @@ entry:
 ; --- Wrappers ---
 ; CHECK-LABEL: define i32 @encode_i32(i32 %x)
 ; CHECK: %encode_i32.obf.wrapper.token = {{(add|sub|xor) i64}}
-; CHECK: %encode_i32.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
+; CHECK: %encode_i32.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}} monotonic, align {{[0-9]+}}
 ; CHECK: %encode_i32.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i32.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i32.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i32.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
@@ -70,7 +70,7 @@ entry:
 ; CHECK: %encode_i32.obf.retdec = {{(add|sub) i32}}
 ; CHECK-LABEL: define i1 @encode_i1(i32 %x)
 ; CHECK: %encode_i1.obf.wrapper.token = {{(add|sub|xor) i64}}
-; CHECK: %encode_i1.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
+; CHECK: %encode_i1.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}} monotonic, align {{[0-9]+}}
 ; CHECK: %encode_i1.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i1.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i1.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i1.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
@@ -82,7 +82,7 @@ entry:
 ; CHECK: %encode_i1.obf.retdec = {{(add|sub|xor) i1}}
 ; CHECK-LABEL: define i64 @encode_i64(i64 %x)
 ; CHECK: %encode_i64.obf.wrapper.token = {{(add|sub|xor) i64}}
-; CHECK: %encode_i64.obf.wrapper.check = load i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}}
+; CHECK: %encode_i64.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}} monotonic, align {{[0-9]+}}
 ; CHECK: %encode_i64.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i64.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
 ; CHECK: %encode_i64.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %encode_i64.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
