@@ -26,7 +26,7 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
   std::uint64_t regional_helper_ordinal = 0;
 
   for (const function_pipeline_state& state : states) {
-    if (state.function == nullptr || state.function->isDeclaration() ||
+    if (state.function == nullptr || state.function->isDeclaration() || state.skip_transform_stages ||
         !state.report.decision.policy.allow_vm) {
       continue;
     }

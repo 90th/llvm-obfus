@@ -344,8 +344,10 @@ separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 
 llvm_map_components_to_libnames(OBF_LLVM_LIBS
   Analysis
+  BitReader
   Core
   IRReader
+  Object
   Passes
   Support
 )

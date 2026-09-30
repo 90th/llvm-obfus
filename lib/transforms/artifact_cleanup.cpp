@@ -137,7 +137,10 @@ bool ShouldStripReleaseMarkerAttribute(llvm::Attribute attribute) {
   if (!attribute.isStringAttribute()) { return false; }
 
   const llvm::StringRef kind = attribute.getKindAsString();
-  return kind.starts_with("obf.") || kind.starts_with("vm.");
+  // LTO obligations are consumed by the mandatory backend finalizer, not by
+  // ordinary artifact cleanup (which also runs in the pre-link frontend).
+  return !kind.starts_with("obf.lto.") &&
+         (kind.starts_with("obf.") || kind.starts_with("vm."));
 }
 
 bool StripReleaseMarkerFunctionAttributes(llvm::Module& module) {

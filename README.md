@@ -291,6 +291,39 @@ clang auth.o build/libobf_runtime.a -o auth_app
 On Windows, replace `obf_plugin.so` with `obf_plugin.dll`.
 Use the generated Windows wrapper when possible.
 
+### Full LTO and ThinLTO
+
+Managed LTO requires ELF targets and an installed `ld.lld` that matches the configured Clang version.
+The wrappers load the plugin in both the frontend and the linker backend.
+Object and archive links do not need to repeat `-flto`.
+
+```sh
+build/obf-clang --obf-config=protect.yaml -O2 -flto=thin -c auth.c -o auth.o
+build/obf-clang --obf-config=protect.yaml -O2 main.o auth.o -o auth_app
+```
+
+Pre-link bitcode keeps its protection and records the policy, source selectors, exclusions, and VM roles.
+LTO keeps the existing minimum-security floors and orchestrator promotions.
+An explicit `none` request does not bypass those floors.
+Live protected boundaries require backend finalization through an undefined hidden guard.
+Missing backend execution fails the final link, including shared-library links.
+The backend validates existing protection without applying VM lowering twice.
+It prepares promotable locals before lowering new O0 targets.
+Managed LTO O0 links use an explicit finalization pipeline because LLVM 22 omits the default ThinLTO plugin callbacks at that level.
+
+Use the same effective configuration and seed for pre-link compilation and final linking.
+Changes to the configuration, seed, or protection options require rebuilding the protected bitcode.
+User ThinLTO caches remain enabled in a namespace keyed by the plugin contents, configuration, and seed.
+The linker dispatcher validates actual inputs before cache lookup, including temporary objects from combined compile-and-link commands.
+Exact requested targets with competing native definitions are rejected instead of treating unused archive bitcode as protection evidence.
+
+Managed routes reject unsupported linkers, non-ELF targets, conflicting custom pipelines, distributed or index-only LTO, and fat-LTO objects.
+They also reject bitcode hidden through linker scripts and unproven script layouts.
+Simple native library-wrapper scripts with direct filenames remain supported.
+Move script `-l` operands to the linker command line.
+Direct linker-plugin use must provide equivalent policy and input validation.
+Do not treat frontend `-fpass-plugin` loading alone as an LTO protection contract.
+
 ### Self-Checksum Binding
 
 `obf-clang` and `obf-clang++` bind self-checksum records automatically for supported final C/C++ links.

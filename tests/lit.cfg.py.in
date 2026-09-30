@@ -222,6 +222,14 @@ lld_version = _tool_output("@OBF_LLD_COMMAND@", *lld_driver, "--version")
 if lld_version is not None and re.search(r"\bLLD\s+21(?:\.|$)", lld_version, re.IGNORECASE):
     config.available_features.add("has-lld-21")
 
+lld_path = _tool_output("@OBF_CLANG@", "-print-prog-name=ld.lld")
+matching_lld_version = _tool_output(lld_path.strip(), "--version") if lld_path else None
+llvm_major = "@LLVM_PACKAGE_VERSION@".split(".", 1)[0]
+if matching_lld_version and re.search(
+    r"\bLLD\s+" + re.escape(llvm_major) + r"(?:\.|$)", matching_lld_version, re.IGNORECASE
+):
+    config.available_features.add("has-lld-llvm-match")
+
 host_elf_machines = {
     "x86_64": (62, 2),
     "amd64": (62, 2),

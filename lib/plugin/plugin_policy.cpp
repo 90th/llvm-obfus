@@ -3,6 +3,7 @@
 #include "obf/analysis/function_features.h"
 #include "obf/frontend/annotations.h"
 #include "obf/policy/policy_engine.h"
+#include "obf/support/stable_hash.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -20,6 +21,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -39,6 +41,54 @@ std::optional<std::string> get_environment_value(const char* name) {
   if (const char* value = std::getenv(name)) { return std::string(value); }
   return std::nullopt;
 #endif
+}
+
+constexpr bool function_policy::* kPolicyFlags[] = {
+    &function_policy::allow_string_encoding, &function_policy::allow_zero_comparison,
+    &function_policy::allow_constant_encoding, &function_policy::allow_instruction_substitution,
+    &function_policy::allow_opaque_gep, &function_policy::allow_function_outlining,
+    &function_policy::allow_bogus_control_flow, &function_policy::allow_opaque_predicates,
+    &function_policy::allow_flattening, &function_policy::allow_split,
+    &function_policy::allow_indirect_calls, &function_policy::allow_vm,
+    &function_policy::allow_self_checksum};
+
+[[noreturn]] void report_invalid_lto_obligation(const llvm::Function& function,
+                                               const llvm::Twine& detail) {
+  llvm::report_fatal_error(llvm::Twine("invalid obf.lto contract on function '") +
+                          function.getName() + "': " + detail);
+}
+
+llvm::StringRef required_lto_attribute(const llvm::Function& function, llvm::StringRef name) {
+  const llvm::Attribute attribute = function.getFnAttribute(name);
+  if (!attribute.isStringAttribute()) {
+    report_invalid_lto_obligation(function, llvm::Twine("missing ") + name);
+  }
+  return attribute.getValueAsString();
+}
+
+std::uint64_t required_lto_integer(const llvm::Function& function, llvm::StringRef name) {
+  std::uint64_t value = 0;
+  if (required_lto_attribute(function, name).getAsInteger(10, value)) {
+    report_invalid_lto_obligation(function, llvm::Twine("invalid ") + name);
+  }
+  return value;
+}
+
+bool is_policy_entry(lto_obligation_role role) {
+  return role == lto_obligation_role::protected_entry ||
+         role == lto_obligation_role::protected_covered || role == lto_obligation_role::explicit_none ||
+         role == lto_obligation_role::raw_entry || role == lto_obligation_role::raw_none;
+}
+
+const llvm::Function* resolve_pipeline_configured_function(const llvm::Module& module,
+                                                          llvm::StringRef name) {
+  if (const llvm::Function* function = resolve_configured_function(module, name)) { return function; }
+  for (const llvm::Function& function : module) {
+    if (function.isDeclaration() || !function_has_lto_obligation(function)) { continue; }
+    const lto_obligation_record record = read_lto_obligation(function);
+    if (is_policy_entry(record.role) && record.selector_name == name) { return &function; }
+  }
+  return nullptr;
 }
 
 bool has_strong_classical(protection_level level) {
@@ -61,18 +111,32 @@ bool is_user_pipeline_function(const llvm::Function& function) {
          !name.contains("ObfEntropy");
 }
 
-void resolve_non_generic_configured_names(const llvm::Module& module, obfuscation_config& config) {
+void resolve_non_generic_configured_names(const llvm::Module& module,
+                                         obfuscation_config& config,
+                                         bool allow_unresolved) {
+  llvm::SmallPtrSet<const llvm::Function*, 8> selected;
   const auto resolve_name = [&](std::string& name) {
-    const llvm::Function* function = resolve_configured_function(module, name);
+    const llvm::Function* function = resolve_pipeline_configured_function(module, name);
     if (function == nullptr) {
-      llvm_unreachable("module validation must resolve every non-generic configured function");
+      if (allow_unresolved) { return false; }
+      llvm::report_fatal_error(llvm::Twine("config error: non-generic frontend configured function '") +
+                              name + "' is not a defined function");
     }
-
+    if (!selected.insert(function).second) {
+      llvm::report_fatal_error(llvm::Twine("config error: non-generic frontend configured function '") +
+                              name + "' resolves to a function already selected by another target or override");
+    }
+    if (function->getName().find_first_of("*?") != llvm::StringRef::npos) {
+      llvm::report_fatal_error(llvm::Twine("config error: configured alias '") + name +
+                              "' resolves to a function whose name is not exact");
+    }
     name = function->getName().str();
+    return true;
   };
 
-  for (target_rule& rule : config.targets) { resolve_name(rule.match); }
-  for (function_override& override : config.overrides) { resolve_name(override.name); }
+  std::erase_if(config.targets, [&](target_rule& rule) { return !resolve_name(rule.match); });
+  std::erase_if(config.overrides,
+                [&](function_override& override) { return !resolve_name(override.name); });
 }
 
 bool is_top_level_semantic_function(const llvm::Function& function) {
@@ -242,7 +306,7 @@ void apply_orchestrator_policy_promotions(llvm::SmallVectorImpl<function_pipelin
 
     for (function_pipeline_state& state : states) {
       llvm::Function* function = state.function;
-      if (function == nullptr || function->isDeclaration() ||
+      if (function == nullptr || function->isDeclaration() || state.skip_transform_stages ||
           !is_user_pipeline_function(*function) ||
           has_strong_classical(state.report.decision.policy.level)) {
         continue;
@@ -285,6 +349,98 @@ llvm::cl::opt<std::uint64_t> obf_seed_override(
 #endif
 
 }  // namespace
+
+obf_lto_mode get_active_lto_mode() {
+  const std::optional<std::string> mode = get_environment_value("OBF_LTO_MODE");
+  if (!mode.has_value() || mode->empty()) { return obf_lto_mode::none; }
+  if (*mode == "full") { return obf_lto_mode::full; }
+  if (*mode == "thin") { return obf_lto_mode::thin; }
+  llvm::report_fatal_error("OBF_LTO_MODE must be full or thin");
+}
+
+std::uint64_t compute_lto_config_identity(const obfuscation_config& config) {
+  // This is a deterministic compatibility identity, not an authentication key.
+  // Conservatively require the effective policy/options that produced the IR.
+  std::uint64_t identity = stable_hash_string(summarize_config(config), 0x6f62662e6c746f01ULL);
+  identity = mix_seed(identity, config.string_encoding.enable_ephemeral_slots);
+  identity = mix_seed(identity, config.self_checksum.enabled);
+  identity = mix_seed(identity, config.self_checksum.window_size);
+  identity = mix_seed(identity, config.self_checksum.max_sites);
+  identity = mix_seed(identity, config.self_checksum.seed);
+  return mix_seed(identity, get_obf_seed_override());
+}
+
+bool function_has_lto_obligation(const llvm::Function& function) {
+  return function.hasFnAttribute("obf.lto.role");
+}
+
+lto_obligation_record read_lto_obligation(const llvm::Function& function) {
+  lto_obligation_record record;
+  if (!function_has_lto_obligation(function)) { return record; }
+  record.present = true;
+  const std::uint64_t role = required_lto_integer(function, "obf.lto.role");
+  const std::uint64_t source = required_lto_integer(function, "obf.lto.source");
+  if (role == 0 || role > static_cast<unsigned>(lto_obligation_role::raw_none) ||
+      source > static_cast<unsigned>(policy_source::explicit_override)) {
+    report_invalid_lto_obligation(function, "invalid role or policy source");
+  }
+  record.role = static_cast<lto_obligation_role>(role);
+  record.source = static_cast<policy_source>(source);
+  const auto level = parse_protection_level(required_lto_attribute(function, "obf.lto.level"));
+  if (!level.has_value()) { report_invalid_lto_obligation(function, "invalid protection level"); }
+  record.policy.level = *level;
+  const std::uint64_t mask = required_lto_integer(function, "obf.lto.policy.mask");
+  if (mask >> std::size(kPolicyFlags)) {
+    report_invalid_lto_obligation(function, "invalid policy options");
+  }
+  for (unsigned index = 0; index < std::size(kPolicyFlags); ++index) {
+    record.policy.*kPolicyFlags[index] = (mask & (1ULL << index)) != 0;
+  }
+  record.entry_identity = required_lto_integer(function, "obf.lto.entry.id");
+  record.config_identity = required_lto_integer(function, "obf.lto.config.id");
+  record.decision_seed = required_lto_integer(function, "obf.lto.decision.seed");
+  record.selector_name = required_lto_attribute(function, "obf.lto.selector").str();
+  record.annotation = required_lto_attribute(function, "obf.lto.annotation").str();
+  record.selection_detail = required_lto_attribute(function, "obf.lto.selection").str();
+  record.requires_finalization = required_lto_integer(function, "obf.lto.finalize") != 0;
+  record.pinned_noinline = required_lto_integer(function, "obf.lto.pin.noinline") != 0;
+  record.uses_target_cache = required_lto_integer(function, "obf.lto.uses.target_cache") != 0;
+  record.uses_shared_seed_resolver =
+      required_lto_integer(function, "obf.lto.uses.shared_seed_resolver") != 0;
+  return record;
+}
+
+void apply_lto_obligation(llvm::Function& function, const lto_obligation_record& record) {
+  function.addFnAttr("obf.lto.role", std::to_string(static_cast<unsigned>(record.role)));
+  function.addFnAttr("obf.lto.source", std::to_string(static_cast<unsigned>(record.source)));
+  const std::string_view level = to_string(record.policy.level);
+  function.addFnAttr("obf.lto.level", llvm::StringRef(level.data(), level.size()));
+  std::uint64_t mask = 0;
+  for (unsigned index = 0; index < std::size(kPolicyFlags); ++index) {
+    if (record.policy.*kPolicyFlags[index]) { mask |= 1ULL << index; }
+  }
+  function.addFnAttr("obf.lto.policy.mask", std::to_string(mask));
+  function.addFnAttr("obf.lto.entry.id", std::to_string(record.entry_identity));
+  function.addFnAttr("obf.lto.config.id", std::to_string(record.config_identity));
+  function.addFnAttr("obf.lto.decision.seed", std::to_string(record.decision_seed));
+  function.addFnAttr("obf.lto.selector", record.selector_name);
+  function.addFnAttr("obf.lto.annotation", record.annotation);
+  function.addFnAttr("obf.lto.selection", record.selection_detail);
+  function.addFnAttr("obf.lto.finalize", record.requires_finalization ? "1" : "0");
+  function.addFnAttr("obf.lto.pin.noinline", record.pinned_noinline ? "1" : "0");
+  function.addFnAttr("obf.lto.uses.target_cache", record.uses_target_cache ? "1" : "0");
+  function.addFnAttr("obf.lto.uses.shared_seed_resolver", record.uses_shared_seed_resolver ? "1" : "0");
+}
+
+void clear_lto_obligation(llvm::Function& function) {
+  llvm::SmallVector<llvm::StringRef, 16> names;
+  for (llvm::Attribute attribute : function.getAttributes().getFnAttrs()) {
+    if (attribute.isStringAttribute() && attribute.getKindAsString().starts_with("obf.lto.")) {
+      names.push_back(attribute.getKindAsString());
+    }
+  }
+  for (llvm::StringRef name : names) { function.removeFnAttr(name); }
+}
 
 bool is_obfuscation_enabled() {
   if (const std::optional<std::string> env = get_environment_value("OBF_ENABLE")) {
@@ -362,38 +518,65 @@ std::uint64_t get_obf_seed_override() {
 }
 
 llvm::SmallVector<function_pipeline_state, 32>
-build_pipeline_state(llvm::Module& module, const obfuscation_config& config) {
+build_lto_pipeline_state(llvm::Module& module, const obfuscation_config& config,
+                         bool allow_unresolved_selectors) {
+  if (!allow_unresolved_selectors &&
+      llvm::none_of(module, [](const llvm::Function& function) {
+        return function_has_lto_obligation(function);
+      })) {
+    validate_effective_config(config, module);
+  }
+  validate_effective_config(config);
   std::optional<obfuscation_config> resolved_config;
   if (config.frontend != frontend_kind::generic) {
-    validate_effective_config(config, module);
     resolved_config.emplace(config);
-    resolve_non_generic_configured_names(module, *resolved_config);
+    resolve_non_generic_configured_names(module, *resolved_config, allow_unresolved_selectors);
   }
 
   const obfuscation_config& policy_config = resolved_config.has_value() ? *resolved_config : config;
-
   const function_annotation_map annotations = config.frontend == frontend_kind::generic
                                                   ? collect_function_annotations(module)
                                                   : function_annotation_map{};
-
+  const std::uint64_t config_identity = compute_lto_config_identity(config);
   llvm::SmallVector<function_pipeline_state, 32> states;
   states.reserve(module.size());
 
   for (llvm::Function& function : module) {
-    function_report_entry report;
-    report.features = collect_function_features(function);
-
-    if (const std::string* annotation = find_function_annotation(annotations, function.getName())) {
-      report.annotation = *annotation;
+    function_pipeline_state state;
+    state.function = &function;
+    state.report.features = collect_function_features(function);
+    state.lto = read_lto_obligation(function);
+    if (state.lto.present) {
+      if (state.lto.config_identity != config_identity) {
+        llvm::report_fatal_error(llvm::Twine("incompatible LTO obfuscation config/seed for '") +
+                                state.lto.selector_name + "'; rebuild its pre-link bitcode");
+      }
+      state.skip_transform_stages = state.lto.role != lto_obligation_role::raw_entry;
+      state.report.annotation = state.lto.annotation;
+      state.report.decision.seed = state.lto.decision_seed;
+      state.report.decision.source = state.lto.source;
+      state.report.decision.detail = state.lto.selection_detail;
+      state.report.decision.policy = is_policy_entry(state.lto.role)
+                                         ? state.lto.policy
+                                         : make_function_policy(protection_level::none);
+    } else {
+      if (const std::string* annotation =
+              find_function_annotation(annotations, function.getName())) {
+        state.report.annotation = *annotation;
+      }
+      state.report.decision = select_policy(
+          module, state.report.features, policy_config, state.report.annotation);
     }
-
-    report.decision = select_policy(module, report.features, policy_config, report.annotation);
-    states.push_back({.function = &function, .report = std::move(report), .mba_counts = {}});
+    states.push_back(std::move(state));
   }
 
   if (config.frontend == frontend_kind::generic) { apply_orchestrator_policy_promotions(states); }
-
   return states;
+}
+
+llvm::SmallVector<function_pipeline_state, 32>
+build_pipeline_state(llvm::Module& module, const obfuscation_config& config) {
+  return build_lto_pipeline_state(module, config, get_active_lto_mode() != obf_lto_mode::none);
 }
 
 artifact_cleanup_options build_artifact_cleanup_options(const obfuscation_config& config) {

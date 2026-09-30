@@ -1,0 +1,8 @@
+target triple = "x86_64-unknown-linux-gnu"
+@configured_alias = alias i32 (i32), ptr @real_target
+
+define i32 @real_target(i32 %value) {
+entry:
+  %result = add i32 %value, 7
+  ret i32 %result
+}

@@ -1,8 +1,13 @@
 #!@Python3_EXECUTABLE@
 
+import hashlib
 import os
+import re
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 CLANG = r"@OBF_CLANG@"
@@ -37,8 +42,9 @@ _QUERY_ARGS = {
     "-print-targets",
 }
 _QUERY_ARG_PREFIXES = ("-print-file-name=", "-print-prog-name=")
-_COMPILE_ONLY_ARGS = {"-c", "-S", "-E", "-M", "-MM", "-fsyntax-only", "--analyze", "-r"}
-_DRY_RUN_ARGS = {"-###"}
+_ARGUMENT_FILE_DEPTH_LIMIT = 20
+_LLVM_BITCODE_MAGIC = (b"BC\xc0\xde", b"\xde\xc0\x17\x0b")
+_CACHE_NAMESPACE_PREFIX = b"obf-managed-thinlto-v1"
 
 
 class _wrapper_error(RuntimeError):
@@ -74,14 +80,6 @@ def _parse_args(argv: list[str]) -> tuple[list[str], str | None, int | None]:
     return clang_args, config_path, None
 
 
-def _inject_windows_lto_linker(clang_args: list[str], is_windows: bool,
-                               uses_msvc_linker: bool = True) -> None:
-    has_lto = any(arg == "-flto" or arg.startswith("-flto=") for arg in clang_args)
-    has_linker = any(arg.startswith("-fuse-ld=") for arg in clang_args)
-    if is_windows and has_lto and not has_linker:
-        clang_args.append("-fuse-ld=lld-link" if uses_msvc_linker else "-fuse-ld=lld")
-
-
 def _resolved_config_path(config_path: str | None, env: dict[str, str]) -> str | None:
     if config_path is not None:
         return config_path
@@ -89,70 +87,203 @@ def _resolved_config_path(config_path: str | None, env: dict[str, str]) -> str |
     return value if value else None
 
 
-def _query_self_checksum(config_path: str | None, env: dict[str, str]) -> bool:
-    if config_path is None:
-        return False
-    if not Path(DRIVER).is_file():
-        raise _wrapper_error(f"missing config driver: {DRIVER}")
-    completed = subprocess.run(
-        [DRIVER, f"--config={config_path}", "--query-self-checksum"],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-    )
+def _capture(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            command,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+        )
+    except OSError as error:
+        raise _wrapper_error(f"cannot execute {command[0]}: {error.strerror or error}") from error
+
+
+def _split_arguments(text: str, *, comments: bool = False) -> list[str]:
+    lexer = shlex.shlex(text, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = "#" if comments else ""
+    return list(lexer)
+
+
+def _read_argument_file(reference: str, *, base_dir: Path, comments: bool = False) -> tuple[Path, list[str]]:
+    path = Path(reference)
+    if not path.is_absolute():
+        path = base_dir / path
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+        tokens = _split_arguments(raw, comments=comments)
+    except (OSError, UnicodeError, ValueError) as error:
+        raise _wrapper_error(f"cannot read argument file {path}: {error}") from error
+    if comments:
+        tokens = [token.replace("<CFGDIR>", str(path.parent)) for token in tokens]
+    return path, tokens
+
+
+def _expand_response_args(args: list[str], *, base_dir: Path | None = None, depth: int = 0) -> list[str]:
+    if depth > _ARGUMENT_FILE_DEPTH_LIMIT:
+        raise _wrapper_error("response file nesting exceeds 20 levels")
+    if base_dir is None:
+        base_dir = Path.cwd()
+    expanded: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        # The linker owns its response file; expanding it here would turn its
+        # operands into driver options. It is inspected separately below.
+        if arg == "-Xlinker" and index + 1 < len(args):
+            expanded.extend(args[index:index + 2])
+            index += 2
+            continue
+        if arg.startswith("@") and len(arg) > 1:
+            _, tokens = _read_argument_file(arg[1:], base_dir=base_dir)
+            expanded.extend(_expand_response_args(tokens, base_dir=base_dir, depth=depth + 1))
+        else:
+            expanded.append(arg)
+        index += 1
+    return expanded
+
+
+def _expand_linker_response_args(args: list[str], *, depth: int = 0) -> list[str]:
+    if depth > _ARGUMENT_FILE_DEPTH_LIMIT:
+        raise _wrapper_error("linker response file nesting exceeds 20 levels")
+    expanded: list[str] = []
+    for arg in args:
+        if arg.startswith("@") and len(arg) > 1:
+            _, tokens = _read_argument_file(arg[1:], base_dir=Path.cwd())
+            expanded.extend(_expand_linker_response_args(tokens, depth=depth + 1))
+        else:
+            expanded.append(arg)
+    return expanded
+
+
+def _driver_plan(compiler: str, clang_args: list[str], env: dict[str, str]) -> tuple[list[list[str]], list[str]]:
+    # Clang expands its own configs and response files and decides which jobs
+    # exist. Inspecting those jobs avoids a second driver-option convention.
+    completed = _capture([compiler, *clang_args, "-###"], env)
     if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip() or "config query failed"
+        detail = completed.stderr.strip() or completed.stdout.strip() or "driver query failed"
         raise _wrapper_error(detail)
-    state = completed.stdout.strip()
-    if state == "enabled":
-        return True
-    if state == "disabled":
-        return False
-    raise _wrapper_error(f"unexpected self_checksum config query result: {state!r}")
+    commands: list[list[str]] = []
+    config_files: list[str] = []
+    for line in (completed.stdout + "\n" + completed.stderr).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Configuration file:"):
+            config_files.append(stripped.split(":", 1)[1].strip())
+        elif stripped.startswith('"'):
+            try:
+                command = _split_arguments(stripped)
+            except ValueError as error:
+                raise _wrapper_error(f"cannot parse compiler driver job: {error}") from error
+            if command:
+                commands.append(command)
+    return commands, config_files
 
 
-def _explicit_target(clang_args: list[str]) -> str | None:
+def _effective_driver_args(args: list[str], config_files: list[str]) -> list[str]:
+    config_head: list[str] = []
+    config_tail: list[str] = []
+    for reference in config_files:
+        path, tokens = _read_argument_file(reference, base_dir=Path.cwd(), comments=True)
+        for token in _expand_response_args(tokens, base_dir=path.parent):
+            if token.startswith("$") and len(token) > 1:
+                config_tail.append(token[1:])
+            else:
+                config_head.append(token)
+    command_args: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--config":
+            index += 2
+            continue
+        if arg.startswith("--config="):
+            index += 1
+            continue
+        command_args.append(arg)
+        index += 1
+    return [*config_head, *command_args, *config_tail]
+
+
+def _effective_lto_mode(args: list[str]) -> str | None:
+    mode: str | None = None
+    for arg in args:
+        if arg == "-fno-lto":
+            mode = None
+        elif arg == "-flto":
+            mode = "full"
+        elif arg.startswith("-flto="):
+            mode = arg.split("=", 1)[1]
+    if mode is not None and mode not in {"full", "thin"}:
+        raise _wrapper_error(f"unsupported obfuscation LTO mode: {mode}")
+    return mode
+
+
+def _last_option_value(args: list[str], option: str) -> str | None:
+    value: str | None = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == option and index + 1 < len(args):
+            value = args[index + 1]
+            index += 2
+            continue
+        if arg.startswith(option + "="):
+            value = arg.split("=", 1)[1]
+        index += 1
+    return value
+
+
+def _linker_job(commands: list[list[str]]) -> list[str] | None:
+    for command in reversed(commands):
+        if "-cc1" in command or "-cc1as" in command:
+            continue
+        name = Path(command[0]).name.lower()
+        if name in {"as", "as.exe", "llvm-as", "dsymutil", "dsymutil.exe"}:
+            continue
+        return command
+    return None
+
+
+def _compiler_target_triple(compiler: str, clang_args: list[str], env: dict[str, str]) -> str:
+    query = [compiler]
     target: str | None = None
     index = 0
     while index < len(clang_args):
         arg = clang_args[index]
-        if arg in {"-target", "--target"}:
-            if index + 1 < len(clang_args):
-                target = clang_args[index + 1]
-                index += 2
-                continue
-        elif arg.startswith("--target=") or arg.startswith("-target="):
+        if arg in {"-target", "--target"} and index + 1 < len(clang_args):
+            target = clang_args[index + 1]
+            index += 2
+            continue
+        if arg.startswith(("-target=", "--target=")):
             target = arg.split("=", 1)[1]
         index += 1
-    return target
-
-
-def _compiler_target_triple(compiler: str,
-                            clang_args: list[str],
-                            env: dict[str, str]) -> str:
-    explicit = _explicit_target(clang_args)
-    target_query = [compiler]
-    if explicit:
-        # Ask Clang to canonicalize aliases such as x86_64-w64-mingw32 into
-        # the actual object-format triple used by code generation.
-        target_query.append(f"--target={explicit}")
-    target_query.append("-dumpmachine")
-    completed = subprocess.run(
-        target_query,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-    )
+    if target:
+        query.append(f"--target={target}")
+    query.append("-dumpmachine")
+    completed = _capture(query, env)
     if completed.returncode != 0 or not completed.stdout.strip():
         detail = completed.stderr.strip() or "compiler did not report a target triple"
         raise _wrapper_error(f"failed to determine compiler target: {detail}")
     return completed.stdout.strip().splitlines()[-1]
+
+
+def _target_object_format(target_triple: str) -> str | None:
+    parts = target_triple.lower().split("-")
+    if any(part in {"windows", "win32", "mingw32", "msvc", "cygwin"} for part in parts):
+        return "coff"
+    if any(part.startswith(("darwin", "macos", "ios", "tvos", "watchos")) or part == "apple" for part in parts):
+        return "macho"
+    if (parts and parts[0].startswith("wasm")) or "emscripten" in parts:
+        return "wasm"
+    if "elf" in parts or any(part.endswith(("eabi", "eabihf")) for part in parts):
+        return "elf"
+    if any(part in {"linux", "android", "gnu", "freebsd", "netbsd", "openbsd", "fuchsia", "solaris"} for part in parts):
+        return "elf"
+    return None
 
 
 def _bound_object_format(target_triple: str, clang_args: list[str], host_is_windows: bool) -> str | None:
@@ -168,38 +299,649 @@ def _bound_object_format(target_triple: str, clang_args: list[str], host_is_wind
     return None
 
 
-def _linker_build_id_modes(clang_args: list[str]) -> list[str]:
-    modes: list[str] = []
+def _same_path(lhs: str, rhs: str) -> bool:
+    return os.path.normcase(str(Path(lhs).resolve())) == os.path.normcase(str(Path(rhs).resolve()))
 
-    def inspect(token: str) -> None:
-        if token == "--build-id":
-            modes.append("default")
-        elif token.startswith("--build-id="):
-            modes.append(token.split("=", 1)[1] or "default")
 
+def _resolve_executable(reference: str) -> str | None:
+    candidate = Path(reference)
+    if not candidate.is_absolute() and os.path.sep not in reference:
+        found = shutil.which(reference)
+        if found is None:
+            return None
+        candidate = Path(found)
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        return None
+    # Keep the ld.lld spelling: LLD's symlink name selects its ELF driver.
+    return os.path.abspath(candidate)
+
+
+def _tool_version(command: str, pattern: str, env: dict[str, str]) -> tuple[str, ...]:
+    completed = _capture([command, "--version"], env)
+    match = re.search(pattern, completed.stdout + completed.stderr)
+    if completed.returncode != 0 or match is None:
+        raise _wrapper_error(f"cannot determine LLVM tool version: {command}")
+    return tuple(match.group(1).split("."))
+
+
+def _managed_lld(compiler: str, env: dict[str, str]) -> str:
+    completed = _capture([compiler, "-print-prog-name=ld.lld"], env)
+    reported = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+    resolved = _resolve_executable(reported) if reported else None
+    if completed.returncode != 0 or resolved is None:
+        raise _wrapper_error(
+            "managed obfuscation LTO requires the configured ELF ld.lld; "
+            f"clang reported an unavailable linker: {reported or '<none>'}"
+        )
+    clang_version = _tool_version(compiler, r"clang version ([0-9]+(?:\.[0-9]+){1,2})", env)
+    lld_version = _tool_version(resolved, r"\bLLD ([0-9]+(?:\.[0-9]+){1,2})", env)
+    if clang_version != lld_version:
+        raise _wrapper_error(
+            "managed obfuscation LTO requires matching configured Clang and ELF LLD versions; "
+            f"Clang={'.'.join(clang_version)}, LLD={'.'.join(lld_version)} ({resolved})"
+        )
+    return resolved
+
+
+def _validate_linker_selection(effective_args: list[str], linker: list[str], managed_lld: str) -> None:
+    ld_path = _last_option_value(effective_args, "--ld-path")
+    fuse_ld = _last_option_value(effective_args, "-fuse-ld")
+    if ld_path is not None:
+        selected = _resolve_executable(ld_path)
+        if selected is None or not _same_path(selected, managed_lld):
+            raise _wrapper_error(
+                "managed obfuscation LTO requires the configured ELF ld.lld; "
+                f"unsupported --ld-path={ld_path}"
+            )
+        return
+    if fuse_ld is not None:
+        if fuse_ld in {"lld", "ld.lld", Path(managed_lld).name}:
+            return
+        selected = _resolve_executable(fuse_ld)
+        if selected is None or not _same_path(selected, managed_lld):
+            raise _wrapper_error(
+                "managed obfuscation LTO requires the configured ELF ld.lld; "
+                f"unsupported -fuse-ld={fuse_ld}"
+            )
+    # Config-expanded linker selection must not silently get overridden if its
+    # driver arguments were not available for inspection.
+    name = Path(linker[0]).name.lower()
+    if name not in {"ld", "ld.bfd", "ld.lld", "lld", "ld.exe", "ld.bfd.exe"} and not _same_path(linker[0], managed_lld):
+        raise _wrapper_error(f"unsupported managed obfuscation LTO linker: {linker[0]}")
+
+
+def _reject_fat_lto(file, path: Path, *, base: int = 0, size: int | None = None) -> None:
+    file.seek(base)
+    header = file.read(64)
+    if len(header) < 52 or header[:4] != b"\x7fELF" or header[4] not in {1, 2} or header[5] not in {1, 2}:
+        return
+    order = "little" if header[5] == 1 else "big"
+    is64 = header[4] == 2
+    def number(data: bytes, start: int, width: int) -> int:
+        return int.from_bytes(data[start:start + width], order)
+    section_offset = number(header, 40 if is64 else 32, 8 if is64 else 4)
+    entry_size = number(header, 58 if is64 else 46, 2)
+    count = number(header, 60 if is64 else 48, 2)
+    names_index = number(header, 62 if is64 else 50, 2)
+    if not section_offset or entry_size < (64 if is64 else 40):
+        return
+    if size is None:
+        size = os.fstat(file.fileno()).st_size - base
+    if section_offset + entry_size > size:
+        return
+    file.seek(base + section_offset)
+    first = file.read(entry_size)
+    if not count:
+        count = number(first, 32 if is64 else 20, 8 if is64 else 4)
+    if names_index == 0xffff:
+        names_index = number(first, 40 if is64 else 24, 4)
+    if names_index >= count or section_offset + count * entry_size > size:
+        return
+    file.seek(base + section_offset + names_index * entry_size)
+    names_header = file.read(entry_size)
+    names_offset = number(names_header, 24 if is64 else 16, 8 if is64 else 4)
+    names_size = number(names_header, 32 if is64 else 20, 8 if is64 else 4)
+    if names_offset + names_size > size:
+        return
+    file.seek(base + names_offset)
+    names = file.read(names_size)
+    for index in range(count):
+        file.seek(base + section_offset + index * entry_size)
+        name_offset = number(file.read(4), 0, 4)
+        name = names[name_offset:].split(b"\0", 1)[0]
+        if name == b".llvm.lto" or name.startswith(b".gnu.lto_"):
+            raise _wrapper_error(
+                f"unsupported fat-LTO native object or archive member in {path}; "
+                "use ordinary LLVM bitcode LTO objects"
+            )
+        if name == b".deplibs":
+            raise _wrapper_error(
+                f"unsupported implicit dependent-library input section in {path}; "
+                "pass the library closure explicitly"
+            )
+
+
+def _file_has_bitcode(path: Path, active: set[Path] | None = None) -> bool:
+    if active is None:
+        active = set()
+    canonical = path.resolve()
+    if canonical in active:
+        return False
+    active.add(canonical)
+    try:
+        with path.open("rb") as file:
+            magic = file.read(8)
+            if magic.startswith(_LLVM_BITCODE_MAGIC):
+                return True
+            if magic.startswith(b"\x7fELF"):
+                _reject_fat_lto(file, path)
+            if magic not in {b"!<arch>\n", b"!<thin>\n"}:
+                return False
+            thin = magic == b"!<thin>\n"
+            names = b""
+            has_bitcode = False
+            while True:
+                header = file.read(60)
+                if not header:
+                    return has_bitcode
+                if len(header) != 60 or header[58:60] != b"`\n":
+                    return False
+                name = header[:16].decode("utf-8", errors="replace").rstrip()
+                try:
+                    size = int(header[48:58])
+                except ValueError:
+                    return False
+                if size < 0:
+                    return False
+                data_start = file.tell()
+                if name == "//":
+                    names = file.read(size)
+                elif name not in {"/", "/SYM64/"}:
+                    if name.startswith("#1/"):
+                        try:
+                            name_size = int(name[3:])
+                        except ValueError:
+                            return False
+                        if name_size < 0 or name_size > size:
+                            return False
+                        member_name = file.read(name_size).rstrip(b"\0").decode("utf-8", errors="replace")
+                    elif name.startswith("/"):
+                        try:
+                            name_offset = int(name[1:])
+                        except ValueError:
+                            if thin:
+                                raise _wrapper_error(f"unsupported nested GNU thin-archive member in {path}")
+                            return False
+                        member_name = names[name_offset:].split(b"\n", 1)[0].rstrip(b"/").decode("utf-8", errors="replace")
+                    else:
+                        member_name = name.rstrip("/")
+                    if thin:
+                        member = Path(member_name)
+                        if not member.is_absolute():
+                            member = path.parent / member
+                        has_bitcode = _file_has_bitcode(member, active) or has_bitcode
+                        continue
+                    member_start = file.tell()
+                    member_magic = file.read(min(8, data_start + size - member_start))
+                    if member_magic.startswith(_LLVM_BITCODE_MAGIC):
+                        has_bitcode = True
+                    if member_magic.startswith(b"\x7fELF"):
+                        _reject_fat_lto(file, path, base=member_start,
+                                        size=data_start + size - member_start)
+                file.seek(data_start + size + (size & 1))
+    except OSError:
+        return False
+    finally:
+        active.remove(canonical)
+
+
+def _sysroot_path(reference: str, sysroot: str) -> Path:
+    if reference.startswith("="):
+        return Path(sysroot + reference[1:])
+    if reference.startswith("$SYSROOT"):
+        return Path(sysroot + reference[len("$SYSROOT"):])
+    return Path(reference)
+
+
+def _normalize_linker_selection_options(linker_args: list[str]) -> list[str]:
+    # LLVM 22 ELF Options.td: F/Eq options accept both dash prefixes, while
+    # EEq/FF options accept only "--". Normalize inspection, not actual argv.
+    values = {"library": "-l", "library-path": "-L", "script": "--script",
+              "sysroot": "--sysroot", "just-symbols": "--just-symbols",
+              "format": "--format"}
+    flags = {
+        "Bstatic": "-Bstatic", "static": "-Bstatic", "dn": "-Bstatic",
+        "non_shared": "-Bstatic", "nmagic": "-Bstatic", "omagic": "-Bstatic",
+        "Bdynamic": "-Bdynamic", "dy": "-Bdynamic", "call_shared": "-Bdynamic",
+        "push-state": "--push-state", "pop-state": "--pop-state",
+        "start-group": "--start-group", "end-group": "--end-group",
+        "start-lib": "--start-lib", "end-lib": "--end-lib",
+        "whole-archive": "--whole-archive", "no-whole-archive": "--no-whole-archive",
+        "as-needed": "--as-needed", "no-as-needed": "--no-as-needed",
+        "relocatable": "-r",
+    }
+    short_flags = {"-n": "-Bstatic", "-N": "-Bstatic", "--omagic": "-Bstatic",
+                   "-(": "--start-group", "-)": "--end-group"}
+    normalized: list[str] = []
     index = 0
-    while index < len(clang_args):
-        arg = clang_args[index]
+    while index < len(linker_args):
+        arg = linker_args[index]
+        option, separator, value = arg.partition("=")
+        name = option[2:] if option.startswith("--") else (option[1:] if option.startswith("-") else "")
+        if option in {"--remap-inputs", "--remap-inputs-file", "--chroot"}:
+            raise _wrapper_error(f"unsupported indirect input-routing option in managed wrapper: {option}")
+        if option in short_flags:
+            normalized.append(short_flags[option])
+        elif not separator and name in flags:
+            normalized.append(flags[name])
+        elif name in values:
+            canonical = values[name]
+            if separator:
+                normalized.append(canonical + value if canonical in {"-l", "-L"} else canonical + "=" + value)
+            else:
+                normalized.append(canonical)
+                if index + 1 < len(linker_args):
+                    index += 1
+                    normalized.append(linker_args[index])
+        elif option in {"-T", "-dT", "-b", "--default-script"}:
+            canonical = {"-T": "--script", "-dT": "--default-script",
+                         "-b": "--format", "--default-script": "--default-script"}[option]
+            normalized.append(canonical + "=" + value if separator else canonical)
+            if not separator and index + 1 < len(linker_args):
+                index += 1
+                normalized.append(linker_args[index])
+        elif arg.startswith("-T") and len(arg) > 2 and not arg.startswith(("-Ttext", "-Tdata", "-Tbss")):
+            normalized.append("--script=" + arg[2:])
+        else:
+            normalized.append(arg)
+        index += 1
+    for index, arg in enumerate(normalized):
+        input_format = None
+        if arg == "--format" and index + 1 < len(normalized):
+            input_format = normalized[index + 1]
+        elif arg.startswith("--format="):
+            input_format = arg.split("=", 1)[1]
+        if input_format is not None and input_format not in {"default", "elf"}:
+            raise _wrapper_error(f"unsupported managed wrapper input format: {input_format}")
+    return normalized
+
+
+def _link_input_paths(linker_args: list[str]) -> list[Path]:
+    linker_args = _normalize_linker_selection_options(linker_args)
+    inputs: list[Path] = []
+    seen: set[Path] = set()
+    library_dirs: list[Path] = []
+    sysroot = _last_option_value(linker_args, "--sysroot") or ""
+    for index, arg in enumerate(linker_args):
+        if arg == "-L" and index + 1 < len(linker_args):
+            library_dirs.append(_sysroot_path(linker_args[index + 1], sysroot))
+        elif arg.startswith("-L") and len(arg) > 2:
+            library_dirs.append(_sysroot_path(arg[2:], sysroot))
+    relocatable = "-r" in linker_args
+    static = relocatable
+    explicit_script = any(arg == "--script" or arg.startswith("--script=") for arg in linker_args)
+    states: list[bool] = []
+    index = 0
+    value_options = {"-o", "-L", "-m", "-e", "-u", "-z", "-plugin", "-plugin-opt", "-mllvm", "--load-pass-plugin", "--thinlto-cache-dir", "--dynamic-linker"}
+    while index < len(linker_args):
+        arg = linker_args[index]
+        if arg == "--push-state":
+            states.append(static)
+        elif arg == "--pop-state" and states:
+            static = states.pop()
+        elif arg == "-Bstatic":
+            static = True
+        elif arg == "-Bdynamic":
+            if not relocatable:
+                static = False
+        elif arg in value_options:
+            index += 2
+            continue
+        elif arg in {"--script", "--default-script", "--just-symbols"} and index + 1 < len(linker_args):
+            reference = Path(linker_args[index + 1])
+            if arg != "--default-script" or not explicit_script:
+                candidates = [reference, *(directory / reference for directory in library_dirs)]
+                candidate = next((path for path in candidates if path.is_file()), None)
+                if candidate is not None and candidate.resolve() not in seen:
+                    seen.add(candidate.resolve())
+                    inputs.append(candidate)
+            index += 2
+            continue
+        elif arg.startswith(("--script=", "--default-script=", "--just-symbols=")):
+            if not arg.startswith("--default-script=") or not explicit_script:
+                reference = Path(arg.split("=", 1)[1])
+                candidates = [reference, *(directory / reference for directory in library_dirs)]
+                candidate = next((path for path in candidates if path.is_file()), None)
+                if candidate is not None and candidate.resolve() not in seen:
+                    seen.add(candidate.resolve())
+                    inputs.append(candidate)
+            index += 1
+            continue
+        elif arg == "-l" or (arg.startswith("-l") and len(arg) > 2):
+            if arg == "-l":
+                if index + 1 >= len(linker_args):
+                    break
+                name = linker_args[index + 1]
+                index += 1
+            else:
+                name = arg[2:]
+            filenames = [name[1:]] if name.startswith(":") else ([f"lib{name}.a"] if static else [f"lib{name}.so", f"lib{name}.a"])
+            found: Path | None = None
+            for directory in library_dirs:
+                for filename in filenames:
+                    candidate = directory / filename
+                    if candidate.is_file():
+                        found = candidate
+                        break
+                if found is not None:
+                    break
+            if found is not None and found.resolve() not in seen:
+                seen.add(found.resolve())
+                inputs.append(found)
+        elif not arg.startswith("-"):
+            candidate = Path(arg)
+            if candidate.is_file() and candidate.resolve() not in seen:
+                seen.add(candidate.resolve())
+                inputs.append(candidate)
+        index += 1
+    return inputs
+
+
+def _script_dependency_paths(path: Path, search_dirs: list[Path], sysroot: str,
+                             *, strict: bool) -> list[Path] | None:
+    try:
+        with path.open("rb") as file:
+            prefix = file.read(256)
+            if (prefix.startswith((b"\x7fELF", b"!<arch>\n", b"!<thin>\n", *_LLVM_BITCODE_MAGIC))
+                    or b"\0" in prefix):
+                return None
+            raw = prefix + file.read()
+    except OSError as error:
+        if strict:
+            raise _wrapper_error(f"cannot inspect managed linker input {path}: {error}") from error
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError:
+        return None
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    text = re.sub(r"#[^\n]*", "", text)
+    tokens = re.findall(r'"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\'|[(),;]|[^\s(),;]+', text)
+    if not tokens:
+        return []
+    dependencies: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "INCLUDE" and index + 1 < len(tokens):
+            if strict:
+                raise _wrapper_error(f"managed LTO does not support linker-script INCLUDE in {path}")
+            dependencies.append(tokens[index + 1].strip("\"'"))
+            index += 2
+            continue
+        commands = {"INPUT", "GROUP", "SEARCH_DIR", "STARTUP", "OUTPUT_FORMAT", "OUTPUT_ARCH"}
+        if token not in commands or index + 1 >= len(tokens) or tokens[index + 1] != "(":
+            if strict and token != ";":
+                raise _wrapper_error(f"unsupported managed LTO linker-script command {token!r} in {path}")
+            index += 1
+            continue
+        if strict and token == "STARTUP":
+            raise _wrapper_error(f"managed LTO does not support linker-script STARTUP in {path}")
+        depth = 1
+        end = index + 2
+        operands: list[str] = []
+        while end < len(tokens) and depth:
+            item = tokens[end]
+            if item == "(":
+                depth += 1
+            elif item == ")":
+                depth -= 1
+            elif item not in {",", ";", "AS_NEEDED", "INPUT", "GROUP"}:
+                operands.append(item.strip("\"'"))
+            end += 1
+        if depth:
+            raise _wrapper_error(f"unsupported unbalanced linker-script input command in {path}")
+        if token == "SEARCH_DIR":
+            # A script search directory can also change resolution of later
+            # command-line -l operands. Do not certify that unproven closure.
+            if strict:
+                raise _wrapper_error(f"managed LTO does not support linker-script SEARCH_DIR in {path}")
+            for operand in operands:
+                search_dirs.append(Path(sysroot + operand[1:] if operand.startswith("=") else operand))
+        elif token not in {"OUTPUT_FORMAT", "OUTPUT_ARCH"}:
+            dependencies.extend(operands)
+        index = end
+    resolved: list[Path] = []
+    for reference in dependencies:
+        if reference.startswith(("--library", "-library")):
+            raise _wrapper_error(f"unsupported library-option spelling inside linker script {path}: {reference}")
+        if reference.startswith("-l"):
+            if strict:
+                raise _wrapper_error(
+                    f"managed LTO does not support state-dependent linker-script -l operands in {path}; "
+                    "pass libraries directly on the linker command line"
+                )
+            name = reference[2:]
+            filenames = [name[1:]] if name.startswith(":") else [f"lib{name}.so", f"lib{name}.a"]
+            # Discovery checks both states instead of mistaking a -Bstatic
+            # script archive input for an unrelated dynamic-library file.
+            for filename in filenames:
+                found = next((directory / filename for directory in search_dirs
+                              if (directory / filename).is_file()), None)
+                if found is not None:
+                    resolved.append(found)
+            continue
+        else:
+            candidate = _sysroot_path(reference, sysroot)
+            script_in_sysroot = bool(sysroot) and path.resolve().is_relative_to(Path(sysroot).resolve())
+            if candidate.is_absolute() and script_in_sysroot and not reference.startswith(("=", "$SYSROOT")):
+                candidate = Path(sysroot) / str(candidate).lstrip("/")
+            candidates = ([candidate] if candidate.is_absolute() else
+                          [path.parent / candidate, candidate, *(directory / candidate for directory in search_dirs)])
+        found = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if found is None:
+            if strict:
+                raise _wrapper_error(f"cannot prove managed LTO linker-script input {reference!r} from {path}")
+            continue
+        resolved.append(found)
+    return resolved
+
+
+def _link_input_closure(linker_args: list[str], *, strict: bool) -> list[Path]:
+    linker_args = _normalize_linker_selection_options(linker_args)
+    roots = _link_input_paths(linker_args)
+    search_dirs: list[Path] = []
+    sysroot = _last_option_value(linker_args, "--sysroot") or ""
+    for index, arg in enumerate(linker_args):
+        if arg == "-L" and index + 1 < len(linker_args):
+            search_dirs.append(_sysroot_path(linker_args[index + 1], sysroot))
+        elif arg.startswith("-L") and len(arg) > 2:
+            search_dirs.append(_sysroot_path(arg[2:], sysroot))
+    inputs: list[Path] = []
+    seen: set[Path] = set()
+    def visit(path: Path, *, indirect: bool, depth: int) -> None:
+        if depth > _ARGUMENT_FILE_DEPTH_LIMIT:
+            raise _wrapper_error("linker-script input nesting exceeds 20 levels")
+        canonical = path.resolve()
+        if canonical in seen:
+            return
+        seen.add(canonical)
+        if _file_has_bitcode(path) and indirect:
+            raise _wrapper_error(
+                f"unsupported LTO input hidden through linker script: {path}; "
+                "pass LLVM bitcode objects or archives directly"
+            )
+        dependencies = _script_dependency_paths(path, search_dirs, sysroot, strict=strict)
+        if dependencies is None:
+            inputs.append(path)
+        else:
+            for dependency in dependencies:
+                visit(dependency, indirect=True, depth=depth + 1)
+    for path in roots:
+        visit(path, indirect=False, depth=0)
+    # SEARCH_DIR can expose a library that was not resolvable from Clang's
+    # original -L list. Such indirect LTO is rejected, not treated as native.
+    expanded_roots = _link_input_paths([*linker_args, *(f"-L{directory}" for directory in search_dirs)])
+    for path in expanded_roots:
+        visit(path, indirect=path not in roots, depth=0)
+    return inputs
+
+
+def _lto_input_paths(linker_args: list[str]) -> list[Path]:
+    return [path for path in _link_input_closure(linker_args, strict=False) if _file_has_bitcode(path)]
+
+
+def _validate_lto_inputs(inputs: list[Path], env: dict[str, str]) -> None:
+    if not Path(DRIVER).is_file():
+        raise _wrapper_error(f"missing LTO contract config driver: {DRIVER}")
+    command = [DRIVER, "--quiet"]
+    config = _resolved_config_path(None, env)
+    if config is not None:
+        command.append(f"--config={config}")
+    command.extend(f"--validate-lto-input={path}" for path in inputs)
+    with tempfile.TemporaryDirectory(prefix="obf-lto-validate-") as temporary:
+        response = Path(temporary) / "validate.rsp"
+        with response.open("w", encoding="utf-8") as file:
+            for arg in command[1:]:
+                file.write('"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"\n')
+        completed = _capture([DRIVER, f"@{response}"], env)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "LTO input policy validation failed"
+        raise _wrapper_error(detail)
+
+
+def _managed_link_main(linker_args: list[str]) -> int:
+    marker = "--obf-managed-lto-linker"
+    args = [arg for arg in _expand_linker_response_args(linker_args) if arg != marker]
+    env = os.environ.copy()
+    managed_lld = env.pop("OBF_MANAGED_LLD", "")
+    if not managed_lld or _resolve_executable(managed_lld) is None:
+        return _fail("managed LTO linker dispatch is missing the configured ELF LLD")
+    env.pop("OBF_LTO_MODE", None)
+    env.pop("OBF_LTO_INPUTS_VALIDATED", None)
+    try:
+        # This runs as Clang's linker job, after its frontend jobs have emitted
+        # their temporary bitcode. Validate the whole input set before either
+        # LTO backend processing or a ThinLTO cache hit can hide obligations.
+        _validate_lto_inputs(_link_input_closure(args, strict=True), env)
+        env["OBF_LTO_INPUTS_VALIDATED"] = "1"
+        # The private marker may have lived inside Clang's response file.
+        # Re-emit a GNU response file after removing it, retaining bounded
+        # process argv size and the current-directory input semantics.
+        with tempfile.TemporaryDirectory(prefix="obf-lto-link-") as temporary:
+            response = Path(temporary) / "link.rsp"
+            with response.open("w", encoding="utf-8") as file:
+                for arg in args:
+                    file.write('"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"\n')
+            return subprocess.run([managed_lld, f"@{response}"], env=env).returncode
+    except (_wrapper_error, OSError) as error:
+        return _fail(str(error))
+
+
+def _has_plugin(args: list[str], option: str) -> bool:
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        value: str | None = None
+        if arg == option and index + 1 < len(args):
+            value = args[index + 1]
+            index += 1
+        elif arg.startswith(option + "="):
+            value = arg.split("=", 1)[1]
+        if value is not None and _same_path(value, PLUGIN):
+            return True
+        index += 1
+    return False
+
+
+def _hash_file(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as file:
+            while True:
+                chunk = file.read(131072)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError as error:
+        raise _wrapper_error(f"cannot read managed LTO policy input {path}: {error}") from error
+    return digest.digest()
+
+
+def _managed_cache_dir(cache_dir: str, config_path: str | None, env: dict[str, str]) -> str:
+    digest = hashlib.sha256(_CACHE_NAMESPACE_PREFIX)
+    digest.update(b"\0plugin\0" + _hash_file(Path(PLUGIN)))
+    digest.update(b"\0seed\0" + env.get("OBF_SEED", "").encode("utf-8"))
+    if config_path is None:
+        digest.update(b"\0config:none")
+    else:
+        digest.update(b"\0config:path\0" + str(Path(config_path).resolve()).encode("utf-8"))
+        digest.update(b"\0config\0" + _hash_file(Path(config_path)))
+    # Keep cache and pruning policy enabled, but never let LLVM's ordinary
+    # module cache key hide a changed plugin or environment-selected policy.
+    return str(Path(cache_dir) / ("obf-managed-" + digest.hexdigest()))
+
+def _user_linker_args(driver_args: list[str]) -> list[str]:
+    tokens: list[str] = []
+    index = 0
+    while index < len(driver_args):
+        arg = driver_args[index]
         if arg.startswith("-Wl,"):
-            for token in arg[4:].split(","):
-                inspect(token)
-        elif arg == "-Xlinker" and index + 1 < len(clang_args):
-            inspect(clang_args[index + 1])
+            tokens.extend(arg[4:].split(","))
+        elif arg == "-Xlinker" and index + 1 < len(driver_args):
+            tokens.append(driver_args[index + 1])
             index += 1
         elif arg.startswith("-Xlinker="):
-            inspect(arg.split("=", 1)[1])
+            tokens.append(arg.split("=", 1)[1])
         index += 1
-    return modes
+    return _expand_linker_response_args(tokens)
 
 
-def _ensure_no_build_id(clang_args: list[str]) -> None:
-    modes = _linker_build_id_modes(clang_args)
-    if any(mode != "none" for mode in modes):
+def _backend_opt_level(linker_args: list[str]) -> str:
+    level = "2"
+    for arg in linker_args:
+        for prefix in ("--lto-O", "-plugin-opt=O", "--plugin-opt=O"):
+            if arg.startswith(prefix):
+                level = arg[len(prefix):]
+    return level
+
+
+def _managed_backend_pipeline_args(linker_args: list[str]) -> list[str]:
+    pipeline = _last_option_value(linker_args, "--lto-newpm-passes")
+    required_pipeline = "obf-lto-finalize,verify"
+    if pipeline is not None and pipeline != required_pipeline:
         raise _wrapper_error(
-            "self_checksum ELF links require --build-id=none; remove the conflicting --build-id option"
+            "managed obfuscation LTO rejects custom --lto-newpm-passes; "
+            f"the supported explicit finalization pipeline is {required_pipeline}"
         )
-    if not modes:
-        clang_args.append("-Wl,--build-id=none")
+    if pipeline is None and _backend_opt_level(linker_args) == "0":
+        # LLVM 22's ThinLTO O0 default pipeline has no plugin extension points.
+        # A link can contain Thin objects even when its frontend mode is full.
+        # The explicit finalizer works for both modes without raising O0.
+        return ["-Xlinker", f"--lto-newpm-passes={required_pipeline}"]
+    return []
+
+
+def _query_self_checksum(config_path: str | None, env: dict[str, str]) -> bool:
+    if config_path is None:
+        return False
+    if not Path(DRIVER).is_file():
+        raise _wrapper_error(f"missing config driver: {DRIVER}")
+    completed = _capture([DRIVER, f"--config={config_path}", "--query-self-checksum"], env)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "config query failed"
+        raise _wrapper_error(detail)
+    state = completed.stdout.strip()
+    if state == "enabled":
+        return True
+    if state == "disabled":
+        return False
+    raise _wrapper_error(f"unexpected self_checksum config query result: {state!r}")
+
+
+def _linker_build_id_modes(linker_args: list[str]) -> list[str]:
+    return [arg.split("=", 1)[1] or "default" if "=" in arg else "default"
+            for arg in linker_args if arg == "--build-id" or arg.startswith("--build-id=")]
 
 
 def _link_output_path(clang_args: list[str], require_explicit: bool, default_output: str) -> Path:
@@ -218,12 +960,9 @@ def _link_output_path(clang_args: list[str], require_explicit: bool, default_out
                 not arg.startswith("-object-file-name=")):
             output = arg[2:]
         index += 1
-
     if output is None:
         if require_explicit:
-            raise _wrapper_error(
-                "self_checksum auto-binding requires an explicit '-o <path>' final-link output"
-            )
+            raise _wrapper_error("self_checksum auto-binding requires an explicit '-o <path>' final-link output")
         output = default_output
     if output == "-":
         raise _wrapper_error("self_checksum final links cannot bind an output written to stdout")
@@ -233,15 +972,7 @@ def _link_output_path(clang_args: list[str], require_explicit: bool, default_out
 def _probe_checksum_records(output: Path, env: dict[str, str]) -> bool:
     if not CHECKSUM_BINDER or not Path(CHECKSUM_BINDER).is_file():
         raise _wrapper_error(f"missing self-checksum binder: {CHECKSUM_BINDER or '<not configured>'}")
-    completed = subprocess.run(
-        [CHECKSUM_BINDER, "--probe", str(output)],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-    )
+    completed = _capture([CHECKSUM_BINDER, "--probe", str(output)], env)
     if completed.returncode == 0:
         return True
     if completed.returncode == 3:
@@ -251,30 +982,17 @@ def _probe_checksum_records(output: Path, env: dict[str, str]) -> bool:
 
 
 def _bind_checksum_records(output: Path, env: dict[str, str]) -> None:
-    completed = subprocess.run(
-        [CHECKSUM_BINDER, str(output)],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-    )
+    completed = _capture([CHECKSUM_BINDER, str(output)], env)
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "binder failed"
-        raise _wrapper_error(
-            f"self-checksum binding failed for {output} (exit {completed.returncode}): {detail}"
-        )
+        raise _wrapper_error(f"self-checksum binding failed for {output} (exit {completed.returncode}): {detail}")
 
 
-def _compiler_command(compiler: str,
-                      clang_args: list[str],
-                      query_action: bool,
-                      link_action: bool) -> list[str]:
-    plugin_arg = f"-fpass-plugin={PLUGIN}"
+def _compiler_command(compiler: str, clang_args: list[str], query_action: bool,
+                      link_action: bool, frontend_has_plugin: bool) -> list[str]:
     final_args = [compiler]
-    if not query_action and plugin_arg not in clang_args:
-        final_args.append(plugin_arg)
+    if not query_action and not frontend_has_plugin:
+        final_args.append(f"-fpass-plugin={PLUGIN}")
     final_args.extend(clang_args)
     if link_action:
         final_args.append(RUNTIME_ARCHIVE)
@@ -282,120 +1000,168 @@ def _compiler_command(compiler: str,
 
 
 def main() -> int:
+    if os.environ.get("OBF_MANAGED_LLD"):
+        try:
+            dispatch_args = _expand_linker_response_args(sys.argv[1:])
+        except _wrapper_error as error:
+            return _fail(str(error))
+        if "--obf-managed-lto-linker" in dispatch_args:
+            return _managed_link_main(sys.argv[1:])
+    elif "--obf-managed-lto-linker" in sys.argv[1:]:
+        return _fail("private managed LTO linker mode requires the wrapper dispatch environment")
     compiler = CLANGXX if "++" in Path(sys.argv[0]).name else CLANG
     clang_args, config_path, early_exit = _parse_args(sys.argv[1:])
     if early_exit is not None:
         return early_exit
-
-    is_windows = sys.platform == "win32" or os.name == "nt"
-    _inject_windows_lto_linker(clang_args, is_windows)
-
-    query_action = any(
-        arg in _QUERY_ARGS or arg.startswith(_QUERY_ARG_PREFIXES) for arg in clang_args
-    )
-    dry_run = any(arg in _DRY_RUN_ARGS for arg in clang_args)
-    link_action = not query_action and not any(arg in _COMPILE_ONLY_ARGS for arg in clang_args)
-
     env = os.environ.copy()
     if config_path is not None:
         env["OBF_CONFIG"] = config_path
+    # Never inherit a stale frontend phase from another wrapper invocation.
+    env.pop("OBF_LTO_MODE", None)
+    env.pop("OBF_LTO_INPUTS_VALIDATED", None)
+    env.pop("OBF_MANAGED_LLD", None)
 
-    self_checksum_requested = False
     bound_object_format: str | None = None
     bind_output: Path | None = None
     binder_available = bool(CHECKSUM_BINDER) and Path(CHECKSUM_BINDER).is_file()
     try:
+        response_args = _expand_response_args(clang_args)
+        query_action = any(arg in _QUERY_ARGS or arg.startswith(_QUERY_ARG_PREFIXES) for arg in response_args)
+        if query_action:
+            return subprocess.run([compiler, *clang_args], env=env).returncode
+        commands, config_files = _driver_plan(compiler, clang_args, env)
+        if not commands:
+            return subprocess.run([compiler, *clang_args], env=env).returncode
+        effective_args = _effective_driver_args(response_args, config_files)
+        if not Path(PLUGIN).is_file():
+            raise _wrapper_error(f"missing pass plugin: {PLUGIN}")
+        if any(arg == "--obf-config" or arg.startswith("--obf-config=") for arg in effective_args):
+            raise _wrapper_error("pass --obf-config directly or use OBF_CONFIG, not inside a compiler config or response file")
+        frontend_jobs = [command for command in commands if "-cc1" in command]
+        frontend_has_plugin = any(_has_plugin(command, "-fpass-plugin") for command in frontend_jobs)
+        if not frontend_jobs:
+            frontend_has_plugin = _has_plugin(effective_args, "-fpass-plugin")
+        frontend_lto_modes = {_effective_lto_mode(command) for command in frontend_jobs}
+        frontend_lto_modes.discard(None)
+        if len(frontend_lto_modes) > 1:
+            raise _wrapper_error("mixed frontend LTO modes in one invocation are unsupported")
+        frontend_lto_mode = next(iter(frontend_lto_modes), None)
+        if frontend_lto_mode is not None:
+            env["OBF_LTO_MODE"] = frontend_lto_mode
+        lto_mode = _effective_lto_mode(effective_args)
+        linker = _linker_job(commands)
+        link_action = linker is not None
+        dry_run = "-###" in effective_args
+        linker_args = _normalize_linker_selection_options(
+            _expand_linker_response_args(linker[1:])) if linker is not None else []
+        final_link_action = link_action and "-r" not in linker_args
+        target_triple = next((_last_option_value(command, "-triple") for command in frontend_jobs), None)
+        if target_triple is None and (link_action or frontend_lto_mode is not None):
+            target_triple = _compiler_target_triple(compiler, effective_args, env)
+        object_format = _target_object_format(target_triple) if target_triple else None
+        lto_inputs = _lto_input_paths(linker_args) if link_action else []
+        needs_backend = link_action and (lto_mode is not None or bool(lto_inputs))
+        if (frontend_lto_mode is not None or needs_backend) and object_format != "elf":
+            raise _wrapper_error(
+                "managed obfuscation LTO currently supports ELF targets only; "
+                f"effective target is {target_triple or 'unknown'}"
+            )
+        if needs_backend:
+            unsupported_modes = (
+                "--thinlto-index-only", "--thinlto-single-module", "--thinlto-distributor",
+                "--thinlto-remote-compiler", "--lto-emit-asm", "--lto-emit-llvm",
+                "-plugin-opt=thinlto-index-only", "--plugin-opt=thinlto-index-only",
+                "-plugin-opt=emit-asm", "--plugin-opt=emit-asm",
+                "-plugin-opt=emit-llvm", "--plugin-opt=emit-llvm",
+            )
+            if any(arg == mode or arg.startswith(mode + "=") for arg in linker_args for mode in unsupported_modes):
+                raise _wrapper_error("managed obfuscation LTO requires an in-process native backend, not index-only, distributed, or emit-IR/assembly modes")
+            managed_lld = _managed_lld(compiler, env)
+            _validate_linker_selection(effective_args, linker, managed_lld)
+            linker_dispatch = str(Path(sys.argv[0]).absolute())
+            env["OBF_MANAGED_LLD"] = managed_lld
+            clang_args.extend(["-fuse-ld=lld", f"--ld-path={linker_dispatch}",
+                               "-Xlinker", "--obf-managed-lto-linker"])
+            if not _has_plugin(linker_args, "--load-pass-plugin"):
+                clang_args.extend(["-Xlinker", f"--load-pass-plugin={PLUGIN}"])
+            clang_args.extend(_managed_backend_pipeline_args(linker_args))
+            cache_dir = _last_option_value(linker_args, "--thinlto-cache-dir")
+            if cache_dir is not None:
+                if cache_dir == "":
+                    raise _wrapper_error("managed ThinLTO cache directory must not be empty")
+                managed_cache = _managed_cache_dir(cache_dir, _resolved_config_path(config_path, env), env)
+                clang_args.extend(["-Xlinker", f"--thinlto-cache-dir={managed_cache}"])
+            # Config tail options are applied after command-line options.
+            # Reinspect the actual driver job rather than assuming an appended
+            # option won; in particular, a stale cache must never win here.
+            routed_commands, _ = _driver_plan(compiler, clang_args, env)
+            routed_linker = _linker_job(routed_commands)
+            if routed_linker is None or not _same_path(routed_linker[0], linker_dispatch):
+                raise _wrapper_error("compiler config overrides the required managed ELF LLD linker")
+            routed_args = _normalize_linker_selection_options(_expand_linker_response_args(routed_linker[1:]))
+            if not _has_plugin(routed_args, "--load-pass-plugin"):
+                raise _wrapper_error("compiler config removes the required managed LTO backend plugin")
+            if cache_dir is not None and _last_option_value(routed_args, "--thinlto-cache-dir") != managed_cache:
+                raise _wrapper_error(
+                    "compiler config tail overrides the managed ThinLTO cache namespace; "
+                    "move --thinlto-cache-dir to the config head or command line"
+                )
+            required_args = _managed_backend_pipeline_args(linker_args)
+            if required_args and _last_option_value(routed_args, "--lto-newpm-passes") != "obf-lto-finalize,verify":
+                raise _wrapper_error("compiler config overrides the required O0 LTO finalization pipeline")
+            linker_args = routed_args
+
+        if final_link_action:
+            if not Path(RUNTIME_ARCHIVE).is_file():
+                raise _wrapper_error(f"missing runtime archive: {RUNTIME_ARCHIVE}")
+            bound_object_format = _bound_object_format(target_triple, effective_args, os.name == "nt")
         resolved_config = _resolved_config_path(config_path, env)
-        self_checksum_requested = link_action and _query_self_checksum(resolved_config, env)
-
-        if link_action:
-            try:
-                target_triple = _compiler_target_triple(compiler, clang_args, env)
-                bound_object_format = _bound_object_format(target_triple, clang_args, is_windows)
-            except _wrapper_error:
-                if self_checksum_requested:
-                    raise
-                bound_object_format = None
-
+        self_checksum_requested = final_link_action and _query_self_checksum(resolved_config, env)
         if bound_object_format == "pe-unsupported-host":
             if self_checksum_requested:
-                raise _wrapper_error(
-                    "PE self_checksum auto-binding currently requires a native Windows host"
-                )
+                raise _wrapper_error("PE self_checksum auto-binding currently requires a native Windows host")
             bound_object_format = None
-
         if bound_object_format is not None and (self_checksum_requested or binder_available):
-            default_output = "a.exe" if bound_object_format == "pe" else "a.out"
             bind_output = _link_output_path(
-                clang_args,
+                effective_args,
                 require_explicit=self_checksum_requested,
-                default_output=default_output,
-            )
-
-        if self_checksum_requested and bound_object_format is not None:
-            if not binder_available:
-                raise _wrapper_error(
-                    f"missing self-checksum binder: {CHECKSUM_BINDER or '<not configured>'}"
-                )
-            if bound_object_format == "elf":
-                _ensure_no_build_id(clang_args)
-    except _wrapper_error as error:
-        return _fail(str(error))
-
-    if not query_action and not Path(PLUGIN).exists():
-        return _fail(f"missing pass plugin: {PLUGIN}")
-    if link_action and not Path(RUNTIME_ARCHIVE).exists():
-        return _fail(f"missing runtime archive: {RUNTIME_ARCHIVE}")
-
-    final_args = _compiler_command(compiler, clang_args, query_action, link_action)
-    completed = subprocess.run(final_args, env=env)
-    if completed.returncode != 0 or dry_run or bound_object_format is None or not binder_available:
-        return completed.returncode
-
-    try:
-        if bind_output is None:
-            bind_output = _link_output_path(
-                clang_args,
-                require_explicit=False,
                 default_output="a.exe" if bound_object_format == "pe" else "a.out",
             )
-        if not bind_output.is_file():
-            raise _wrapper_error(
-                f"successful link did not produce expected output for self_checksum probe: {bind_output}"
-            )
-
+        build_id_modes = _linker_build_id_modes(_user_linker_args(effective_args))
+        if self_checksum_requested and bound_object_format is not None:
+            if not binder_available:
+                raise _wrapper_error(f"missing self-checksum binder: {CHECKSUM_BINDER or '<not configured>'}")
+            if bound_object_format == "elf":
+                if any(mode != "none" for mode in build_id_modes):
+                    raise _wrapper_error("self_checksum ELF links require --build-id=none; remove the conflicting --build-id option")
+                if not build_id_modes:
+                    clang_args.append("-Wl,--build-id=none")
+                    build_id_modes.append("none")
+        final_args = _compiler_command(compiler, clang_args, False, final_link_action, frontend_has_plugin)
+        completed = subprocess.run(final_args, env=env)
+        if completed.returncode != 0 or dry_run or bound_object_format is None or not binder_available:
+            return completed.returncode
+        if bind_output is None or not bind_output.is_file():
+            raise _wrapper_error(f"successful link did not produce expected output for self_checksum probe: {bind_output}")
         if not _probe_checksum_records(bind_output, env):
             return 0
-
         if bound_object_format == "elf":
-            build_id_modes = _linker_build_id_modes(clang_args)
             if any(mode != "none" for mode in build_id_modes):
-                raise _wrapper_error(
-                    "linked ELF contains self_checksum records but a conflicting --build-id option was requested"
-                )
-
+                raise _wrapper_error("linked ELF contains self_checksum records but a conflicting --build-id option was requested")
             if not build_id_modes:
-                # Records can arrive from separately compiled objects or archives even
-                # when the final link invocation has no active obfuscation config.
-                # Relink once without a GNU build ID so post-link binding cannot stale it.
+                # Inherited records require a relink if Clang's default link had
+                # a GNU build ID. Keep the same LTO backend and cache contract.
                 clang_args.append("-Wl,--build-id=none")
-                relink_args = _compiler_command(compiler, clang_args, query_action, link_action)
+                relink_args = _compiler_command(compiler, clang_args, False, final_link_action, frontend_has_plugin)
                 relinked = subprocess.run(relink_args, env=env)
                 if relinked.returncode != 0:
                     return relinked.returncode
-                if not bind_output.is_file():
-                    raise _wrapper_error(
-                        f"self_checksum relink did not produce expected output: {bind_output}"
-                    )
-                if not _probe_checksum_records(bind_output, env):
-                    raise _wrapper_error(
-                        "self_checksum records disappeared during final --build-id=none relink"
-                    )
-
+                if not bind_output.is_file() or not _probe_checksum_records(bind_output, env):
+                    raise _wrapper_error("self_checksum records disappeared during final --build-id=none relink")
         _bind_checksum_records(bind_output, env)
+        return 0
     except _wrapper_error as error:
         return _fail(str(error))
-    return 0
 
 
 if __name__ == "__main__":

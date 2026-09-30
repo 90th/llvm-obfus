@@ -1,4 +1,19 @@
 #include "obf/frontend/config.h"
+#include "obf/analysis/function_features.h"
+#include "obf/frontend/annotations.h"
+#include "obf/policy/policy_engine.h"
+#include "llvm/ADT/SmallPtrSet.h"
+
+#include "llvm/ADT/StringSet.h"
+#include "llvm/BinaryFormat/Magic.h"
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Object/Archive.h"
+#include "llvm/Object/ELFObjectFile.h"
+#include "llvm/Object/ObjectFile.h"
+#include "llvm/Support/MemoryBuffer.h"
 
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/CommandLine.h"
@@ -7,6 +22,179 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <optional>
+
+namespace {
+
+llvm::Error collect_lto_definitions(
+    llvm::MemoryBufferRef buffer, llvm::LLVMContext& context,
+    llvm::StringSet<>& names, llvm::StringSet<>& native_names,
+    llvm::StringSet<>& selected_names,
+    const obf::obfuscation_config& config) {
+  const llvm::file_magic magic = llvm::identify_magic(buffer.getBuffer());
+  if (magic == llvm::file_magic::archive) {
+    auto archive = llvm::object::Archive::create(buffer);
+    if (!archive) { return archive.takeError(); }
+    llvm::Error error = llvm::Error::success();
+    for (const auto& child : (*archive)->children(error)) {
+      auto member = child.getMemoryBufferRef();
+      if (!member) { return member.takeError(); }
+      if (llvm::Error member_error =
+              collect_lto_definitions(*member, context, names, native_names, selected_names, config)) {
+        return member_error;
+      }
+    }
+    return error;
+  }
+  if (magic != llvm::file_magic::bitcode) {
+    if (magic != llvm::file_magic::elf_relocatable &&
+        magic != llvm::file_magic::elf_shared_object &&
+        magic != llvm::file_magic::elf_executable) {
+      return llvm::Error::success();
+    }
+    auto object = llvm::object::ObjectFile::createObjectFile(buffer);
+    if (!object) { return object.takeError(); }
+    const auto collect_symbol = [&](const llvm::object::SymbolRef& symbol) -> llvm::Error {
+      auto flags = symbol.getFlags();
+      if (!flags) { return flags.takeError(); }
+      if ((*flags & llvm::object::SymbolRef::SF_Undefined) != 0 ||
+          (*flags & llvm::object::SymbolRef::SF_Global) == 0) {
+        return llvm::Error::success();
+      }
+      auto name = symbol.getName();
+      if (!name) { return name.takeError(); }
+      native_names.insert(*name);
+      return llvm::Error::success();
+    };
+    for (const auto& symbol : (*object)->symbols()) {
+      if (llvm::Error error = collect_symbol(symbol)) { return error; }
+    }
+    if (const auto* elf = llvm::dyn_cast<llvm::object::ELFObjectFileBase>(object->get())) {
+      for (const auto& symbol : elf->getDynamicSymbolIterators()) {
+        if (llvm::Error error = collect_symbol(symbol)) { return error; }
+      }
+    }
+    return llvm::Error::success();
+  }
+  auto module = llvm::parseBitcodeFile(buffer, context);
+  if (!module) { return module.takeError(); }
+  std::optional<obf::obfuscation_config> resolved_config;
+  if (config.frontend != obf::frontend_kind::generic) {
+    resolved_config.emplace(config);
+    for (auto& rule : resolved_config->targets) {
+      if (const auto* function = obf::resolve_configured_function(**module, rule.match)) {
+        rule.match = function->getName().str();
+      }
+    }
+    for (auto& override : resolved_config->overrides) {
+      if (const auto* function = obf::resolve_configured_function(**module, override.name)) {
+        override.name = function->getName().str();
+      }
+    }
+  }
+  const auto& policy_config = resolved_config.has_value() ? *resolved_config : config;
+  const auto annotations = obf::collect_function_annotations(**module);
+  llvm::SmallPtrSet<const llvm::Function*, 16> selected_functions;
+  for (const llvm::Function& function : **module) {
+    if (function.isDeclaration()) { continue; }
+    names.insert(function.getName());
+    if (function.hasFnAttribute("obf.lto.selector")) {
+      names.insert(function.getFnAttribute("obf.lto.selector").getValueAsString());
+    }
+    const bool has_retained_level = function.hasFnAttribute("obf.lto.level");
+    const bool retained =
+        has_retained_level && function.getFnAttribute("obf.lto.level").getValueAsString() != "none";
+    bool selected = retained;
+    if (!has_retained_level) {
+      const std::string* annotation = obf::find_function_annotation(annotations, function.getName());
+      const auto decision = obf::select_policy(
+          **module, obf::collect_function_features(function), policy_config,
+          annotation == nullptr ? llvm::StringRef{} : llvm::StringRef(*annotation));
+      selected = decision.policy.level != obf::protection_level::none;
+    }
+    if (selected) { selected_functions.insert(&function); }
+    if (selected && !function.hasLocalLinkage()) {
+      selected_names.insert(function.getName());
+      if (retained && function.hasFnAttribute("obf.lto.selector")) {
+        selected_names.insert(function.getFnAttribute("obf.lto.selector").getValueAsString());
+      }
+    }
+  }
+  for (const llvm::GlobalAlias& alias : (*module)->aliases()) {
+    const auto* function = llvm::dyn_cast_or_null<llvm::Function>(alias.getAliaseeObject());
+    if (function != nullptr && !function->isDeclaration()) {
+      names.insert(alias.getName());
+      if (!alias.hasLocalLinkage() && selected_functions.contains(function)) {
+        selected_names.insert(alias.getName());
+      }
+    }
+  }
+  if (config.frontend != obf::frontend_kind::generic) {
+    for (const auto& rule : config.targets) {
+      if (obf::resolve_configured_function(**module, rule.match) != nullptr) {
+        names.insert(rule.match);
+      }
+    }
+    for (const auto& override : config.overrides) {
+      if (obf::resolve_configured_function(**module, override.name) != nullptr) {
+        names.insert(override.name);
+      }
+    }
+  }
+  return llvm::Error::success();
+}
+
+llvm::Error validate_lto_inputs(
+    const llvm::cl::list<std::string>& paths, const obf::obfuscation_config& config) {
+  llvm::LLVMContext context;
+  llvm::StringSet<> names;
+  llvm::StringSet<> native_names;
+  llvm::StringSet<> selected_names;
+  for (const std::string& path : paths) {
+    auto buffer = llvm::MemoryBuffer::getFile(path);
+    if (!buffer) {
+      return llvm::createStringError(buffer.getError(), "cannot read LTO input %s", path.c_str());
+    }
+    if (llvm::Error error = collect_lto_definitions(
+            (*buffer)->getMemBufferRef(), context, names, native_names, selected_names, config)) {
+      return error;
+    }
+  }
+  const auto require_definition = [&](llvm::StringRef name, obf::protection_level level) -> llvm::Error {
+    if (level == obf::protection_level::none || name.contains('*') || name.contains('?')) {
+      return llvm::Error::success();
+    }
+    if (native_names.contains(name) && selected_names.contains(name)) {
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "requested LTO protection target %s has a competing native definition; use bitcode-only definitions",
+          name.str().c_str());
+    }
+    if (names.contains(name)) { return llvm::Error::success(); }
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(), "requested LTO protection target %s has no bitcode definition",
+        name.str().c_str());
+  };
+  for (const auto& rule : config.targets) {
+    bool overridden = false;
+    for (const auto& override : config.overrides) {
+      if (override.name == rule.match) { overridden = true; break; }
+    }
+    if (!overridden) {
+      if (llvm::Error error = require_definition(rule.match, rule.level)) { return error; }
+    }
+  }
+  for (const auto& override : config.overrides) {
+    if (llvm::Error error = require_definition(override.name, override.level)) { return error; }
+  }
+  for (const auto& selected : selected_names) {
+    if (llvm::Error error = require_definition(selected.getKey(), obf::protection_level::strong)) {
+      return error;
+    }
+  }
+  return llvm::Error::success();
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
   llvm::InitLLVM init_llvm(argc, argv);
@@ -35,6 +223,9 @@ int main(int argc, char** argv) {
       llvm::cl::desc("Print whether the resolved config enables self_checksum"),
       llvm::cl::init(false),
       llvm::cl::cat(driver_category));
+  llvm::cl::list<std::string> lto_inputs(
+      "validate-lto-input", llvm::cl::desc("Validate requested protection across LTO input definitions"),
+      llvm::cl::ZeroOrMore, llvm::cl::cat(driver_category));
   llvm::cl::HideUnrelatedOptions(driver_category);
   llvm::cl::ParseCommandLineOptions(argc, argv, "llvm-obfus driver scaffold\n");
 
@@ -85,6 +276,15 @@ int main(int argc, char** argv) {
   } else if (!quiet && !query_self_checksum) {
     llvm::outs() << "No config provided. Using default milestone-zero policy "
                     "inputs.\n";
+  }
+
+  if (!lto_inputs.empty()) {
+    const obf::obfuscation_config config = loaded_config.value_or(obf::obfuscation_config{});
+    if (llvm::Error error = validate_lto_inputs(lto_inputs, config)) {
+      llvm::errs() << llvm::toString(std::move(error)) << '\n';
+      return 1;
+    }
+    return 0;
   }
 
   if (query_self_checksum) {

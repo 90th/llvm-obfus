@@ -12,6 +12,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/ModRef.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <optional>
@@ -24,7 +25,9 @@ namespace {
 
 bool should_skip_function(const function_pipeline_state& state,
                           const llvm::StringSet<>* skip_functions) {
-  if (state.function == nullptr || state.function->isDeclaration()) { return true; }
+  if (state.function == nullptr || state.function->isDeclaration() || state.skip_transform_stages) {
+    return true;
+  }
 
   return skip_functions != nullptr && skip_functions->contains(state.function->getName());
 }
@@ -48,7 +51,7 @@ bool is_strong_vm_state(const function_pipeline_state& state) {
 
 bool binding_belongs_to_state(const virtualized_function_binding& binding,
                               const function_pipeline_state& state) {
-  if (binding.state == &state) { return true; }
+  if (binding.state == &state || binding.interface_function == state.function) { return true; }
 
   return binding.state != nullptr && binding.state->function != nullptr &&
          state.function != nullptr &&
@@ -218,10 +221,25 @@ bool is_strong_vm_binding(const virtualized_function_binding& binding) {
 std::string describe_attribute(llvm::Attribute attribute) { return attribute.getAsString(); }
 
 bool is_unsafe_strong_vm_function_attribute(llvm::Attribute attribute) {
-  const std::string text = describe_attribute(attribute);
-  return text == "mustprogress" || text == "nofree" || text == "norecurse" || text == "nosync" ||
-         text == "willreturn" || text == "readnone" || text == "readonly" ||
-         llvm::StringRef(text).starts_with("memory(");
+  if (!attribute.hasKindAsEnum()) { return false; }
+  switch (attribute.getKindAsEnum()) {
+    case llvm::Attribute::Memory:
+      // Explicit all-memory readwrite is the conservative unknown effect,
+      // equivalent to an absent memory attribute. Reject restrictions on
+      // access kind or location, not this redundant spelling of unknown.
+      return attribute.getMemoryEffects() != llvm::MemoryEffects::unknown();
+    case llvm::Attribute::MustProgress:
+    case llvm::Attribute::NoFree:
+    case llvm::Attribute::NoRecurse:
+    case llvm::Attribute::NoSync:
+    case llvm::Attribute::WillReturn:
+    case llvm::Attribute::ReadNone:
+    case llvm::Attribute::ReadOnly:
+    case llvm::Attribute::Speculatable:
+      return true;
+    default:
+      return false;
+  }
 }
 
 void enforce_strong_vm_function_attributes(llvm::Function* function,
@@ -471,10 +489,15 @@ bool apply_string_encoding_stage(llvm::Module& module,
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config,
                                  const virtualized_function_map* virtualized_functions) {
-  llvm::StringMap<std::uint64_t> protected_functions = build_function_seed_map(
-      states, [](const function_policy& policy) { return policy.allow_string_encoding; });
-  llvm::StringMap<protection_level> protected_levels = build_function_level_map(
-      states, [](const function_policy& policy) { return policy.allow_string_encoding; });
+  llvm::StringMap<std::uint64_t> protected_functions;
+  llvm::StringMap<protection_level> protected_levels;
+  for (const function_pipeline_state& state : states) {
+    if (should_skip_function(state, nullptr) || !state.report.decision.policy.allow_string_encoding) {
+      continue;
+    }
+    protected_functions[state.function->getName()] = state.report.decision.seed;
+    protected_levels[state.function->getName()] = state.report.decision.policy.level;
+  }
   append_virtualized_function_seeds(
       protected_functions, virtualized_functions, [](const function_policy& policy) {
         return policy.allow_string_encoding;

@@ -30,6 +30,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace llvm {
 
@@ -41,10 +42,47 @@ class Module;
 
 namespace obf {
 
+enum class obf_lto_mode {
+  none,
+  full,
+  thin,
+};
+
+enum class lto_obligation_role {
+  none,
+  protected_entry,
+  protected_covered,
+  explicit_none,
+  generated_internal,
+  vm_implementation,
+  vm_entry_thunk,
+  raw_entry,
+  raw_none,
+};
+
+struct lto_obligation_record {
+  bool present = false;
+  lto_obligation_role role = lto_obligation_role::none;
+  std::uint64_t entry_identity = 0;
+  std::string selector_name;
+  std::string annotation;
+  std::string selection_detail;
+  policy_source source = policy_source::default_policy;
+  function_policy policy;
+  std::uint64_t config_identity = 0;
+  std::uint64_t decision_seed = 0;
+  bool requires_finalization = false;
+  bool pinned_noinline = false;
+  bool uses_target_cache = false;
+  bool uses_shared_seed_resolver = false;
+};
+
 struct function_pipeline_state {
   llvm::Function* function = nullptr;
   function_report_entry report;
   mba::mba_shape_counts mba_counts;
+  lto_obligation_record lto;
+  bool skip_transform_stages = false;
 };
 
 bool is_obfuscation_enabled();
@@ -52,9 +90,19 @@ obfuscation_config load_active_config();
 std::uint32_t effective_vm_mba_depth(const obfuscation_config& config);
 
 std::uint64_t get_obf_seed_override();
+obf_lto_mode get_active_lto_mode();
+std::uint64_t compute_lto_config_identity(const obfuscation_config& config);
+lto_obligation_record read_lto_obligation(const llvm::Function& function);
+void apply_lto_obligation(llvm::Function& function, const lto_obligation_record& obligation);
+void clear_lto_obligation(llvm::Function& function);
+bool function_has_lto_obligation(const llvm::Function& function);
 
 llvm::SmallVector<function_pipeline_state, 32>
 build_pipeline_state(llvm::Module& module, const obfuscation_config& config);
+
+llvm::SmallVector<function_pipeline_state, 32>
+build_lto_pipeline_state(llvm::Module& module, const obfuscation_config& config,
+                         bool allow_unresolved_selectors);
 
 artifact_cleanup_options build_artifact_cleanup_options(const obfuscation_config& config);
 
