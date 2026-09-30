@@ -47,6 +47,12 @@ llvm::AttributeList build_rewritten_function_attributes(const llvm::Function& fu
     }
   }
 
+  for (llvm::StringRef name : {"no_caller_saved_registers", "no_callee_saved_registers"}) {
+    if (function.hasFnAttribute(name)) {
+      preserved = preserved.addFnAttribute(context, function.getFnAttribute(name));
+    }
+  }
+
   return support::merge_preserved_source_function_attributes(preserved, function);
 }
 

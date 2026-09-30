@@ -442,6 +442,31 @@ void TestVmOptimizationAttributeConflicts() {
   }
 }
 
+void TestVmRegisterPreservationAbi() {
+  for (const char* attribute : {"no_caller_saved_registers", "no_callee_saved_registers"}) {
+    llvm::LLVMContext context;
+    llvm::Module module("vm_register_preservation_abi", context);
+    module.setTargetTriple(llvm::Triple("x86_64-unknown-linux-gnu"));
+    llvm::Type* i32_type = llvm::Type::getInt32Ty(context);
+    llvm::FunctionType* function_type = llvm::FunctionType::get(i32_type, {i32_type}, false);
+    llvm::Function* function =
+        llvm::Function::Create(function_type, llvm::GlobalValue::ExternalLinkage, "target", module);
+    function->addFnAttr(attribute);
+    llvm::IRBuilder<> builder(llvm::BasicBlock::Create(context, "entry", function));
+    builder.CreateRet(builder.CreateAdd(function->getArg(0), builder.getInt32(7)));
+
+    obf::vm::virtualization_options options;
+    options.decision_seed = 1337;
+    const obf::vm::virtualization_result result = obf::vm::run_virtualization(*function, options);
+    const std::string name = attribute;
+    ExpectTrue(result.virtualized, name + ": register-saving ABI must permit virtualization");
+    ExpectTrue(function->hasFnAttribute(attribute),
+               name + ": in-place virtualization must retain the register-saving ABI");
+    ExpectTrue(!llvm::verifyModule(module, &llvm::errs()),
+               name + ": virtualized module must verify");
+  }
+}
+
 void TestAuthenticatedStringConfig() {
   const std::filesystem::path path =
       std::filesystem::temp_directory_path() / "obf_auth_string_config.yaml";
@@ -2187,6 +2212,7 @@ int main() {
   TestVmConfig();
   TestVmConfigDefaults();
   TestVmOptimizationAttributeConflicts();
+  TestVmRegisterPreservationAbi();
   TestAuthenticatedStringConfig();
   TestReleaseMarkerConfig();
   TestConstantProtectionModeConfig();

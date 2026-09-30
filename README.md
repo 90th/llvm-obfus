@@ -59,6 +59,7 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 - Generated VM thunks and implementations use the selected function's address space. The pointer encoding uses that space's pointer width.
 - VM island, decoy, and split helpers accept state pointers in the module's alloca address space.
 - VM wrappers, implementations, thunks, and helpers keep audited execution and subtarget attributes, including denormal modes, target features, and stack-probe settings.
+- In-place VM rewriting retains `no_caller_saved_registers` and `no_callee_saved_registers` on the original function. Helpers with different signatures do not inherit these ABI attributes.
 - Helper extraction keeps attributes for the helper's own ABI. Body replacement removes invalidated memory, synchronization, progress, and inlining promises.
 - Later hardening stages also process `strong_vm` implementation bodies, not just the public wrapper.
 - Candidate analysis (`lib/vm/candidate_analysis.cpp`) skips incompatible constructs (varargs, non-integral pointers, complex EH pads) and gives clear diagnostics if instruction limits are exceeded.
