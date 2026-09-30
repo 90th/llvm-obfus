@@ -104,6 +104,19 @@ bool is_orchestrator_promoted_level(protection_level level) {
   return level != protection_level::none;
 }
 
+bool is_retained_native_none_role(lto_obligation_role role) {
+  return role == lto_obligation_role::explicit_none || role == lto_obligation_role::raw_none;
+}
+
+// Full LTO can make a previously hidden protected callee visible to a
+// retained native boundary. Revisit only the retained native none roles;
+// already-protected bodies stay skipped.
+
+bool can_revisit_orchestrator_promotion(const function_pipeline_state& state) {
+  return !state.skip_transform_stages ||
+         (state.lto.present && is_retained_native_none_role(state.lto.role));
+}
+
 bool is_user_pipeline_function(const llvm::Function& function) {
   const llvm::StringRef name = function.getName();
   return !name.starts_with("__obf_") && !name.starts_with("llvm.") &&
@@ -306,8 +319,8 @@ void apply_orchestrator_policy_promotions(llvm::SmallVectorImpl<function_pipelin
 
     for (function_pipeline_state& state : states) {
       llvm::Function* function = state.function;
-      if (function == nullptr || function->isDeclaration() || state.skip_transform_stages ||
-          !is_user_pipeline_function(*function) ||
+      if (function == nullptr || function->isDeclaration() ||
+          !can_revisit_orchestrator_promotion(state) || !is_user_pipeline_function(*function) ||
           has_strong_classical(state.report.decision.policy.level)) {
         continue;
       }
@@ -327,6 +340,10 @@ void apply_orchestrator_policy_promotions(llvm::SmallVectorImpl<function_pipelin
                         reason->callee_name,
                         describe_orchestrator_observation(reason->observation))
               .str());
+      if (state.lto.present && is_retained_native_none_role(state.lto.role) &&
+          is_orchestrator_promoted_level(promoted_policy.level)) {
+        state.skip_transform_stages = false;
+      }
       if (is_orchestrator_promoted_level(promoted_policy.level)) {
         sensitive_functions.insert(function->getName());
       }

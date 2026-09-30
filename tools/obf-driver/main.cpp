@@ -24,11 +24,25 @@
 #include <optional>
 
 namespace {
+llvm::Error reject_dependent_library_metadata(
+    const llvm::Module& module, llvm::StringRef source_name) {
+  const auto* dependent_libraries = module.getNamedMetadata("llvm.dependent-libraries");
+  if (dependent_libraries == nullptr || dependent_libraries->getNumOperands() == 0) {
+    return llvm::Error::success();
+  }
+  const std::string source = source_name.str();
+  return llvm::createStringError(
+      llvm::inconvertibleErrorCode(),
+      "unsupported implicit dependent-library input metadata llvm.dependent-libraries in %s; "
+      "pass the library closure explicitly",
+      source.c_str());
+}
+
 
 llvm::Error collect_lto_definitions(
-    llvm::MemoryBufferRef buffer, llvm::LLVMContext& context,
-    llvm::StringSet<>& names, llvm::StringSet<>& native_names,
-    llvm::StringSet<>& selected_names,
+    llvm::MemoryBufferRef buffer, llvm::StringRef source_name,
+    llvm::LLVMContext& context, llvm::StringSet<>& names,
+    llvm::StringSet<>& native_names, llvm::StringSet<>& selected_names,
     const obf::obfuscation_config& config) {
   const llvm::file_magic magic = llvm::identify_magic(buffer.getBuffer());
   if (magic == llvm::file_magic::archive) {
@@ -38,8 +52,12 @@ llvm::Error collect_lto_definitions(
     for (const auto& child : (*archive)->children(error)) {
       auto member = child.getMemoryBufferRef();
       if (!member) { return member.takeError(); }
-      if (llvm::Error member_error =
-              collect_lto_definitions(*member, context, names, native_names, selected_names, config)) {
+      std::string member_source = source_name.str();
+      member_source.push_back('(');
+      member_source.append(member->getBufferIdentifier().begin(), member->getBufferIdentifier().end());
+      member_source.push_back(')');
+      if (llvm::Error member_error = collect_lto_definitions(
+              *member, member_source, context, names, native_names, selected_names, config)) {
         return member_error;
       }
     }
@@ -77,6 +95,10 @@ llvm::Error collect_lto_definitions(
   }
   auto module = llvm::parseBitcodeFile(buffer, context);
   if (!module) { return module.takeError(); }
+  if (llvm::Error error = reject_dependent_library_metadata(**module, source_name)) {
+    return error;
+  }
+
   std::optional<obf::obfuscation_config> resolved_config;
   if (config.frontend != obf::frontend_kind::generic) {
     resolved_config.emplace(config);
@@ -155,7 +177,8 @@ llvm::Error validate_lto_inputs(
       return llvm::createStringError(buffer.getError(), "cannot read LTO input %s", path.c_str());
     }
     if (llvm::Error error = collect_lto_definitions(
-            (*buffer)->getMemBufferRef(), context, names, native_names, selected_names, config)) {
+            (*buffer)->getMemBufferRef(), path, context, names, native_names, selected_names,
+            config)) {
       return error;
     }
   }

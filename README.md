@@ -305,6 +305,8 @@ build/obf-clang --obf-config=protect.yaml -O2 main.o auth.o -o auth_app
 Pre-link bitcode keeps its protection and records the policy, source selectors, exclusions, and VM roles.
 LTO keeps the existing minimum-security floors and orchestrator promotions.
 An explicit `none` request does not bypass those floors.
+The backend reevaluates retained native exclusions when protected callee definitions become visible.
+New orchestrator promotions receive protection without repeating transforms on already-protected bodies.
 Live protected boundaries require backend finalization through an undefined hidden guard.
 Missing backend execution fails the final link, including shared-library links.
 The backend validates existing protection without applying VM lowering twice.
@@ -319,6 +321,8 @@ Exact requested targets with competing native definitions are rejected instead o
 
 Managed routes reject unsupported linkers, non-ELF targets, conflicting custom pipelines, distributed or index-only LTO, and fat-LTO objects.
 They also reject bitcode hidden through linker scripts and unproven script layouts.
+Nonempty bitcode `llvm.dependent-libraries` metadata is unsupported, including metadata in archive members.
+Remove that metadata and pass the complete library closure explicitly.
 Simple native library-wrapper scripts with direct filenames remain supported.
 Move script `-l` operands to the linker command line.
 Direct linker-plugin use must provide equivalent policy and input validation.

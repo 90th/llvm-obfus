@@ -1,0 +1,11 @@
+target triple = "x86_64-unknown-linux-gnu"
+
+define dso_local i32 @protected_calc(i32 %value) {
+entry:
+  %mixed = xor i32 %value, 23130
+  %add = add i32 %mixed, 17
+  %mul = mul i32 %add, 3
+  ret i32 %mul
+}
+
+!llvm.dependent-libraries = !{}

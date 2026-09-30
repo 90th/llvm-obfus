@@ -798,6 +798,68 @@ void pin_lto_protected_boundary(llvm::Function& function) {
   function.addFnAttr(llvm::Attribute::OptimizeNone);
 }
 
+bool is_retained_native_none_role(lto_obligation_role role) {
+  return role == lto_obligation_role::explicit_none || role == lto_obligation_role::raw_none;
+}
+
+bool function_has_pending_lto_finalize_guard(const llvm::Function& function,
+                                             const llvm::Function& guard) {
+  for (const llvm::BasicBlock& block : function) {
+    for (const llvm::Instruction& instruction : block) {
+      const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+      if (call != nullptr && call->getCalledFunction() == &guard && call->arg_size() == 0) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+// A postlink orchestrator promotion revives a prelink-retained native body.
+// Re-emit the raw-entry contract so later post-VM state rebuilds keep the
+// function active and the finalizer guard now covers the promoted boundary.
+
+bool prepare_retained_native_orchestrator_promotions(
+    llvm::Module& module,
+    llvm::SmallVectorImpl<function_pipeline_state>& states) {
+  llvm::Function* guard = nullptr;
+  bool changed = false;
+  for (function_pipeline_state& state : states) {
+    llvm::Function* function = state.function;
+    if (function == nullptr || function->isDeclaration() || !state.lto.present ||
+        !is_retained_native_none_role(state.lto.role) ||
+        state.report.decision.policy.level == protection_level::none) {
+      continue;
+    }
+
+    pin_lto_protected_boundary(*function);
+
+    lto_obligation_record record = state.lto;
+    record.role = lto_obligation_role::raw_entry;
+    record.source = state.report.decision.source;
+    record.policy = state.report.decision.policy;
+    record.selection_detail = state.report.decision.detail;
+    record.requires_finalization = true;
+    record.pinned_noinline = true;
+
+    clear_lto_obligation(*function);
+    apply_lto_obligation(*function, record);
+
+    if (guard == nullptr) { guard = &get_lto_finalize_guard(module); }
+    if (!function_has_pending_lto_finalize_guard(*function, *guard)) {
+      llvm::IRBuilder<> builder(&*function->getEntryBlock().getFirstInsertionPt());
+      builder.CreateCall(guard);
+    }
+
+    state.lto = record;
+    state.skip_transform_stages = false;
+    changed = true;
+  }
+
+  return changed;
+}
+
 struct retained_function_contract {
   llvm::Function* function = nullptr;
   lto_obligation_record record;
@@ -1160,6 +1222,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
         build_lto_pipeline_state(module, config, allow_unresolved);
     bool changed = false;
     if (is_postlink(route_)) {
+      changed |= prepare_retained_native_orchestrator_promotions(module, states);
       // The backend may receive raw optnone IR; keep the same targeted O0
       // mem2reg preparation rather than changing VM admission or budgets.
       for (const function_pipeline_state& state : states) {
