@@ -1,0 +1,9 @@
+seed: 424242
+default_level: none
+targets:
+  - match: protected_float
+    level: vm
+  - match: protected_double
+    level: vm
+security:
+  fail_on_public_obf_symbol: true

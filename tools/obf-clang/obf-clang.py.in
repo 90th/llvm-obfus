@@ -12,7 +12,7 @@ from pathlib import Path
 
 CLANG = r"@OBF_CLANG@"
 CLANGXX = r"@OBF_CLANGXX@"
-PLUGIN = r"@CMAKE_CURRENT_BINARY_DIR@/obf_plugin@CMAKE_SHARED_MODULE_SUFFIX@"
+PLUGIN = r"@OBF_CLANG_PLUGIN_PATH@"
 RUNTIME_ARCHIVE = r"@OBF_RUNTIME_ARCHIVE@"
 DRIVER = r"@CMAKE_CURRENT_BINARY_DIR@/obf-driver@CMAKE_EXECUTABLE_SUFFIX@"
 CHECKSUM_BINDER = r"@OBF_CHECKSUM_BIND@"
@@ -78,6 +78,16 @@ def _parse_args(argv: list[str]) -> tuple[list[str], str | None, int | None]:
         clang_args.append(arg)
         index += 1
     return clang_args, config_path, None
+
+def _compiler_invocation(argv0: str, args: list[str]) -> list[str]:
+    if "++" not in Path(argv0).name:
+        return [CLANG]
+    if os.name != "nt":
+        return [CLANGXX]
+    if _last_option_value(args, "--driver-mode") is not None:
+        return [CLANG]
+    # Windows frontend plugins must import the canonical clang.exe image.
+    return [CLANG, "--driver-mode=g++"]
 
 
 def _resolved_config_path(config_path: str | None, env: dict[str, str]) -> str | None:
@@ -160,10 +170,10 @@ def _expand_linker_response_args(args: list[str], *, depth: int = 0) -> list[str
     return expanded
 
 
-def _driver_plan(compiler: str, clang_args: list[str], env: dict[str, str]) -> tuple[list[list[str]], list[str]]:
+def _driver_plan(compiler: list[str], clang_args: list[str], env: dict[str, str]) -> tuple[list[list[str]], list[str]]:
     # Clang expands its own configs and response files and decides which jobs
     # exist. Inspecting those jobs avoids a second driver-option convention.
-    completed = _capture([compiler, *clang_args, "-###"], env)
+    completed = _capture([*compiler, *clang_args, "-###"], env)
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "driver query failed"
         raise _wrapper_error(detail)
@@ -248,8 +258,8 @@ def _linker_job(commands: list[list[str]]) -> list[str] | None:
     return None
 
 
-def _compiler_target_triple(compiler: str, clang_args: list[str], env: dict[str, str]) -> str:
-    query = [compiler]
+def _compiler_target_triple(compiler: list[str], clang_args: list[str], env: dict[str, str]) -> str:
+    query = [*compiler]
     target: str | None = None
     index = 0
     while index < len(clang_args):
@@ -316,16 +326,17 @@ def _resolve_executable(reference: str) -> str | None:
     return os.path.abspath(candidate)
 
 
-def _tool_version(command: str, pattern: str, env: dict[str, str]) -> tuple[str, ...]:
-    completed = _capture([command, "--version"], env)
+def _tool_version(command: str | list[str], pattern: str, env: dict[str, str]) -> tuple[str, ...]:
+    argv = [command] if isinstance(command, str) else command
+    completed = _capture([*argv, "--version"], env)
     match = re.search(pattern, completed.stdout + completed.stderr)
     if completed.returncode != 0 or match is None:
-        raise _wrapper_error(f"cannot determine LLVM tool version: {command}")
+        raise _wrapper_error(f"cannot determine LLVM tool version: {' '.join(argv)}")
     return tuple(match.group(1).split("."))
 
 
-def _managed_lld(compiler: str, env: dict[str, str]) -> str:
-    completed = _capture([compiler, "-print-prog-name=ld.lld"], env)
+def _managed_lld(compiler: list[str], env: dict[str, str]) -> str:
+    completed = _capture([*compiler, "-print-prog-name=ld.lld"], env)
     reported = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
     resolved = _resolve_executable(reported) if reported else None
     if completed.returncode != 0 or resolved is None:
@@ -988,9 +999,9 @@ def _bind_checksum_records(output: Path, env: dict[str, str]) -> None:
         raise _wrapper_error(f"self-checksum binding failed for {output} (exit {completed.returncode}): {detail}")
 
 
-def _compiler_command(compiler: str, clang_args: list[str], query_action: bool,
+def _compiler_command(compiler: list[str], clang_args: list[str], query_action: bool,
                       link_action: bool, frontend_has_plugin: bool) -> list[str]:
-    final_args = [compiler]
+    final_args = [*compiler]
     if not query_action and not frontend_has_plugin:
         final_args.append(f"-fpass-plugin={PLUGIN}")
     final_args.extend(clang_args)
@@ -1009,7 +1020,6 @@ def main() -> int:
             return _managed_link_main(sys.argv[1:])
     elif "--obf-managed-lto-linker" in sys.argv[1:]:
         return _fail("private managed LTO linker mode requires the wrapper dispatch environment")
-    compiler = CLANGXX if "++" in Path(sys.argv[0]).name else CLANG
     clang_args, config_path, early_exit = _parse_args(sys.argv[1:])
     if early_exit is not None:
         return early_exit
@@ -1026,12 +1036,13 @@ def main() -> int:
     binder_available = bool(CHECKSUM_BINDER) and Path(CHECKSUM_BINDER).is_file()
     try:
         response_args = _expand_response_args(clang_args)
+        compiler = _compiler_invocation(sys.argv[0], response_args)
         query_action = any(arg in _QUERY_ARGS or arg.startswith(_QUERY_ARG_PREFIXES) for arg in response_args)
         if query_action:
-            return subprocess.run([compiler, *clang_args], env=env).returncode
+            return subprocess.run([*compiler, *clang_args], env=env).returncode
         commands, config_files = _driver_plan(compiler, clang_args, env)
         if not commands:
-            return subprocess.run([compiler, *clang_args], env=env).returncode
+            return subprocess.run([*compiler, *clang_args], env=env).returncode
         effective_args = _effective_driver_args(response_args, config_files)
         if not Path(PLUGIN).is_file():
             raise _wrapper_error(f"missing pass plugin: {PLUGIN}")
@@ -1065,6 +1076,11 @@ def main() -> int:
             raise _wrapper_error(
                 "managed obfuscation LTO currently supports ELF targets only; "
                 f"effective target is {target_triple or 'unknown'}"
+            )
+        if needs_backend and os.name == "nt":
+            raise _wrapper_error(
+                "managed LTO final links require an ELF host with a compatible LLD plugin runtime; "
+                "Windows host-exported plugins support frontend compilation only"
             )
         if needs_backend:
             unsupported_modes = (

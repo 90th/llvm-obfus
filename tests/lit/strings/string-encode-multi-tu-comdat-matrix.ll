@@ -1,4 +1,4 @@
-; RUN: %python %S/../Inputs/multi_tu_comdat_matrix.py %obf_clangxx %obf_plugin %obf_runtime %t
+; RUN: %python %S/../Inputs/multi_tu_comdat_matrix.py %obf_clangxx %obf_clang_plugin %obf_runtime %t
 ; RUN: %FileCheck %s --input-file=%t.log
 
 ; CHECK: RESOLVED_DRIVER: {{.*}}obf-clang++

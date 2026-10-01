@@ -29,20 +29,52 @@ if is_windows:
     # Git for Windows so POSIX test commands such as `cmp` and `not` work.
     lit_config.bashPath = git_bash
     config.test_format = lit.formats.ShTest(execute_external=True)
+    for var in [
+        "INCLUDE",
+        "LIB",
+        "LIBPATH",
+        "SystemRoot",
+        "SystemDrive",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+    ]:
+        if var in os.environ:
+            config.environment[var] = os.environ[var]
+    extra_paths = []
+    host_root = _normalize_path("@OBF_WINDOWS_PLUGIN_HOST_ROOT@")
+    if host_root:
+        host_bin = os.path.join(host_root, "bin")
+        if os.path.isdir(host_bin):
+            extra_paths.append(host_bin)
+    llvm_bin = _normalize_path("@LLVM_TOOLS_BINARY_DIR@")
+    if llvm_bin and os.path.isdir(llvm_bin):
+        extra_paths.append(llvm_bin)
+    if extra_paths:
+        orig_path = config.environment.get("PATH", os.environ.get("PATH", ""))
+        config.environment["PATH"] = os.pathsep.join(extra_paths) + (os.pathsep + orig_path if orig_path else "")
 else:
     config.test_format = lit.formats.ShTest(True)
 config.suffixes = [".ll"]
 config.test_source_root = _normalize_path("@CMAKE_CURRENT_SOURCE_DIR@/tests/lit")
 config.test_exec_root = _normalize_path("@CMAKE_CURRENT_BINARY_DIR@/tests")
 
-opt_path = _normalize_path("@LLVM_TOOLS_BINARY_DIR@/opt@CMAKE_EXECUTABLE_SUFFIX@")
 if is_windows:
-    opt_path = _normalize_path("@CMAKE_CURRENT_BINARY_DIR@/obf-opt.cmd")
+    opt_cmd = (
+        _shell_quote(_normalize_path("@Python3_EXECUTABLE@"))
+        + " "
+        + _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/obf-opt"))
+    )
+else:
+    opt_cmd = _shell_quote(_normalize_path("@LLVM_TOOLS_BINARY_DIR@/opt@CMAKE_EXECUTABLE_SUFFIX@"))
 filecheck_path = _normalize_path(
     "@LLVM_TOOLS_BINARY_DIR@/FileCheck@CMAKE_EXECUTABLE_SUFFIX@"
 )
 if is_windows:
-    if not os.path.isfile(filecheck_path):
+    host_filecheck = _normalize_path("@OBF_WINDOWS_PLUGIN_HOST_ROOT@/bin/FileCheck@CMAKE_EXECUTABLE_SUFFIX@")
+    if os.path.isfile(host_filecheck):
+        filecheck_path = host_filecheck
+    elif not os.path.isfile(filecheck_path):
         filecheck_path = _normalize_path(
             shutil.which("FileCheck")
             or shutil.which("filecheck")
@@ -53,7 +85,7 @@ if is_windows:
             "Windows Lit requires FileCheck in the configured LLVM tools directory "
             "or on PATH."
         )
-config.substitutions.append(("%opt", _shell_quote(opt_path)))
+config.substitutions.append(("%opt", opt_cmd))
 config.substitutions.append(("%FileCheck", _shell_quote(filecheck_path)))
 llc_path = _normalize_path("@OBF_LLC@")
 possible_llc_paths = [
@@ -112,6 +144,9 @@ config.substitutions.append(
     ("%obf_clangxx", _shell_quote(_normalize_path(f"@CMAKE_CURRENT_BINARY_DIR@/obf-clang++{wrapper_suffix}")))
 )
 config.substitutions.append(
+    ("%obf_clang_plugin", _shell_quote(_normalize_path("@OBF_CLANG_PLUGIN_PATH@")))
+)
+config.substitutions.append(
     ("%obf_clang", _shell_quote(_normalize_path(f"@CMAKE_CURRENT_BINARY_DIR@/obf-clang{wrapper_suffix}")))
 )
 config.substitutions.append(
@@ -120,8 +155,10 @@ config.substitutions.append(
 config.substitutions.append(
     ("%obf_driver", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/obf-driver@CMAKE_EXECUTABLE_SUFFIX@")))
 )
-config.substitutions.append(("%raw_clang", _shell_quote(_normalize_path("@OBF_CLANG@"))))
-config.substitutions.append(("%raw_clangxx", _shell_quote(_normalize_path("@OBF_CLANGXX@"))))
+raw_clang = _shell_quote(_normalize_path("@OBF_CLANG@"))
+raw_clangxx = raw_clang + " --driver-mode=g++" if is_windows else _shell_quote(_normalize_path("@OBF_CLANGXX@"))
+config.substitutions.append(("%raw_clangxx", raw_clangxx))
+config.substitutions.append(("%raw_clang", raw_clang))
 config.substitutions.append(("%obf_runtime", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/libobf_runtime.a"))))
 config.substitutions.append(("%obf_build_include", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/include"))))
 checksum_bind_path = _normalize_path("@OBF_CHECKSUM_BIND@")
@@ -134,6 +171,8 @@ else:
 
 config.substitutions.append(("%cmake", _shell_quote(_normalize_path("@CMAKE_COMMAND@"))))
 config.substitutions.append(("%llvm_host_triple", _shell_quote("@LLVM_HOST_TRIPLE@")))
+fpic_flag = "" if is_windows else "-fPIC"
+config.substitutions.append(("%fpic", fpic_flag))
 
 wrapper_suffix = ".cmd" if (sys.platform.startswith("win") or os.name == "nt") else ""
 
@@ -183,6 +222,10 @@ if is_windows:
     config.available_features.add("system-windows")
     if platform.machine().lower() in ("x86_64", "amd64"):
         config.available_features.add("system-windows-x86-64")
+    if "@OBF_WINDOWS_RUST_LLVM_HOST_BOUND@" == "TRUE":
+        config.available_features.add("has-rust-windows-bound")
+    else:
+        config.available_features.add("has-rust-windows-unbound")
 
 rust_version = _tool_output("@OBF_RUSTC_COMMAND@", "-Vv")
 if rust_version is not None:

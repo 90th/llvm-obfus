@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -18,6 +19,17 @@ RUSTC = r"@OBF_RUSTC_COMMAND@"
 PLUGIN_DIRECTORY = r"@CMAKE_CURRENT_BINARY_DIR@"
 RUNTIME_ARCHIVE = r"@OBF_RUNTIME_ARCHIVE@"
 CONFIG_DRIVER = r"@CMAKE_CURRENT_BINARY_DIR@/obf-driver@CMAKE_EXECUTABLE_SUFFIX@"
+RUST_PLUGIN_FILENAME = r"@OBF_RUST_PLUGIN_FILENAME@"
+WINDOWS_RUST_LLVM_HOST_BOUND = "@OBF_WINDOWS_RUST_LLVM_HOST_BOUND@" == "TRUE"
+WINDOWS_RUST_HOST_IMAGE = r"@OBF_WINDOWS_RUST_LLVM_HOST_IMAGE@"
+WINDOWS_RUST_HOST_RUSTC = r"@OBF_WINDOWS_RUST_LLVM_HOST_RUSTC@"
+WINDOWS_RUST_HOST_RUSTC_RELEASE = r"@OBF_WINDOWS_RUST_LLVM_HOST_RUSTC_RELEASE@"
+WINDOWS_RUST_HOST_RUSTC_HOST = r"@OBF_WINDOWS_RUST_LLVM_HOST_RUSTC_HOST@"
+WINDOWS_RUST_HOST_RUSTC_COMMIT_HASH = r"@OBF_WINDOWS_RUST_LLVM_HOST_RUSTC_COMMIT_HASH@"
+WINDOWS_RUST_HOST_RUSTC_COMMIT_DATE = r"@OBF_WINDOWS_RUST_LLVM_HOST_RUSTC_COMMIT_DATE@"
+WINDOWS_RUST_HOST_RUSTC_LLVM_VERSION = r"@OBF_WINDOWS_RUST_LLVM_HOST_RUSTC_LLVM_VERSION@"
+WINDOWS_RUST_HOST_IMAGE_SHA256 = r"@OBF_WINDOWS_RUST_LLVM_HOST_IMAGE_SHA256@"
+WINDOWS_RUST_HOST_RUSTC_SHA256 = r"@OBF_WINDOWS_RUST_LLVM_HOST_RUSTC_SHA256@"
 
 
 def _host_is_windows() -> bool:
@@ -38,8 +50,10 @@ def _resolve_build_artifact(name: str) -> str:
 
 
 def _plugin_path() -> str:
-    if _host_is_windows():
-        name = "obf_plugin.dll"
+    if RUST_PLUGIN_FILENAME:
+        name = RUST_PLUGIN_FILENAME
+    elif _host_is_windows():
+        name = "obf_rustc_plugin.dll"
     elif sys.platform == "darwin":
         name = "obf_plugin.dylib"
     else:
@@ -1078,6 +1092,19 @@ def _run_process(
 
 
 def _preflight(compiler: str, env: dict[str, str]) -> int | None:
+    if _host_is_windows():
+        if not WINDOWS_RUST_LLVM_HOST_BOUND:
+            return _fail(
+                "active Windows Rust protection requires a bound Rust LLVM host; "
+                "rebuild llvm-obfus with -DOBF_WINDOWS_RUST_LLVM_HOST_IMAGE=... "
+                "-DOBF_WINDOWS_RUST_LLVM_HOST_IMPORT_LIBRARY=... "
+                "-DOBF_WINDOWS_RUST_LLVM_HOST_RUSTC=..."
+            )
+        if WINDOWS_RUST_HOST_RUSTC and not _same_path(compiler, WINDOWS_RUST_HOST_RUSTC):
+            return _fail(
+                f"active Windows Rust compiler ({compiler}) does not match the bound "
+                f"Rust LLVM host compiler ({WINDOWS_RUST_HOST_RUSTC})"
+            )
     pass_fds, error = _jobserver_pass_fds(env)
     if error is not None:
         return error
@@ -1100,6 +1127,43 @@ def _preflight(compiler: str, env: dict[str, str]) -> int | None:
         r"(?:^|[-.])(nightly|dev)(?:$|[-.])", release.group(1)
     ) is None:
         return _fail("active Rust support requires a nightly or dev rustc")
+    if _host_is_windows():
+        if WINDOWS_RUST_HOST_RUSTC_RELEASE and release.group(1) != WINDOWS_RUST_HOST_RUSTC_RELEASE:
+            return _fail(
+                f"active Windows rustc release ({release.group(1)}) does not match bound "
+                f"Rust LLVM host ({WINDOWS_RUST_HOST_RUSTC_RELEASE})"
+            )
+        reported_commit = re.search(r"(?mi)^\s*commit-hash:\s*([^\s]+)", output)
+        if (
+            WINDOWS_RUST_HOST_RUSTC_COMMIT_HASH
+            and reported_commit is not None
+            and reported_commit.group(1) != WINDOWS_RUST_HOST_RUSTC_COMMIT_HASH
+        ):
+            return _fail(
+                f"active Windows rustc commit ({reported_commit.group(1)}) does not match bound "
+                f"Rust LLVM host ({WINDOWS_RUST_HOST_RUSTC_COMMIT_HASH})"
+            )
+        if WINDOWS_RUST_HOST_IMAGE_SHA256 and WINDOWS_RUST_HOST_IMAGE:
+            image_name = os.path.basename(WINDOWS_RUST_HOST_IMAGE)
+            adjacent_image = os.path.join(os.path.dirname(compiler), image_name)
+            if not os.path.isfile(adjacent_image):
+                return _fail(
+                    f"Rust LLVM owner DLL ({image_name}) not found adjacent to {compiler}"
+                )
+            try:
+                import hashlib
+
+                with open(adjacent_image, "rb") as image_file:
+                    actual_hash = hashlib.sha256(image_file.read()).hexdigest()
+                if actual_hash.lower() != WINDOWS_RUST_HOST_IMAGE_SHA256.lower():
+                    return _fail(
+                        f"Rust LLVM owner DLL ({image_name}) has changed since configuration; "
+                        "rebuild llvm-obfus with the updated host binding"
+                    )
+            except OSError as error:
+                return _fail(
+                    f"cannot inspect Rust LLVM owner DLL ({adjacent_image}): {error}"
+                )
 
     reported_llvm = re.search(r"(?mi)^\s*LLVM version:\s*([^\s]+)", output)
     expected_components = _version_component(LLVM_PACKAGE_VERSION)
@@ -1336,6 +1400,13 @@ def _run_active_action_in_scope(
         signal_scope.raise_if_received()
         if frontend_error is not None:
             return frontend_error
+        if _host_is_windows() and not WINDOWS_RUST_LLVM_HOST_BOUND:
+            return _fail(
+                "active Windows Rust protection requires a bound Rust LLVM host; "
+                "rebuild llvm-obfus with -DOBF_WINDOWS_RUST_LLVM_HOST_IMAGE=... "
+                "-DOBF_WINDOWS_RUST_LLVM_HOST_IMPORT_LIBRARY=... "
+                "-DOBF_WINDOWS_RUST_LLVM_HOST_RUSTC=..."
+            )
         plugin = _plugin_path()
         runtime_archive = _rustc_path(RUNTIME_ARCHIVE)
         if not Path(plugin).is_file():
@@ -1353,7 +1424,6 @@ def _run_active_action_in_scope(
             output_plan, error = _plan_direct_output(injected_args)
             if error is not None:
                 return error
-            assert output_plan is not None
         child_env = os.environ.copy()
         child_env["OBF_CONFIG"] = str(pinned_config)
         signal_scope.raise_if_received()

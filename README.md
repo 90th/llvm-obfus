@@ -257,6 +257,10 @@ cmake --build build
 - `OBF_CARGO`: Custom path to `cargo`.
 - `OBF_ZIG`: Custom path to `zig`.
 - `OBF_TINYGO`: Custom path to `tinygo`.
+- `OBF_WINDOWS_PLUGIN_HOST_ROOT`: Path to host build containing exported `opt.exe`, `clang.exe`, and import libraries.
+- `OBF_WINDOWS_RUST_LLVM_HOST_IMAGE`: Path to `rustc_driver-*.dll` for active Windows Rust protection.
+- `OBF_WINDOWS_RUST_LLVM_HOST_IMPORT_LIBRARY`: Path to matching `.lib` for the Rust LLVM owner.
+- `OBF_WINDOWS_RUST_LLVM_HOST_RUSTC`: Path to matching `rustc.exe` for the bound Rust LLVM owner.
 
 ---
 
@@ -278,7 +282,8 @@ OBF_SEED=20260817 build/obf-clang -O1 -fno-inline src/auth.c -o auth_app \
 
 For direct Clang use, load the plugin, set the configuration, and link `libobf_runtime` yourself.
 
-Use `obf_plugin.so` on Linux. Use `obf_plugin.dll` on Windows.
+Use `obf_plugin.so` on Linux.
+On Windows, use `obf_clang_plugin.dll` with Clang and `obf_plugin.dll` with `opt`.
 
 ```sh
 OBF_CONFIG=path/to/protect.yaml \

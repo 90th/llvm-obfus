@@ -127,12 +127,12 @@ def run_cmd(cmd, env=None):
 
 def main():
     if len(sys.argv) < 5:
-        print("Usage: multi_tu_comdat_matrix.py <clangxx> <plugin> <runtime> <out_base>")
+        print("Usage: multi_tu_comdat_matrix.py <clangxx> <frontend_plugin> <runtime> <out_base>")
         sys.exit(1)
 
     driver_cmd = resolve_driver(sys.argv[1])
-    plugin = sys.argv[2].strip('\'"')
-    runtime = sys.argv[3].strip('\'"')
+    frontend_plugin = sys.argv[2].strip('\'\"')
+    runtime = sys.argv[3].strip('\'\"')
     out_base = sys.argv[4].strip('\'"')
     lib_flags = find_msvc_lib_flags()
 
@@ -177,7 +177,7 @@ int main() {
 }
 """)
 
-        run_cmd(driver_cmd + ["-O1", "-fno-inline", f"-fpass-plugin={plugin}", "-c", tu1_a_src, "-o", tu1_a_obj], env=get_protected_env())
+        run_cmd(driver_cmd + ["-O1", "-fno-inline", f"-fpass-plugin={frontend_plugin}", "-c", tu1_a_src, "-o", tu1_a_obj], env=get_protected_env())
         run_cmd(driver_cmd + ["-O1", "-fno-inline", "-c", tu2_a_src, "-o", tu2_a_obj], env=get_unprotected_env())
 
         # Link order 1: tu2 (unprotected) first
@@ -236,8 +236,8 @@ int main() {
 }
 """)
 
-        run_cmd(driver_cmd + ["-O1", "-fno-inline", f"-fpass-plugin={plugin}", "-c", tu1_b_src, "-o", tu1_b_obj], env=get_protected_env())
-        run_cmd(driver_cmd + ["-O1", "-fno-inline", f"-fpass-plugin={plugin}", "-c", tu2_b_src, "-o", tu2_b_obj], env=get_protected_env())
+        run_cmd(driver_cmd + ["-O1", "-fno-inline", f"-fpass-plugin={frontend_plugin}", "-c", tu1_b_src, "-o", tu1_b_obj], env=get_protected_env())
+        run_cmd(driver_cmd + ["-O1", "-fno-inline", f"-fpass-plugin={frontend_plugin}", "-c", tu2_b_src, "-o", tu2_b_obj], env=get_protected_env())
 
         # Link order 1: tu2 first
         run_cmd(driver_cmd + lib_flags + [tu2_b_obj, tu1_b_obj, runtime, "-o", app_b_order1], env=get_unprotected_env())
