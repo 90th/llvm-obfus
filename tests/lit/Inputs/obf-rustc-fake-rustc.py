@@ -10,19 +10,7 @@ from pathlib import Path
 
 
 def expected_llvm_version() -> str:
-    wrapper = os.environ.get("OBF_RUSTC_FAKE_WRAPPER")
-    if wrapper:
-        try:
-            match = re.search(
-                r'^LLVM_PACKAGE_VERSION = r"([^"]+)"$',
-                Path(wrapper).read_text(encoding="utf-8"),
-                re.MULTILINE,
-            )
-        except OSError:
-            match = None
-        if match is not None:
-            return match.group(1)
-    return "0.0"
+    return os.environ["OBF_RUSTC_FAKE_EXPECTED_LLVM"]
 
 
 def jobserver_fds_open() -> bool | None:
@@ -130,8 +118,11 @@ def main() -> int:
     if arguments in (["-vV"], ["-Vv"]):
         release = os.environ.get("OBF_RUSTC_FAKE_RELEASE", "1.99.0-nightly")
         llvm_version = os.environ.get("OBF_RUSTC_FAKE_LLVM", expected_llvm_version())
-        print("rustc 1.99.0-nightly")
+        print(f"rustc {release}")
         print(f"release: {release}")
+        print(f"host: {os.environ['OBF_RUSTC_FAKE_HOST']}")
+        print(f"commit-hash: {os.environ['OBF_RUSTC_FAKE_COMMIT_HASH']}")
+        print(f"commit-date: {os.environ['OBF_RUSTC_FAKE_COMMIT_DATE']}")
         print(f"LLVM version: {llvm_version}")
         probe_signal = requested_signal("OBF_RUSTC_FAKE_PROBE_SIGNAL")
         if probe_signal is not None:

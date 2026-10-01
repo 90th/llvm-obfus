@@ -427,7 +427,15 @@ void bind_cfg_state_placeholders(llvm::ArrayRef<llvm::BasicBlock*> blocks,
     llvm::SmallVector<llvm::Instruction*, 4> erase_list;
     for (llvm::Instruction& instruction : *block) {
       if (is_cfg_state_placeholder_call(instruction, kCfgStatePlaceholderName)) {
-        instruction.replaceAllUsesWith(state_phi);
+        llvm::Value* current_state = state_phi;
+        if (instruction_escapes_block(instruction)) {
+          // A later block must observe this definition's state, not the state
+          // selected when the dispatcher reaches that block. Keep an explicit
+          // SSA definition for the carried-value machinery to thread over edges.
+          llvm::IRBuilder<> builder(&instruction);
+          current_state = builder.CreateFreeze(state_phi, "obf.state.snapshot");
+        }
+        instruction.replaceAllUsesWith(current_state);
         erase_list.push_back(&instruction);
         continue;
       }
@@ -752,6 +760,13 @@ control_flattening_result run_control_flattening(llvm::Function& function,
   std::vector<decoy_state> decoy_states;
   decoy_states.reserve(decoy_count);
 
+  // Bind before recording any carried values or PHI incoming operands: binding
+  // erases placeholder calls, and those records must refer to surviving SSA
+  // definitions rather than dangling calls or the live dispatcher state.
+  llvm::PHINode* state_phi =
+      llvm::PHINode::Create(llvm::Type::getInt32Ty(context), 1, "obf.state", dispatch);
+  bind_cfg_state_placeholders(blocks, state_ids, state_phi);
+
   std::vector<carried_value> carried_values;
   carried_values.reserve(blocks.size());
   std::vector<llvm::PHINode*> original_phis;
@@ -781,16 +796,12 @@ control_flattening_result run_control_flattening(llvm::Function& function,
   llvm::DenseSet<const llvm::PHINode*> original_phi_set;
   for (llvm::PHINode* phi : original_phis) { original_phi_set.insert(phi); }
 
-  llvm::PHINode* state_phi =
-      llvm::PHINode::Create(llvm::Type::getInt32Ty(context), 1, "obf.state", dispatch);
   llvm::DenseMap<llvm::Value*, llvm::PHINode*> dispatcher_phis;
   for (carried_value& carried : carried_values) {
     auto* phi = llvm::PHINode::Create(carried.original->getType(), 1, "obf.flat.val", dispatch);
     carried.dispatcher_phi = phi;
     dispatcher_phis[carried.original] = phi;
   }
-
-  bind_cfg_state_placeholders(blocks, state_ids, state_phi);
 
   for (const carried_value& carried : carried_values) {
     auto* instruction = llvm::cast<llvm::Instruction>(carried.original);

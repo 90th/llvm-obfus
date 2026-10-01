@@ -1,8 +1,13 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/zero-comparison.yaml -passes='obf-zero-comparison,verify' -S %s -o %t.ll
 ; RUN: %FileCheck %s < %t.ll
-; RUN: %lli %t.ll
-; RUN: %opt -passes='default<O2>,verify' -S %t.ll -o %t.opt.ll
+; RUN: %opt -mtriple=%llvm_host_triple -passes=verify -S %t.ll -o %t.host.ll
+; RUN: %lli %t.host.ll
+; RUN: %opt -passes='default<O2>,verify' -S %t.host.ll -o %t.opt.ll
 ; RUN: %lli %t.opt.ll
+
+; The Linux triple supplies the libc-recognition contract, including bcmp.
+; Retarget the transformed IR before JIT compilation so it uses the same ABI and
+; object format as the host runtime objects at both optimization levels.
 
 target triple = "x86_64-unknown-linux-gnu"
 
@@ -88,7 +93,7 @@ entry:
   %equal = call i1 @bounded(ptr @abc, ptr @abc)
   %mismatch = call i1 @bounded(ptr @a_x, ptr @b_x)
   %before_nul = call i1 @bounded(ptr @abc, ptr @abd)
-  %zero = call i1 @zero_length(ptr @a_x, ptr @b_x)
+  %zero = call i1 @zero_length(ptr null, ptr null)
   %shorter = call i1 @unbounded(ptr @short)
   %empty_result = call i1 @unbounded(ptr @empty)
   %same = call i1 @unbounded(ptr @apple)

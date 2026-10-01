@@ -3,7 +3,9 @@
 #include "obf/vm/virtualize_internal.h"
 
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Intrinsics.h"
 
 #include <algorithm>
 #include <string>
@@ -43,8 +45,7 @@ llvm::Value* build_hidden_token_seed(llvm::IRBuilder<>& builder,
         builder.CreateZExtOrTrunc(hidden_token, builder.getInt64Ty(), "obf.vm.token.cast");
   }
 
-  llvm::Value* selected = mba::entangle_value(
-      builder, hidden_token, mba_context, salt ^ 0xabcddcbaULL, (name + ".fallback").str());
+  llvm::Value* admitted = builder.getFalse();
   for (std::size_t token_index = 0; token_index < valid_tokens.size(); ++token_index) {
     llvm::Value* token_const =
         mba::create_opaque_integer(builder,
@@ -53,19 +54,30 @@ llvm::Value* build_hidden_token_seed(llvm::IRBuilder<>& builder,
                                    llvm::APInt(64, valid_tokens[token_index]),
                                    salt + static_cast<std::uint64_t>(token_index) * 8 + 1,
                                    (name + ".token").str());
-    llvm::Value* seed_const =
-        mba::create_opaque_integer(builder,
-                                   builder.getInt64Ty(),
-                                   mba_context,
-                                   llvm::APInt(64, canonical_seed),
-                                   salt + static_cast<std::uint64_t>(token_index) * 8 + 2,
-                                   (name + ".seed").str());
     llvm::Value* match = builder.CreateICmpEQ(hidden_token, token_const, (name + ".match").str());
-    selected = builder.CreateSelect(
-        match, seed_const, selected, name.empty() ? "obf.vm.token.seed" : name);
+    admitted = builder.CreateOr(admitted, match, (name + ".admitted").str());
   }
 
-  return selected;
+  llvm::Function* function = builder.GetInsertBlock()->getParent();
+  auto* admitted_block =
+      llvm::BasicBlock::Create(builder.getContext(), "obf.vm.token.accept", function);
+  auto* rejected_block =
+      llvm::BasicBlock::Create(builder.getContext(), "obf.vm.token.reject", function);
+  builder.CreateCondBr(admitted, admitted_block, rejected_block);
+
+  llvm::IRBuilder<> rejected_builder(rejected_block);
+  rejected_builder.CreateCall(
+      llvm::Intrinsic::getOrInsertDeclaration(function->getParent(), llvm::Intrinsic::trap));
+  rejected_builder.CreateUnreachable();
+
+  // Only admitted callers can initialize the canonical bytecode state.
+  builder.SetInsertPoint(admitted_block);
+  return mba::create_opaque_integer(builder,
+                                    builder.getInt64Ty(),
+                                    mba_context,
+                                    llvm::APInt(64, canonical_seed),
+                                    salt + 2,
+                                    name.empty() ? "obf.vm.token.seed" : name);
 }
 
 llvm::GlobalVariable* clone_bytecode_global_for_subhelper(llvm::GlobalVariable* bytecode_global,

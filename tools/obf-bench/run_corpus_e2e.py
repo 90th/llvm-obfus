@@ -34,6 +34,27 @@ SPECS = {
     "tinygo_demo": BenchmarkSpec("tinygo_demo", ()),
 }
 
+LICENSE_INVALID_ARGV = (
+    (),
+    ("",),
+    ("fdlta-7",),
+    ("delta-4",),
+    ("xxxxxxx",),
+    ("d",),
+    ("delta-",),
+    ("delta-70",),
+    ("delta-7" + "x" * 256,),
+    ("Delta-7",),
+    ("dflta-7",),
+    ("demta-7",),
+    ("delua-7",),
+    ("deltb-7",),
+    ("delta.7",),
+    ("delta-6",),
+    ("\u00e9elta-7",),
+    ("d\u00e9lta7",),
+)
+
 
 class CheckError(RuntimeError):
     pass
@@ -90,6 +111,42 @@ def has_runtime_abi_marker(ir_text: str, runtime_prefix: str) -> bool:
     ) is not None
 
 
+def check_license_admission(
+    path: pathlib.Path, argv: tuple[str, ...], result: subprocess.CompletedProcess[str]
+) -> None:
+    accepted = argv == ("delta-7",)
+    expected_status = 0 if accepted else 1
+    expected_message = "ACCESS GRANTED" if accepted else "ACCESS DENIED"
+    if (
+        result.returncode != expected_status
+        or re.fullmatch(rf"{expected_message}\n[0-9]+\n", result.stdout) is None
+        or result.stderr
+    ):
+        raise CheckError(
+            f"license admission contract failed for {path.name} argv={argv!r}: "
+            f"expected rc={expected_status}, message={expected_message!r}; "
+            f"got {(result.returncode, result.stdout, result.stderr)!r}"
+        )
+
+
+def check_behavior_pair(
+    name: str,
+    argv: tuple[str, ...],
+    baseline: subprocess.CompletedProcess[str],
+    obfuscated: subprocess.CompletedProcess[str],
+) -> None:
+    if (baseline.returncode, baseline.stdout, baseline.stderr) != (
+        obfuscated.returncode,
+        obfuscated.stdout,
+        obfuscated.stderr,
+    ):
+        raise CheckError(
+            f"behavior mismatch for {name} argv={argv!r}: baseline rc/stdout/stderr "
+            f"{(baseline.returncode, baseline.stdout, baseline.stderr)!r} != "
+            f"{(obfuscated.returncode, obfuscated.stdout, obfuscated.stderr)!r}"
+        )
+
+
 def check_pair(benchmarks_dir: pathlib.Path, runtime_prefix: str, iterations: int, spec: BenchmarkSpec) -> None:
     output_dir = benchmarks_dir / spec.name
     baseline_ll = output_dir / f"{spec.name}.baseline.ll"
@@ -118,16 +175,18 @@ def check_pair(benchmarks_dir: pathlib.Path, runtime_prefix: str, iterations: in
     default_env.pop("OBF_BENCH_ITERS", None)
     baseline = run_binary(baseline_bin, spec.argv, env=default_env)
     obfuscated = run_binary(obfuscated_bin, spec.argv, env=default_env)
-    if (baseline.returncode, baseline.stdout, baseline.stderr) != (
-        obfuscated.returncode,
-        obfuscated.stdout,
-        obfuscated.stderr,
-    ):
-        raise CheckError(
-            f"behavior mismatch for {spec.name}: baseline rc/stdout/stderr "
-            f"{(baseline.returncode, baseline.stdout, baseline.stderr)!r} != "
-            f"{(obfuscated.returncode, obfuscated.stdout, obfuscated.stderr)!r}"
-        )
+    if spec.name == "license_demo":
+        check_license_admission(baseline_bin, spec.argv, baseline)
+        check_license_admission(obfuscated_bin, spec.argv, obfuscated)
+    check_behavior_pair(spec.name, spec.argv, baseline, obfuscated)
+
+    if spec.name == "license_demo":
+        for argv in LICENSE_INVALID_ARGV:
+            baseline_case = run_binary(baseline_bin, argv, env=default_env)
+            obfuscated_case = run_binary(obfuscated_bin, argv, env=default_env)
+            check_license_admission(baseline_bin, argv, baseline_case)
+            check_license_admission(obfuscated_bin, argv, obfuscated_case)
+            check_behavior_pair(spec.name, argv, baseline_case, obfuscated_case)
 
     bench_env = os.environ.copy()
     bench_env["OBF_BENCH_ITERS"] = str(iterations)

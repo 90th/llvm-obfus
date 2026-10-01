@@ -27,15 +27,14 @@ static std::uint64_t OBF_ANNOTATE("obf:strong_vm") verify_license(const char* to
   const char* expected = "delta-7";
   size_t expected_len = 7;
 
-  std::uint64_t auth_state = 0xabad1deac0defa11;
-  auth_state ^= (len ^ expected_len) * 0x1337;
+  std::uint64_t mismatch = len != expected_len;
 
   size_t limit = len < expected_len ? len : expected_len;
   for (size_t i = 0; i < limit; ++i) {
-    auth_state ^= static_cast<std::uint64_t>(token[i] ^ expected[i]) << (i % 32);
+    mismatch |= static_cast<unsigned char>(token[i]) ^ static_cast<unsigned char>(expected[i]);
   }
 
-  return auth_state ^ 0xc0defa11;
+  return mismatch;
 }
 
 // main contains std::cout (exceptions). DO NOT virtualize main.
@@ -84,10 +83,11 @@ int main(int argc, char** argv) {
 
   // Derive the string securely
   const char* msgs[] = {"ACCESS DENIED", "ACCESS GRANTED"};
-  std::uint32_t index = (auth_state >> 48) == 0xabad ? 1 : 0;
+  const bool accepted = auth_state == 0;
+  const std::uint32_t index = accepted ? 1 : 0;
 
   std::cout << msgs[index] << '\n';
   std::cout << score << '\n';
 
-  return static_cast<int>(auth_state & 0xffffffff);
+  return accepted ? 0 : 1;
 }

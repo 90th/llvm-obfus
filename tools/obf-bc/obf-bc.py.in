@@ -316,6 +316,7 @@ def _install_output(
                 pending_signal = _pending_terminal_signal()
                 if pending_signal is not None:
                     raise _Interrupted(pending_signal)
+            signal_scope.raise_if_interrupted()
             committed = True
         finally:
             if previous_mask is not None:
@@ -462,8 +463,7 @@ def main() -> int:
                     result = _fail(f"cannot install output '{output_path}': {error}")
                 else:
                     temp_path = None
-                    # A terminal signal delivered during the bounded install
-                    # window is ordered after this commit and still propagated.
+                    # Signals delivered after the commit are still propagated.
                     signal_scope.raise_if_interrupted()
         except _Interrupted as error:
             interrupted = error

@@ -871,9 +871,11 @@ void rewrite_function_body_state_islands(llvm::Function& function,
   if (options.hidden_token_handshake && function.arg_size() > 0) {
     hidden_token_arg = &*std::prev(function.arg_end());
   }
-  entry_builder.CreateStore(
-      build_hidden_token_storage_value(entry_builder, hidden_token_arg, opaque_seed_base),
-      hidden_token_slot);
+  if (options.hidden_token_handshake && hidden_token_arg == nullptr) {
+    entry_builder.CreateBr(failure_block);
+    entry_builder.SetInsertPoint(
+        llvm::BasicBlock::Create(context, "obf.vm.token.missing", &function));
+  }
 
   const std::uint32_t entry_instruction =
       program.blocks.empty() ? 0 : program.blocks.front().first_instruction;
@@ -888,16 +890,18 @@ void rewrite_function_body_state_islands(llvm::Function& function,
       .max_ir_instructions_override = options.mba_max_ir_instructions,
       .enable_polynomial_override = options.mba_enable_polynomial,
       .enable_multiplication_override = options.mba_enable_multiplication};
-  entry_builder.CreateStore(build_hidden_token_seed(entry_builder,
-                                                    hidden_token_arg,
-                                                    program.instructions.empty()
-                                                        ? bytecode_seed
-                                                        : entry_states[entry_instruction],
-                                                    options.valid_hidden_tokens,
-                                                    mba_context,
-                                                    0x3100,
-                                                    "obf.vm.token.state"),
-                            state_slot);
+  llvm::Value* admitted_seed = build_hidden_token_seed(
+      entry_builder,
+      hidden_token_arg,
+      program.instructions.empty() ? bytecode_seed : entry_states[entry_instruction],
+      options.valid_hidden_tokens,
+      mba_context,
+      0x3100,
+      "obf.vm.token.state");
+  entry_builder.CreateStore(
+      build_hidden_token_storage_value(entry_builder, hidden_token_arg, opaque_seed_base),
+      hidden_token_slot);
+  entry_builder.CreateStore(admitted_seed, state_slot);
   entry_builder.CreateStore(
       entry_builder.getInt32(dispatch_index_for_instruction[entry_instruction]),
       dispatch_index_slot);
@@ -971,11 +975,13 @@ void rewrite_function_body_state_islands(llvm::Function& function,
     decoy_helpers[island_index] = decoy_helper;
   }
 
+  llvm::BasicBlock* initialized_entry_block = entry_builder.GetInsertBlock();
   entry_builder.CreateBr(route_block);
   llvm::IRBuilder<> route_builder(route_block);
   auto* status_phi = route_builder.CreatePHI(
       route_builder.getInt32Ty(), helpers.size() + 1, "vm.island.route.status");
-  status_phi->addIncoming(route_builder.getInt32(vm_island_continue_status), entry_block);
+  status_phi->addIncoming(route_builder.getInt32(vm_island_continue_status),
+                          initialized_entry_block);
   auto* island_route_block = llvm::BasicBlock::Create(context, "vm.island.root.route", &function);
   auto* route_switch = route_builder.CreateSwitch(status_phi, failure_block, 3);
   route_switch->addCase(route_builder.getInt32(vm_island_continue_status), island_route_block);

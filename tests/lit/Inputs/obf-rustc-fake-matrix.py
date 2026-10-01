@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import json
 import os
 import re
 import shlex
+import runpy
 import signal
 import shutil
 import subprocess
@@ -52,13 +55,12 @@ def rust_settings(arguments: list[str], family: str, name: str) -> list[str]:
 
 class wrapper_matrix:
     def __init__(self, arguments: argparse.Namespace) -> None:
-        self.wrapper = Path(arguments.wrapper).resolve()
-        llvm_match = re.search(
-            r'^LLVM_PACKAGE_VERSION = r"(\d+)\.(\d+)',
-            self.wrapper.read_text(encoding="utf-8"),
-            re.MULTILINE,
-        )
-        require(llvm_match is not None, "generated Rust wrapper has no LLVM version")
+        self.production_wrapper = Path(arguments.wrapper_script).resolve()
+        self.wrapper = self.production_wrapper
+        self.llvm_version = arguments.llvm_version
+        self.host_triple = arguments.host_triple
+        llvm_match = re.match(r"(\d+)\.(\d+)", self.llvm_version)
+        require(llvm_match is not None, "configured LLVM version is invalid")
         assert llvm_match is not None
         self.mismatched_llvm = (
             f"{llvm_match.group(1)}.{int(llvm_match.group(2)) + 1}.0"
@@ -66,11 +68,13 @@ class wrapper_matrix:
         self.mismatched_llvm_major = (
             f"{int(llvm_match.group(1)) + 1}.{llvm_match.group(2)}.0"
         )
+        self.clang = arguments.clang
+        self.launcher_source = Path(arguments.fake_launcher_source).resolve()
         self.fake = Path(arguments.fake).resolve()
         self.config = Path(arguments.config).resolve()
         self.generic_config = Path(arguments.generic_config).resolve()
-        self.plugin = str(Path(arguments.plugin).resolve())
-        self.runtime = str(Path(arguments.runtime).resolve())
+        self.plugin = Path(arguments.plugin).resolve().as_posix()
+        self.runtime = Path(arguments.runtime).resolve().as_posix()
         self.work = Path(arguments.workdir).resolve()
         shutil.rmtree(self.work, ignore_errors=True)
         self.work.mkdir(parents=True)
@@ -101,8 +105,25 @@ class wrapper_matrix:
         self.source = self.work / "source.rs"
         self.source.write_text("fn main() {}\n", encoding="utf-8")
         self.rustc = self._make_rustc_launcher()
+        if os.name == "nt":
+            self.wrapper = self._make_bound_windows_wrapper()
 
     def _make_rustc_launcher(self) -> Path:
+        if os.name == "nt":
+            launcher = self.work / "rustc.exe"
+            completed = subprocess.run(
+                [self.clang, str(self.launcher_source), "-o", str(launcher)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            require(
+                completed.returncode == 0,
+                "cannot build native fake rustc launcher: "
+                f"{completed.stdout}{completed.stderr}",
+            )
+            return launcher
         launcher = self.work / "rustc"
         launcher.write_text(
             "#!/bin/sh\nexec "
@@ -115,6 +136,55 @@ class wrapper_matrix:
         launcher.chmod(0o755)
         return launcher
 
+    def _make_bound_windows_wrapper(self) -> Path:
+        # Bind only configuration constants in a test copy. Production host
+        # admission and all wrapper functions remain unchanged.
+        self.owner_image = self.work / "fake-rust-llvm-owner.dll"
+        shutil.copyfile(self.plugin, self.owner_image)
+        settings = {
+            "RUSTC": self.rustc.as_posix(),
+            "PLUGIN_DIRECTORY": Path(self.plugin).parent.as_posix(),
+            "RUNTIME_ARCHIVE": self.runtime,
+            "RUST_PLUGIN_FILENAME": Path(self.plugin).name,
+            "WINDOWS_RUST_LLVM_HOST_BOUND": True,
+            "WINDOWS_RUST_HOST_IMAGE": self.owner_image.as_posix(),
+            "WINDOWS_RUST_HOST_RUSTC": self.rustc.as_posix(),
+            "WINDOWS_RUST_HOST_RUSTC_RELEASE": "1.99.0-nightly",
+            "WINDOWS_RUST_HOST_RUSTC_HOST": self.host_triple,
+            "WINDOWS_RUST_HOST_RUSTC_COMMIT_HASH": "f" * 40,
+            "WINDOWS_RUST_HOST_RUSTC_COMMIT_DATE": "2026-01-01",
+            "WINDOWS_RUST_HOST_RUSTC_LLVM_VERSION": self.llvm_version,
+            "WINDOWS_RUST_HOST_IMAGE_SHA256": hashlib.sha256(
+                self.owner_image.read_bytes()
+            ).hexdigest(),
+            "WINDOWS_RUST_HOST_RUSTC_SHA256": hashlib.sha256(
+                self.rustc.read_bytes()
+            ).hexdigest(),
+        }
+        source = self.production_wrapper.read_text(encoding="utf-8")
+        lines = source.splitlines(keepends=True)
+        assignments = {
+            node.targets[0].id: node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in settings
+        }
+        require(
+            assignments.keys() == settings.keys(),
+            "generated wrapper is missing a Windows host configuration constant",
+        )
+        for name, node in sorted(
+            assignments.items(), key=lambda item: item[1].lineno, reverse=True
+        ):
+            lines[node.lineno - 1 : node.end_lineno] = [
+                f"{name} = {settings[name]!r}\n"
+            ]
+        wrapper = self.work / "obf-rustc"
+        wrapper.write_text("".join(lines), encoding="utf-8")
+        return wrapper
+
     def invoke(
         self,
         label: str,
@@ -123,6 +193,7 @@ class wrapper_matrix:
         environment: dict[str, str] | None = None,
         pass_fds: tuple[int, ...] = (),
         expected_status: int = 0,
+        wrapper: Path | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], list[dict[str, object]]]:
         self.log.unlink(missing_ok=True)
         env = os.environ.copy()
@@ -148,14 +219,24 @@ class wrapper_matrix:
         ):
             env.pop(key, None)
         env["OBF_RUSTC_FAKE_LOG"] = str(self.log)
-        env["OBF_RUSTC_FAKE_WRAPPER"] = str(self.wrapper)
+        env.update(
+            {
+                "OBF_RUSTC_FAKE_EXPECTED_LLVM": self.llvm_version,
+                "OBF_RUSTC_FAKE_RELEASE": "1.99.0-nightly",
+                "OBF_RUSTC_FAKE_HOST": self.host_triple,
+                "OBF_RUSTC_FAKE_COMMIT_HASH": "f" * 40,
+                "OBF_RUSTC_FAKE_COMMIT_DATE": "2026-01-01",
+                "OBF_RUSTC_FAKE_PYTHON": sys.executable,
+                "OBF_RUSTC_FAKE_SCRIPT": str(self.fake),
+            }
+        )
         if environment:
             env.update(environment)
         process_options: dict[str, object] = {}
         if pass_fds and os.name == "posix":
             process_options["pass_fds"] = pass_fds
         completed = subprocess.run(
-            [str(self.wrapper), *wrapper_args],
+            [sys.executable, str(wrapper or self.wrapper), *wrapper_args],
             cwd=self.work,
             env=env,
             stdout=subprocess.PIPE,
@@ -230,11 +311,28 @@ class wrapper_matrix:
             rust_settings(arguments, "C", "codegen-units") == ["codegen-units=1"],
             f"{label}: expected exactly one codegen-units setting, got {arguments!r}",
         )
-        expected_runtime = [f"link-arg={self.runtime}"] if link else []
+        expected_runtime = (
+            [f"link-arg={self.runtime}"] if link and os.name != "nt" else []
+        )
         require(
             rust_settings(arguments, "C", "link-arg") == expected_runtime,
             f"{label}: unexpected runtime link arguments: {arguments!r}",
         )
+        if os.name == "nt":
+            native_search = [
+                argument for argument in arguments if argument.startswith("-Lnative=")
+            ]
+            expected_search = (
+                [f"-Lnative={Path(self.runtime).parent.as_posix()}"] if link else []
+            )
+            require(
+                native_search == expected_search,
+                f"{label}: unexpected runtime search paths: {arguments!r}",
+            )
+            require(
+                arguments.count("-lstatic=obf_runtime") == int(link),
+                f"{label}: unexpected static runtime linkage: {arguments!r}",
+            )
         expected_config = self.config if config is None else config
         pinned_config = row["obf_config"]
         require(
@@ -295,7 +393,77 @@ class wrapper_matrix:
             str(source),
         ]
 
+    def assert_windows_host_admission(self) -> None:
+        production = runpy.run_path(str(self.production_wrapper))
+        bound = production["WINDOWS_RUST_LLVM_HOST_BOUND"]
+        cases = [
+            (
+                "production-foreign-host" if bound else "production-unbound-host",
+                self.production_wrapper,
+                self.rustc,
+                "does not match the bound" if bound else "requires a bound Rust LLVM host",
+            )
+        ]
+        foreign = self.work / "foreign" / "rustc.exe"
+        foreign.parent.mkdir()
+        shutil.copyfile(self.rustc, foreign)
+        cases.append(
+            ("fixture-foreign-host", self.wrapper, foreign, "does not match the bound")
+        )
+        for label, wrapper, compiler, diagnostic in cases:
+            output = self.work / f"{label}.out"
+            output.write_bytes(b"host rejection sentinel\n")
+            arguments = self.active_direct_arguments("-o", str(output))
+            arguments[0] = f"--rustc={compiler}"
+            completed, rows = self.invoke(
+                label, arguments, wrapper=wrapper, expected_status=2
+            )
+            require(
+                diagnostic in completed.stderr,
+                f"{label}: wrong host admission diagnostic: {completed.stderr!r}",
+            )
+            require(rows == [], f"{label}: rejected host reached rustc")
+            require(
+                output.read_bytes() == b"host rejection sentinel\n",
+                f"{label}: host rejection changed existing output",
+            )
+            require(
+                not list(self.work.glob(f".{output.name}.obf-rustc-*")),
+                f"{label}: host rejection leaked a staged output",
+            )
+
+        output = self.work / "changed-owner-image.out"
+        output.write_bytes(b"owner image sentinel\n")
+        original = self.owner_image.read_bytes()
+        try:
+            self.owner_image.write_bytes(original + b"changed\n")
+            completed, rows = self.invoke(
+                "changed-owner-image",
+                self.active_direct_arguments("-o", str(output)),
+                expected_status=2,
+            )
+        finally:
+            self.owner_image.write_bytes(original)
+        require(
+            "has changed since configuration" in completed.stderr,
+            f"changed-owner-image: wrong diagnostic: {completed.stderr!r}",
+        )
+        require(
+            len(rows) == 1 and rows[0]["args"] == ["-vV"],
+            "changed owner image reached the final compiler",
+        )
+        require(
+            output.read_bytes() == b"owner image sentinel\n",
+            "changed owner image replaced existing output",
+        )
+        require(
+            not list(self.work.glob(f".{output.name}.obf-rustc-*")),
+            "changed owner image leaked a staged output",
+        )
+
     def run(self) -> None:
+        if os.name == "nt":
+            self.assert_windows_host_admission()
         query, rows = self.invoke(
             "inactive-query", [f"--rustc={self.rustc}", "--version"]
         )
@@ -1010,7 +1178,11 @@ class wrapper_matrix:
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--wrapper", required=True)
+    parser.add_argument("--wrapper-script", required=True)
+    parser.add_argument("--llvm-version", required=True)
+    parser.add_argument("--host-triple", required=True)
+    parser.add_argument("--clang", required=True)
+    parser.add_argument("--fake-launcher-source", required=True)
     parser.add_argument("--fake", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--generic-config", required=True)

@@ -44,26 +44,31 @@
 ; RUN: timeout 120 %obf_clang -O3 --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml %S/../Inputs/string-encode-ephemeral-compare-e2e.c -o %t.o3.exe
 ; RUN: %t.o3.exe | %FileCheck %s --check-prefix=RESULT
 ;
-; The standalone string pass intentionally stops before artifact cleanup, so it
-; is the right layer for asserting the generated short-circuit CFG names. The
-; feature report independently proves that all three sentinel globals select
-; the ephemeral micro-slot strategy on every optimized input.
+; Exercise the explicit string/flattening/cleanup pipeline as well as the full
+; wrapper. Large suites can exceed the flattening budget; the companion
+; string-encode-ephemeral-compare-flatten.ll checks in-budget comparisons and
+; definition-site state captures at runtime. The feature report independently
+; proves that the sentinel globals retain the ephemeral micro-slot strategy.
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o0.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['transforms'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %t.pre.o0.ll -o %t.direct.o0.ll
-; RUN: %FileCheck %s --check-prefix=DIRECT < %t.direct.o0.ll
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-control-flatten,obf-cfg-state-cleanup' -S %t.pre.o0.ll -o %t.direct.o0.ll
 ; RUN: %opt -passes=verify -disable-output %t.direct.o0.ll
+; RUN: timeout 120 %raw_clang -O0 %t.direct.o0.ll %obf_runtime -o %t.direct.o0.exe
+; RUN: %t.direct.o0.exe | %FileCheck %s --check-prefix=RESULT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o1.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['transforms'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %t.pre.o1.ll -o %t.direct.o1.ll
-; RUN: %FileCheck %s --check-prefix=DIRECT < %t.direct.o1.ll
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-control-flatten,obf-cfg-state-cleanup' -S %t.pre.o1.ll -o %t.direct.o1.ll
 ; RUN: %opt -passes=verify -disable-output %t.direct.o1.ll
+; RUN: timeout 120 %raw_clang -O0 %t.direct.o1.ll %obf_runtime -o %t.direct.o1.exe
+; RUN: %t.direct.o1.exe | %FileCheck %s --check-prefix=RESULT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o2.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['transforms'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %t.pre.o2.ll -o %t.direct.o2.ll
-; RUN: %FileCheck %s --check-prefix=DIRECT < %t.direct.o2.ll
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-control-flatten,obf-cfg-state-cleanup' -S %t.pre.o2.ll -o %t.direct.o2.ll
 ; RUN: %opt -passes=verify -disable-output %t.direct.o2.ll
+; RUN: timeout 120 %raw_clang -O0 %t.direct.o2.ll %obf_runtime -o %t.direct.o2.exe
+; RUN: %t.direct.o2.exe | %FileCheck %s --check-prefix=RESULT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o3.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['transforms'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %t.pre.o3.ll -o %t.direct.o3.ll
-; RUN: %FileCheck %s --check-prefix=DIRECT < %t.direct.o3.ll
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-control-flatten,obf-cfg-state-cleanup' -S %t.pre.o3.ll -o %t.direct.o3.ll
 ; RUN: %opt -passes=verify -disable-output %t.direct.o3.ll
+; RUN: timeout 120 %raw_clang -O0 %t.direct.o3.ll %obf_runtime -o %t.direct.o3.exe
+; RUN: %t.direct.o3.exe | %FileCheck %s --check-prefix=RESULT
 
 ; PRE-LABEL: define{{.*}} @test_probe_memcmp(
 ; PRE: call i32 @memcmp
@@ -89,13 +94,6 @@
 ; REPORT-DAG: g_probe_memcmp|applied|ephemeral_micro_slot
 ; REPORT-DAG: g_probe_strcmp|applied|ephemeral_micro_slot
 ; REPORT-DAG: g_probe_strncmp|applied|ephemeral_micro_slot
-
-; DIRECT-LABEL: define{{.*}} @test_probe_memcmp(
-; DIRECT: obf.str.cmp.0:
-; DIRECT-LABEL: define{{.*}} @test_probe_strcmp(
-; DIRECT: obf.str.cmp.0:
-; DIRECT-LABEL: define{{.*}} @test_probe_strncmp(
-; DIRECT: obf.str.cmp.0:
 
 ; POST-RESULT: [ALL E2E PASS] 43 assertions passed
 ; RESULT: [ALL E2E PASS] 43 assertions passed

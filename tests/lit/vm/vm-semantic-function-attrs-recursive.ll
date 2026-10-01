@@ -1,10 +1,14 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-semantic-function-attrs-recursive.yaml -passes='obf-vm,verify' -S %s -o - | %FileCheck %s --check-prefix=RECURSIVE
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-semantic-function-attrs-recursive.yaml -passes='obf-vm,verify' -S %s -o %t
+; RUN: %python %S/../Inputs/prepare_vm_semantic_attrs_runtime.py %s %t.host-input.ll %llvm_host_triple
+; RUN: %opt -mtriple=%llvm_host_triple -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-semantic-function-attrs-recursive.yaml -passes='obf-vm,verify' -S %t.host-input.ll -o %t
 ; RUN: %lli %t
+
+; Keep the source-attribute propagation contract separate from the runtime ABI.
+; The runtime input retains stack probing and is virtualized with the host probe.
 
 ; RECURSIVE-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(
 ; RECURSIVE-SAME: #[[IMPL:[0-9]+]] {
-; RECURSIVE-LABEL: define internal i32 @__obf_vm_hs_{{[A-Za-z0-9_]+}}(ptr %vm.island.subhelper.state)
+; RECURSIVE-LABEL: define internal i32 @__obf_vm_hs_{{[A-Za-z0-9_]+}}(
 ; RECURSIVE-SAME: #[[SUB:[0-9]+]] {
 ; RECURSIVE-DAG: attributes #[[IMPL]] = { noinline null_pointer_is_valid optnone strictfp "denormal-fp-math"="preserve-sign,preserve-sign" "denormal-fp-math-f32"="preserve-sign"{{.*}}"probe-stack"="inline-asm" "stack-probe-size"="4096" "target-cpu"="x86-64" "target-features"="+sse2" "tune-cpu"="generic"{{.*}}"vm.island.topology.helper_shards"{{.*}} }
 ; RECURSIVE-DAG: attributes #[[SUB]] = { noinline null_pointer_is_valid optnone strictfp "denormal-fp-math"="preserve-sign,preserve-sign" "denormal-fp-math-f32"="preserve-sign"{{.*}}"probe-stack"="inline-asm" "stack-probe-size"="4096" "target-cpu"="x86-64" "target-features"="+sse2" "tune-cpu"="generic"{{.*}}"vm.island.subhelper"{{.*}} }

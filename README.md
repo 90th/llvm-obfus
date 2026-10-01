@@ -441,6 +441,10 @@ clang module.obf.bc build/libobf_runtime.a -o module_binary
 If the configuration creates supported v1 records, bind the final executable manually.
 On Linux, use `--build-id=none` when you create the final executable.
 
+The wrapper checks handled interruptions before output commit.
+If an interruption prevents commit, it restores the previous output and removes staged files.
+This includes interruptions delivered by a signal handler during file replacement on Windows.
+
 ---
 
 ## Rust Integration
@@ -639,9 +643,15 @@ The safe pipeline execution order runs as follows:
 ## Security Model
 
 - **Defense in Depth**: Combines control-flow obscurity, semantic abstraction (VM), dynamic key derivation, and integrity checks.
-- **Fail-Closed Integrity**: String decoding and constant-pool access use MAC validation at run time.
-  The program aborts if ciphertext or a descriptor does not match.
+- **Fail-Closed Integrity**: Authenticated string and constant-pool decoders use MAC validation at run time.
+  Failed ciphertext or descriptor checks abort the program.
   If execution reaches a protected site with a required UNBOUND v1 record, the run-time guard traps.
+- **VM Token Admission**: `vm` and `strong_vm` admit only registered caller tokens before bytecode execution.
+  Unregistered tokens trap before protected side effects.
+  A bytecode entry-state value does not grant admission unless it is also a registered token.
+  The direct virtualization API preserves its explicit disabled-handshake mode.
+- **CFG State Snapshots**: Flattened string comparisons keep the CFG state captured at the decoder's definition.
+  Later blocks use that snapshot instead of their current dispatcher state.
 - **Code-Byte Tamper Dependency**: A BOUND self-checksum site hashes selected loaded instruction bytes.
   A one-byte change in the sample changes the full v1 checksum.
   A software breakpoint also changes it when the breakpoint replaces a sampled byte with `0xCC`.

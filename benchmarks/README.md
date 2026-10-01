@@ -35,7 +35,12 @@ Run default-mode and benchmark-mode parity checks with:
 cmake --build build --target obf-benchmarks-e2e -- -j1
 ```
 
-This target runs each built baseline and obfuscated pair once in normal mode and once with `OBF_BENCH_ITERS` set.
+This target checks normal-mode behavior and benchmark output for each baseline/protected pair.
+The license checks also cover invalid inputs, not only baseline/protected parity.
+
+In normal mode, `license_demo` grants only the exact token `delta-7` and returns status `0`.
+Other tokens print `ACCESS DENIED` and return status `1`.
+The runner checks both binaries against this contract, including the former `fdlta-7` collision.
 
 For reproducible checkpoint work, configure a dedicated build with a fixed seed:
 

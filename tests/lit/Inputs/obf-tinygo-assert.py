@@ -241,7 +241,11 @@ def assert_obf_bc_signal_transaction(wrapper: Path, work: Path) -> None:
         nonlocal queued
         if Path(source) == temporary and not queued:
             queued = True
-            os.kill(os.getpid(), signal.SIGTERM)
+            if os.name == "nt":
+                # os.kill(self, SIGTERM) bypasses Python handlers on Windows.
+                signal.raise_signal(signal.SIGTERM)
+            else:
+                os.kill(os.getpid(), signal.SIGTERM)
         real_replace(source, destination)
 
     caught = False

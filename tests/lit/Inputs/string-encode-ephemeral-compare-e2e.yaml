@@ -9,4 +9,4 @@ string_encoding:
   allow_ctor_fallback: true
 targets:
   - match: test_*
-    level: light
+    level: strong

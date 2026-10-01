@@ -178,6 +178,9 @@ wrapper_suffix = ".cmd" if (sys.platform.startswith("win") or os.name == "nt") e
 
 config.substitutions.extend(
     [
+        ("%obf_bc_script", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/obf-bc"))),
+        ("%obf_rustc_script", _shell_quote(_normalize_path("@CMAKE_CURRENT_BINARY_DIR@/obf-rustc"))),
+        ("%llvm_version", _shell_quote("@LLVM_PACKAGE_VERSION@")),
         ("%obf_bc", _shell_quote(_normalize_path(f"@CMAKE_CURRENT_BINARY_DIR@/obf-bc{wrapper_suffix}"))),
         ("%obf_rustc", _shell_quote(_normalize_path(f"@CMAKE_CURRENT_BINARY_DIR@/obf-rustc{wrapper_suffix}"))),
         ("%obf_tinygo", _shell_quote(_normalize_path(f"@CMAKE_CURRENT_BINARY_DIR@/obf-tinygo{wrapper_suffix}"))),

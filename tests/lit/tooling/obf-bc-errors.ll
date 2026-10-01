@@ -1,7 +1,7 @@
 ; RUN: %raw_clang -O1 -fno-inline -fno-inline-functions -emit-llvm -c %S/../Inputs/obf-bc-e2e.c -o %t.input.bc
 ; RUN: printf 'obf-bc sentinel\n' > %t.sentinel.bc
 ; RUN: cp %t.sentinel.bc %t.sentinel.expected.bc
-; RUN: %python %S/../Inputs/obf-tinygo-assert.py obf-bc-signal %obf_bc %t.signal-transaction
+; RUN: %python %S/../Inputs/obf-tinygo-assert.py obf-bc-signal %obf_bc_script %t.signal-transaction
 ; RUN: not %obf_bc --obf-config %S/../Inputs/obf-bc-e2e.yaml -passes=verify %t.input.bc -o %t.sentinel.bc 2>&1 | %FileCheck %s --check-prefix=NO-PASS
 ; RUN: cmp %t.sentinel.expected.bc %t.sentinel.bc
 ; RUN: not %obf_bc --obf-config %S/../Inputs/obf-bc-e2e.yaml -c %t.input.bc -o %t.sentinel.bc 2>&1 | %FileCheck %s --check-prefix=OBJECT

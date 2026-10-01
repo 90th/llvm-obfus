@@ -1,12 +1,16 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-semantic-function-attrs-local.yaml -passes='obf-vm,verify' -S %s -o - | %FileCheck %s --check-prefix=LOCAL
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-semantic-function-attrs-local.yaml -passes='obf-vm,verify' -S %s -o %t
+; RUN: %python %S/../Inputs/prepare_vm_semantic_attrs_runtime.py %s %t.host-input.ll %llvm_host_triple
+; RUN: %opt -mtriple=%llvm_host_triple -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-semantic-function-attrs-local.yaml -passes='obf-vm,verify' -S %t.host-input.ll -o %t
 ; RUN: %lli %t
+
+; Check the original source attributes independently of code generation, then
+; virtualize the same body with the host's real stack-probe ABI for execution.
 
 ; LOCAL-LABEL: define i32 @local_attr_target(
 ; LOCAL-SAME: #[[WRAP:[0-9]+]] {
-; LOCAL: call i32 %local_attr_target.obf.wrapper.indirect({{.*}}) #[[STRICTCALL:[0-9]+]]
+; LOCAL: call i32 {{%[^ (]+}}({{.*}}) #[[STRICTCALL:[0-9]+]]
 ; LOCAL-LABEL: define i32 @local_attr_caller() {
-; LOCAL: call i32 %local_attr_target.obf.indirect({{.*}}) #[[STRICTCALL]]
+; LOCAL: call i32 {{%[^ (]+}}({{.*}}) #[[STRICTCALL]]
 ; LOCAL-LABEL: define i32 @constrained_target(
 ; LOCAL-SAME: #[[CONSTRAINED:[0-9]+]] {
 ; LOCAL: call float @llvm.experimental.constrained.fmul.f32
@@ -14,7 +18,7 @@
 ; LOCAL-SAME: #[[IMPL:[0-9]+]] {
 ; LOCAL-LABEL: define internal i32 @__obf_vm_e_{{[A-Za-z0-9_]+}}(
 ; LOCAL-SAME: #[[THUNK:[0-9]+]] {
-; LOCAL: call i32 {{(@__obf_vm_i_[A-Za-z0-9_]+|%obf\.vm\.entry\.thunk\.[A-Za-z0-9_.]+)}}({{.*}}) #[[STRICTCALL]]
+; LOCAL: call i32 {{(@__obf_vm_i_[A-Za-z0-9_]+|%[^ (]+)}}({{.*}}) #[[STRICTCALL]]
 ; LOCAL-DAG: attributes #[[WRAP]] = { null_pointer_is_valid strictfp "denormal-fp-math"="preserve-sign,preserve-sign" "denormal-fp-math-f32"="preserve-sign" "probe-stack"="inline-asm" "stack-probe-size"="4096" "target-cpu"="x86-64" "target-features"="+sse2" "tune-cpu"="generic" }
 ; LOCAL-DAG: attributes #[[CONSTRAINED]] = { strictfp "denormal-fp-math"="preserve-sign,preserve-sign" "denormal-fp-math-f32"="preserve-sign" "target-cpu"="x86-64" "target-features"="+sse2" "tune-cpu"="generic" }
 ; LOCAL-DAG: attributes #[[IMPL]] = { noinline null_pointer_is_valid optnone strictfp "denormal-fp-math"="preserve-sign,preserve-sign" "denormal-fp-math-f32"="preserve-sign"{{.*}}"probe-stack"="inline-asm" "stack-probe-size"="4096" "target-cpu"="x86-64" "target-features"="+sse2" "tune-cpu"="generic"{{.*}} }
