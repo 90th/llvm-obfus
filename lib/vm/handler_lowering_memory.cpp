@@ -372,6 +372,7 @@ bool lower_memory_instruction(llvm::IRBuilder<>& builder,
                                                          0x12100 + instruction_index);
         pointer_address = apply_memory_address_shape(store_builder, pointer_address, shape);
         value = apply_memory_value_shape(store_builder, value, pointer_address, shape);
+        llvm::Value* next_target = activate_validated_target(store_builder, context);
         if (!store_non_pointer_value_to_memory(store_builder,
                                                pointer_address,
                                                value,
@@ -387,10 +388,6 @@ bool lower_memory_instruction(llvm::IRBuilder<>& builder,
           rotate_to_mapping(
               store_builder, context, static_cast<std::uint32_t>(instruction_index + 1));
         }
-        llvm::Value* next_target = decode_target_dispatch(store_builder,
-                                                          function_context,
-                                                          context.layout.fallthrough_target_offset,
-                                                          0x12200 + instruction_index);
         emit_dispatch(store_builder,
                       function_context,
                       next_target,
@@ -434,6 +431,7 @@ bool lower_memory_instruction(llvm::IRBuilder<>& builder,
                                                               0x12040 + instruction_index);
         stored_pointer_value =
             apply_memory_value_shape(store_builder, stored_pointer_value, pointer_address, shape);
+        llvm::Value* next_target = activate_validated_target(store_builder, context);
         if (llvm::Value* carrier = materialize_pointer_carrier(store_builder,
                                                                stored_pointer_value,
                                                                function_context.opaque_seed_slot,
@@ -495,10 +493,6 @@ bool lower_memory_instruction(llvm::IRBuilder<>& builder,
           rotate_to_mapping(
               store_builder, context, static_cast<std::uint32_t>(instruction_index + 1));
         }
-        llvm::Value* next_target = decode_target_dispatch(store_builder,
-                                                          function_context,
-                                                          context.layout.fallthrough_target_offset,
-                                                          0x12200 + instruction_index);
         emit_dispatch(store_builder,
                       function_context,
                       next_target,
@@ -709,6 +703,7 @@ bool lower_memory_instruction(llvm::IRBuilder<>& builder,
     case opcode::memcpy_fixed:
     case opcode::memset_fixed: {
       const auto emit_mem = [&](llvm::IRBuilder<>& mem_builder) {
+        llvm::Value* next_target = activate_validated_target(mem_builder, context);
         if (instruction.op == opcode::memset_fixed) {
           (void)mem_builder.CreateMemSet(materialize_value(mem_builder,
                                                            function_context.slot_allocas,
@@ -779,10 +774,6 @@ bool lower_memory_instruction(llvm::IRBuilder<>& builder,
           rotate_to_mapping(
               mem_builder, context, static_cast<std::uint32_t>(instruction_index + 1));
         }
-        llvm::Value* next_target = decode_target_dispatch(mem_builder,
-                                                          function_context,
-                                                          context.layout.fallthrough_target_offset,
-                                                          0x13a60 + instruction_index);
         emit_dispatch(mem_builder,
                       function_context,
                       next_target,

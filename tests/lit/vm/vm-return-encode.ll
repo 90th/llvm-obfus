@@ -121,23 +121,16 @@ entry:
 ; --- VM body: no plaintext return ---
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_{{[0-9A-F]+}}
-; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
-; CHECK: %obf.vm.ret.tokenkey = {{(add|sub) i64}}
-; CHECK: %obf.vm.ret.{{(key|token)}}.cast = trunc i64 %obf.vm.ret.{{(fullkey|tokenkey)}}{{(\.poison[0-9]*)?}} to i32
 ; CHECK: ret i32 %obf.vm.ret.encoded
 
 ; CHECK-LABEL: define internal i1 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_{{[0-9A-F]+}}
-; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
-; CHECK: %obf.vm.ret.tokenkey = {{(add|sub) i64}}
-; CHECK: %obf.vm.ret.{{(key|token)}}.cast = trunc i64 %obf.vm.ret.{{(fullkey|tokenkey)}}{{(\.poison[0-9]*)?}} to i1
 ; CHECK: ret i1 %obf.vm.ret.encoded
 
 ; CHECK-LABEL: define internal i64 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i64 %x, i64 %obf.hidden_token)
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_{{[0-9A-F]+}}
-; CHECK: %obf.vm.ret.state = load i64, ptr %obf.vm.state
 ; CHECK: %obf.vm.ret.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
 ; CHECK-NOT: %obf.vm.ret.key.trunc
 ; CHECK: ret i64 %obf.vm.ret.encoded

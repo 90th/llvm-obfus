@@ -4,6 +4,65 @@
 
 This project follows a rolling release model. The `main` branch is the supported version.
 
+## VM bytecode integrity contract
+
+`vm` and `strong_vm` check bytecode as execution reaches each instruction.
+These checks detect bytecode tampering. They do not provide cryptographic authentication.
+
+### Checked values and execution order
+
+The VM compares every decoded header chunk exactly with the expected decoded value from serialization.
+The semantic fields are:
+
+- Opcode and subtype.
+- Flags and immediate.
+- Result slot.
+- Operand count, kinds, and descriptors.
+- Edge count.
+
+Padding carries no semantics, but the VM also checks each padding chunk exactly.
+
+Before handler effects, the VM checks the complete 64-bit post-header state and all encoded successor targets of the current instruction.
+This includes fallthrough and every branch or switch edge, even if execution does not select that edge.
+Each successor check compares the exact dispatch index and full 64-bit entry state with their expected values.
+The VM caches the decoded successor values in SSA.
+When execution selects a successor, the VM activates these checked values without rereading the encoded successor payload.
+
+A failed check traps before the affected instruction can call, store, apply edge assignments, or return.
+This rule includes failures on the first call and in successor-target payloads.
+
+### Tamper observation and return encoding
+
+Volatile bytecode loads preserve runtime tamper observation after optimization.
+Return encoding still combines the return key with the registered token.
+The VM does not rely on wrong-result poisoning as its only integrity control.
+
+Rolling decode and sampled probes mix byte changes into the decode state.
+They provide diffusion, not proof of authentication.
+
+### Physical anchor diversification
+
+Each execution-bearing anchor stores a reversible, seeded permutation of the canonical ciphertext, with a per-byte XOR mask.
+The decoder computes physical offsets at emission time and restores each ciphertext byte before decoding or state diffusion.
+The transform does not allocate a runtime decode buffer or change the serialized instruction contract.
+Each anchor has the same payload length. Distinct copies can increase linked data size because the linker cannot merge their contents.
+
+This changes physical anchor sharing, not the protection contract.
+The placement and masks are embedded in the decoder. They do not provide key secrecy or cryptographic authentication.
+Recoverable root, decoder, or data references remain possible. Candidate counts and failed bounded analyses do not prove resistance.
+
+### Exercised scope
+
+Linux x86-64 native execution checked `vm` results and effects.
+Windows x86-64 native standard-policy fixtures exercised header mutations, successor substitutions, first-instruction failures, and return mutations.
+
+### Security limits
+
+- The checks do not verify all future unexecuted headers upfront. An unexecuted path can retain modified bytes without an immediate trap.
+- The contract does not protect against simultaneous changes to code and expected values.
+- The checks are not a MAC. They do not guarantee key secrecy or prevent every bypass.
+- The checks do not guarantee whole-program integrity.
+
 ## Self-checksum security contract
 
 `self_checksum` provides code-as-data verification for selected functions.

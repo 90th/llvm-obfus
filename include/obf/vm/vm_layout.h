@@ -23,6 +23,8 @@ struct bytecode_header_chunk {
   std::uint32_t offset = 0;
   std::uint8_t size = 0;
   bool carries_opcode = false;
+  std::uint32_t expected_value = 0;
+  bool is_padding = false;
 };
 
 // Pending header chunk during construction
@@ -31,14 +33,22 @@ struct pending_bytecode_header_chunk {
   std::uint64_t order_key = 0;
   std::uint8_t size = 0;
   bool carries_opcode = false;
+  bool is_padding = false;
+};
+
+// Encoded successor binding for a single instruction
+struct bytecode_target_layout {
+  std::uint32_t offset = invalid_slot;
+  std::uint32_t dispatch_index = invalid_slot;
+  std::uint64_t entry_state = 0;
 };
 
 // Bytecode layout for a single instruction
 struct bytecode_layout {
   std::uint32_t header_offset = 0;
   std::vector<bytecode_header_chunk> header_chunks;
-  std::uint32_t fallthrough_target_offset = invalid_slot;
-  std::vector<std::uint32_t> edge_target_offsets;
+  bytecode_target_layout fallthrough_target;
+  std::vector<bytecode_target_layout> edge_targets;
   std::uint32_t integrity_probe_range = 0;
   std::uint64_t expected_post_header_state = 0;
 };

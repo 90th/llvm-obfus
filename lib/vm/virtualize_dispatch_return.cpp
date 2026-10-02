@@ -507,14 +507,12 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
         .current_slot_mapping = llvm::ArrayRef<std::uint32_t>(slot_mappings[instruction_index]),
     };
 
-    llvm::Value* decoded_opcode =
-        consume_metadata(header_builder,
-                         rewrite_context,
-                         layout,
-                         0x8000 + static_cast<std::uint64_t>(instruction_index) * 32);
+    const instruction_metadata_validation metadata =
+        validate_instruction_metadata(header_builder,
+                                      instruction_context,
+                                      0x8000 + static_cast<std::uint64_t>(instruction_index) * 32);
+    llvm::Value* decoded_opcode = metadata.opcode;
     decoded_opcode->setName(subhelper ? "vm.island.subhelper.decode" : "vm.island.helper.decode");
-
-    emit_instruction_integrity_probes(header_builder, instruction_context);
 
     auto* opcode_block = llvm::BasicBlock::Create(
         context,
@@ -528,12 +526,14 @@ void emit_state_instruction_dispatcher(llvm::Function& dispatcher,
                                                   decoded_opcode,
                                                   instruction.op,
                                                   0x7d000 + instruction_index);
+    llvm::Value* instruction_match =
+        header_builder.CreateAnd(metadata.matches, opcode_match, "obf.vm.instruction.match");
     if (select_handler_variant(instruction.op, opaque_seed_base, 0x7d000 + instruction_index) ==
         0) {
-      header_builder.CreateCondBr(opcode_match, route_block, failure_block);
+      header_builder.CreateCondBr(instruction_match, route_block, failure_block);
     } else {
       llvm::Value* match_word = header_builder.CreateZExt(
-          opcode_match, header_builder.getInt64Ty(), "obf.vm.opcode.match.word");
+          instruction_match, header_builder.getInt64Ty(), "obf.vm.opcode.match.word");
       llvm::Value* gated_match =
           mba::create_xor(header_builder,
                           match_word,

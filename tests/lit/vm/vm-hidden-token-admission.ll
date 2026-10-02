@@ -5,7 +5,11 @@
 ; RUN: %python %S/../Inputs/vm-hidden-token-admission.py check %t.ll %t.tokens %t -- %lli
 ;
 ; Discover opaque values only in a separate instrumented copy. Each admission
-; scenario then executes the original generated body in a fresh process.
+; scenario executes the complete original reachable body in a fresh lli process.
+; Keep its resolver and startup dependencies. Remove only unrelated definitions,
+; unused retention-list operands, and independent constructor stores to unused seeds.
+; Unique temporary scenario paths prevent reuse of files held by interrupted runs.
+; Each lli has the same 30-second deadline and is killed/reaped on timeout.
 ; Small ordinary targets exercise the inline root; large strong targets
 ; exercise the state-island root, including integer and void return paths.
 ; The configuration retains strong_vm's required public-symbol isolation gate.

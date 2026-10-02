@@ -2,15 +2,174 @@
 
 #include "obf/vm/virtualize_internal.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #include <algorithm>
+#include <limits>
+#include <numeric>
 #include <string>
+#include <vector>
 
 namespace obf::vm {
+
+namespace {
+
+constexpr llvm::StringLiteral anchor_encoding_metadata = "obf.vm.anchor.encoding";
+
+std::uint32_t bytecode_anchor_length(const llvm::GlobalVariable& anchor) {
+  const auto* array_type = llvm::dyn_cast<llvm::ArrayType>(anchor.getValueType());
+  if (array_type == nullptr || !array_type->getElementType()->isIntegerTy(8) ||
+      array_type->getNumElements() == 0 ||
+      array_type->getNumElements() > std::numeric_limits<std::uint32_t>::max() ||
+      !anchor.hasInitializer()) {
+    llvm::report_fatal_error("vm bytecode anchor must be an initialized nonempty i8 array");
+  }
+  return static_cast<std::uint32_t>(array_type->getNumElements());
+}
+
+void validate_anchor_encoding(const bytecode_anchor_encoding& encoding, std::uint32_t length) {
+  if (length == 0 || encoding.stride == 0 || encoding.bias >= length ||
+      std::gcd(encoding.stride, length) != 1) {
+    llvm::report_fatal_error("malformed vm bytecode anchor encoding: non-bijective placement");
+  }
+}
+
+llvm::GlobalVariable* clone_bytecode_anchor(llvm::GlobalVariable& source, const llvm::Twine& name) {
+  auto* clone = new llvm::GlobalVariable(*source.getParent(),
+                                         source.getValueType(),
+                                         source.isConstant(),
+                                         llvm::GlobalValue::PrivateLinkage,
+                                         source.getInitializer(),
+                                         name,
+                                         nullptr,
+                                         source.getThreadLocalMode(),
+                                         source.getAddressSpace(),
+                                         source.isExternallyInitialized());
+  clone->copyAttributesFrom(&source);
+  clone->setLinkage(llvm::GlobalValue::PrivateLinkage);
+  clone->copyMetadata(&source, 0);
+  return clone;
+}
+
+std::vector<std::uint8_t> canonical_anchor_bytes(const llvm::GlobalVariable& anchor,
+                                                 std::uint32_t length) {
+  const bool is_encoded = anchor.getMetadata(anchor_encoding_metadata) != nullptr;
+  const bytecode_anchor_encoding encoding = get_bytecode_anchor_encoding(anchor);
+  const llvm::Constant* initializer = anchor.getInitializer();
+  std::vector<std::uint8_t> canonical(length);
+  for (std::uint32_t offset = 0; offset < length; ++offset) {
+    const std::uint32_t physical =
+        is_encoded ? physical_bytecode_offset(encoding, offset, length) : offset;
+    const auto* byte =
+        llvm::dyn_cast_or_null<llvm::ConstantInt>(initializer->getAggregateElement(physical));
+    if (byte == nullptr || !byte->getType()->isIntegerTy(8)) {
+      llvm::report_fatal_error("vm bytecode anchor initializer contains a non-byte constant");
+    }
+    canonical[offset] = static_cast<std::uint8_t>(byte->getZExtValue()) ^
+                        (is_encoded ? bytecode_anchor_mask(encoding, offset) : 0);
+  }
+  return canonical;
+}
+
+void encode_bytecode_anchor(llvm::GlobalVariable& anchor,
+                            llvm::ArrayRef<std::uint8_t> canonical,
+                            llvm::Constant* canonical_initializer,
+                            std::vector<std::uint8_t>& physical,
+                            llvm::SmallVectorImpl<llvm::Constant*>& used_initializers,
+                            std::uint64_t bytecode_seed,
+                            std::uint64_t salt,
+                            std::uint32_t ordinal) {
+  const auto length = static_cast<std::uint32_t>(canonical.size());
+  const std::uint64_t site_seed = mix_seed(
+      bytecode_seed, salt ^ ((static_cast<std::uint64_t>(ordinal) + 1) * 0x9e3779b97f4a7c15ULL));
+  for (std::uint64_t attempt = 0;; ++attempt) {
+    const std::uint64_t seed = mix_seed(site_seed, 0x27310000ULL + attempt);
+    bytecode_anchor_encoding encoding;
+    if (length > 1) {
+      encoding.stride =
+          1U + static_cast<std::uint32_t>(mix_seed(seed, 0x27310001ULL) % (length - 1U));
+      while (std::gcd(encoding.stride, length) != 1) {
+        encoding.stride = encoding.stride == length - 1U ? 1U : encoding.stride + 1U;
+      }
+      encoding.bias = static_cast<std::uint32_t>(mix_seed(seed, 0x27310002ULL) % length);
+    }
+    encoding.mask_seed = mix_seed(seed, 0x27310003ULL);
+    for (std::uint32_t offset = 0; offset < length; ++offset) {
+      physical[physical_bytecode_offset(encoding, offset, length)] =
+          canonical[offset] ^ bytecode_anchor_mask(encoding, offset);
+    }
+    llvm::Constant* initializer = llvm::ConstantDataArray::get(anchor.getContext(), physical);
+    // Constant uniquing makes equality exact without a second payload comparison.
+    if ((length > 1 && initializer == canonical_initializer) ||
+        llvm::is_contained(used_initializers, initializer)) {
+      if (attempt == std::numeric_limits<std::uint64_t>::max()) {
+        llvm::report_fatal_error("vm bytecode anchor encoding exhausted distinct payloads");
+      }
+      continue;
+    }
+    anchor.setInitializer(initializer);
+    llvm::LLVMContext& context = anchor.getContext();
+    anchor.setMetadata(
+        anchor_encoding_metadata,
+        llvm::MDNode::get(context,
+                          {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                               llvm::Type::getInt32Ty(context), encoding.stride)),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                               llvm::Type::getInt32Ty(context), encoding.bias)),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                               llvm::Type::getInt64Ty(context), encoding.mask_seed))}));
+    used_initializers.push_back(initializer);
+    return;
+  }
+}
+
+}  // namespace
+
+bytecode_anchor_encoding get_bytecode_anchor_encoding(const llvm::GlobalVariable& anchor) {
+  const llvm::MDNode* metadata = anchor.getMetadata(anchor_encoding_metadata);
+  if (metadata == nullptr) { return {}; }
+  if (metadata->getNumOperands() != 3) {
+    llvm::report_fatal_error("malformed vm bytecode anchor encoding: expected three operands");
+  }
+  const auto integer_operand = [&](unsigned index, unsigned bits) {
+    const auto* constant =
+        llvm::dyn_cast_or_null<llvm::ConstantAsMetadata>(metadata->getOperand(index).get());
+    const auto* integer =
+        constant == nullptr ? nullptr : llvm::dyn_cast<llvm::ConstantInt>(constant->getValue());
+    if (integer == nullptr || !integer->getType()->isIntegerTy(bits)) {
+      llvm::report_fatal_error("malformed vm bytecode anchor encoding: invalid integer operand");
+    }
+    return integer->getZExtValue();
+  };
+  const bytecode_anchor_encoding encoding{
+      .stride = static_cast<std::uint32_t>(integer_operand(0, 32)),
+      .bias = static_cast<std::uint32_t>(integer_operand(1, 32)),
+      .mask_seed = integer_operand(2, 64)};
+  validate_anchor_encoding(encoding, bytecode_anchor_length(anchor));
+  return encoding;
+}
+
+std::uint32_t physical_bytecode_offset(const bytecode_anchor_encoding& encoding,
+                                       std::uint32_t logical_offset,
+                                       std::uint32_t length) {
+  if (length == 0 || logical_offset >= length) {
+    llvm::report_fatal_error("vm bytecode anchor logical offset is outside its payload");
+  }
+  return static_cast<std::uint32_t>(
+      (static_cast<std::uint64_t>(logical_offset) * encoding.stride + encoding.bias) % length);
+}
+
+std::uint8_t bytecode_anchor_mask(const bytecode_anchor_encoding& encoding,
+                                  std::uint32_t logical_offset) {
+  return static_cast<std::uint8_t>(
+      mix_seed(encoding.mask_seed, static_cast<std::uint64_t>(logical_offset) + 1));
+}
 
 std::uint64_t derive_vm_opaque_seed(std::uint64_t decision_seed,
                                     const llvm::Function& function,
@@ -83,16 +242,10 @@ llvm::Value* build_hidden_token_seed(llvm::IRBuilder<>& builder,
 llvm::GlobalVariable* clone_bytecode_global_for_subhelper(llvm::GlobalVariable* bytecode_global,
                                                           std::uint32_t subhelper_index) {
   if (bytecode_global == nullptr) { return nullptr; }
-  llvm::Module* module = bytecode_global->getParent();
-  auto* clone = new llvm::GlobalVariable(*module,
-                                         bytecode_global->getValueType(),
-                                         true,
-                                         llvm::GlobalValue::PrivateLinkage,
-                                         bytecode_global->getInitializer(),
-                                         bytecode_global->getName().str() + "_h" +
-                                             std::to_string(subhelper_index));
-  clone->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-  return clone;
+  // The initializer and metadata remain paired even if the source was encoded already.
+  (void)get_bytecode_anchor_encoding(*bytecode_global);
+  return clone_bytecode_anchor(*bytecode_global,
+                               bytecode_global->getName() + "_h" + llvm::Twine(subhelper_index));
 }
 
 std::uint32_t select_bytecode_anchor_real_count(std::uint64_t bytecode_size,
@@ -135,14 +288,31 @@ build_bytecode_anchor_globals(llvm::GlobalVariable* bytecode_global,
   out_decoy_count = 0;
   if (bytecode_global == nullptr) { return anchors; }
 
-  auto* array_type = llvm::dyn_cast<llvm::ArrayType>(bytecode_global->getValueType());
-  if (array_type == nullptr || bytecode_global->getInitializer() == nullptr) {
-    anchors.push_back(bytecode_global);
-    out_real_count = 1;
-    return anchors;
+  const std::uint32_t bytecode_size = bytecode_anchor_length(*bytecode_global);
+  const std::vector<std::uint8_t> canonical =
+      canonical_anchor_bytes(*bytecode_global, bytecode_size);
+  llvm::Constant* canonical_initializer =
+      llvm::ConstantDataArray::get(bytecode_global->getContext(), canonical);
+  std::vector<std::uint8_t> physical(bytecode_size);
+  llvm::SmallVector<llvm::Constant*, 17> used_initializers;
+  // A fresh subhelper clone has no users. Reencode it, but never change a base
+  // whose existing decoders already embed its physical offsets and masks.
+  if (bytecode_global->getMetadata(anchor_encoding_metadata) == nullptr ||
+      bytecode_global->use_empty()) {
+    if (bytecode_global->getMetadata(anchor_encoding_metadata) != nullptr) {
+      used_initializers.push_back(bytecode_global->getInitializer());
+    }
+    encode_bytecode_anchor(*bytecode_global,
+                           canonical,
+                           canonical_initializer,
+                           physical,
+                           used_initializers,
+                           bytecode_seed,
+                           salt,
+                           0);
+  } else {
+    used_initializers.push_back(bytecode_global->getInitializer());
   }
-
-  const std::uint64_t bytecode_size = array_type->getNumElements();
   const std::uint32_t real_count =
       select_bytecode_anchor_real_count(bytecode_size, bytecode_seed, salt);
   const std::uint32_t decoy_count =
@@ -155,50 +325,38 @@ build_bytecode_anchor_globals(llvm::GlobalVariable* bytecode_global,
   for (std::uint32_t anchor_index = 1; anchor_index < real_count; ++anchor_index) {
     const std::uint64_t name_seed =
         mix_seed(bytecode_seed, salt ^ (0x27110000ULL + static_cast<std::uint64_t>(anchor_index)));
-    auto* clone = new llvm::GlobalVariable(*module,
-                                           bytecode_global->getValueType(),
-                                           true,
-                                           llvm::GlobalValue::PrivateLinkage,
-                                           bytecode_global->getInitializer(),
-                                           bytecode_global->getName().str() + "_a" +
-                                               llvm::utohexstr(name_seed & 0xffffffffULL));
-    clone->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    auto* clone = clone_bytecode_anchor(*bytecode_global,
+                                        bytecode_global->getName() + "_a" +
+                                            llvm::utohexstr(name_seed & 0xffffffffULL));
+    encode_bytecode_anchor(*clone,
+                           canonical,
+                           canonical_initializer,
+                           physical,
+                           used_initializers,
+                           bytecode_seed,
+                           salt,
+                           anchor_index);
     real_clones.push_back(clone);
     get_or_create_pointer_constant_cell(*module, *clone);
   }
 
   llvm::SmallVector<llvm::GlobalVariable*, 4> decoys;
-  const std::uint32_t interleave_count = std::max(real_count - 1U, decoy_count);
-  for (std::uint32_t slot = 0; slot < interleave_count; ++slot) {
-    if (slot < real_clones.size()) {
-      if (slot < decoy_count) {
-        const std::uint64_t name_seed =
-            mix_seed(bytecode_seed, salt ^ (0x27210000ULL + static_cast<std::uint64_t>(slot)));
-        auto* decoy = new llvm::GlobalVariable(*module,
-                                               bytecode_global->getValueType(),
-                                               true,
-                                               llvm::GlobalValue::PrivateLinkage,
-                                               bytecode_global->getInitializer(),
-                                               bytecode_global->getName().str() + "_d" +
-                                                   llvm::utohexstr(name_seed & 0xffffffffULL));
-        decoy->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-        decoys.push_back(decoy);
-        get_or_create_pointer_constant_cell(*module, *decoy);
-      }
-    } else if (slot < decoy_count) {
-      const std::uint64_t name_seed =
-          mix_seed(bytecode_seed, salt ^ (0x27210000ULL + static_cast<std::uint64_t>(slot)));
-      auto* decoy = new llvm::GlobalVariable(*module,
-                                             bytecode_global->getValueType(),
-                                             true,
-                                             llvm::GlobalValue::PrivateLinkage,
-                                             bytecode_global->getInitializer(),
-                                             bytecode_global->getName().str() + "_d" +
-                                                 llvm::utohexstr(name_seed & 0xffffffffULL));
-      decoy->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-      decoys.push_back(decoy);
-      get_or_create_pointer_constant_cell(*module, *decoy);
-    }
+  for (std::uint32_t slot = 0; slot < decoy_count; ++slot) {
+    const std::uint64_t name_seed =
+        mix_seed(bytecode_seed, salt ^ (0x27210000ULL + static_cast<std::uint64_t>(slot)));
+    auto* decoy = clone_bytecode_anchor(*bytecode_global,
+                                        bytecode_global->getName() + "_d" +
+                                            llvm::utohexstr(name_seed & 0xffffffffULL));
+    encode_bytecode_anchor(*decoy,
+                           canonical,
+                           canonical_initializer,
+                           physical,
+                           used_initializers,
+                           bytecode_seed,
+                           salt,
+                           real_count + slot);
+    decoys.push_back(decoy);
+    get_or_create_pointer_constant_cell(*module, *decoy);
   }
 
   anchors.push_back(bytecode_global);

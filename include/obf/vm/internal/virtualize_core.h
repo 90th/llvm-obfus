@@ -67,12 +67,19 @@ struct rewrite_function_context {
   std::size_t& dispatch_site_counter;
 };
 
+struct validated_bytecode_target {
+  llvm::Value* dispatch_index = nullptr;
+  llvm::Value* entry_state = nullptr;
+};
+
 struct instruction_rewrite_context {
   rewrite_function_context& function_context;
   std::size_t instruction_index = 0;
   const micro_instruction& instruction;
   const bytecode_layout& layout;
   llvm::ArrayRef<std::uint32_t> current_slot_mapping;
+  validated_bytecode_target validated_fallthrough = {};
+  llvm::SmallVector<validated_bytecode_target, 2> validated_edges = {};
 };
 
 struct VmDecoyRoutePlan {

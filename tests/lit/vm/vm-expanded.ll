@@ -186,11 +186,6 @@ entry:
 ; CHECK: call {{(void|\{ i64, i64 \})}} @__obf_entropy_thunk_
 ; CHECK: %obf.entropy.pair{{[0-9]*}} = load {{.*}} %obf.entropy.cache
 ; CHECK: %obf.entropy.direct{{[0-9]*}} = {{.*}}
-; CHECK: %obf.vm.integrity.ptr = getelementptr inbounds
-; CHECK: %obf.vm.integrity.byte.ptr = getelementptr inbounds
-; CHECK: %obf.vm.integrity.byte.window = load i32, ptr %obf.vm.integrity.byte.ptr, align 1
-; CHECK: %obf.vm.integrity.byte = trunc i32 %obf.vm.integrity.byte.shr to i8
-; CHECK: %obf.vm.integrity.fold = xor i64
 ; CHECK: indirectbr ptr
 ; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(ptr %src, ptr %dst, i64 %obf.hidden_token)
 ; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_

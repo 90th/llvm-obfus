@@ -16,6 +16,22 @@
 
 namespace obf::vm {
 
+struct bytecode_anchor_encoding {
+  std::uint32_t stride = 1;
+  std::uint32_t bias = 0;
+  std::uint64_t mask_seed = 0;
+};
+
+// Missing metadata identifies canonical construction input, never a runtime encoding.
+bytecode_anchor_encoding get_bytecode_anchor_encoding(const llvm::GlobalVariable& anchor);
+
+std::uint32_t physical_bytecode_offset(const bytecode_anchor_encoding& encoding,
+                                       std::uint32_t logical_offset,
+                                       std::uint32_t length);
+
+std::uint8_t bytecode_anchor_mask(const bytecode_anchor_encoding& encoding,
+                                  std::uint32_t logical_offset);
+
 std::uint64_t derive_vm_opaque_seed(std::uint64_t decision_seed,
                                     const llvm::Function& function,
                                     const bytecode_program& program);

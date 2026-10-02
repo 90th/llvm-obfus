@@ -134,6 +134,7 @@ void finish_value_in_builder(llvm::IRBuilder<>& builder,
                              llvm::Value* result) {
   rewrite_function_context& function_context = context.function_context;
   const micro_instruction& instruction = context.instruction;
+  llvm::Value* next_target = activate_validated_target(builder, context);
 
   if (instruction.result_slot != invalid_slot) {
     store_slot(builder,
@@ -150,11 +151,6 @@ void finish_value_in_builder(llvm::IRBuilder<>& builder,
   if (context.instruction_index + 1 < function_context.slot_mappings.size()) {
     rotate_to_mapping(builder, context, static_cast<std::uint32_t>(context.instruction_index + 1));
   }
-  llvm::Value* next_target =
-      decode_target_dispatch(builder,
-                             function_context,
-                             context.layout.fallthrough_target_offset,
-                             0x9000 + static_cast<std::uint64_t>(context.instruction_index) * 32);
   emit_dispatch(builder,
                 function_context,
                 next_target,
@@ -187,6 +183,7 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
                                                 function_context.mba_context,
                                                 0x14000 + instruction_index * 16 + operand_index));
         }
+        llvm::Value* next_target = activate_validated_target(call_builder, context);
 
         auto* call = call_builder.CreateCall(
             llvm::cast<llvm::FunctionType>(const_cast<llvm::Type*>(instruction.type)),
@@ -220,10 +217,6 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
           rotate_to_mapping(
               call_builder, context, static_cast<std::uint32_t>(instruction_index + 1));
         }
-        llvm::Value* next_target = decode_target_dispatch(call_builder,
-                                                          function_context,
-                                                          context.layout.fallthrough_target_offset,
-                                                          0x14200 + instruction_index);
         emit_dispatch(call_builder,
                       function_context,
                       next_target,
@@ -240,7 +233,8 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
       return true;
     }
 
-    case opcode::jump:
+    case opcode::jump: {
+      llvm::Value* next_target = activate_validated_target(builder, context, 0);
       apply_edge_assignments(builder, context, instruction.edges[0], 0x15000 + instruction_index);
       rotate_to_mapping(
           builder,
@@ -249,13 +243,11 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
       emit_dispatch(
           builder,
           function_context,
-          decode_target_dispatch(builder,
-                                 function_context,
-                                 context.layout.edge_target_offsets[0],
-                                 0x15100 + instruction_index),
+          next_target,
           0x15200 + instruction_index,
           function_context.program.blocks[instruction.edges[0].target_block].first_instruction);
       return true;
+    }
 
     case opcode::branch: {
       const branch_handler_shape shape = select_branch_handler_shape(
@@ -275,6 +267,7 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
                            swap_targets ? true_block : false_block);
 
       llvm::IRBuilder<> true_builder(true_block);
+      llvm::Value* true_target = activate_validated_target(true_builder, context, 0);
       apply_edge_assignments(
           true_builder, context, instruction.edges[0], 0x16100 + instruction_index);
       rotate_to_mapping(
@@ -284,14 +277,12 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
       emit_dispatch(
           true_builder,
           function_context,
-          decode_target_dispatch(true_builder,
-                                 function_context,
-                                 context.layout.edge_target_offsets[0],
-                                 0x16200 + instruction_index),
+          true_target,
           0x16300 + instruction_index,
           function_context.program.blocks[instruction.edges[0].target_block].first_instruction);
 
       llvm::IRBuilder<> false_builder(false_block);
+      llvm::Value* false_target = activate_validated_target(false_builder, context, 1);
       apply_edge_assignments(
           false_builder, context, instruction.edges[1], 0x16400 + instruction_index);
       rotate_to_mapping(
@@ -301,10 +292,7 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
       emit_dispatch(
           false_builder,
           function_context,
-          decode_target_dispatch(false_builder,
-                                 function_context,
-                                 context.layout.edge_target_offsets[1],
-                                 0x16500 + instruction_index),
+          false_target,
           0x16600 + instruction_index,
           function_context.program.blocks[instruction.edges[1].target_block].first_instruction);
       return true;
@@ -341,6 +329,7 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
       }
 
       llvm::IRBuilder<> default_builder(default_block);
+      llvm::Value* default_target = activate_validated_target(default_builder, context, 0);
       apply_edge_assignments(
           default_builder, context, instruction.edges[0], 0x17100 + instruction_index);
       rotate_to_mapping(
@@ -350,15 +339,14 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
       emit_dispatch(
           default_builder,
           function_context,
-          decode_target_dispatch(default_builder,
-                                 function_context,
-                                 context.layout.edge_target_offsets[0],
-                                 0x17200 + instruction_index),
+          default_target,
           0x17300 + instruction_index,
           function_context.program.blocks[instruction.edges[0].target_block].first_instruction);
 
       for (std::size_t case_index = 0; case_index < case_blocks.size(); ++case_index) {
         llvm::IRBuilder<> case_builder(case_blocks[case_index]);
+        llvm::Value* case_target = activate_validated_target(
+            case_builder, context, static_cast<std::uint32_t>(case_index + 1));
         apply_edge_assignments(case_builder,
                                context,
                                instruction.edges[case_index + 1],
@@ -371,10 +359,7 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
         emit_dispatch(
             case_builder,
             function_context,
-            decode_target_dispatch(case_builder,
-                                   function_context,
-                                   context.layout.edge_target_offsets[case_index + 1],
-                                   0x17500 + instruction_index * 8 + case_index),
+            case_target,
             0x17600 + instruction_index * 8 + case_index,
             function_context.program.blocks[instruction.edges[case_index + 1].target_block]
                 .first_instruction);
@@ -413,15 +398,6 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
                                                  0x18000 + instruction_index);
         if (function_context.retkey_global != nullptr && ret_val->getType()->isIntegerTy()) {
           const std::uint64_t ret_salt = 0x1a000 + instruction_index * 16;
-          auto* state_load = builder.CreateLoad(
-              builder.getInt64Ty(), function_context.state_slot, "obf.vm.ret.state");
-          auto* expected_const = builder.getInt64(context.layout.expected_post_header_state);
-          llvm::Value* poison = mba::create_xor(builder,
-                                                state_load,
-                                                expected_const,
-                                                function_context.mba_context,
-                                                ret_salt + 1,
-                                                "obf.vm.ret.poison");
           auto* retkey_load = builder.CreateLoad(
               builder.getInt64Ty(), function_context.retkey_global, "obf.vm.ret.retkey");
           llvm::Value* token_component = nullptr;
@@ -437,42 +413,36 @@ bool lower_control_instruction(llvm::IRBuilder<>& builder,
             token_component = builder.CreateZExtOrTrunc(
                 token_component, builder.getInt64Ty(), "obf.vm.ret.token.cast");
           }
-          llvm::Value* token_key = mba::create_xor(builder,
-                                                   retkey_load,
-                                                   token_component,
-                                                   function_context.mba_context,
-                                                   ret_salt + 2,
-                                                   "obf.vm.ret.tokenkey");
           if (shape == return_handler_shape::result_slot_roundtrip) {
             ret_val = roundtrip_vm_handler_value(builder, ret_val, return_shape_marker(shape));
           }
 
           if (shape == return_handler_shape::split_encode) {
-            llvm::Value* token_key_trunc =
-                convert_return_key(builder, token_key, ret_val->getType(), "obf.vm.ret.token.cast");
-            llvm::Value* poison_trunc =
-                convert_return_key(builder, poison, ret_val->getType(), "obf.vm.ret.poison.cast");
+            llvm::Value* retkey_trunc =
+                convert_return_key(builder, retkey_load, ret_val->getType(), "obf.vm.ret.key.cast");
+            llvm::Value* token_trunc = convert_return_key(
+                builder, token_component, ret_val->getType(), "obf.vm.ret.token.cast");
             llvm::Value* partial = mba::create_xor(builder,
                                                    ret_val,
-                                                   token_key_trunc,
+                                                   retkey_trunc,
                                                    function_context.mba_context,
                                                    ret_salt + 3,
                                                    return_shape_marker(shape));
             ret_val = mba::create_xor(builder,
                                       partial,
-                                      poison_trunc,
+                                      token_trunc,
                                       function_context.mba_context,
                                       ret_salt + 4,
                                       "obf.vm.ret.encoded");
           } else {
-            llvm::Value* full_key = mba::create_xor(builder,
-                                                    token_key,
-                                                    poison,
-                                                    function_context.mba_context,
-                                                    ret_salt + 3,
-                                                    "obf.vm.ret.fullkey");
+            llvm::Value* token_key = mba::create_xor(builder,
+                                                     retkey_load,
+                                                     token_component,
+                                                     function_context.mba_context,
+                                                     ret_salt + 2,
+                                                     "obf.vm.ret.tokenkey");
             llvm::Value* key_trunc =
-                convert_return_key(builder, full_key, ret_val->getType(), "obf.vm.ret.key.cast");
+                convert_return_key(builder, token_key, ret_val->getType(), "obf.vm.ret.key.cast");
             if (shape == return_handler_shape::direct) {
               function_context.function.addFnAttr(return_shape_marker(shape));
             } else if (shape == return_handler_shape::neutralized_encode) {

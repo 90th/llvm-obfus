@@ -66,6 +66,16 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 - The VM lowers scalar `llvm.umin`, `llvm.smin`, `llvm.umax`, and `llvm.smax` through frozen operands, integer comparison, and select handlers. Each intrinsic costs four virtual instructions; vector forms remain unsupported.
 - VM `select` handlers keep vector conditions lane-wise. Scalar branch handlers freeze their conditions before branching to preserve poison and `undef` semantics.
 - The VM rejects ordered comparisons at LLVM's maximum integer width rather than constructing an invalid widened type. `strong_vm` reports this as an admission failure.
+- VM bytecode checks compare every decoded header chunk exactly with its expected decoded value, including semantically inert padding.
+- Before handler effects, the VM checks the complete 64-bit post-header state and every encoded successor target.
+- Successor checks bind the exact dispatch index and full 64-bit entry state. The VM later activates cached decoded SSA values without rereading successor payloads.
+- Volatile bytecode loads preserve runtime tamper observation after optimization.
+- Failed checks trap before the affected call, store, edge assignment, or return. This includes first-call and successor-target failures.
+- Return encoding still combines the return key with the registered token. The VM does not rely solely on wrong-result poisoning.
+- Rolling decode and sampled probes provide diffusion, not proof of authentication.
+- Bytecode anchor copies use seeded, bijective byte placement and per-byte masks. The decoder restores canonical ciphertext before the integrity checks.
+- Distinct physical copies prevent identical-data coalescing within each anchor pool. This changes data-reference relationships without runtime decode buffers or larger individual payloads.
+- See [VM bytecode integrity contract](SECURITY.md#vm-bytecode-integrity-contract) for the checked fields, exercised scope, and limits.
 - MBA rewriting diversifies arithmetic identities across `add`, `sub`, `xor`, and `mul`. It also rewrites `udiv` and `urem` by power-of-two constant divisors. It works directly and as part of other transforms such as constant reconstruction and opaque predicates.
 - Shape families include linear identities (`x ^ y = (x | y) - (x & y)`), affine wrappers (`Encode(x) = a*x + b` with odd modular multiplier), polynomial zero terms (depth 3+), and constant-multiplication decomposition.
 - A private `BudgetTracker` enforces a per-expression IR-instruction cap derived from `mba.depth`. When the budget runs out mid-expansion, the engine emits the plain LLVM binary operation instead.

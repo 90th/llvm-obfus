@@ -258,7 +258,7 @@ std::uint32_t estimate_instruction_lowering_cost(const micro_instruction& instru
                                                  const bytecode_layout& layout) {
   std::uint32_t cost = 2U + static_cast<std::uint32_t>(instruction.operands.size()) +
                        static_cast<std::uint32_t>(layout.header_chunks.size()) +
-                       static_cast<std::uint32_t>(layout.edge_target_offsets.size() * 2U);
+                       static_cast<std::uint32_t>(layout.edge_targets.size() * 2U);
   switch (instruction.op) {
     case opcode::load_int:
     case opcode::load_float:

@@ -137,16 +137,16 @@ serialize_bytecode_program(const bytecode_program& program,
                            llvm::ArrayRef<std::uint64_t> entry_states,
                            std::uint64_t seed_base,
                            const opcode_permutation& opcode_map);
-llvm::Value* consume_metadata(llvm::IRBuilder<>& builder,
-                              const rewrite_function_context& context,
-                              const bytecode_layout& layout,
-                              std::uint64_t salt);
-llvm::Value* decode_target_dispatch(llvm::IRBuilder<>& builder,
-                                    const rewrite_function_context& context,
-                                    std::uint32_t offset,
-                                    std::uint64_t salt);
-void emit_instruction_integrity_probes(llvm::IRBuilder<>& builder,
-                                       const instruction_rewrite_context& context);
+struct instruction_metadata_validation {
+  llvm::Value* opcode = nullptr;
+  llvm::Value* matches = nullptr;
+};
+instruction_metadata_validation validate_instruction_metadata(llvm::IRBuilder<>& builder,
+                                                              instruction_rewrite_context& context,
+                                                              std::uint64_t salt);
+llvm::Value* activate_validated_target(llvm::IRBuilder<>& builder,
+                                       const instruction_rewrite_context& context,
+                                       std::uint32_t edge_index = invalid_slot);
 
 llvm::Value* load_slot(llvm::IRBuilder<>& builder,
                        const slot_storage& slot_allocas,

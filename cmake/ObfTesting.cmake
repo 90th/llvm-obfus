@@ -7,7 +7,7 @@ configure_file(tests/lit.cfg.py.in
 
 add_test(
   NAME obf-lit
-  COMMAND "${OBF_LIT}" -j 1 -sv "${CMAKE_CURRENT_BINARY_DIR}/tests"
+  COMMAND "${OBF_LIT}" -j 3 -sv "${CMAKE_CURRENT_BINARY_DIR}/tests"
 )
 
 add_test(

@@ -3,6 +3,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 
 
 TARGETS = ("ordinary_value", "ordinary_void", "strong_value", "strong_void")
@@ -232,6 +233,89 @@ def captured_values(path):
     return tokens, [next(iter(values)) for values in seeds]
 
 
+def reachable_module(text):
+    # Follow globals as well as functions. Keep each reachable body intact.
+    definitions = {function["name"]: function for function in FUNCTION.finditer(text)}
+    definitions.update({global_value["name"]: global_value for global_value in
+                        re.finditer(rf"(?m)^@(?P<name>{SYMBOL}) = [^\n]*$", text)})
+    retention_lists = {"llvm.used", "llvm.compiler.used"}
+    seed_ctor_name = "__obf_vm_seed_ctor"
+    seed_ctor = definitions.get(seed_ctor_name)
+    seed_stores = []
+    if seed_ctor is not None:
+        # This generated constructor contains only independent seed stores.
+        # A store matters only if a reachable wrapper or resolver reads its seed.
+        lines = seed_ctor.group().splitlines()
+        require(lines[0] == f"define private void @{seed_ctor_name}() {{"
+                and lines[1] == "entry:" and lines[-2:] == ["  ret void", "}"],
+                "unexpected VM seed constructor structure")
+        store_pattern = re.compile(
+            rf"  store i64 xor \(i64 ptrtoint \(ptr @{SYMBOL} to i64\), i64 -?\d+\), "
+            rf"ptr @(?P<destination>{SYMBOL}), align \d+")
+        for line in lines[2:-2]:
+            store = store_pattern.fullmatch(line)
+            require(store is not None, "unexpected VM seed constructor instruction")
+            destination = store["destination"]
+            require(destination in definitions and re.fullmatch(
+                rf"@{re.escape(destination)} = private global i64 0(?:, align \d+)?",
+                definitions[destination].group()) is not None,
+                "VM seed constructor destination is not a private zero-initialized seed")
+            seed_stores.append((destination, line))
+
+    pending = ["main"] + [name for name in definitions
+                          if name.startswith("llvm.") and name not in retention_lists]
+    reachable, retained_seeds = set(), set()
+    while True:
+        while pending:
+            name = pending.pop()
+            if name in reachable or name not in definitions:
+                continue
+            reachable.add(name)
+            if name != seed_ctor_name and name not in retention_lists:
+                pending.extend(re.findall(rf"@({SYMBOL})", definitions[name].group()))
+        if seed_ctor_name not in reachable:
+            break
+        # Seed stores can retain wrappers with further resolver dependencies.
+        selected = [(destination, line) for destination, line in seed_stores
+                    if destination in reachable and destination not in retained_seeds]
+        if not selected:
+            break
+        for destination, line in selected:
+            retained_seeds.add(destination)
+            pending.extend(re.findall(rf"@({SYMBOL})", line))
+
+    replacements = {}
+    if seed_ctor_name in reachable:
+        replacements[seed_ctor_name] = "\n".join(
+            lines[:2] + [line for destination, line in seed_stores if destination in retained_seeds]
+            + lines[-2:])
+    for name in retention_lists & definitions.keys():
+        # llvm.used preserves existing dependencies, not unrelated VM targets.
+        retention = re.fullmatch(
+            rf"(?P<prefix>@{re.escape(name)} = appending global )\[\d+ x ptr\] "
+            rf"\[(?P<operands>(?:ptr @{SYMBOL}(?:, ptr @{SYMBOL})*)?)\](?P<suffix>.*)",
+            definitions[name].group())
+        require(retention is not None, f"unexpected @{name} operand list")
+        operands = [operand for operand in retention["operands"].split(", ") if operand
+                    and (operand.removeprefix("ptr @") in reachable
+                         or operand.removeprefix("ptr @") not in definitions)]
+        if operands:
+            reachable.add(name)
+            replacements[name] = (f"{retention['prefix']}[{len(operands)} x ptr] "
+                                  f"[{', '.join(operands)}]{retention['suffix']}")
+
+    # Join once to avoid repeated copies of the unrelated protected bodies.
+    pieces, cursor = [], 0
+    for name, definition in sorted(definitions.items(), key=lambda item: item[1].start()):
+        if name in reachable and name not in replacements:
+            continue
+        pieces.append(text[cursor:definition.start()])
+        pieces.append(replacements.get(name, "") if name in reachable else "")
+        cursor = definition.end()
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def scenario(text, target, token):
     function = roots(text)[target]
     if target in EXPECTED_VALUES:
@@ -262,7 +346,7 @@ entry:
   %exit = select i1 %ok, i32 0, i32 1
   ret i32 %exit
 }}'''
-    return bind_fixture_writer(replace_spans(text, [(main.start(), main.end(), replacement)]))
+    return reachable_module(bind_fixture_writer(replace_spans(text, [(main.start(), main.end(), replacement)])))
 
 
 def register_tokens(text, target, values):
@@ -299,15 +383,21 @@ def check(text, captures, prefix, command):
         _, hard_limit = resource.getrlimit(resource.RLIMIT_CORE)
         resource.setrlimit(resource.RLIMIT_CORE, (0, hard_limit))
     tokens, seeds = captured_values(captures)
-    path = pathlib.Path(str(prefix) + ".scenario.ll")
+    prefix = pathlib.Path(prefix)
 
     def run(module, target, token, admitted, label):
-        path.write_text(scenario(module, target, token), encoding="utf-8")
-        try:
-            completed = subprocess.run(command + [str(path)], capture_output=True, text=True, timeout=30)
-        except subprocess.TimeoutExpired as error:
-            raise SystemExit(f"{target}/{label}: token {token:#018x} timed out\n"
-                             f"stdout={error.stdout!r}\nstderr={error.stderr!r}") from error
+        # A fresh directory also avoids overwriting an older interrupted lit
+        # run's scenario while its lli process still has the file open.
+        with tempfile.TemporaryDirectory(prefix=prefix.name + ".scenario-", dir=prefix.parent) as directory:
+            path = pathlib.Path(directory) / f"{target}-{label}.ll"
+            path.write_text(scenario(module, target, token), encoding="utf-8")
+            try:
+                # Invoke lli directly, not through a shell. subprocess.run
+                # kills and waits for this child on timeout before cleanup.
+                completed = subprocess.run(command + [str(path)], capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired as error:
+                raise SystemExit(f"{target}/{label}: token {token:#018x} timed out\n"
+                                 f"stdout={error.stdout!r}\nstderr={error.stderr!r}") from error
         if admitted:
             require(completed.returncode == 0 and completed.stdout.splitlines() == ["SIDE", "ACCEPT"],
                     f"{target}/{label}: registered token rejected or side effects incorrect\n"
@@ -318,32 +408,29 @@ def check(text, captures, prefix, command):
                     f"normal exits and LLVM parse/loading failures are not rejection\n"
                     f"exit={completed.returncode}\n{completed.stdout}\n{completed.stderr}")
 
-    try:
-        for target_id, target in enumerate(TARGETS):
-            membership_count = sum(token_operand(line) is not None
-                                   for line in roots(text)[target].group().splitlines())
-            require(set(tokens[target_id]) == set(range(membership_count)),
-                    f"{target}: missing runtime capture for a registered token")
-            registered = list(tokens[target_id].values())
-            canonical = seeds[target_id]
-            require(canonical not in registered and 0 not in registered,
-                    f"{target}: fixture requires unregistered canonical and zero tokens")
-            for index, token in tokens[target_id].items():
-                run(text, target, token, True, f"registered-{index}")
-            other = 1
-            while other in registered or other == canonical:
-                other += 1
-            for label, token in (("canonical-impostor", canonical), ("zero", 0), ("other-invalid", other)):
-                run(text, target, token, False, label)
-            # These membership-only fixture variants leave bytecode, target
-            # encoding, return poisoning, and the admission CFG unchanged.
-            member_text = register_tokens(text, target, [canonical])
-            run(member_text, target, canonical, True, "canonical-registered")
-            duplicate_text = register_tokens(text, target, [registered[0], registered[0]])
-            run(duplicate_text, target, registered[0], True, "duplicate-member")
-            run(duplicate_text, target, other, False, "duplicate-nonmember")
-    finally:
-        path.unlink(missing_ok=True)
+    for target_id, target in enumerate(TARGETS):
+        membership_count = sum(token_operand(line) is not None
+                               for line in roots(text)[target].group().splitlines())
+        require(set(tokens[target_id]) == set(range(membership_count)),
+                f"{target}: missing runtime capture for a registered token")
+        registered = list(tokens[target_id].values())
+        canonical = seeds[target_id]
+        require(canonical not in registered and 0 not in registered,
+                f"{target}: fixture requires unregistered canonical and zero tokens")
+        for index, token in tokens[target_id].items():
+            run(text, target, token, True, f"registered-{index}")
+        other = 1
+        while other in registered or other == canonical:
+            other += 1
+        for label, token in (("canonical-impostor", canonical), ("zero", 0), ("other-invalid", other)):
+            run(text, target, token, False, label)
+        # These membership-only fixture variants leave bytecode, target
+        # encoding, and the full admission CFG unchanged.
+        member_text = register_tokens(text, target, [canonical])
+        run(member_text, target, canonical, True, "canonical-registered")
+        duplicate_text = register_tokens(text, target, [registered[0], registered[0]])
+        run(duplicate_text, target, registered[0], True, "duplicate-member")
+        run(duplicate_text, target, other, False, "duplicate-nonmember")
     print("VM hidden-token admission: registered callers admitted; impostors trap before side effects")
 
 

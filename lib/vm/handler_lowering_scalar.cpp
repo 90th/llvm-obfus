@@ -1368,6 +1368,7 @@ bool lower_scalar_instruction(llvm::IRBuilder<>& builder,
                                                    0x10000 + instruction_index);
         // A select permits poison here, but a synthesized branch does not.
         condition = builder.CreateFreeze(condition, "obf.vm.select.cond");
+        llvm::Value* next_target = activate_validated_target(builder, context);
         builder.CreateCondBr(condition, true_block, false_block);
 
         llvm::IRBuilder<> true_builder(true_block);
@@ -1419,10 +1420,6 @@ bool lower_scalar_instruction(llvm::IRBuilder<>& builder,
           rotate_to_mapping(
               merge_builder, context, static_cast<std::uint32_t>(instruction_index + 1));
         }
-        llvm::Value* next_target = decode_target_dispatch(merge_builder,
-                                                          function_context,
-                                                          context.layout.fallthrough_target_offset,
-                                                          0x10300 + instruction_index);
         emit_dispatch(merge_builder,
                       function_context,
                       next_target,
