@@ -1,790 +1,146 @@
 # llvm-obfus
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![LLVM](https://img.shields.io/badge/LLVM-21%2B-262D3A?logo=llvm&logoColor=white)](https://llvm.org/)
-[![C++23](https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/23)
-[![Top language](https://img.shields.io/github/languages/top/90th/llvm-obfus)](https://github.com/90th/llvm-obfus)
-[![Last commit](https://img.shields.io/github/last-commit/90th/llvm-obfus)](https://github.com/90th/llvm-obfus/commits)
+[![LLVM](https://img.shields.io/badge/LLVM-21%2B-262D3A?logo=llvm&logoColor=white)](docs/building.md)
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white)](docs/building.md)
 
-`llvm-obfus` is an out-of-tree LLVM 21+ pass plugin for policy-driven IR obfuscation.
+`llvm-obfus` is an out-of-tree LLVM pass plugin for function-selective obfuscation and virtualization.
+Configure it with YAML or source annotations. The main entry point is `obf-safe-pipeline`.
 
-The plugin applies native LLVM IR transforms to selected functions. The main entry point is `obf-safe-pipeline`. It runs virtualization, structural rewrites, string and constant protection, self-checksumming, zero-comparison lowering, late indirect dispatch, and final artifact cleanup.
+**[Build](docs/building.md) · [Usage](docs/usage.md) · [Configuration](docs/configuration.md) · [Documentation](docs/README.md) · [Security](SECURITY.md)**
 
-The design goal is simple. The passes make static recovery much harder and stay inside normal LLVM semantics. The project does not rely on malformed objects, inline-asm traps, EH spoofing, or target-specific parser breaks.
+## Features
 
----
+- VM bytecode with encoded dispatch, registered caller tokens, and instruction/successor integrity checks.
+- MBA, instruction substitution, CFG flattening, outlining, and seeded indirect dispatch.
+- String and constant encoding, with optional authenticated runtime decoding.
+- Code-as-data self-checksum with post-link binding.
+- Release marker cleanup and configurable symbol-isolation checks.
 
-## Visual Comparison
+Levels control pass eligibility. Input shape and configuration determine which transforms apply.
 
-### 1. Decompiler Comparison
+| Level | Purpose |
+|---|---|
+| `none` | Requests no transforms, subject to enforced security floors |
+| `light` | Permits string encoding, constant encoding, and block splitting |
+| `strong` | Permits native arithmetic and control-flow transforms |
+| `vm` | Permits VM execution and selected supporting transforms |
+| `strong_vm` | Adds VM implementation hardening and enforces admission for VM-eligible functions |
 
-The left image shows the original function. The right image shows the obfuscated function.
+Profiles (`fast`, `standard`, `guarded`, `fortress`, `lab`) set budgets and defaults.
+See the [configuration reference](docs/configuration.md) for the full pass matrix and selection rules.
 
-The obfuscated output contains expanded arithmetic and an indirect dispatch path.
+## Supported workflows
 
-| Baseline Function (`check_license`) | Obfuscated Function (`config_process`) |
-|:---:|:---:|
-| ![Baseline Decompiled Output](images/baseline_decomp.png) | ![Obfuscated Decompiled Output](images/obfuscated_decomp.png) |
+Linux and Windows x86-64. LLVM 21 minimum, with matching tools and plugin hosts.
 
-### 2. Control-Flow Graph Comparison
+| Input | Workflow |
+|---|---|
+| C / C++ | `obf-clang` / `obf-clang++`, or direct Clang plugin loading |
+| LLVM bitcode | `obf-bc`, followed by compilation and runtime linkage |
+| Rust / Cargo | `obf-rustc` with a compatible nightly or development toolchain |
+| Zig | LLVM bitcode workflow with a compatible toolchain |
+| TinyGo | `obf-tinygo` on Linux |
 
-The second comparison shows a baseline routine and an obfuscated VM dispatcher.
+Windows plugins require compatible hosts that export LLVM symbols.
+Clang uses `obf_clang_plugin.dll`. `opt` uses `obf_plugin.dll`.
 
-| Baseline Routine (`main`) | Obfuscated VM Dispatcher (`sub_140003E00`) |
-|:---:|:---:|
-| ![Baseline CFG](images/baseline_cfg.png) | ![Obfuscated CFG](images/obfuscated_cfg.png) |
+## Build on Linux
 
----
-
-## Overview
-
-- **Design Model**: Function-selective policy engine driven by YAML configuration or source-level `__attribute__((annotate(...)))` tags. The direct `opt` interface also accepts command-line configuration flags on non-Windows hosts.
-- **Compiler Compatibility**: Uses LLVM New Pass Manager (NPM) extension points. Clang/Clang++, LLVM bitcode, Rust, Zig, and TinyGo integrations are supplied by wrappers or bitcode workflows.
-- **Platform Support**: The C/C++ plugin, runtime, Clang wrapper, bitcode wrapper, Rust (`obf-rustc`), and Zig workflows support Linux and Windows x86_64. TinyGo workflows are currently Linux-only.
-- **Profiles**: Five built-in performance-versus-security profiles: `fast`, `standard`, `guarded`, `fortress`, and `lab`.
-- **Clean Artifacts**: Final cleanup strips release markers, annotations, and local SSA names. Security gates verify configured symbol-isolation invariants.
-
----
-
-## Main Features
-
-### Strong Virtualization and MBA Flattening
-
-- Protection levels are `none`, `light`, `strong`, `vm`, and `strong_vm`.
-- `vm` and `strong_vm` lower selected functions into VM-backed execution paths.
-- The VM wrapper keeps the selected function's linkage and visibility. Its implementation has internal linkage and default visibility.
-- Shared VM seed resolvers use separate integer widths when selected functions have different function-pointer sizes.
-- Ordinary `vm` caches encoded targets with naturally aligned, monotonic atomic loads and stores. The cache does not publish other runtime state.
-- Pointer widths that cannot use LLVM integer atomics use local decoding. `strong_vm` always uses local decoding.
-- Generated VM thunks and implementations use the selected function's address space. The pointer encoding uses that space's pointer width.
-- VM island, decoy, and split helpers accept state pointers in the module's alloca address space.
-- VM wrappers, implementations, thunks, and helpers keep audited execution and subtarget attributes, including denormal modes, target features, and stack-probe settings.
-- In-place VM rewriting retains `no_caller_saved_registers` and `no_callee_saved_registers` on the original function. Helpers with different signatures do not inherit these ABI attributes.
-- Helper extraction keeps attributes for the helper's own ABI. Body replacement removes invalidated memory, synchronization, progress, and inlining promises.
-- Later hardening stages also process `strong_vm` implementation bodies, not just the public wrapper.
-- Candidate analysis (`lib/vm/candidate_analysis.cpp`) skips incompatible constructs (varargs, non-integral pointers, complex EH pads) and gives clear diagnostics if instruction limits are exceeded.
-- The VM lowers scalar `llvm.umin`, `llvm.smin`, `llvm.umax`, and `llvm.smax` through frozen operands, integer comparison, and select handlers. Each intrinsic costs four virtual instructions; vector forms remain unsupported.
-- VM `select` handlers keep vector conditions lane-wise. Scalar branch handlers freeze their conditions before branching to preserve poison and `undef` semantics.
-- The VM rejects ordered comparisons at LLVM's maximum integer width rather than constructing an invalid widened type. `strong_vm` reports this as an admission failure.
-- VM bytecode checks compare every decoded header chunk exactly with its expected decoded value, including semantically inert padding.
-- Before handler effects, the VM checks the complete 64-bit post-header state and every encoded successor target.
-- Successor checks bind the exact dispatch index and full 64-bit entry state. The VM later activates cached decoded SSA values without rereading successor payloads.
-- Volatile bytecode loads preserve runtime tamper observation after optimization.
-- Failed checks trap before the affected call, store, edge assignment, or return. This includes first-call and successor-target failures.
-- Return encoding still combines the return key with the registered token. The VM does not rely solely on wrong-result poisoning.
-- Rolling decode and sampled probes provide diffusion, not proof of authentication.
-- Bytecode anchor copies use seeded, bijective byte placement and per-byte masks. The decoder restores canonical ciphertext before the integrity checks.
-- Distinct physical copies prevent identical-data coalescing within each anchor pool. This changes data-reference relationships without runtime decode buffers or larger individual payloads.
-- See [VM bytecode integrity contract](SECURITY.md#vm-bytecode-integrity-contract) for the checked fields, exercised scope, and limits.
-- MBA rewriting diversifies arithmetic identities across `add`, `sub`, `xor`, and `mul`. It also rewrites `udiv` and `urem` by power-of-two constant divisors. It works directly and as part of other transforms such as constant reconstruction and opaque predicates.
-- Shape families include linear identities (`x ^ y = (x | y) - (x & y)`), affine wrappers (`Encode(x) = a*x + b` with odd modular multiplier), polynomial zero terms (depth 3+), and constant-multiplication decomposition.
-- A private `BudgetTracker` enforces a per-expression IR-instruction cap derived from `mba.depth`. When the budget runs out mid-expansion, the engine emits the plain LLVM binary operation instead.
-- `instruction_substitution` rewrites logical `and`, `or`, and `xor` operations into equivalent identities. Each site selects one of two variants and can pad the result with an MBA opaque zero.
-- `zero_comparison` converts integer and string equality checks (`strcmp`, `memcmp`, `strncmp`, `bcmp`, `icmpeq`) into non-branching bitwise XOR reduction ladders and entropy-masked comparisons.
-
-### Seeded Indirect Dispatch
-
-- `indirect_dispatch` is a late pass in the safe pipeline.
-- It rewrites supported conditional branches and switch dispatch sites into per-site masked `blockaddress` plus arithmetic plus `indirectbr` sequences.
-- Each dispatch site derives its masking material from the protected function seed and site index.
-- The implementation reconstructs targets from same-function deltas in SSA instead of emitting absolute dispatch tables in globals.
-- The pass skips unsupported shapes conservatively: EH personalities, EH pads, `invoke`, `callbr`, existing `indirectbr`, `catchswitch`, `catchreturn`, `cleanupreturn`, `resume`, `musttail`, and non-integral program address spaces.
-
-### Code-as-Data Self-Checksumming
-
-- `self_checksum` selects an eligible target function and records a sample range of 16 to 32 bytes.
-- The binder calculates the expected checksum from the final linked bytes.
-- During compilation, the pass creates an **UNBOUND** versioned record.
-- After the final link, `obf-checksum-bind` calculates the checksum of the final file-backed code bytes.
-- The binder then changes the record state to **BOUND**.
-- If execution reaches a protected site with a required UNBOUND record, the program traps.
-- The program does not continue with the protected calculation at that site.
-- `obf-clang` and `obf-clang++` bind records automatically for supported Linux x86-64 ELF final links.
-- They also bind records automatically for native Windows x86-64 PE executable final links.
-- This behavior also applies to records from object files or static archives.
-- At run time, `rt_core_cc` calculates the checksum for the loaded code bytes.
-- A one-byte change in the sampled range changes the v1 checksum.
-- A software breakpoint changes the checksum when it replaces a sampled byte with `0xCC`.
-- The pass XORs `actual` with `expected` and injects the resulting value into the protected calculation.
-- For integer sites below 64 bits, the pass truncates that XOR value to the site width.
-- The v1 rolling hash does not provide cryptographic collision resistance.
-- `self_checksum` does not authenticate the complete binary.
-- An attacker can change the code and the BOUND record if the attacker can rewrite both.
-- See [Self-checksum security contract](SECURITY.md#self-checksum-security-contract) for the security limits.
-
-### Keyed and Integrity-Checked Runtime Strings
-
-- `string_encoding` handles string encryption.
-- **Ephemeral Micro-Decryption Slots (No Transform-Created Plaintext Buffer)**:
-  - Evaluates supported single-byte loads and bounded direct comparisons (`str[i]`, `strcmp`, `strncmp`, `memcmp`) as transient SSA values. Direct compare lowering is limited to at most 64 effective bytes; larger or unsupported comparisons fall back to the normal decode strategies.
-  - The micro-slot path does not allocate a transform-created contiguous plaintext string buffer (`alloca [N x i8]` or heap buffer). Compare lowering uses short-circuit control flow so it does not intentionally read past the first mismatch/NUL that terminates `strcmp`/`strncmp`.
-  - This is not a physical-register erasure guarantee. LLVM may map, copy, or spill transient SSA values during code generation, and debuggers, tracing, or process-memory inspection can still observe plaintext while it is live.
-- `authenticated_mode` enables the keyed and integrity-checked runtime decode path.
-- The runtime support lives in `runtime/string_auth_runtime.c` and handles keyed string and constant-pool recovery.
-- The transform handles lazy decode, eager decode, constructor fallback, and forwarded-pointer cases.
-- String policy follows actual regional extracts, VM islands and subhelpers, and outlined shards. Generated helpers keep their separate transformation policy.
-- Encoding, reporting, and final validation use the same original owner seed and level. LTO retains this provenance through the final gate.
-- The `strong_vm` string gate rejects surviving source plaintext, including unsupported protected globals and forwarding. A planned strategy is not completed protection.
-- Generated ciphertext, keys, and encoded bytecode carry explicit data provenance. C-string-shaped binary data is not encoded again or mistaken for source plaintext.
-- Authenticated decode waiters tolerate delayed owners without poll-count rejection. Invalid tags, phase tokens, and completed payloads still trap. See [authenticated decode waiting](runtime/README.md#authenticated-decode-waiting).
-- Short compare-only, non-escaping authenticated strings decode through `rt_core_sd3` into per-use stack scratch. The decode path volatile-zeroes the scratch after the compare. Escaping, shared, forwarded, or weakly proven uses keep lazy or constructor stable storage.
-### Constant Pooling
-
-- Constant encoding modes are `off`, `mba_inline`, `keyed_pool`, `auto`, and `all`.
-- `mba_inline` reconstructs constants directly in IR.
-- `keyed_pool` moves constants into keyed, integrity-checked pools that the runtime recovers at use sites.
-- `auto` chooses a strategy per use site based on bit-width and target level.
-
-### Seed and Key Derivation
-
-- The top-level `seed` is the root build input. Function-selective passes such as `indirect_dispatch` derive per-site seeds from the top-level seed, the function name, and the site index. The keyed string and keyed-pool runtime uses the top-level seed directly.
-- `authenticated_mode` and `keyed_pool` use a domain-separated BLAKE2s schedule in `include/obf/support/auth_encoding.h`:
-  `build_key(seed)` -> `function_key(module_id, function_id)` -> `site_key` -> `(enc_key, mac_key)`
-- Authentication uses a keyed BLAKE2s tag over descriptor metadata plus ciphertext. Encryption uses a BLAKE2s-derived XOR keystream with a derived nonce. The scheme does not use AES, ChaCha20, HMAC, or SipHash.
-- The emitted artifacts store the 32-byte `build_key` in internal globals and reconstruct derived keys at runtime. This is an embedded-key, self-contained runtime. It does not use a hardware token, remote service, white-box key split, or entropy-anchor binding.
-- Integrity verification is fail-closed. Descriptor mismatches, tag mismatches, and length mismatches trap in the runtime. The runtime does not return tampered plaintext.
-- `runtime/entropy_anchor.c` supports opaque arithmetic and MBA-style transforms. It exposes five deterministic accessor variants: `direct`, `stack_roundtrip`, `split_recombine`, `xor_neutral`, and `add_sub_neutral`.
-- MBA entropy out-parameter thunks accept cache pointers in the module's alloca address space.
-
-### Stealth ABI and Artifact Cleanup
-
-- The build generates public runtime ABI names in `include/obf/support/runtime_abi_generated.h`.
-- The default public prefix is `rt_core_`.
-- Final cleanup strips marker attributes, removes annotation metadata, anonymizes local and internal obfuscation artifacts, and strips local SSA names.
-- Security gates can fail the build on leaked public `obf` symbols. Set `security.allow_unsafe_config: true` only if you explicitly want to allow a weakened test config.
-
----
-
-## Architecture
-
-```mermaid
-graph TD
-    Config[YAML Config / Profile / Annotations] --> Frontend[lib/frontend - Config Parser & Validator]
-    Source[LLVM IR / Bitcode] --> Analysis[lib/analysis - Feature Extraction]
-    Frontend --> Policy[lib/policy - Policy Engine]
-    Analysis --> Policy
-    Policy --> Pipeline[lib/plugin - Safe Pipeline Orchestrator]
-    
-    subgraph Safe Pipeline Execution Flow
-        Pipeline --> Step1[1. Entropy Init & Dual-Phase VM Lowering]
-        Step1 --> Step2[2. String Encode, Zero-Comparison & Constant Pooling]
-        Step2 --> Step3[3. Opaque GEP, Substitution & Control Flattening]
-        Step3 --> Step4[4. Outlining, Bogus CF, Self-Checksum & Split]
-        Step4 --> Step5[5. Strong VM Implementation Hardening]
-        Step5 --> Step6[6. CFG Cleanup & Indirect Dispatch]
-        Step6 --> Step7[7. Security Gate Enforcement & Artifact Cleanup]
-    end
-
-    Step7 --> Output[Hardened Target Object / Binary]
-    Runtime[runtime/ - libobf_runtime.a] -. Linked .-> Output
-```
-
----
-
-## Supported Frontends
-
-| Frontend | Integration Method | Configuration Requirements | Platform Support |
-|---|---|---|---|
-| **Clang / Clang++** | `-fpass-plugin=<plugin>` or `obf-clang` / `obf-clang++` wrapper | Generic configuration, annotations, or YAML overrides | Linux, Windows |
-| **LLVM Bitcode** | `obf-bc` CLI wrapper or `opt` pass plugin | Valid `.bc` input/output and explicit configuration | Linux, Windows |
-| **Rust (`rustc`/Cargo)** | `obf-rustc` wrapper via `RUSTC_WORKSPACE_WRAPPER` | `frontend: rust`, `default_level: none`, exact symbol names | Linux, Windows |
-| **Zig** | Bitcode pipeline via `zig build-obj -femit-llvm-bc` | `frontend: zig`, `default_level: none`, exact symbol names | Linux, Windows |
-| **TinyGo** | `obf-tinygo` wrapper | `frontend: tinygo`, `default_level: none`, `string_encoding.max_strings_per_module: 0`, exact symbol names | Linux only |
-
----
-
-## Protection Levels
-
-Functions are classified into five protection levels:
-
-| Level | Allow VM | MBA / Sub | CFG Flatten | Strings | Constants | Outlining | Bogus CF | Indirect | Self-Checksum | Split |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `none` | No | No | No | No | No | No | No | No | No | No |
-| `light` | No | No | No | Yes | Yes | No | No | No | No | Yes |
-| `strong` | No | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| `vm` | Yes | No | No | Yes | Yes | No | No | Yes | Yes | Yes |
-| `strong_vm` | Yes | Yes | Yes | Yes | No* | Yes | No | Yes | Yes | No |
-
-\* *In `strong_vm`, constant protection is bypassed during initial function policy to avoid interfering with VM dispatch tables; constants are absorbed directly into bytecode tables and hardened VM handlers.*
-
----
-
-## Profiles
-
-Built-in profiles configure default heuristic thresholds:
-
-| Profile Setting | `fast` | `standard` | `guarded` | `fortress` | `lab` |
-|---|:---:|:---:|:---:|:---:|:---:|
-| `mba.depth` | 1 | 1 | 2 | 3 | 4 |
-| `mba.enable_polynomial` | unset | unset | unset | unset | `true` |
-| `mba.enable_multiplication` | unset | unset | unset | unset | `true` |
-| `mba.max_ir_instructions` | unset | unset | unset | unset | 320 |
-| `block_split.max_splits_per_function` | 1 | 1 | 2 | 4 | 8 |
-| `block_split.min_instructions_per_block` | 2 | 2 | 2 | 1 | 1 |
-| `string_encoding.min_string_length` | 3 | 2 | 2 | 1 | 1 |
-| `string_encoding.max_strings_per_module` | 32 | 128 | 256 | 512 | 1024 |
-| `string_encoding.prefer_lazy_decode` | `true` | `true` | `true` | `false` | `false` |
-| `string_encoding.allow_ctor_fallback` | `true` | `true` | `false` | `false` | `false` |
-| `constant_encoding.max_constants_per_function` | 2 | 4 | 8 | 16 | 32 |
-| `security.fail_on_public_obf_symbol` | `false` | `true` | `true` | `true` | `true` |
-
----
-
-## Build
-
-### Requirements
-
-- CMake 3.24 or higher
-- C++23 compiler: Clang, GCC, or MSVC 2022. Windows builds use `clang-cl` with the Visual Studio toolchain.
-- LLVM 21 or newer development package. LLVM 22.1.7 is verified.
-- Python 3.10 or newer and `lit`
-- LLVM tools: `clang`, `clang++`, `opt`, `llvm-link`, `llc`, `llvm-strip`, `llvm-nm`, `llvm-objdump`, and `llvm-ar`; `ninja` when using the Ninja generator
-- Optional frontend workflows: matching-LLVM nightly/development `rustc` and `cargo` (Linux, Windows); Zig 0.16.x (Linux, Windows); TinyGo 0.41.x with Go 1.23–1.26 and LLD 21 (Linux only)
-
-### Linux Build
+Requires CMake 3.24+, a C++23 compiler, LLVM development files and tools, Python 3.10+, `lit`, and Ninja.
 
 ```sh
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_DIR="$(llvm-config --cmakedir)"
-cmake --build build
+cmake --build build --parallel 3
 ```
 
-### Windows Build (MSVC / clang-cl)
+See [Build and toolchains](docs/building.md) for Windows setup and toolchain requirements.
 
-Open an **x64 Native Tools Command Prompt for VS 2022** or Visual Studio Developer PowerShell:
+## Quick start
 
-```powershell
-cmake -S . -B build -G Ninja `
-  -DCMAKE_BUILD_TYPE=Release `
-  -DLLVM_DIR="C:\path\to\llvm\lib\cmake\llvm" `
-  -DCMAKE_C_COMPILER="clang-cl" `
-  -DCMAKE_CXX_COMPILER="clang-cl"
-cmake --build build
-```
+From the repository root after building:
 
-### Key CMake Cache Variables
-
-- `LLVM_DIR`: Path to LLVM CMake package.
-- `OBF_RUNTIME_ABI_PREFIX`: Prefix for runtime symbols (default: `rt_core_`).
-- `OBF_BENCHMARK_SEED`: Optional fixed integer seed for benchmark builds.
-- `OBF_RUSTC`: Custom path to `rustc`.
-- `OBF_CARGO`: Custom path to `cargo`.
-- `OBF_ZIG`: Custom path to `zig`.
-- `OBF_TINYGO`: Custom path to `tinygo`.
-- `OBF_WINDOWS_PLUGIN_HOST_ROOT`: Path to host build containing exported `opt.exe`, `clang.exe`, and import libraries.
-- `OBF_WINDOWS_RUST_LLVM_HOST_IMAGE`: Path to `rustc_driver-*.dll` for active Windows Rust protection.
-- `OBF_WINDOWS_RUST_LLVM_HOST_IMPORT_LIBRARY`: Path to matching `.lib` for the Rust LLVM owner.
-- `OBF_WINDOWS_RUST_LLVM_HOST_RUSTC`: Path to matching `rustc.exe` for the bound Rust LLVM owner.
-
----
-
-## Quick Start
-
-Compile through the wrapper. It loads the pass plugin and links the matching runtime archive for link actions:
-
-```sh
-build/obf-clang -O1 -fno-inline src/auth.c -o auth_app \
-  --obf-config=path/to/protect.yaml
-```
-
-The wrapper sets `OBF_CONFIG` for the compiler process. Set `OBF_SEED` to override the YAML `seed`:
-
-```sh
-OBF_SEED=20260817 build/obf-clang -O1 -fno-inline src/auth.c -o auth_app \
-  --obf-config=path/to/protect.yaml
-```
-
-For direct Clang use, load the plugin, set the configuration, and link `libobf_runtime` yourself.
-
-Use `obf_plugin.so` on Linux.
-On Windows, use `obf_clang_plugin.dll` with Clang and `obf_plugin.dll` with `opt`.
-
-```sh
-OBF_CONFIG=path/to/protect.yaml \
-clang -O1 -fno-inline \
-  -fpass-plugin=build/obf_plugin.so \
-  -Iinclude -c src/auth.c -o auth.o
-clang auth.o build/libobf_runtime.a -o auth_app
-```
-
-On Windows, replace `obf_plugin.so` with `obf_plugin.dll`.
-Use the generated Windows wrapper when possible.
-
-### Full LTO and ThinLTO
-
-Managed LTO requires ELF targets and an installed `ld.lld` that matches the configured Clang version.
-The wrappers load the plugin in both the frontend and the linker backend.
-Object and archive links do not need to repeat `-flto`.
-
-```sh
-build/obf-clang --obf-config=protect.yaml -O2 -flto=thin -c auth.c -o auth.o
-build/obf-clang --obf-config=protect.yaml -O2 main.o auth.o -o auth_app
-```
-
-Pre-link bitcode keeps its protection and records the policy, source selectors, exclusions, and VM roles.
-LTO keeps the existing minimum-security floors and orchestrator promotions.
-An explicit `none` request does not bypass those floors.
-The backend reevaluates retained native exclusions when protected callee definitions become visible.
-New orchestrator promotions receive protection without repeating transforms on already-protected bodies.
-Live protected boundaries require backend finalization through an undefined hidden guard.
-Missing backend execution fails the final link, including shared-library links.
-The backend validates existing protection without applying VM lowering twice.
-It prepares promotable locals before lowering new O0 targets.
-Managed LTO O0 links use an explicit finalization pipeline because LLVM 22 omits the default ThinLTO plugin callbacks at that level.
-
-Use the same effective configuration and seed for pre-link compilation and final linking.
-Changes to the configuration, seed, or protection options require rebuilding the protected bitcode.
-User ThinLTO caches remain enabled in a namespace keyed by the plugin contents, configuration, and seed.
-The linker dispatcher validates actual inputs before cache lookup, including temporary objects from combined compile-and-link commands.
-Exact requested targets with competing native definitions are rejected instead of treating unused archive bitcode as protection evidence.
-
-Managed routes reject unsupported linkers, non-ELF targets, conflicting custom pipelines, distributed or index-only LTO, and fat-LTO objects.
-They also reject bitcode hidden through linker scripts and unproven script layouts.
-Nonempty bitcode `llvm.dependent-libraries` metadata is unsupported, including metadata in archive members.
-Remove that metadata and pass the complete library closure explicitly.
-Simple native library-wrapper scripts with direct filenames remain supported.
-Move script `-l` operands to the linker command line.
-Direct linker-plugin use must provide equivalent policy and input validation.
-Do not treat frontend `-fpass-plugin` loading alone as an LTO protection contract.
-
-### Self-Checksum Binding
-
-`obf-clang` and `obf-clang++` bind self-checksum records automatically for supported final C/C++ links.
-When `self_checksum` is active on a final wrapper link, specify the output with `-o <path>`.
-
-Object files and static archives can contain UNBOUND records.
-Bind these records only after you create the final executable.
-
-Supported v1 targets are:
-
-| Final target | Creates record | Wrapper binds | Binder support |
-|---|:---:|:---:|---|
-| Linux x86-64 ELF executable | Yes | Yes | Supported |
-| Linux x86-64 PIE | Yes | Yes | Supported |
-| Windows x86-64 PE32+ EXE | Yes | Yes on native Windows | Supported |
-| Windows x86-64 DLL | Can create a record | No | Not supported in v1 |
-| Windows x86 / non-x86-64 PE | No v1 BOUND record | No | Not supported |
-| ARM / ARM64 | No v1 BOUND record | No | Not supported |
-| Object file / static archive | Can contain an UNBOUND record | At final link only | Not a final executable |
-| Windows final link from a Linux host | Raw pass can emit a PE record | No | Cross-host finalization is not supported |
-
-The wrapper rejects an active `self_checksum` Windows final link on a non-Windows host.
-It does not auto-finalize inherited PE records during that unsupported cross-host workflow.
-
-If you do not use the C/C++ wrapper, bind the executable after the final link.
-
-On Linux, disable the GNU build ID before you bind the file:
-
-```sh
-clang protected.o build/libobf_runtime.a -Wl,--build-id=none -o protected_app
-build/obf-checksum-bind protected_app
-```
-
-On Windows, bind the final PE executable before Authenticode signing:
-
-```powershell
-build\obf-checksum-bind.exe protected.exe
-# Sign protected.exe after binding.
-```
-
-`obf-checksum-bind --probe <file>` finds self-checksum record slots without modifying the file.
-It does not prove that the file can be bound.
-
-- `0`: The active platform binder recognizes the image and finds one or more self-checksum record slots.
-- `3`: The active platform binder recognizes the image and finds zero self-checksum record slots.
-- `1`: Input reading, image parsing, or record-section validation failed.
-- `2`: Command-line usage error.
-
-Normal binding mode returns:
-
-- `0`: Records were bound successfully, or all existing records were already valid and BOUND.
-- `1`: Binding failed, including when no `.obfsc` records exist.
-- `2`: Command-line usage error.
-
-Important workflow rules:
-
-- **ELF:** Use `--build-id=none` for a manual link.
-- **Windows:** Follow this sequence: `link -> bind -> sign`.
-- **Windows:** Bind before embedded Authenticode signing. The binder rejects a nonzero PE Security directory.
-- **Windows:** DLL binding is not supported in v1.
-- **Frontends:** `obf-bc`, `obf-rustc`, Zig, and `obf-tinygo` do not run the binder automatically.
-- **C++ Selectors:** LLVM function names are used for target matching. Use `extern "C"` or mangled names for C++ functions.
-
-See [`docs/self-checksum.md`](docs/self-checksum.md) for record layouts, relocation validation, and binary format rules.
-See [`SECURITY.md`](SECURITY.md#self-checksum-security-contract) for security guarantees and defect reporting.
-
-### Source Annotations
-
-Mark sensitive routines directly in C/C++ source:
+1. Create `example.c`:
 
 ```c
-#if defined(__clang__)
-#define OBF_PROTECT(level) __attribute__((annotate("obf:" level)))
-#else
-#define OBF_PROTECT(level)
-#endif
+#include <stdio.h>
 
-OBF_PROTECT("strong_vm")
-int verify_license_token(const char* user, const char* token) {
-    return validate_hash(user, token) ^ 0x5A5A;
+int protected_value(int input) {
+    return (input * 7) ^ 0x5a;
+}
+
+int main(void) {
+    printf("%d\n", protected_value(7));
+    return 0;
 }
 ```
 
----
-
-## LLVM Bitcode
-
-Process standalone bitcode modules with `obf-bc`:
-
-```sh
-# Emit bitcode
-clang -O1 -emit-llvm -c module.c -o module.bc
-
-# Apply safe obfuscation pipeline
-build/obf-bc \
-  --obf-config=config/production.yaml \
-  --obf-seed=20260817 \
-  -o module.obf.bc \
-  module.bc
-
-# Compile and link
-clang module.obf.bc build/libobf_runtime.a -o module_binary
-```
-
-`obf-bc` transforms bitcode. It does not perform the final link.
-If the configuration creates supported v1 records, bind the final executable manually.
-On Linux, use `--build-id=none` when you create the final executable.
-
-The wrapper checks handled interruptions before output commit.
-If an interruption prevents commit, it restores the previous output and removes staged files.
-This includes interruptions delivered by a signal handler during file replacement on Windows.
-
----
-
-## Rust Integration
-
-Protect Rust binaries using `obf-rustc` or Cargo:
-
-```sh
-# Direct rustc invocation
-build/obf-rustc \
-  --obf-config=$(pwd)/config/rust_protect.yaml \
-  --obf-enable \
-  --crate-type=bin \
-  src/main.rs -o rust_app
-
-# Cargo build integration
-#
-# Set these variables to select the crate that the wrapper must protect.
-RUSTC_WORKSPACE_WRAPPER=$(pwd)/build/obf-rustc \
-OBF_CONFIG=$(pwd)/config/rust_protect.yaml \
-OBF_RUST_MANIFEST_DIR=$(pwd) \
-OBF_RUST_CRATE_ROOT=$(pwd)/src/main.rs \
-OBF_RUST_CRATE_NAME=my_app \
-OBF_RUST_CRATE_TYPE=bin \
-cargo build --release
-```
-
-The Cargo wrapper requires an exact crate name and a crate type of `bin` or `cdylib`.
-It also uses one code generation unit for the selected crate.
-
-`obf-rustc` does not bind self-checksum records automatically after the final link.
-Keep `self_checksum` disabled unless you create and bind a supported final executable.
-
----
-
-## Zig Integration
-
-```sh
-# 1. Compile Zig source to bitcode
-zig build-obj -femit-llvm-bc=component.bc component.zig
-
-# 2. Obfuscate via obf-bc
-build/obf-bc \
-  --obf-config=config/zig_protect.yaml \
-  -o component.obf.bc \
-  component.bc
-
-# 3. Assemble and link
-clang component.obf.bc main.c build/libobf_runtime.a -o zig_app
-```
-
-The Zig bitcode workflow does not bind self-checksum records automatically.
-If you enable `self_checksum`, use the manual procedure in [Self-Checksum Binding](#self-checksum-binding).
-Otherwise, keep `self_checksum` disabled.
-
----
-
-## TinyGo Integration
-
-```sh
-# Native Linux TinyGo protected compilation
-build/obf-tinygo \
-  --obf-config=$(pwd)/config/tinygo_protect.yaml \
-  build -scheduler=none -gc=conservative \
-  -o app_go \
-  main.go
-```
-
-`obf-tinygo` does not bind self-checksum records automatically.
-Keep `self_checksum` disabled unless you bind the final file with a supported platform binder.
-
----
-
-## Configuration
-
-Configuration files use standard YAML syntax:
+2. Create `protect.yaml`:
 
 ```yaml
-# Target frontend: generic, rust, zig, or tinygo
-frontend: generic
-
-# Base profile: fast, standard, guarded, fortress, lab
-profile: guarded
-
-# Global PRNG seed (64-bit unsigned integer)
+profile: standard
 seed: 20260817
-
-# Default fallback protection level: none, light, strong, vm, strong_vm
 default_level: none
-
-# Exact function symbol overrides (takes highest precedence)
 overrides:
-  - name: license_verify
+  - name: protected_value
     level: strong_vm
-  - name: decrypt_payload
-    level: strong
-
-# Pattern-matched target rules (wildcard '*' and '?' supported in generic frontend)
-targets:
-  - match: "auth_*"
-    level: strong
-  - match: "crypto_*"
-    level: vm
-
-# String encryption settings
-string_encoding:
-  min_string_length: 2
-  max_strings_per_module: 256
-  prefer_lazy_decode: true
-  allow_ctor_fallback: false
-  authenticated_mode: true
-
-# Constant protection settings
-constant_encoding:
-  mode: auto                 # off, mba_inline, keyed_pool, auto, all
-  max_constants_per_function: 8
-  min_bit_width: 8
-
-# Mixed Boolean-Arithmetic (MBA)
-mba:
-  depth: 2
-  enable_polynomial: false
-  enable_multiplication: false
-  max_ir_instructions: 128
-
-# Virtual Machine settings
-vm:
-  max_virtual_instructions: 512
-  max_mba_depth: 2
-
-# Indirect control dispatch
-indirect_dispatch:
-  enabled: true
-  max_sites_per_function: 8
-  max_switch_targets: 16
-  target_vm_dispatchers: true
-  target_flattened_headers: true
-
-# Basic block splitting
-block_split:
-  max_splits_per_function: 2
-  min_instructions_per_block: 2
-
-# Zero comparison reduction
-zero_comparison:
-  enabled: true
-  max_sites_per_function: 16
-  max_unroll_bytes: 64
-  transform_string_comparisons: true
-  transform_integer_comparisons: true
-
-# Code-as-data self-checksumming
 self_checksum:
-  enabled: true
-  window_size: 32
-  max_sites: 4
-  seed: 20260817
-
-# Security gates and sanitization
-security:
-  fail_on_public_obf_symbol: true
-  strip_release_markers: true
-  allow_unsafe_config: false
-
-debug_preserve_generated_names: false
-emit_progress_warnings: false
+  enabled: false
 ```
 
----
-
-## Safe Pipeline
-
-The safe pipeline execution order runs as follows:
-
-1. **`obf-entropy-init`**: Injects module-level entropy seeds and links entropy anchor bindings.
-2. **`obf-vm` (Level `vm`)**: Lowers `vm`-targeted functions into bytecode and replaces callsites with VM wrappers.
-3. **`obf-vm` (Level `strong_vm`)**: Synthesizes bytecode and dispatch wrappers for `strong_vm` functions.
-4. **`obf-string-encode`**: Encrypts static global strings across post-VM module state.
-5. **`obf-control-flatten`**: Flattens eligible basic-block CFGs into state-driven dispatch loops before later source-site-consuming stages.
-6. **`obf-zero-comparison`**: Lowers source integer/string equality checks to arithmetic XOR ladders.
-7. **`obf-constant-encode`**: Transforms constants into inline MBA arithmetic or keyed pools.
-8. **`obf-instruction-substitute`**: Rewrites source bitwise operations into compound identities after zero-comparison and constant encoding.
-9. **`obf-opaque-gep`**: Encodes global variable access offsets through opaque math.
-10. **`obf-opaque-preds`**: Injects invariant opaque predicate branches.
-11. **`obf-function-outline`**: Outlines selected control-flow blocks into helper shards and preserves handler PHI values on rerouted edges.
-12. **`obf-bogus-cf`**: Injects junk basic blocks and opaque branching loops.
-13. **`obf-self-checksum`**: Injects code-as-data rolling hash verification windows (`rt_core_cc`).
-14. **`obf-block-split`**: Splits eligible linear basic blocks.
-15. **`strong_vm` Implementation Hardening**: Applies secondary hardening passes (`opaque_gep`, `control_flatten`, `outline`, `substitute`, `bogus_cf`) directly to VM interpreter implementations.
-16. **`obf-cfg-state-cleanup`**: Removes dead CFG placeholders and intermediate metadata.
-17. **`obf-indirect-dispatch`**: Replaces remaining control-flow branches and VM dispatch headers with `indirectbr` sequences.
-18. **Security Gate Validation**: Verifies internal symbol isolation and invariants (`enforce_security_gates`).
-19. **`obf-artifact-cleanup`**: Strips release markers, annotations, and internal SSA names.
-
----
-
-## Security Model
-
-- **Defense in Depth**: Combines control-flow obscurity, semantic abstraction (VM), dynamic key derivation, and integrity checks.
-- **Fail-Closed Integrity**: Authenticated string and constant-pool decoders use MAC validation at run time.
-  Failed ciphertext or descriptor checks abort the program.
-  If execution reaches a protected site with a required UNBOUND v1 record, the run-time guard traps.
-- **VM Token Admission**: `vm` and `strong_vm` admit only registered caller tokens before bytecode execution.
-  Unregistered tokens trap before protected side effects.
-  A bytecode entry-state value does not grant admission unless it is also a registered token.
-  The direct virtualization API preserves its explicit disabled-handshake mode.
-- **CFG State Snapshots**: Flattened string comparisons keep the CFG state captured at the decoder's definition.
-  Later blocks use that snapshot instead of their current dispatcher state.
-- **Code-Byte Tamper Dependency**: A BOUND self-checksum site hashes selected loaded instruction bytes.
-  A one-byte change in the sample changes the full v1 checksum.
-  A software breakpoint also changes it when the breakpoint replaces a sampled byte with `0xCC`.
-  Narrow integer sites use a truncated checksum delta in the protected calculation.
-- **No Whole-Binary Authentication**: `self_checksum` does not authenticate the complete executable.
-  It does not stop an attacker who can change both the code and the expected-checksum record.
-  Use signed-code verification if you need binary authentication.
-- **Key Storage Model**: Master build keys and initialization seeds are embedded directly in compiled binaries as internal read-only constants. This project implements a self-contained obfuscation model. It does not rely on external hardware security modules (HSM), remote attestation services, or white-box cryptographic guarantees.
-- **Scope**: The transforms make static reverse engineering, symbolic analysis, and binary decompilation more difficult.
-  They do not prevent manual analysis, instruction tracing, memory inspection, or arbitrary binary changes.
-
-See [`SECURITY.md`](SECURITY.md#self-checksum-security-contract) for the threat model and defect reporting.
-See [`docs/self-checksum.md`](docs/self-checksum.md) for technical binding specifications and binary format rules.
-
----
-
-## Limitations
-
-- **Compilation Overhead**: `vm` and `strong_vm` expansion increases compilation time and memory usage. Target functions should be compiled with `-O1 -fno-inline` or targeted selectively.
-- **Exception Handling**: Functions containing complex C++ landing pads, cleanups, or Windows SEH constructs cannot be lowered into VM bytecode and are retained in native code.
-- **Non-Integral Pointers**: VM translation and indirect dispatch exclude pointers in non-integral address spaces. Outlining stops with an error when a shard function uses a non-integral address space.
-- **Embedded Keys**: Because key schedule root materials reside in the compiled binary, an attacker with full memory inspection capabilities can extract decrypted strings once loaded in memory.
-- **Self-Checksum Scope**: Self-checksum v1 supports Linux x86-64 ELF executables and PIE files.
-  It also supports native Windows x86-64 PE32+ executable files.
-  It does not support Windows DLL binding, x86 targets, ARM targets, Authenticode rebinding, or GNU build-ID recomputation.
-- **Native C++ Selectors**: Generic policy target matching uses LLVM function names.
-  A native C++ function usually has a mangled LLVM name.
-  Use that mangled name in `targets[].match`.
-  You can also use a selector-friendly symbol such as `extern "C"`.
-  This limit applies to policy selection, not to the binder.
-- **MBA Post-Pass Optimization**: Optimized plugin builds place obfuscation late in the optimizer or full-LTO pipeline; `-O0` runs it at pipeline start, and `obf-bc` invokes it explicitly. A second, unconfigured scalar optimization pipeline (such as full `instcombine` or `-O2`) can fold bit-partition, compare-select, and linear opaque-zero identities before code generation.
-- **MBA Native Footprint**: Backend-surviving opaque zeros add instructions to protected functions. Strong and VM targets can grow binaries and increase hot-path latency; select target functions or lower MBA depth when footprint matters.
-
----
-
-## Benchmarks
-
-The `benchmarks/` directory provides baseline versus obfuscated comparison targets:
-
-- **C/C++ Benchmarks**: `license_demo`, `config_demo`, `vm_workflow_demo`, `wpo_demo`
-- **Multi-Language Benchmarks**: `rust_demo` (Rust), `zig_demo` (Zig), `tinygo_demo` (TinyGo)
-
-Build and run benchmark verification:
+3. Compile and run the program:
 
 ```sh
-# Build all benchmark target pairs
-cmake --build build --target obf-benchmarks
-
-# Run end-to-end execution and output parity checks
-cmake --build build --target obf-benchmarks-e2e
-
-# Run binary recovery scoring harness
-cmake --build build --target obf-re-harness-binary
+build/obf-clang --obf-config=protect.yaml \
+  -O1 -fno-inline example.c -o example
+./example
 ```
 
-## Testing
+Expected output:
 
-Run unit tests, runtime validation, and Lit integration tests:
-
-```sh
-# 1. Run C++ transform and policy unit tests
-./build/obf-unit-tests
-
-# 2. Run runtime atomic integrity tests
-./build/obf-runtime-atomic-tests
-
-# 3. Run full LLVM Lit integration test suite
-lit -v build/tests
-
-# Or run all test suites via CTest
-ctest --test-dir build --output-on-failure
+```text
+107
 ```
 
----
+The wrapper loads the plugin and links `libobf_runtime.a`.
+Self-checksum is disabled in this example, so no binding step is needed.
+Policy floors and caller promotions can select functions beyond the explicit target.
 
-## Repository Layout
+Use `obf-clang++` for C++. Select functions by LLVM symbol name or [source annotation](docs/usage.md).
+VM expansion can increase build time, memory use, binary size, and runtime cost.
 
-```
-llvm-obfus/
-├── benchmarks/         # Multi-language benchmark corpus and sample applications
-├── cmake/              # CMake toolchain, target definitions, and build scripts
-├── images/             # Documentation media and control-flow comparison graphs
-├── include/
-│   └── obf/
-│       ├── analysis/   # Feature analysis and complexity metrics headers
-│       ├── frontend/   # Configuration structures and YAML parser definitions
-│       ├── plugin/     # Pass plugin interfaces and stage declarations
-│       ├── policy/     # Function protection level and policy engine headers
-│       ├── report/     # Function report and audit telemetry headers
-│       ├── support/    # Cryptographic schedules, runtime ABI, and atomic helpers
-│       ├── transforms/ # IR transformation pass interfaces
-│       └── vm/         # Virtual machine compiler and candidate analysis headers
-├── lib/
-│   ├── analysis/       # Function metrics and feature extraction
-│   ├── frontend/       # YAML configuration loader and validation
-│   ├── plugin/         # Pass manager integration and pipeline orchestrator
-│   ├── policy/         # Function policy selection logic
-│   ├── report/         # Function report generation implementation
-│   ├── support/        # Runtime ABI, hashing, and configuration builders
-│   ├── transforms/     # Core LLVM IR transformation implementations
-│   └── vm/             # Bytecode compiler and interpreter emission
-├── runtime/            # Static runtime support library (entropy anchor, auth strings)
-├── tests/
-│   ├── lit/            # End-to-end LLVM Lit regression test suite
-│   └── unit/           # C++ unit tests (obf_unit_tests, runtime_atomic_tests)
-└── tools/              # Tooling and frontend wrappers (obf-clang, obf-bc, obf-rustc, obf-tinygo, obf-opt, obf-driver)
-```
+## Security boundaries
 
----
+Keys are embedded in the binary. Debugging, tracing, and memory inspection can expose live plaintext.
+
+- VM header and successor checks run before handler effects. They are not cryptographic authentication.
+- Authenticated runtime decoders check descriptors, ciphertext tags, and completed payloads.
+  A valid-looking abandoned decode owner can leave waiters pending indefinitely.
+- Self-checksum covers selected code samples, not the whole binary. Required records must be bound after the final link.
+- Ordinary `vm` can leave unsupported functions native.
+  The `strong_vm` admission gate applies only while VM eligibility remains enabled.
+
+Exception edges or inline assembly can disable VM eligibility, even for an exact `strong_vm` override.
+See [feature restrictions](docs/configuration.md#feature-restrictions) and [SECURITY.md](SECURITY.md) for the full limits and private reporting contact.
+
+## Documentation
+
+| Task | Guide |
+|---|---|
+| Build and select compatible tools | [Build and toolchains](docs/building.md) |
+| Use annotations, bitcode, or managed ELF LTO | [Usage](docs/usage.md) |
+| Set selectors, profiles, and transform options | [Configuration](docs/configuration.md) |
+| Integrate Rust, Zig, or TinyGo | [Other frontends](docs/frontends.md) |
+| Understand transforms and pipeline order | [Protection reference](docs/protection.md) |
+| Bind self-checksum records | [Self-checksum binding](docs/self-checksum.md) |
+| Run tests, benchmarks, and audits | [Development](docs/development.md) |
+| View existing decompiler and control-flow images | [Visual examples](docs/visual-examples.md) |
+
+See the [documentation index](docs/README.md) for runtime and contribution references.
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
-
----
-
-<div align="center">
-
-Developed by [@90th](https://github.com/90th)
-
-</div>
+[GNU General Public License v3.0](LICENSE).
+Developed by [@90th](https://github.com/90th).

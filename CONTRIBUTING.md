@@ -3,8 +3,10 @@
 ## Toolchain Requirements
 * **CMake**: 3.24+
 * **Compiler**: Native C++23 support
-* **LLVM**: 21+
-* **Testing**: Python 3 and LLVM `lit`
+* **LLVM**: 21 minimum. Use compatible tools from the selected installation.
+* **Testing**: Python 3.10+ and LLVM `lit`
+
+See [Build and toolchains](docs/building.md) for platform and plugin-host requirements.
 
 ## Coding Standards
 * Run `clang-format -i` on your changes before opening a pull request.
@@ -19,18 +21,18 @@ Validate your changes locally before submitting:
 # Configure the build
 cmake -S . -B build -DLLVM_DIR="$(llvm-config --cmakedir)"
 
-# Fast contributor checks
-cmake --build build --target obf-clang-wrappers obf-driver obf-unit-tests obf-runtime-atomic-tests -- -j1
-ctest --test-dir build --output-on-failure -R "obf-lit|obf-unit-tests|obf-runtime-atomic-tests"
+# Build and run all registered tests
+cmake --build build --parallel 3
+ctest --test-dir build -j 3 --output-on-failure
 
 # Opt-in sequential benchmark, audit, recoverability, diversity, and multiseed checks
-cmake --build build --target obf-benchmarks -- -j1
-cmake --build build --target obf-benchmarks-e2e -- -j1
-cmake --build build --target obf-audit-benchmarks -- -j1
-cmake --build build --target obf-re-harness -- -j1
-cmake --build build --target obf-re-harness-binary -- -j1
-cmake --build build --target obf-re-harness-binary-seeds -- -j1
-cmake --build build --target obf-seed-diversity -- -j1
+cmake --build build --parallel 3 --target obf-benchmarks
+cmake --build build --parallel 3 --target obf-benchmarks-e2e
+cmake --build build --parallel 3 --target obf-audit-benchmarks
+cmake --build build --parallel 3 --target obf-re-harness
+cmake --build build --parallel 3 --target obf-re-harness-binary
+cmake --build build --parallel 3 --target obf-re-harness-binary-seeds
+cmake --build build --parallel 3 --target obf-seed-diversity
 ```
 
 `obf-benchmarks` builds the four core C and C++ corpus targets and adds the Rust, Zig, and TinyGo corpus targets when compatible toolchains are configured. `obf-benchmarks-e2e` then proves baseline versus obfuscated runtime parity for every built corpus benchmark. `obf-audit-benchmarks` audits every built benchmark pair. The current `obf-re-harness` and `obf-seed-diversity` checks intentionally stay scoped to `license_demo`, `config_demo`, and `vm_workflow_demo`.

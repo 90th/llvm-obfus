@@ -1,6 +1,6 @@
 # Benchmarks
 
-This directory will hold the benchmark corpus used for:
+This directory contains the benchmark corpus for:
 
 - baseline versus obfuscated comparisons
 - overhead measurements
@@ -19,20 +19,29 @@ Compatible optional language corpus targets:
 - `zig_demo` from `corpus/zig_demo_component.zig` and `corpus/zig_demo_main.zig`
 - `tinygo_demo` from `corpus/tinygo_demo.go`
 
-The four C and C++ targets are always in the build corpus. CMake adds Rust with a nightly or development `rustc`, matching LLVM major/minor, and Cargo. CMake adds Zig with Zig 0.16.x on a native Linux host. CMake adds TinyGo with TinyGo 0.41.x, Go 1.23 through 1.26, LLVM 21 `llc`, and LLD on native Linux.
+The four core targets require a loadable pass plugin.
+CMake adds optional language targets when their toolchain checks pass:
+
+- Rust requires Cargo and a nightly or development `rustc` with matching LLVM major and minor versions.
+  Windows also requires a plugin bound to the Rust LLVM host.
+- Zig requires Zig 0.16.x on native Linux or Windows.
+- TinyGo requires native Linux, TinyGo 0.41.x with embedded LLVM 20, and Go 1.23 through 1.26.
+  The project LLVM package, `llc`, and LLD must use version 21.
+
+See [frontend requirements](../docs/frontends.md) for setup and limits.
 
 The `obf-re-harness` and `obf-seed-diversity` targets analyze only `license_demo`, `config_demo`, and `vm_workflow_demo`.
 
 Build benchmark pairs with:
 
 ```sh
-cmake --build build --target obf-benchmarks -- -j1
+cmake --build build --parallel 3 --target obf-benchmarks
 ```
 
 Run default-mode and benchmark-mode parity checks with:
 
 ```sh
-cmake --build build --target obf-benchmarks-e2e -- -j1
+cmake --build build --parallel 3 --target obf-benchmarks-e2e
 ```
 
 This target checks normal-mode behavior and benchmark output for each baseline/protected pair.
@@ -48,7 +57,7 @@ For reproducible checkpoint work, configure a dedicated build with a fixed seed:
 cmake -S . -B build-ghidra-check \
   -DLLVM_DIR="$(llvm-config --cmakedir)" \
   -DOBF_BENCHMARK_SEED=151616
-cmake --build build-ghidra-check --target obf-benchmarks -- -j1
+cmake --build build-ghidra-check --parallel 3 --target obf-benchmarks
 ```
 
 Artifacts are written under `build/benchmarks/<name>/`:
