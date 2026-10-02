@@ -34,16 +34,24 @@ def admission_cases():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("binaries", nargs="+", type=Path)
+    parser.add_argument("baseline", type=Path)
+    parser.add_argument("protected", nargs="+", type=Path)
     args = parser.parse_args()
     environment = os.environ.copy()
     environment.pop("OBF_BENCH_ITERS", None)
+    binaries = [args.baseline, *args.protected]
+    secrets = [argv[0].encode("utf-8") + b"\0" for argv, accepted in admission_cases() if accepted]
+    for binary in args.protected:
+        image = binary.read_bytes()
+        for secret in secrets:
+            if secret in image:
+                raise AssertionError(f"{binary.name}: protected license remains plaintext")
 
     for argv, accepted in admission_cases():
         expected_status = 0 if accepted else 1
         expected_message = "ACCESS GRANTED" if accepted else "ACCESS DENIED"
         reference = None
-        for binary in args.binaries:
+        for binary in binaries:
             result = subprocess.run(
                 [str(binary), *argv],
                 check=False,

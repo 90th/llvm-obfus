@@ -23,6 +23,8 @@ inline bool is_preserved_source_function_attribute(llvm::Attribute attribute) {
         .Case("no-nans-fp-math", true)
         .Case("no-signed-zeros-fp-math", true)
         .Case("no-trapping-math", true)
+        .Case("obf.string.owner.seed", true)
+        .Case("obf.string.owner.level", true)
         .Case("probe-stack", true)
         .Case("sign-return-address", true)
         .Case("sign-return-address-key", true)
@@ -34,6 +36,7 @@ inline bool is_preserved_source_function_attribute(llvm::Attribute attribute) {
         .Case("tune-features", true)
         .Case("unsafe-fp-math", true)
         .Case("use-soft-float", true)
+        .Case("vm.string.owner", true)
         .Default(false);
   }
 

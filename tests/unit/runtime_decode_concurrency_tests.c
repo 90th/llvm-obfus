@@ -9,13 +9,16 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <poll.h>
 #endif
 
 #define ObfAtomicLoadU64Acquire ObfAtomicLoadU64AcquireBase
 #define ObfAtomicCompareExchangeU64AcqRelRelaxed ObfAtomicCompareExchangeU64AcqRelRelaxedBase
+#define ObfAtomicStoreU64Release ObfAtomicStoreU64ReleaseBase
 #include "obf/support/runtime_atomic.h"
 #undef ObfAtomicLoadU64Acquire
 #undef ObfAtomicCompareExchangeU64AcqRelRelaxed
+#undef ObfAtomicStoreU64Release
 
 #if defined(_MSC_VER)
 #define TEST_THREAD_LOCAL __declspec(thread)
@@ -205,13 +208,36 @@ enum ThreadRole {
   kThreadRoleReader = 2,
 };
 
+enum WriterCheckpoint {
+  kWriterAfterElection = 0,
+  kWriterAfterDecodingStatus = 1,
+  kWriterAfterCompletion = 2,
+};
+
+enum PendingCorruption {
+  kPendingCorruptionNone = 0,
+  kPendingCorruptionCompletion = 1,
+  kPendingCorruptionPhase = 2,
+  kPendingCorruptionTag = 3,
+};
+
 TEST_THREAD_LOCAL enum ThreadRole g_thread_role = kThreadRoleNone;
 
 struct AtomicHookState {
   int enabled;
-  const uint64_t* status_address;
+  uint64_t* status_address;
   uint64_t* completion_address;
   uint64_t cold_status;
+  enum WriterCheckpoint writer_checkpoint;
+  int capture_cold_status;
+  int fast_backoff;
+  uint64_t reader_snapshot_target;
+  uint64_t reader_snapshots;
+  int reader_progress_reached;
+  int reader_returned;
+  uint64_t reader_return_status;
+  enum PendingCorruption pending_corruption;
+  uint8_t* tag_to_corrupt;
   int writer_blocked;
   int writer_may_resume;
   int reader_blocked;
@@ -233,7 +259,7 @@ static void DestroyAtomicHook(void) {
   TestMutexDestroy(&g_atomic_hook.mutex);
 }
 
-static void ConfigureAtomicHook(const uint64_t* status_address,
+static void ConfigureAtomicHook(uint64_t* status_address,
                                 uint64_t* completion_address,
                                 uint64_t cold_status) {
   TestMutexLock(&g_atomic_hook.mutex);
@@ -241,6 +267,16 @@ static void ConfigureAtomicHook(const uint64_t* status_address,
   g_atomic_hook.status_address = status_address;
   g_atomic_hook.completion_address = completion_address;
   g_atomic_hook.cold_status = cold_status;
+  g_atomic_hook.writer_checkpoint = kWriterAfterElection;
+  g_atomic_hook.capture_cold_status = 1;
+  g_atomic_hook.fast_backoff = 0;
+  g_atomic_hook.reader_snapshot_target = 0;
+  g_atomic_hook.reader_snapshots = 0;
+  g_atomic_hook.reader_progress_reached = 0;
+  g_atomic_hook.reader_returned = 0;
+  g_atomic_hook.reader_return_status = 0;
+  g_atomic_hook.pending_corruption = kPendingCorruptionNone;
+  g_atomic_hook.tag_to_corrupt = NULL;
   g_atomic_hook.writer_blocked = 0;
   g_atomic_hook.writer_may_resume = 0;
   g_atomic_hook.reader_blocked = 0;
@@ -308,11 +344,13 @@ static void ResumeReader(void) {
   TestMutexUnlock(&g_atomic_hook.mutex);
 }
 
-static inline void MaybeBlockAfterWriterElection(uint64_t* value, int exchanged) {
-  if (!exchanged || g_thread_role != kThreadRoleWriter) { return; }
+static inline void MaybeBlockWriter(enum WriterCheckpoint checkpoint, const uint64_t* value) {
+  if (g_thread_role != kThreadRoleWriter) { return; }
 
   TestMutexLock(&g_atomic_hook.mutex);
-  if (!g_atomic_hook.enabled || value != g_atomic_hook.completion_address) {
+  if (!g_atomic_hook.enabled || checkpoint != g_atomic_hook.writer_checkpoint ||
+      value != (checkpoint == kWriterAfterDecodingStatus ? g_atomic_hook.status_address
+                                                        : g_atomic_hook.completion_address)) {
     TestMutexUnlock(&g_atomic_hook.mutex);
     return;
   }
@@ -330,8 +368,8 @@ static inline void MaybeBlockAfterReaderStatusLoad(const uint64_t* value, uint64
   if (g_thread_role != kThreadRoleReader) { return; }
 
   TestMutexLock(&g_atomic_hook.mutex);
-  if (!g_atomic_hook.enabled || value != g_atomic_hook.status_address ||
-      observed != g_atomic_hook.cold_status) {
+  if (!g_atomic_hook.enabled || !g_atomic_hook.capture_cold_status ||
+      value != g_atomic_hook.status_address || observed != g_atomic_hook.cold_status) {
     TestMutexUnlock(&g_atomic_hook.mutex);
     return;
   }
@@ -345,20 +383,81 @@ static inline void MaybeBlockAfterReaderStatusLoad(const uint64_t* value, uint64
   TestMutexUnlock(&g_atomic_hook.mutex);
 }
 
+static inline void ObserveReaderCompletionLoad(const uint64_t* value) {
+  if (g_thread_role != kThreadRoleReader) { return; }
+
+  TestMutexLock(&g_atomic_hook.mutex);
+  if (g_atomic_hook.enabled && value == g_atomic_hook.completion_address) {
+    ++g_atomic_hook.reader_snapshots;
+    if (g_atomic_hook.reader_snapshot_target != 0 &&
+        g_atomic_hook.reader_snapshots == g_atomic_hook.reader_snapshot_target) {
+      g_atomic_hook.reader_progress_reached = 1;
+      TestCondBroadcast(&g_atomic_hook.cond);
+    }
+    /* Snapshot one enters the pending path; corrupt only on its next read. */
+    if (g_atomic_hook.reader_snapshots == 2) {
+      if (g_atomic_hook.pending_corruption == kPendingCorruptionCompletion) {
+        ObfAtomicStoreU64ReleaseBase(g_atomic_hook.completion_address, 0);
+      } else if (g_atomic_hook.pending_corruption == kPendingCorruptionPhase) {
+        ObfAtomicStoreU64ReleaseBase(g_atomic_hook.completion_address, g_atomic_hook.cold_status);
+        ObfAtomicStoreU64ReleaseBase(g_atomic_hook.status_address, g_atomic_hook.cold_status);
+      } else if (g_atomic_hook.pending_corruption == kPendingCorruptionTag) {
+        g_atomic_hook.tag_to_corrupt[0] ^= 1u;
+      }
+    }
+  }
+  TestMutexUnlock(&g_atomic_hook.mutex);
+}
+
 static inline uint64_t ObfAtomicLoadU64Acquire(const uint64_t* value) {
   const uint64_t observed = ObfAtomicLoadU64AcquireBase(value);
   MaybeBlockAfterReaderStatusLoad(value, observed);
+  ObserveReaderCompletionLoad(value);
   return observed;
 }
 
 static inline int
 ObfAtomicCompareExchangeU64AcqRelRelaxed(uint64_t* value, uint64_t* expected, uint64_t desired) {
   const int exchanged = ObfAtomicCompareExchangeU64AcqRelRelaxedBase(value, expected, desired);
-  MaybeBlockAfterWriterElection(value, exchanged);
+  if (exchanged) { MaybeBlockWriter(kWriterAfterElection, value); }
   return exchanged;
 }
 
+static inline void ObfAtomicStoreU64Release(uint64_t* value, uint64_t next) {
+  ObfAtomicStoreU64ReleaseBase(value, next);
+  MaybeBlockWriter(kWriterAfterDecodingStatus, value);
+  MaybeBlockWriter(kWriterAfterCompletion, value);
+}
+
+/* Keep counted progress deterministic without changing production limits. */
+static int SkipDecodeSchedulerDelay(void) {
+  int skip;
+  TestMutexLock(&g_atomic_hook.mutex);
+  skip = g_atomic_hook.enabled && g_atomic_hook.fast_backoff;
+  TestMutexUnlock(&g_atomic_hook.mutex);
+  return skip;
+}
+
+#if defined(_WIN32)
+static void TestDecodeSleep(DWORD milliseconds) {
+  if (!SkipDecodeSchedulerDelay()) { Sleep(milliseconds); }
+}
+#define Sleep TestDecodeSleep
+#else
+static int TestDecodePoll(struct pollfd* descriptors, nfds_t count, int timeout) {
+  if (SkipDecodeSchedulerDelay()) { return 0; }
+  return poll(descriptors, count, timeout);
+}
+#define poll TestDecodePoll
+#endif
+
 #include "../../runtime/string_auth_runtime.c"
+
+#if defined(_WIN32)
+#undef Sleep
+#else
+#undef poll
+#endif
 
 enum DecodeKind {
   kDecodeKindString = 0,
@@ -722,12 +821,225 @@ TEST_THREAD_PROC(DecodeThreadMain) {
                                                   fixture->descriptor.binding_id,
                                                   &fixture->topology);
   }
+  if (g_thread_role == kThreadRoleReader) {
+    const uint64_t status = args->kind == kDecodeKindString
+                                ? ObfAtomicLoadU64AcquireBase(
+                                      &((struct StringFixture*)args->fixture)->state_ref.status)
+                                : ObfAtomicLoadU64AcquireBase(
+                                      &((struct ConstantFixture*)args->fixture)->state_ref.status);
+    TestMutexLock(&g_atomic_hook.mutex);
+    if (g_atomic_hook.enabled) {
+      g_atomic_hook.reader_returned = 1;
+      g_atomic_hook.reader_return_status = status;
+      TestCondBroadcast(&g_atomic_hook.cond);
+    }
+    TestMutexUnlock(&g_atomic_hook.mutex);
+  }
   g_thread_role = kThreadRoleNone;
 #if defined(_WIN32)
   return 0;
 #else
   return NULL;
 #endif
+}
+
+static int DeriveFixtureStatuses(enum DecodeKind kind,
+                                 void* fixture,
+                                 struct ObfCacheStatusSet* statuses) {
+  int valid;
+  if (kind == kDecodeKindString) {
+    struct StringFixture* string = (struct StringFixture*)fixture;
+    struct ObfStringValidationContext context;
+    valid = ObfValidateStringDescriptor(&context,
+                                         &string->descriptor,
+                                         string->descriptor.length,
+                                         string->descriptor.binding_id,
+                                         &string->topology) &&
+            ObfDeriveRelocationStatuses(&context.statuses,
+                                         context.mac_key,
+                                         kObfAuthDescriptorKindString,
+                                         string->descriptor.binding_id,
+                                         &string->descriptor,
+                                         &string->topology,
+                                         &string->state_ref);
+    if (valid) { *statuses = context.statuses; }
+    ObfSecureZeroize(&context, sizeof(context));
+  } else {
+    struct ConstantFixture* constant = (struct ConstantFixture*)fixture;
+    struct ObfConstantPoolValidationContext context;
+    valid = ObfValidateConstantPoolDescriptor(&context,
+                                               &constant->descriptor,
+                                               constant->descriptor.length,
+                                               constant->descriptor.binding_id,
+                                               &constant->topology) &&
+            ObfDeriveRelocationStatuses(&context.statuses,
+                                         context.mac_key,
+                                         kObfAuthDescriptorKindConstantPool,
+                                         constant->descriptor.binding_id,
+                                         &constant->descriptor,
+                                         &constant->topology,
+                                         &constant->state_ref);
+    if (valid) { *statuses = context.statuses; }
+    ObfSecureZeroize(&context, sizeof(context));
+  }
+  if (!valid) { Fail("fixture must derive authenticated decode phases"); }
+  return valid;
+}
+
+static int WaitForReaderProgress(void) {
+  for (unsigned attempt = 0; attempt < 30000u; ++attempt) {
+    int progressed;
+    int returned;
+    TestMutexLock(&g_atomic_hook.mutex);
+    progressed = g_atomic_hook.reader_progress_reached;
+    returned = g_atomic_hook.reader_returned;
+    TestMutexUnlock(&g_atomic_hook.mutex);
+    if (returned) {
+      Fail("pending waiter must not return before decoded status publication");
+      return 0;
+    }
+    if (progressed) { return 1; }
+    SleepMillis(1u);
+  }
+  Fail("pending waiter must reach its observed snapshot budget");
+  return 0;
+}
+
+static void TestDelayedOwner(enum DecodeKind kind, enum WriterCheckpoint checkpoint) {
+  struct StringFixture string;
+  struct ConstantFixture constant;
+  void* fixture;
+  struct ObfAuthenticatedStateReferenceV3* state;
+  uint8_t* destination;
+  struct ObfCacheStatusSet statuses;
+  struct DecodeThreadArgs writer_args;
+  struct DecodeThreadArgs reader_args;
+  TestThread writer_thread = 0;
+  TestThread reader_thread = 0;
+
+  if (kind == kDecodeKindString) {
+    InitializeStringFixture(&string);
+    fixture = &string;
+    state = &string.state_ref;
+    destination = string.destination;
+  } else {
+    InitializeConstantFixture(&constant);
+    fixture = &constant;
+    state = &constant.state_ref;
+    destination = constant.destination;
+  }
+  if (!DeriveFixtureStatuses(kind, fixture, &statuses)) { return; }
+  ConfigureAtomicHook(&state->status, &state->completion, statuses.cold);
+  TestMutexLock(&g_atomic_hook.mutex);
+  g_atomic_hook.writer_checkpoint = checkpoint;
+  g_atomic_hook.capture_cold_status = 0;
+  g_atomic_hook.fast_backoff = 1;
+  /*
+   * The election window must outlive the old 2^20 waiter limit. Later
+   * publication windows need only prove that a real pending waiter runs.
+   */
+  g_atomic_hook.reader_snapshot_target =
+      checkpoint == kWriterAfterElection ? (UINT64_C(1) << 20) + 16u : 64u;
+  TestMutexUnlock(&g_atomic_hook.mutex);
+
+  writer_args = (struct DecodeThreadArgs){kind, fixture, NULL, kThreadRoleWriter, NULL};
+  reader_args = (struct DecodeThreadArgs){kind, fixture, NULL, kThreadRoleReader, NULL};
+  if (!StartThread(
+          &writer_thread, DecodeThreadMain, &writer_args, "delayed owner thread must start")) {
+    DisableAtomicHook();
+    return;
+  }
+  if (!WaitForWriterBlocked()) {
+    ReleaseAtomicHookWaiters();
+    JoinThread(&writer_thread, "delayed owner must join after hook timeout");
+    DisableAtomicHook();
+    return;
+  }
+  ExpectU64Eq(ObfAtomicLoadU64AcquireBase(&state->status),
+              checkpoint == kWriterAfterElection ? statuses.cold : statuses.decoding,
+              "held owner must leave decoded status unpublished");
+  if (checkpoint != kWriterAfterCompletion) {
+    ExpectU64Eq(ObfAtomicLoadU64AcquireBase(&state->completion),
+                statuses.decoding,
+                "held elected owner must retain its completion ownership token");
+  }
+  if (!StartThread(
+          &reader_thread, DecodeThreadMain, &reader_args, "delayed owner waiter must start")) {
+    ReleaseAtomicHookWaiters();
+    JoinThread(&writer_thread, "delayed owner must join after waiter start failure");
+    DisableAtomicHook();
+    return;
+  }
+  (void)WaitForReaderProgress();
+  TestMutexLock(&g_atomic_hook.mutex);
+  if (g_atomic_hook.reader_returned) {
+    Fail("waiter must remain pending while decoded publication is held");
+  }
+  TestMutexUnlock(&g_atomic_hook.mutex);
+  ExpectU64Eq(ObfAtomicLoadU64AcquireBase(&state->status),
+              checkpoint == kWriterAfterElection ? statuses.cold : statuses.decoding,
+              "waiter must not take over or advance the elected owner's phase");
+
+  ResumeWriter();
+  JoinThread(&writer_thread, "delayed owner must resume and join");
+  JoinThread(&reader_thread, "delayed owner waiter must join");
+  ExpectU64Eq(g_atomic_hook.reader_return_status,
+              statuses.decoded,
+              "waiter must observe decoded publication before returning");
+  DisableAtomicHook();
+  ExpectPtrEq(writer_args.result, destination, "resumed owner must return the single destination");
+  ExpectPtrEq(reader_args.result, destination, "delayed waiter must return the single destination");
+  if (kind == kDecodeKindString) {
+    VerifyStringDecoded(&string, "delayed string owner");
+  } else {
+    VerifyConstantDecoded(&constant, "delayed constant owner");
+  }
+}
+
+static void TestDelayedOwners(void) {
+  for (unsigned kind = kDecodeKindString; kind <= kDecodeKindConstantPool; ++kind) {
+    for (unsigned checkpoint = kWriterAfterElection; checkpoint <= kWriterAfterCompletion;
+         ++checkpoint) {
+      TestDelayedOwner((enum DecodeKind)kind, (enum WriterCheckpoint)checkpoint);
+    }
+  }
+}
+
+static void RejectCorruptedPendingDecode(enum DecodeKind kind, enum PendingCorruption corruption) {
+  struct StringFixture string;
+  struct ConstantFixture constant;
+  void* fixture;
+  struct ObfAuthenticatedStateReferenceV3* state;
+  uint8_t* tag;
+  struct ObfCacheStatusSet statuses;
+  struct DecodeThreadArgs args;
+
+  if (kind == kDecodeKindString) {
+    InitializeStringFixture(&string);
+    fixture = &string;
+    state = &string.state_ref;
+    tag = string.descriptor.tag;
+  } else {
+    InitializeConstantFixture(&constant);
+    fixture = &constant;
+    state = &constant.state_ref;
+    tag = constant.descriptor.tag;
+  }
+  if (!DeriveFixtureStatuses(kind, fixture, &statuses)) { return; }
+  state->status = statuses.decoding;
+  state->completion = statuses.decoding;
+  ConfigureAtomicHook(&state->status, &state->completion, statuses.cold);
+  g_atomic_hook.capture_cold_status = 0;
+  g_atomic_hook.pending_corruption = corruption;
+  g_atomic_hook.tag_to_corrupt = tag;
+  /*
+   * Entry validation and its first stable snapshot are valid. The reader's
+   * own second completion load mutates state/tag, without another C writer.
+   */
+  args = (struct DecodeThreadArgs){kind, fixture, NULL, kThreadRoleReader, NULL};
+  (void)DecodeThreadMain(&args);
+  DisableAtomicHook();
+  Fail("corrupted pending decode must trap instead of returning");
 }
 
 static void TestDeterministicStringColdCompletionRace(void) {
@@ -998,11 +1310,40 @@ static void TestConcurrentStress(void) {
   }
 }
 
-int main(void) {
+int main(int argc, char** argv) {
   InitializeAtomicHook();
-  TestDeterministicStringColdCompletionRace();
-  TestDeterministicConstantColdCompletionRace();
-  TestConcurrentStress();
+  if (argc == 1) {
+    TestDeterministicStringColdCompletionRace();
+    TestDeterministicConstantColdCompletionRace();
+    TestDelayedOwners();
+    TestConcurrentStress();
+  } else if (argc == 4 && strcmp(argv[1], "--reject") == 0) {
+    enum DecodeKind kind;
+    enum PendingCorruption corruption;
+    if (strcmp(argv[2], "string") == 0) {
+      kind = kDecodeKindString;
+    } else if (strcmp(argv[2], "constant") == 0) {
+      kind = kDecodeKindConstantPool;
+    } else {
+      Fail("rejection mode requires string or constant");
+      DestroyAtomicHook();
+      return EXIT_FAILURE;
+    }
+    if (strcmp(argv[3], "decoding-zero") == 0) {
+      corruption = kPendingCorruptionCompletion;
+    } else if (strcmp(argv[3], "phase-corruption") == 0) {
+      corruption = kPendingCorruptionPhase;
+    } else if (strcmp(argv[3], "pending-tag") == 0) {
+      corruption = kPendingCorruptionTag;
+    } else {
+      Fail("unknown pending rejection scenario");
+      DestroyAtomicHook();
+      return EXIT_FAILURE;
+    }
+    RejectCorruptedPendingDecode(kind, corruption);
+  } else {
+    Fail("usage: runtime-decode-concurrency-tests [--reject string|constant scenario]");
+  }
   DestroyAtomicHook();
   if (g_failures != 0) { return EXIT_FAILURE; }
   return EXIT_SUCCESS;

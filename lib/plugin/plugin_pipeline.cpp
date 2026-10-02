@@ -153,18 +153,8 @@ void enforce_strong_vm_string_gate(llvm::Module& module,
                                    const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                    const virtualized_function_map& virtualized_functions,
                                    const obfuscation_config& config) {
-  llvm::StringMap<std::uint64_t> protected_functions = build_function_seed_map(
-      states, [](const function_policy& policy) { return policy.allow_string_encoding; });
-  llvm::StringMap<protection_level> protected_levels = build_function_level_map(
-      states, [](const function_policy& policy) { return policy.allow_string_encoding; });
-  append_virtualized_function_seeds(
-      protected_functions, &virtualized_functions, [](const function_policy& policy) {
-        return policy.allow_string_encoding;
-      });
-  append_virtualized_function_levels(
-      protected_levels, &virtualized_functions, [](const function_policy& policy) {
-        return policy.allow_string_encoding;
-      });
+  const llvm::StringMap<string_protection_owner> protected_functions =
+      build_string_protection_map(module, states, &virtualized_functions);
 
   const string_encoding_options options = build_string_encoding_options(config);
   const std::vector<string_encoding_result> results = analyze_string_encoding(
@@ -172,24 +162,20 @@ void enforce_strong_vm_string_gate(llvm::Module& module,
       [&](llvm::StringRef function_name) -> std::optional<std::uint64_t> {
         const auto iterator = protected_functions.find(function_name);
         if (iterator == protected_functions.end()) { return std::nullopt; }
-        return iterator->second;
+        return iterator->second.seed;
       },
       [&](llvm::StringRef function_name) -> std::optional<protection_level> {
-        const auto iterator = protected_levels.find(function_name);
-        if (iterator == protected_levels.end()) { return std::nullopt; }
-        return iterator->second;
+        const auto iterator = protected_functions.find(function_name);
+        if (iterator == protected_functions.end()) { return std::nullopt; }
+        return iterator->second.level;
       },
       options,
       config.seed);
 
   for (const string_encoding_result& result : results) {
+    // Producer-tagged binary/local outcomes are excluded by discovery. A
+    // prospective strategy cannot excuse a surviving protected source here.
     if (!result.has_strong_vm_use) { continue; }
-
-    const bool leaves_plaintext = !result.applied;
-    const bool uses_global_fallback =
-        result.applied && result.mode != string_encoding_mode::inline_stack_decode &&
-        result.key_schedule != string_key_schedule_kind::blake2s_keyed_auth_v3;
-    if (!leaves_plaintext && !uses_global_fallback) { continue; }
 
     std::string detail = "string ";
     detail += result.global_name.empty() ? "<unknown>" : result.global_name;
@@ -489,23 +475,8 @@ bool apply_string_encoding_stage(llvm::Module& module,
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config,
                                  const virtualized_function_map* virtualized_functions) {
-  llvm::StringMap<std::uint64_t> protected_functions;
-  llvm::StringMap<protection_level> protected_levels;
-  for (const function_pipeline_state& state : states) {
-    if (should_skip_function(state, nullptr) || !state.report.decision.policy.allow_string_encoding) {
-      continue;
-    }
-    protected_functions[state.function->getName()] = state.report.decision.seed;
-    protected_levels[state.function->getName()] = state.report.decision.policy.level;
-  }
-  append_virtualized_function_seeds(
-      protected_functions, virtualized_functions, [](const function_policy& policy) {
-        return policy.allow_string_encoding;
-      });
-  append_virtualized_function_levels(
-      protected_levels, virtualized_functions, [](const function_policy& policy) {
-        return policy.allow_string_encoding;
-      });
+  const llvm::StringMap<string_protection_owner> protected_functions =
+      build_string_protection_map(module, states, virtualized_functions);
 
   const string_encoding_options options = build_string_encoding_options(config);
   const std::vector<string_encoding_result> results = run_string_encoding(
@@ -514,13 +485,13 @@ bool apply_string_encoding_stage(llvm::Module& module,
         const auto iterator = protected_functions.find(function_name);
         if (iterator == protected_functions.end()) { return std::nullopt; }
 
-        return iterator->second;
+        return iterator->second.seed;
       },
       [&](llvm::StringRef function_name) -> std::optional<protection_level> {
-        const auto iterator = protected_levels.find(function_name);
-        if (iterator == protected_levels.end()) { return std::nullopt; }
+        const auto iterator = protected_functions.find(function_name);
+        if (iterator == protected_functions.end()) { return std::nullopt; }
 
-        return iterator->second;
+        return iterator->second.level;
       },
       options,
       config.seed);
@@ -785,6 +756,7 @@ bool apply_function_outlining_stage(const llvm::SmallVectorImpl<function_pipelin
       continue;
     }
 
+    record_string_protection_owner(*state.function, state.report.decision);
     const function_outlining_options options =
         build_function_outlining_options(config, state.report.decision);
     changed |= run_function_outlining(*state.function, options).shard_count > 0;

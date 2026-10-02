@@ -122,6 +122,11 @@ The second comparison shows a baseline routine and an obfuscated VM dispatcher.
 - `authenticated_mode` enables the keyed and integrity-checked runtime decode path.
 - The runtime support lives in `runtime/string_auth_runtime.c` and handles keyed string and constant-pool recovery.
 - The transform handles lazy decode, eager decode, constructor fallback, and forwarded-pointer cases.
+- String policy follows actual regional extracts, VM islands and subhelpers, and outlined shards. Generated helpers keep their separate transformation policy.
+- Encoding, reporting, and final validation use the same original owner seed and level. LTO retains this provenance through the final gate.
+- The `strong_vm` string gate rejects surviving source plaintext, including unsupported protected globals and forwarding. A planned strategy is not completed protection.
+- Generated ciphertext, keys, and encoded bytecode carry explicit data provenance. C-string-shaped binary data is not encoded again or mistaken for source plaintext.
+- Authenticated decode waiters tolerate delayed owners without poll-count rejection. Invalid tags, phase tokens, and completed payloads still trap. See [authenticated decode waiting](runtime/README.md#authenticated-decode-waiting).
 - Short compare-only, non-escaping authenticated strings decode through `rt_core_sd3` into per-use stack scratch. The decode path volatile-zeroes the scratch after the compare. Escaping, shared, forwarded, or weakly proven uses keep lazy or constructor stable storage.
 ### Constant Pooling
 

@@ -393,6 +393,9 @@ llvm::Function* clone_vm_implementation(llvm::Function& interface_function,
     implementation_function->setPersonalityFn(interface_function.getPersonalityFn());
   }
   sanitize_vm_implementation_attributes(*implementation_function, interface_function);
+  if (read_string_protection_owner(*implementation_function).has_value()) {
+    implementation_function->addFnAttr("vm.string.owner");
+  }
   return implementation_function;
 }
 

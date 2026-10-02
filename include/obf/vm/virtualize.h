@@ -8,6 +8,7 @@
 
 namespace llvm {
 class Function;
+class GlobalVariable;
 }
 
 namespace obf::vm {
@@ -30,6 +31,8 @@ struct virtualization_result {
   std::size_t instruction_count = 0;
   std::string detail;
 };
+
+bool has_encoded_bytecode_payload(const llvm::GlobalVariable& global);
 
 // Virtualized bodies use noinline optnone instead of alwaysinline, minsize,
 // optsize, or optdebug. Rejected candidates remain unchanged.

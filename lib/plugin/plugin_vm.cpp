@@ -34,6 +34,7 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
     if (only_level && state.report.decision.policy.level != *only_level) { continue; }
 
     if (skip_functions.contains(state.function->getName())) { continue; }
+    record_string_protection_owner(*state.function, state.report.decision);
 
     const llvm::SmallVector<vm_target_candidate, 8> target_candidates =
         discover_vm_targets_for_state(state,

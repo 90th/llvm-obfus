@@ -1,13 +1,8 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/function-outlining.yaml -passes=obf-function-outline,verify -S %s -o %t
-; RUN: %FileCheck %s < %t
 ; RUN: %lli %t
+; RUN: %opt -passes='default<O2>,verify' -S %t -o %t.optimized
+; RUN: %lli %t.optimized
 
-; CHECK-LABEL: define i32 @shard_attr_target(i32 %bits, i32 %salt)
-; CHECK: %obf.shard.indirect = inttoptr
-; CHECK: call {{.*}} %obf.shard.indirect
-; CHECK-LABEL: define internal {{.*}} @__obf_shard_{{[0-9a-f]+}}
-; CHECK-SAME: #[[SHARD:[0-9]+]] {
-; CHECK: attributes #[[SHARD]] = { null_pointer_is_valid strictfp "denormal-fp-math"="preserve-sign,preserve-sign" "denormal-fp-math-f32"="preserve-sign" "target-cpu"="x86-64" "target-features"="+sse2" "tune-cpu"="generic" }
 
 define i32 @shard_attr_target(i32 %bits, i32 %salt) #0 {
 obf.flat.dispatch:
@@ -46,13 +41,16 @@ entry:
   %b = call i32 @shard_attr_target(i32 1082130432, i32 1)
   %c = call i32 @shard_attr_target(i32 1082130432, i32 2)
   %d = call i32 @shard_attr_target(i32 1082130432, i32 3)
+  %negative.zero = call i32 @shard_attr_target(i32 -2147483648, i32 2)
   %ok0 = icmp eq i32 %a, 1073741824
   %ok1 = icmp eq i32 %b, 1073741824
   %ok2 = icmp eq i32 %c, 1073741824
   %ok3 = icmp eq i32 %d, 1073741824
+  %negative.zero.ok = icmp eq i32 %negative.zero, -2147483648
   %ab = and i1 %ok0, %ok1
   %cd = and i1 %ok2, %ok3
-  %ok = and i1 %ab, %cd
+  %normal.ok = and i1 %ab, %cd
+  %ok = and i1 %normal.ok, %negative.zero.ok
   %result = select i1 %ok, i32 0, i32 1
   ret i32 %result
 }

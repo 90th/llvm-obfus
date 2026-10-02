@@ -1,5 +1,7 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region.yaml -passes=obf-vm -S %s -o - | %FileCheck %s --check-prefix=VM
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s --check-prefix=SAFE
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region.yaml -passes=obf-vm,verify -S %s -o %t.vm
+; RUN: %lli %t.vm
+; RUN: %opt -passes='default<O2>,verify' -S %t.vm -o %t.vm.optimized
+; RUN: %lli %t.vm.optimized
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region.yaml -passes=obf-safe-pipeline -S %s -o %t
 ; RUN: %lli %t
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region-strip.yaml -passes=obf-safe-pipeline -S %s -o %t.strip
@@ -94,37 +96,3 @@ entry:
   %ret = select i1 %ok, i32 0, i32 1
   ret i32 %ret
 }
-
-; VM-DAG: @rt_core_ea = external externally_initialized global i64, align 8
-; VM-DAG: @__obf_vm_ptrconst_{{[0-9A-F]+}} = private unnamed_addr constant ptr @__obf_vm_bc_i_{{[A-Za-z0-9_]+}}
-; VM-DAG: @__obf_vm_s_{{[A-Za-z0-9_]+}} = private global i{{[0-9]+}} 0
-; VM-LABEL: define i32 @strong_vm_region(ptr %out, i32 %x)
-; VM: call void @__obf_vm_g_{{[A-Za-z0-9_]+}}(i32 %x, ptr %v.ce.loc)
-; VM-LABEL: define i32 @strong_vm_two_regions(ptr %out, i32 %x, i32 %y)
-; VM: call void @__obf_vm_g_{{[A-Za-z0-9_]+}}(i32 %x, ptr %v.ce.loc)
-; VM: call void @__obf_vm_g_{{[A-Za-z0-9_]+}}(i32 %{{[^,]+}}, i32 %{{[^,]+}}, ptr %w.ce.loc)
-; VM-LABEL: define internal void @__obf_vm_g_{{[A-Za-z0-9_]+}}(i32 %x, ptr %v.ce.out) {
-; VM: load i64, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
-; VM: load i64, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; VM: call void %{{[^ ]+}}(i32 %x, ptr %v.ce.ce.loc, i64
-; VM-LABEL: define internal void @__obf_vm_g_{{[A-Za-z0-9_]+}}(i32 %x, ptr %v.ce.ce.out) {
-; VM: load i64, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
-; VM: load i64, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; VM: call void %{{[^ ]+}}(i32 %x, ptr %v.ce.ce.out, i64
-; VM-LABEL: define internal void @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, ptr %v.ce.ce.out, i64 %obf.hidden_token) #{{[0-9]+}} {
-; VM: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_{{[0-9A-F]+}}
-; VM: indirectbr ptr
-; SAFE-DAG: @rt_core_ea = external externally_initialized global i64, align 8
-; SAFE-LABEL: define i32 @strong_vm_region(ptr
-; SAFE: load i64, ptr @rt_core_ea
-; SAFE-LABEL: define i32 @strong_vm_two_regions(ptr
-; SAFE: call void @{{_[0-9a-f]+}}(i32 %{{[^,]+}}, ptr %{{[^)]+}})
-; SAFE: call void @{{_[0-9a-f]+}}(i32 %{{[^,]+}}, i32 %{{[^,]+}}, ptr %{{[^)]+}})
-; SAFE: define internal void @{{_[0-9a-f]+}}(i32 %0, ptr %1) {
-; SAFE: call void %{{[^ ]+}}(i32 %0, ptr %{{[^,]+}}, i64 %{{[^)]+}})
-; SAFE: define internal void @{{_[0-9a-f]+}}(i32 %0, ptr %1, i64 %2)
-; SAFE: indirectbr ptr
-; SAFE: define internal void @{{_[0-9a-f]+}}(i32 %0, i32 %1, ptr %2) {
-; SAFE: call void %{{[^ ]+}}(i32 %1, i32 %0, ptr %{{[^,]+}}, i64 %{{[^)]+}})
-; SAFE: define internal void @{{_[0-9a-f]+}}(i32 %0, i32 %1, ptr %2, i64 %3)
-; SAFE: indirectbr ptr

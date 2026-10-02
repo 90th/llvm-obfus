@@ -155,6 +155,15 @@ bytecode_anchor_encoding get_bytecode_anchor_encoding(const llvm::GlobalVariable
   return encoding;
 }
 
+bool has_encoded_bytecode_payload(const llvm::GlobalVariable& global) {
+  if (global.getMetadata(anchor_encoding_metadata) == nullptr) { return false; }
+  if (!global.isConstant() || !global.hasLocalLinkage()) {
+    llvm::report_fatal_error("invalid encoded VM bytecode provenance");
+  }
+  (void)get_bytecode_anchor_encoding(global);
+  return true;
+}
+
 std::uint32_t physical_bytecode_offset(const bytecode_anchor_encoding& encoding,
                                        std::uint32_t logical_offset,
                                        std::uint32_t length) {

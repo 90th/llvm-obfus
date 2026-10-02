@@ -30,6 +30,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace llvm {
@@ -149,77 +150,21 @@ void verify_changed_module(llvm::Module& module);
 // All apply_*_stage() functions are declared in stage_signatures.h
 // to reduce transitive includes and compilation coupling.
 
-template <typename Predicate>
-llvm::StringMap<std::uint64_t>
-build_function_seed_map(const llvm::SmallVectorImpl<function_pipeline_state>& states,
-                        Predicate predicate) {
-  llvm::StringMap<std::uint64_t> seeds;
-  for (const function_pipeline_state& state : states) {
-    if (state.function == nullptr || state.function->isDeclaration()) { continue; }
+struct string_protection_owner {
+  std::uint64_t seed = 0;
+  protection_level level = protection_level::none;
+};
 
-    if (!predicate(state.report.decision.policy)) { continue; }
+std::optional<string_protection_owner>
+read_string_protection_owner(const llvm::Function& function);
 
-    seeds[state.function->getName()] = state.report.decision.seed;
-  }
+void record_string_protection_owner(llvm::Function& function,
+                                    const policy_decision& decision);
 
-  return seeds;
-}
-
-template <typename Predicate>
-llvm::StringMap<protection_level>
-build_function_level_map(const llvm::SmallVectorImpl<function_pipeline_state>& states,
-                         Predicate predicate) {
-  llvm::StringMap<protection_level> levels;
-  for (const function_pipeline_state& state : states) {
-    if (state.function == nullptr || state.function->isDeclaration()) { continue; }
-
-    if (!predicate(state.report.decision.policy)) { continue; }
-
-    levels[state.function->getName()] = state.report.decision.policy.level;
-  }
-
-  return levels;
-}
-
-template <typename Predicate>
-void append_virtualized_function_seeds(llvm::StringMap<std::uint64_t>& seeds,
-                                       const virtualized_function_map* virtualized_functions,
-                                       Predicate predicate) {
-  if (virtualized_functions == nullptr) { return; }
-
-  for (const auto& entry : *virtualized_functions) {
-    const virtualized_function_binding& binding = entry.second;
-    if (binding.state == nullptr || !predicate(binding.state->report.decision.policy)) { continue; }
-
-    const std::uint64_t seed = binding.state->report.decision.seed;
-    if (binding.interface_function != nullptr) {
-      seeds[binding.interface_function->getName()] = seed;
-    }
-    if (binding.implementation_function != nullptr) {
-      seeds[binding.implementation_function->getName()] = seed;
-    }
-  }
-}
-
-template <typename Predicate>
-void append_virtualized_function_levels(llvm::StringMap<protection_level>& levels,
-                                        const virtualized_function_map* virtualized_functions,
-                                        Predicate predicate) {
-  if (virtualized_functions == nullptr) { return; }
-
-  for (const auto& entry : *virtualized_functions) {
-    const virtualized_function_binding& binding = entry.second;
-    if (binding.state == nullptr || !predicate(binding.state->report.decision.policy)) { continue; }
-
-    const protection_level level = binding.state->report.decision.policy.level;
-    if (binding.interface_function != nullptr) {
-      levels[binding.interface_function->getName()] = level;
-    }
-    if (binding.implementation_function != nullptr) {
-      levels[binding.implementation_function->getName()] = level;
-    }
-  }
-}
+llvm::StringMap<string_protection_owner>
+build_string_protection_map(llvm::Module& module,
+                            const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                            const virtualized_function_map* virtualized_functions = nullptr);
 
 }  // namespace obf
 

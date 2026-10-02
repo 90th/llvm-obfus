@@ -3,6 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <poll.h>
+#endif
+
 #include "obf/support/runtime_abi_generated.h"
 #include "obf/support/runtime_atomic.h"
 #include "obf/support/blake2s_internal.h"
@@ -118,7 +127,7 @@ enum {
   kObfCacheStatusCold = 0u,
   kObfCacheStatusDecoding = 1u,
   kObfCacheStatusDecoded = 2u,
-  kObfDecodePollLimit = 1u << 20,
+  kObfDecodeWaitSpinCount = 64u,
 };
 
 #define OBF_MAX_SIZE(lhs, rhs) ((lhs) < (rhs) ? (rhs) : (lhs))
@@ -953,11 +962,12 @@ static uint64_t ObfConstantPoolCompletion(
 }
 
 /*
- * Status is the phase authority.
- * The phase moves cold -> decoding -> decoded.
- * The writer can publish completion before the next status value.
- * Read status, then completion, then status again.
- * If status changes, retry. A stable decoded status authorizes the hash check.
+ * Status is the phase authority. The sole owner publishes:
+ * (cold, cold) -> (cold, decoding) -> (decoding, decoding)
+ *              -> (decoding, completion) -> (decoded, completion).
+ * Completion is nonzero, but can equal a phase token. Only decoded status
+ * authorizes reading the destination and checking its completion hash.
+ * Read status, completion, then status again; retry if status changes.
  */
 static int ObfLoadStableStatusCompletion(const struct ObfAuthenticatedStateReferenceV3* state_ref,
                                          uint64_t* status,
@@ -968,15 +978,34 @@ static int ObfLoadStableStatusCompletion(const struct ObfAuthenticatedStateRefer
   return initial_status == *status;
 }
 
+/*
+ * Lack of progress is not evidence of tampering: an elected owner can be
+ * descheduled at any publication boundary. Cooperate with the scheduler only
+ * on retries, without a deadline, allocation, or changes to shared state.
+ * A legal-looking abandoned owner remains pending; it never admits plaintext.
+ */
+static void ObfPauseDecodeWait(uint32_t *spins) {
+  if (++*spins < kObfDecodeWaitSpinCount) { return; }
+  *spins = 0;
+#if defined(_WIN32)
+  Sleep(1);
+#else
+  (void)poll(NULL, 0, 1);
+#endif
+}
+
 static uint8_t *ObfWaitForStringDecode(
     struct ObfStringValidationContext *context,
     const struct ObfStringRuntimeDescriptorV3 *descriptor,
     const struct ObfAuthenticatedDecodeTopologyV3 *topology) {
-  uint32_t poll;
-  for (poll = 0; poll < kObfDecodePollLimit; ++poll) {
+  uint32_t spins = 0;
+  for (;;) {
     uint64_t status;
     uint64_t completion;
-    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) { continue; }
+    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) {
+      ObfPauseDecodeWait(&spins);
+      continue;
+    }
     if (!ObfVerifyStringTag(context, descriptor)) {
       ObfTrapAfterZeroize(context, sizeof(*context));
     }
@@ -990,24 +1019,26 @@ static uint8_t *ObfWaitForStringDecode(
       return destination;
     }
     if ((status == context->statuses.cold && completion == context->statuses.decoding) ||
-        (status == context->statuses.decoding)) {
+        (status == context->statuses.decoding && completion != 0)) {
+      ObfPauseDecodeWait(&spins);
       continue;
     }
     ObfTrapAfterZeroize(context, sizeof(*context));
   }
-  ObfTrapAfterZeroize(context, sizeof(*context));
-  return NULL;
 }
 
 static uint8_t *ObfWaitForConstantPoolDecode(
     struct ObfConstantPoolValidationContext *context,
     const struct ObfConstantPoolRuntimeDescriptorV3 *descriptor,
     const struct ObfAuthenticatedDecodeTopologyV3 *topology) {
-  uint32_t poll;
-  for (poll = 0; poll < kObfDecodePollLimit; ++poll) {
+  uint32_t spins = 0;
+  for (;;) {
     uint64_t status;
     uint64_t completion;
-    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) { continue; }
+    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) {
+      ObfPauseDecodeWait(&spins);
+      continue;
+    }
     if (!ObfVerifyConstantPoolTag(context, descriptor)) {
       ObfTrapAfterZeroize(context, sizeof(*context));
     }
@@ -1021,13 +1052,12 @@ static uint8_t *ObfWaitForConstantPoolDecode(
       return destination;
     }
     if ((status == context->statuses.cold && completion == context->statuses.decoding) ||
-        (status == context->statuses.decoding)) {
+        (status == context->statuses.decoding && completion != 0)) {
+      ObfPauseDecodeWait(&spins);
       continue;
     }
     ObfTrapAfterZeroize(context, sizeof(*context));
   }
-  ObfTrapAfterZeroize(context, sizeof(*context));
-  return NULL;
 }
 
 OBF_HIDDEN
@@ -1054,13 +1084,17 @@ uint8_t *OBF_RT_STRING_AUTH_DECODE_V3(
     ObfTrapAfterZeroize(&context, sizeof(context));
   }
 
-  for (uint32_t poll = 0; poll < kObfDecodePollLimit; ++poll) {
+  uint32_t spins = 0;
+  for (;;) {
     uint64_t status;
     uint64_t completion;
     if (!ObfVerifyStringTag(&context, descriptor)) {
       ObfTrapAfterZeroize(&context, sizeof(context));
     }
-    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) { continue; }
+    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) {
+      ObfPauseDecodeWait(&spins);
+      continue;
+    }
     if (status == context.statuses.decoded) {
       const uint64_t expected_completion = ObfStringCompletion(&context, descriptor, trusted_topology);
       if (!ObfVerifyStringTag(&context, descriptor)) {
@@ -1091,16 +1125,15 @@ uint8_t *OBF_RT_STRING_AUTH_DECODE_V3(
         ObfSecureZeroize(&context, sizeof(context));
         return destination;
       }
+      ObfPauseDecodeWait(&spins);
       continue;
     }
     if ((status == context.statuses.cold && completion == context.statuses.decoding) ||
-        (status == context.statuses.decoding)) {
+        (status == context.statuses.decoding && completion != 0)) {
       return ObfWaitForStringDecode(&context, descriptor, trusted_topology);
     }
     ObfTrapAfterZeroize(&context, sizeof(context));
   }
-  ObfTrapAfterZeroize(&context, sizeof(context));
-  return NULL;
 }
 
 OBF_HIDDEN
@@ -1127,13 +1160,17 @@ uint8_t *OBF_RT_CONSTANT_POOL_DECODE_V3(
     ObfTrapAfterZeroize(&context, sizeof(context));
   }
 
-  for (uint32_t poll = 0; poll < kObfDecodePollLimit; ++poll) {
+  uint32_t spins = 0;
+  for (;;) {
     uint64_t status;
     uint64_t completion;
     if (!ObfVerifyConstantPoolTag(&context, descriptor)) {
       ObfTrapAfterZeroize(&context, sizeof(context));
     }
-    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) { continue; }
+    if (!ObfLoadStableStatusCompletion(descriptor->state, &status, &completion)) {
+      ObfPauseDecodeWait(&spins);
+      continue;
+    }
     if (status == context.statuses.decoded) {
       const uint64_t expected_completion =
           ObfConstantPoolCompletion(&context, descriptor, trusted_topology);
@@ -1165,14 +1202,13 @@ uint8_t *OBF_RT_CONSTANT_POOL_DECODE_V3(
         ObfSecureZeroize(&context, sizeof(context));
         return destination;
       }
+      ObfPauseDecodeWait(&spins);
       continue;
     }
     if ((status == context.statuses.cold && completion == context.statuses.decoding) ||
-        (status == context.statuses.decoding)) {
+        (status == context.statuses.decoding && completion != 0)) {
       return ObfWaitForConstantPoolDecode(&context, descriptor, trusted_topology);
     }
     ObfTrapAfterZeroize(&context, sizeof(context));
   }
-  ObfTrapAfterZeroize(&context, sizeof(context));
-  return NULL;
 }

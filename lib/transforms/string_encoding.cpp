@@ -10,6 +10,7 @@
 #include "obf/support/stable_hash.h"
 #include "obf/transforms/cfg_state_placeholders.h"
 #include "obf/support/runtime_abi_generated.h"
+#include "obf/vm/virtualize.h"
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -79,6 +80,7 @@ struct string_use_summary {
 struct classified_string_candidate {
   llvm::GlobalVariable* global = nullptr;
   std::uint64_t seed = 0;
+  bool supported_global = false;
   bool has_high_security_use = false;
   bool has_strong_vm_use = false;
   string_use_summary summary;
@@ -247,14 +249,6 @@ bool is_local_constant_forwarding_global(const llvm::GlobalVariable& global) {
 }
 
 bool is_local_forwarding_alias(const llvm::GlobalAlias& alias) { return alias.hasLocalLinkage(); }
-
-bool is_generated_vm_forwarding_global(const llvm::GlobalVariable& global) {
-  return global.getName().starts_with("__obf_vm_ptrconst_");
-}
-
-bool is_generated_vm_owner(const llvm::Function& function) {
-  return function.getName().starts_with("__obf_vm_");
-}
 
 bool is_direct_string_pointer_forward(const llvm::Value& value,
                                       const llvm::GlobalVariable& global) {
@@ -700,24 +694,20 @@ void collect_string_users(const llvm::Value& value,
     }
 
     if (const auto* forwarding_global = llvm::dyn_cast<llvm::GlobalVariable>(user)) {
-      if (is_local_constant_forwarding_global(*forwarding_global)) {
-        collect_string_users(*forwarding_global, global, get_seed, visited, summary);
-        continue;
+      if (!is_local_constant_forwarding_global(*forwarding_global)) {
+        summary.has_non_function_use = true;
+        add_use_kind(summary.observed_kinds, string_use_kind::non_function_use);
       }
-
-      summary.has_non_function_use = true;
-      add_use_kind(summary.observed_kinds, string_use_kind::non_function_use);
+      collect_string_users(*forwarding_global, global, get_seed, visited, summary);
       continue;
     }
 
     if (const auto* forwarding_alias = llvm::dyn_cast<llvm::GlobalAlias>(user)) {
-      if (is_local_forwarding_alias(*forwarding_alias)) {
-        collect_string_users(*forwarding_alias, global, get_seed, visited, summary);
-        continue;
+      if (!is_local_forwarding_alias(*forwarding_alias)) {
+        summary.has_non_function_use = true;
+        add_use_kind(summary.observed_kinds, string_use_kind::non_function_use);
       }
-
-      summary.has_non_function_use = true;
-      add_use_kind(summary.observed_kinds, string_use_kind::non_function_use);
+      collect_string_users(*forwarding_alias, global, get_seed, visited, summary);
       continue;
     }
 
@@ -801,19 +791,11 @@ bool is_high_security_level(protection_level level) {
   return level == protection_level::strong || level == protection_level::strong_vm;
 }
 
-bool has_generated_vm_forwarding_use(const llvm::GlobalVariable& global) {
-  for (const llvm::User* user : global.users()) {
-    const auto* forwarding_global = llvm::dyn_cast<llvm::GlobalVariable>(user);
-    if (forwarding_global == nullptr) { continue; }
-    if (!is_generated_vm_forwarding_global(*forwarding_global)) { continue; }
-    if (is_local_constant_forwarding_global(*forwarding_global)) { return true; }
-  }
-  return false;
-}
-
 bool has_generated_vm_owner(const classified_string_candidate& candidate) {
   return llvm::any_of(candidate.strong_vm_functions, [](const llvm::Function* function) {
-    return function != nullptr && is_generated_vm_owner(*function);
+    return function != nullptr && function->hasFnAttribute("vm.string.owner") &&
+           function->hasFnAttribute("obf.string.owner.seed") &&
+           function->hasFnAttribute("obf.string.owner.level");
   });
 }
 
@@ -869,16 +851,16 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable& global,
   classified_string_candidate candidate;
   candidate.global = &global;
   candidate.result.global_name = global.getName().str();
+  const bool encoded_global_source =
+      support::get_encoded_data_kind(global) == support::encoded_data_kind::global_string;
 
-  if (!is_string_like_global(global)) {
+  if (!is_string_like_global(global) && !encoded_global_source) {
     candidate.result.detail = "not a cstring global";
     return candidate;
   }
 
-  if (!is_supported_string_global(global, options.min_string_length)) {
-    candidate.result.detail = "unsupported string global kind";
-    return candidate;
-  }
+  candidate.supported_global =
+      !encoded_global_source && is_supported_string_global(global, options.min_string_length);
 
   candidate.seed = stable_hash_string(global.getName(), module_seed);
 
@@ -938,6 +920,10 @@ classified_string_candidate classify_candidate(llvm::GlobalVariable& global,
   candidate.seed = mix_seed(
       candidate.seed, static_cast<std::uint64_t>(candidate.summary.protected_uses.size() + 1));
   if (candidate.seed == 0) { candidate.seed = 0xa55aa55aa55aa55aULL; }
+  if (!candidate.supported_global) {
+    candidate.result.detail = encoded_global_source ? "unauthenticated global string decoding"
+                                                    : "unsupported string global kind";
+  }
 
   return candidate;
 }
@@ -1020,7 +1006,7 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     plan.result.fallback_reason = "strong_vm_no_global_plaintext";
   };
 
-  if (candidate.global == nullptr) { return plan; }
+  if (candidate.global == nullptr || !candidate.supported_global) { return plan; }
 
   if (candidate.summary.protected_functions.empty()) {
     plan.result.detail = "not referenced by protected function";
@@ -1035,8 +1021,7 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
   const bool is_strong_vm_candidate = candidate.has_strong_vm_use;
   const bool use_authenticated_vm_forwarded_pointer_fallback =
       is_strong_vm_candidate && candidate.summary.has_forwarded_pointer_load &&
-      ((candidate.global != nullptr && has_generated_vm_forwarding_use(*candidate.global)) ||
-       has_generated_vm_owner(candidate));
+      has_generated_vm_owner(candidate);
 
   if (!candidate.summary.unprotected_functions.empty()) {
     if (is_strong_vm_candidate &&
@@ -1375,7 +1360,9 @@ void privatize_transformed_string_global(llvm::GlobalVariable& global) {
   if (had_comdat) { global.setComdat(nullptr); }
   if (must_clear_section && global.hasSection()) { global.setSection(""); }
 }
-void encode_global_initializer(llvm::GlobalVariable& global, std::uint64_t seed) {
+void encode_global_initializer(llvm::GlobalVariable& global,
+                               std::uint64_t seed,
+                               string_encoding_mode mode) {
   const auto* data = llvm::cast<llvm::ConstantDataSequential>(global.getInitializer());
 
   llvm::SmallVector<std::uint8_t, 32> encoded_bytes;
@@ -1387,6 +1374,10 @@ void encode_global_initializer(llvm::GlobalVariable& global, std::uint64_t seed)
 
   privatize_transformed_string_global(global);
   global.setInitializer(llvm::ConstantDataArray::get(global.getContext(), encoded_bytes));
+  const bool local = mode == string_encoding_mode::inline_stack_decode ||
+                     mode == string_encoding_mode::ephemeral_slot;
+  support::mark_encoded_data(global, local ? support::encoded_data_kind::local_string
+                                          : support::encoded_data_kind::global_string);
 }
 
 authenticated_string_payload build_authenticated_payload(const llvm::GlobalVariable& global,
@@ -1458,13 +1449,15 @@ create_authenticated_ciphertext_global(llvm::Module& module,
                                        const string_encoding_options& options) {
   const std::string name = make_string_generated_name(
       module, plan, "__obf_str_ct", "__obf_string_ct_", "", plan.seed ^ 0xc17eULL, options);
-  return new llvm::GlobalVariable(
+  auto* global = new llvm::GlobalVariable(
       module,
       llvm::ArrayType::get(llvm::Type::getInt8Ty(module.getContext()), payload.ciphertext.size()),
       true,
       llvm::GlobalValue::InternalLinkage,
       llvm::ConstantDataArray::get(module.getContext(), payload.ciphertext),
       name);
+  support::mark_encoded_data(*global, support::encoded_data_kind::ciphertext);
+  return global;
 }
 
 llvm::GlobalVariable*
@@ -1475,13 +1468,15 @@ create_authenticated_build_key_global(llvm::Module& module,
   const auth::BuildKey build_key = auth::DeriveBuildKey(build_seed);
   const std::string name = make_string_generated_name(
       module, plan, "__obf_str_bk", "__obf_string_build_key_", "", plan.seed ^ 0xb617ULL, options);
-  return new llvm::GlobalVariable(
+  auto* global = new llvm::GlobalVariable(
       module,
       llvm::ArrayType::get(llvm::Type::getInt8Ty(module.getContext()), build_key.size()),
       true,
       llvm::GlobalValue::InternalLinkage,
       llvm::ConstantDataArray::get(module.getContext(), build_key),
       name);
+  support::mark_encoded_data(*global, support::encoded_data_kind::build_key);
+  return global;
 }
 
 llvm::StructType* get_authenticated_buffer_reference_type(llvm::LLVMContext& context) {
@@ -2791,7 +2786,21 @@ void rewrite_authenticated_inline_stack_uses(llvm::GlobalVariable& global,
 llvm::SmallVector<llvm::GlobalVariable*, 16> discover_string_candidates(llvm::Module& module) {
   llvm::SmallVector<llvm::GlobalVariable*, 16> globals;
   for (llvm::GlobalVariable& global : module.globals()) {
-    if (is_string_like_global(global)) { globals.push_back(&global); }
+    const support::encoded_data_kind kind = support::get_encoded_data_kind(global);
+    if (vm::has_encoded_bytecode_payload(global)) {
+      if (kind != support::encoded_data_kind::none) {
+        llvm::report_fatal_error("conflicting encoded data provenance");
+      }
+      continue;
+    }
+    if (kind == support::encoded_data_kind::ciphertext ||
+        kind == support::encoded_data_kind::build_key ||
+        kind == support::encoded_data_kind::local_string) {
+      continue;
+    }
+    if (kind == support::encoded_data_kind::global_string || is_string_like_global(global)) {
+      globals.push_back(&global);
+    }
   }
 
   std::sort(globals.begin(),
@@ -2969,7 +2978,7 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
               *plan.global, plan, *authenticated_payloads[plan_index], *ciphertext, *build_key);
         }
       } else {
-        encode_global_initializer(*plan.global, plan.seed);
+        encode_global_initializer(*plan.global, plan.seed, plan.result.mode);
         if (plan.result.mode == string_encoding_mode::ephemeral_slot) {
           rewrite_ephemeral_byte_loads(*plan.global, plan.seed, plan.inline_uses);
           lower_ephemeral_compare_uses(*plan.global, plan.seed, plan.inline_uses, options);

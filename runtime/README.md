@@ -11,6 +11,29 @@ Users invoking raw `clang` or `clang++` must link `build/libobf_runtime.a` after
 
 Users invoking `build/obf-clang` or `build/obf-clang++` get `build/libobf_runtime.a` appended automatically for link actions.
 
+## Authenticated decode waiting
+
+Authenticated strings and constant pools share one decode owner per descriptor.
+The successful completion compare-exchange elects that owner.
+The owner publishes decoded completion before it publishes decoded status.
+Waiters use acquire loads and a stable status/completion/status snapshot.
+Only decoded status permits payload and completion verification before return.
+
+A delayed owner is not evidence of tampering.
+Waiters have no poll-count integrity deadline.
+After bounded retry batches, they use Windows `Sleep(1)` or POSIX `poll(NULL, 0, 1)` to reduce contention.
+These calls do not authorize data or guarantee scheduler fairness.
+The authenticated state remains the completion authority.
+
+Invalid descriptors, tags, stable phases, and completed payloads still trap.
+A zero completion in the decoding phase also traps.
+The runtime never resets ownership or lets a waiter decode concurrently.
+
+A legal-looking abandoned owner cannot be distinguished from a delayed owner under this ABI.
+Such a state can wait indefinitely, but cannot authorize unverified data.
+POSIX `poll` can be a cancellation point.
+The runtime does not promise cancellation-safe key erasure or abandoned-owner recovery.
+
 ## Self-checksum runtime contract
 
 `self_checksum` uses runtime helpers from `obf_entropy_anchor.o`.

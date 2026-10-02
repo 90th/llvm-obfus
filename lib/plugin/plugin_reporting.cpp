@@ -315,24 +315,22 @@ build_transform_reports(llvm::Module& module,
     reports.push_back(std::move(entry));
   }
 
-  const llvm::StringMap<std::uint64_t> string_function_seeds = build_function_seed_map(
-      states, [](const function_policy& policy) { return policy.allow_string_encoding; });
-  const llvm::StringMap<protection_level> string_function_levels = build_function_level_map(
-      states, [](const function_policy& policy) { return policy.allow_string_encoding; });
+  const llvm::StringMap<string_protection_owner> string_owners =
+      build_string_protection_map(module, states);
   const string_encoding_options string_options = build_string_encoding_options(config);
   const std::vector<string_encoding_result> string_results = analyze_string_encoding(
       module,
       [&](llvm::StringRef function_name) -> std::optional<std::uint64_t> {
-        const auto iterator = string_function_seeds.find(function_name);
-        if (iterator == string_function_seeds.end()) { return std::nullopt; }
+        const auto iterator = string_owners.find(function_name);
+        if (iterator == string_owners.end()) { return std::nullopt; }
 
-        return iterator->second;
+        return iterator->second.seed;
       },
       [&](llvm::StringRef function_name) -> std::optional<protection_level> {
-        const auto iterator = string_function_levels.find(function_name);
-        if (iterator == string_function_levels.end()) { return std::nullopt; }
+        const auto iterator = string_owners.find(function_name);
+        if (iterator == string_owners.end()) { return std::nullopt; }
 
-        return iterator->second;
+        return iterator->second.level;
       },
       string_options,
       config.seed);

@@ -516,13 +516,15 @@ llvm::GlobalVariable* create_keyed_pool_ciphertext_global(llvm::Module& module,
                                                           std::uint64_t seed) {
   const std::string name = make_unique_obf_symbol_name(
       module, "__obf_const_pool", "ciphertext", seed ^ plan.pool_id ^ 0xc011ULL);
-  return new llvm::GlobalVariable(module,
+  auto* global = new llvm::GlobalVariable(module,
                                   llvm::ArrayType::get(llvm::Type::getInt8Ty(module.getContext()),
                                                        payload.ciphertext.size()),
                                   true,
                                   llvm::GlobalValue::InternalLinkage,
                                   support::create_byte_array_constant(module.getContext(), payload.ciphertext),
                                   name);
+  support::mark_encoded_data(*global, support::encoded_data_kind::ciphertext);
+  return global;
 }
 
 llvm::GlobalVariable* create_keyed_pool_build_key_global(llvm::Module& module,
@@ -531,13 +533,15 @@ llvm::GlobalVariable* create_keyed_pool_build_key_global(llvm::Module& module,
   const auth::BuildKey build_key = auth::DeriveBuildKey(seed);
   const std::string name =
       make_unique_obf_symbol_name(module, "__obf_const_build_key", "build_key", seed ^ pool_id);
-  return new llvm::GlobalVariable(module,
+  auto* global = new llvm::GlobalVariable(module,
                                   llvm::ArrayType::get(llvm::Type::getInt8Ty(module.getContext()),
                                                        build_key.size()),
                                   true,
                                   llvm::GlobalValue::InternalLinkage,
                                   llvm::ConstantDataArray::get(module.getContext(), build_key),
                                   name);
+  support::mark_encoded_data(*global, support::encoded_data_kind::build_key);
+  return global;
 }
 
 llvm::GlobalVariable* create_keyed_pool_destination_global(llvm::Module& module,

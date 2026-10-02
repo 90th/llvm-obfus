@@ -1,0 +1,13 @@
+seed: 6062
+default_level: none
+targets:
+  - match: verify_owned_strings
+    level: strong_vm
+string_encoding:
+  min_string_length: 1
+  max_strings_per_module: 32
+  allow_ctor_fallback: false
+mba:
+  depth: 1
+security:
+  fail_on_public_obf_symbol: true

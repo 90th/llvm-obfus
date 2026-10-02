@@ -1,4 +1,5 @@
 #include "obf/plugin/obfuscator_plugin_internal.h"
+#include "obf/policy/policy_engine.h"
 
 #include "obf/report/function_report.h"
 #include "obf/support/stable_hash.h"
@@ -948,6 +949,10 @@ capture_lto_contracts(llvm::Module& module,
     record.present = true;
     record.role = lto_obligation_role::generated_internal;
     record.config_identity = config_identity;
+    if (const auto owner = read_string_protection_owner(function)) {
+      record.policy = make_function_policy(owner->level);
+      record.decision_seed = owner->seed;
+    }
     contracts.push_back({&function, std::move(record), false});
   }
   return contracts;

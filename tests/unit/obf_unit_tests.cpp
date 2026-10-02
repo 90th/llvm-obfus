@@ -1,4 +1,5 @@
 #include "obf/support/auth_encoding.h"
+#include "obf/support/constant_materialization.h"
 #include "obf/frontend/config.h"
 #include "obf/policy/policy_engine.h"
 #include "obf/support/generated_names.h"
@@ -2201,6 +2202,116 @@ void TestEphemeralStringEncodingCompares() {
     }
   }
 }
+
+void TestEncodedCStringDiscovery() {
+  obf::string_encoding_options options;
+  options.min_string_length = 1;
+  options.authenticated_mode = true;
+  options.allow_ctor_fallback = false;
+
+  for (std::uint64_t seed = 1; seed <= 4096; ++seed) {
+    llvm::LLVMContext context;
+    llvm::Module module("encoded-cstring-producer", context);
+    module.setDataLayout("e-p:64:64");
+    auto* initializer = llvm::ConstantDataArray::getString(context, "K", true);
+    auto* source = new llvm::GlobalVariable(module, initializer->getType(), true,
+                                           llvm::GlobalValue::PrivateLinkage, initializer, "source");
+    auto* pointer_type = llvm::PointerType::getUnqual(context);
+    auto* type =
+        llvm::FunctionType::get(llvm::Type::getInt32Ty(context), {pointer_type}, false);
+    auto* compare_type = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(context), {pointer_type, pointer_type}, false);
+    auto* compare =
+        llvm::Function::Create(compare_type, llvm::GlobalValue::ExternalLinkage, "strcmp", module);
+    auto* reader =
+        llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage, "reader", module);
+    llvm::IRBuilder<> builder(llvm::BasicBlock::Create(context, "entry", reader));
+    builder.CreateRet(builder.CreateCall(compare, {source, reader->getArg(0)}));
+    const auto get_seed = [&](llvm::StringRef name) -> std::optional<std::uint64_t> {
+      return name == "reader" ? std::optional<std::uint64_t>(seed) : std::nullopt;
+    };
+    const auto get_level = [](llvm::StringRef name) -> std::optional<obf::protection_level> {
+      return name == "reader" ? std::optional<obf::protection_level>(obf::protection_level::strong_vm)
+                              : std::nullopt;
+    };
+    obf::run_string_encoding(module, get_seed, get_level, options, seed);
+
+    llvm::GlobalVariable* ciphertext = nullptr;
+    for (llvm::GlobalVariable& global : module.globals()) {
+      if (obf::support::get_encoded_data_kind(global) !=
+          obf::support::encoded_data_kind::ciphertext) {
+        continue;
+      }
+      const auto* data = llvm::dyn_cast<llvm::ConstantDataSequential>(global.getInitializer());
+      if (data != nullptr && data->isCString()) {
+        ciphertext = &global;
+        break;
+      }
+    }
+    if (ciphertext == nullptr) { continue; }
+
+    auto* unmarked = new llvm::GlobalVariable(
+        module, ciphertext->getValueType(), true, llvm::GlobalValue::PrivateLinkage,
+        ciphertext->getInitializer(), "unmarked_source");
+    auto* ret = llvm::cast<llvm::ReturnInst>(reader->getEntryBlock().getTerminator());
+    llvm::IRBuilder<> before_return(ret);
+    auto* source_byte = before_return.CreateLoad(before_return.getInt8Ty(), unmarked);
+    ret->setOperand(0, before_return.CreateXor(
+                           ret->getReturnValue(),
+                           before_return.CreateZExt(source_byte, before_return.getInt32Ty())));
+    bool recognized_plaintext = false;
+    const auto results = obf::analyze_string_encoding(module, get_seed, get_level, options, seed);
+    for (const auto& result : results) {
+      ExpectTrue(result.global_name != ciphertext->getName(),
+                 "A real CString-shaped ciphertext must not be encrypted again");
+      if (result.global_name == "unmarked_source") {
+        recognized_plaintext = result.has_strong_vm_use;
+      }
+    }
+    ExpectTrue(recognized_plaintext,
+               "Identical unmarked source bytes must retain their strong_vm string obligation");
+    return;
+  }
+  ExpectTrue(false, "The real producer must exercise a CString-shaped ciphertext");
+}
+
+void TestEncodedGlobalStringObligation() {
+  llvm::LLVMContext context;
+  llvm::Module module("encoded-source-obligation", context);
+  module.setDataLayout("e-p:64:64");
+  auto* initializer =
+      llvm::ConstantDataArray::getString(context, "a-long-lived-source-string", true);
+  auto* source = new llvm::GlobalVariable(module, initializer->getType(), true,
+                                         llvm::GlobalValue::PrivateLinkage, initializer, "source");
+  auto* type = llvm::FunctionType::get(llvm::PointerType::getUnqual(context), false);
+  auto* reader =
+      llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage, "reader", module);
+  llvm::IRBuilder<> builder(llvm::BasicBlock::Create(context, "entry", reader));
+  builder.CreateRet(source);
+  const auto get_seed = [](llvm::StringRef name) -> std::optional<std::uint64_t> {
+    return name == "reader" ? std::optional<std::uint64_t>(7171) : std::nullopt;
+  };
+  obf::protection_level level = obf::protection_level::strong;
+  const auto get_level = [&](llvm::StringRef name) -> std::optional<obf::protection_level> {
+    return name == "reader" ? std::optional<obf::protection_level>(level) : std::nullopt;
+  };
+  obf::string_encoding_options options;
+  options.prefer_lazy_decode = true;
+  options.allow_ctor_fallback = true;
+  obf::run_string_encoding(module, get_seed, get_level, options, 7171);
+
+  level = obf::protection_level::strong_vm;
+  bool rejected_global_decode = false;
+  for (const auto& result :
+       obf::analyze_string_encoding(module, get_seed, get_level, options, 7171)) {
+    if (result.global_name == "source") {
+      rejected_global_decode = result.has_strong_vm_use && !result.applied;
+    }
+  }
+  ExpectTrue(rejected_global_decode,
+             "An encoded global fallback must not hide a later strong_vm source obligation");
+}
+
 }  // namespace
 
 int main() {
@@ -2234,6 +2345,8 @@ int main() {
   TestSelfChecksum(self_checksum_context);
   llvm::LLVMContext self_checksum_pe_context;
   TestEphemeralStringEncodingCompares();
+  TestEncodedCStringDiscovery();
+  TestEncodedGlobalStringObligation();
   TestSelfChecksumPeRecord(self_checksum_pe_context);
 
   if (g_failures == 0) {

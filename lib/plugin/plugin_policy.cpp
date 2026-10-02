@@ -596,6 +596,96 @@ build_pipeline_state(llvm::Module& module, const obfuscation_config& config) {
   return build_lto_pipeline_state(module, config, get_active_lto_mode() != obf_lto_mode::none);
 }
 
+std::optional<string_protection_owner>
+read_string_protection_owner(const llvm::Function& function) {
+  const bool has_seed = function.hasFnAttribute("obf.string.owner.seed");
+  const bool has_level = function.hasFnAttribute("obf.string.owner.level");
+  const bool vm_owner = function.hasFnAttribute("vm.string.owner");
+  if (!has_seed && !has_level && !vm_owner) { return std::nullopt; }
+  if (!has_seed || !has_level) {
+    llvm::report_fatal_error(llvm::Twine("incomplete string protection ownership in '") +
+                            function.getName() + "'");
+  }
+
+  std::uint64_t seed = 0;
+  const auto level =
+      parse_protection_level(function.getFnAttribute("obf.string.owner.level").getValueAsString());
+  if (!level.has_value() || *level == protection_level::none ||
+      function.getFnAttribute("obf.string.owner.seed").getValueAsString().getAsInteger(10, seed) ||
+      (vm_owner && !function.getFnAttribute("vm.string.owner").getValueAsString().empty())) {
+    llvm::report_fatal_error(llvm::Twine("invalid string protection ownership in '") +
+                            function.getName() + "'");
+  }
+  return string_protection_owner{seed, *level};
+}
+
+void record_string_protection_owner(llvm::Function& function,
+                                    const policy_decision& decision) {
+  if (!decision.policy.allow_string_encoding) { return; }
+  if (const auto owner = read_string_protection_owner(function)) {
+    if (owner->seed != decision.seed || owner->level != decision.policy.level) {
+      llvm::report_fatal_error(llvm::Twine("conflicting string protection ownership in '") +
+                              function.getName() + "'");
+    }
+    return;
+  }
+  const std::string_view level = to_string(decision.policy.level);
+  function.addFnAttr("obf.string.owner.seed", std::to_string(decision.seed));
+  function.addFnAttr("obf.string.owner.level", llvm::StringRef(level.data(), level.size()));
+}
+
+llvm::StringMap<string_protection_owner>
+build_string_protection_map(llvm::Module& module,
+                            const llvm::SmallVectorImpl<function_pipeline_state>& states,
+                            const virtualized_function_map* virtualized_functions) {
+  llvm::StringMap<string_protection_owner> owners;
+  const auto add_owner = [&](const llvm::Function* function, string_protection_owner owner) {
+    if (function == nullptr || function->isDeclaration()) { return; }
+    if (owner.level == protection_level::none) {
+      llvm::report_fatal_error(llvm::Twine("invalid string protection ownership in '") +
+                              function->getName() + "'");
+    }
+    const auto [iterator, inserted] = owners.try_emplace(function->getName(), owner);
+    if (!inserted &&
+        (iterator->second.seed != owner.seed || iterator->second.level != owner.level)) {
+      llvm::report_fatal_error(llvm::Twine("conflicting string protection ownership in '") +
+                              function->getName() + "'");
+    }
+  };
+
+  for (llvm::Function& function : module) {
+    if (function.isDeclaration()) { continue; }
+    if (const auto owner = read_string_protection_owner(function)) { add_owner(&function, *owner); }
+  }
+  for (const function_pipeline_state& state : states) {
+    if (state.function == nullptr || state.function->isDeclaration()) { continue; }
+    // Retained generated roles keep their generic transform policy at none.
+    // Their original string policy is an independent finalization obligation.
+    if (state.lto.present && state.lto.policy.allow_string_encoding) {
+      add_owner(state.function, {state.lto.decision_seed, state.lto.policy.level});
+    } else if (state.report.decision.policy.allow_string_encoding &&
+               !owners.contains(state.function->getName())) {
+      add_owner(state.function,
+                {state.report.decision.seed, state.report.decision.policy.level});
+    }
+  }
+  if (virtualized_functions != nullptr) {
+    for (const auto& entry : *virtualized_functions) {
+      const virtualized_function_binding& binding = entry.second;
+      if (binding.state == nullptr ||
+          !binding.state->report.decision.policy.allow_string_encoding) {
+        continue;
+      }
+      const string_protection_owner owner{binding.state->report.decision.seed,
+                                          binding.state->report.decision.policy.level};
+      add_owner(binding.interface_function, owner);
+      add_owner(binding.implementation_function, owner);
+      add_owner(binding.entry_thunk_function, owner);
+    }
+  }
+  return owners;
+}
+
 artifact_cleanup_options build_artifact_cleanup_options(const obfuscation_config& config) {
   artifact_cleanup_options options;
   options.seed = config.seed;
