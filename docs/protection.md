@@ -26,8 +26,8 @@ The [security contracts](../SECURITY.md) define the checked scope and reporting 
 ### VM lowering and build checks
 
 `vm` and `strong_vm` lower supported functions into bytecode-backed execution paths.
-The interface wrapper keeps the selected function's linkage and visibility.
-The implementation has internal linkage and default visibility.
+The interface wrapper keeps the selected function's linkage, visibility, and DLL export storage class.
+The implementation has internal linkage and default visibility, without DLL export or import storage classes.
 
 Candidate analysis rejects unsupported IR, not only exception handlers.
 Important limits include:
