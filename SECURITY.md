@@ -112,13 +112,12 @@ The following scenarios are outside the security contract:
 - A debugger attaches or sets hardware breakpoints without modifying sampled code bytes.
 - Code outside selected sample ranges changes.
 - An unsupported architecture does not receive bound v1 records.
-- A Windows DLL is not bound by the v1 binder.
 
 ### Platform scope
 
 - **Linux x86-64 ELF executable / PIE**: Supported.
-- **Windows x86-64 PE32+ EXE on native Windows**: Supported.
-- **Windows DLL**: Unsupported in v1.
+- **Windows x86-64 PE32+ user-mode EXE / DLL on native Windows**: Supported for GUI and console subsystems.
+- **Windows EFI / native-subsystem images**: Unsupported.
 - **x86 / ARM / ARM64 / macOS**: Unsupported by the bound v1 path.
 
 See [`docs/self-checksum.md`](docs/self-checksum.md) for the detailed technical specification, record format, relocation rules, and binder behavior.
