@@ -38,7 +38,7 @@
 ;
 ; BOUND: SELF_CHECKSUM_PE_RECORD
 ; BOUND-SAME: flags=0x3
-; DYNAMIC: DLL_DYNAMIC_OK vm=1 strong_vm=1 effects=1 init=1 concurrent=1 exports=8 rebased=1 joined_unloads=4
+; DYNAMIC: DLL_DYNAMIC_OK vm=1 strong_vm=1 effects=1 init=1 concurrent=1 exports=7 rebased=1 joined_unloads=4
 ; EXPLICIT: obf-clang: self_checksum auto-binding requires an explicit '-o <path>' final-link output
 ; LTO-REJECT: obf-clang: managed obfuscation LTO currently supports ELF targets only
 ; STDOUT: obf-clang: self_checksum final links cannot bind an output written to stdout

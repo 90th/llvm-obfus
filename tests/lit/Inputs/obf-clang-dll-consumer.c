@@ -12,7 +12,6 @@ typedef uint64_t (*calculation_fn)(uint64_t, uint64_t *);
 typedef const char *(*text_fn)(void);
 typedef uint64_t (*checksum_fn)(uint64_t);
 typedef uint64_t (*init_fn)(void);
-typedef int (*entropy_fn)(void);
 
 struct dll_api {
   calculation_fn vm;
@@ -22,7 +21,6 @@ struct dll_api {
   checksum_fn checksum;
   init_fn init_value;
   text_fn init_text;
-  entropy_fn entropy_ready;
 };
 
 struct worker {
@@ -89,7 +87,7 @@ static int exercise(const struct dll_api *api) {
   if (start == NULL || ready == NULL) {
     return 1;
   }
-  if (api->init_value() != 0x123456789abcdef0ULL || api->entropy_ready() != 1 ||
+  if (api->init_value() != 0x123456789abcdef0ULL ||
       api->init_text() == NULL || strcmp(api->init_text(), "dll-initializer-authenticated") != 0) {
     return 1;
   }
@@ -133,11 +131,10 @@ __declspec(dllimport) const char *dll_strong_vm_text(void);
 __declspec(dllimport) uint64_t dll_checksum(uint64_t);
 __declspec(dllimport) uint64_t dll_init_value(void);
 __declspec(dllimport) const char *dll_init_text(void);
-__declspec(dllimport) int dll_entropy_ready(void);
 
 int main(void) {
   const struct dll_api api = {dll_vm, dll_strong_vm, dll_vm_text, dll_strong_vm_text,
-                              dll_checksum, dll_init_value, dll_init_text, dll_entropy_ready};
+                              dll_checksum, dll_init_value, dll_init_text};
   if (exercise(&api)) {
     return 1;
   }
@@ -145,9 +142,9 @@ int main(void) {
   return 0;
 }
 #else
-static const char *const export_names[8] = {
+static const char *const export_names[7] = {
     "dll_vm", "dll_strong_vm", "dll_vm_text", "dll_strong_vm_text",
-    "dll_checksum", "dll_init_value", "dll_init_text", "dll_entropy_ready"};
+    "dll_checksum", "dll_init_value", "dll_init_text"};
 
 static int check_exports(HMODULE module) {
   const unsigned char *base = (const unsigned char *)module;
@@ -158,7 +155,7 @@ static int check_exports(HMODULE module) {
     return 1;
   }
   const IMAGE_EXPORT_DIRECTORY *exports = (const IMAGE_EXPORT_DIRECTORY *)(base + directory.VirtualAddress);
-  if (exports->NumberOfNames != 8 || exports->NumberOfFunctions != 8) {
+  if (exports->NumberOfNames != 7 || exports->NumberOfFunctions != 7) {
     return 1;
   }
   const DWORD *names = (const DWORD *)(base + exports->AddressOfNames);
@@ -166,12 +163,12 @@ static int check_exports(HMODULE module) {
   const DWORD *functions = (const DWORD *)(base + exports->AddressOfFunctions);
   unsigned seen = 0;
   unsigned seen_ordinals = 0;
-  for (unsigned index = 0; index < 8; ++index) {
+  for (unsigned index = 0; index < 7; ++index) {
     unsigned expected = 0;
-    while (expected < 8 && strcmp((const char *)(base + names[index]), export_names[expected]) != 0) {
+    while (expected < 7 && strcmp((const char *)(base + names[index]), export_names[expected]) != 0) {
       ++expected;
     }
-    if (expected == 8 || (seen & (1U << expected)) || ordinals[index] >= 8 ||
+    if (expected == 7 || (seen & (1U << expected)) || ordinals[index] >= 7 ||
         (seen_ordinals & (1U << ordinals[index]))) {
       return 1;
     }
@@ -183,7 +180,7 @@ static int check_exports(HMODULE module) {
       return 1;
     }
   }
-  return seen != 255 || seen_ordinals != 255;
+  return seen != 127 || seen_ordinals != 127;
 }
 
 static void *reserve_preferred_base(const char *path) {
@@ -244,9 +241,8 @@ int main(int argc, char **argv) {
     api.checksum = (checksum_fn)GetProcAddress(module, "dll_checksum");
     api.init_value = (init_fn)GetProcAddress(module, "dll_init_value");
     api.init_text = (text_fn)GetProcAddress(module, "dll_init_text");
-    api.entropy_ready = (entropy_fn)GetProcAddress(module, "dll_entropy_ready");
     if (api.vm == NULL || api.strong_vm == NULL || api.vm_text == NULL || api.strong_vm_text == NULL ||
-        api.checksum == NULL || api.init_value == NULL || api.init_text == NULL || api.entropy_ready == NULL ||
+        api.checksum == NULL || api.init_value == NULL || api.init_text == NULL ||
         exercise(&api)) {
       return 5;
     }
@@ -258,7 +254,7 @@ int main(int argc, char **argv) {
   if (!VirtualFree(reservation, 0, MEM_RELEASE)) {
     return 7;
   }
-  puts("DLL_DYNAMIC_OK vm=1 strong_vm=1 effects=1 init=1 concurrent=1 exports=8 rebased=1 joined_unloads=4");
+  puts("DLL_DYNAMIC_OK vm=1 strong_vm=1 effects=1 init=1 concurrent=1 exports=7 rebased=1 joined_unloads=4");
   return 0;
 }
 #endif

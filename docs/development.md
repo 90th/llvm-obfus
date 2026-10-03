@@ -43,6 +43,9 @@ Run a focused lit selection with the `lit` executable from your build configurat
 lit -j 3 -sv build/tests --filter='vm-extrema'
 ```
 
+On Windows, run `obf-clang-dll-lifecycle-pe` and `obf-clang-dll-output-pe` separately with three lit workers for focused native DLL checks.
+They check protected constructor results, decoded string publication, return values, effects, exact exports, rebasing, and joined unload cycles.
+
 Individual runtime and unit executables are also available:
 
 ```sh

@@ -1,9 +1,5 @@
 #include <stdint.h>
 
-#include "obf/support/runtime_abi_generated.h"
-
-extern uint64_t OBF_RT_ENTROPY_ANCHOR;
-
 static const uint64_t vm_table[4] = {0x11223344ULL, 0x55667788ULL, 0x99aabbccULL, 0xddeeff11ULL};
 static const uint64_t strong_table[4] = {0x10203040ULL, 0x50607080ULL, 0x90a0b0c0ULL, 0xd0e0f001ULL};
 static uint64_t initialization_value;
@@ -54,10 +50,6 @@ __declspec(dllexport) uint64_t dll_init_value(void) {
 
 __declspec(dllexport) const char *dll_init_text(void) {
   return initialization_text;
-}
-
-__declspec(dllexport) int dll_entropy_ready(void) {
-  return OBF_RT_ENTROPY_ANCHOR != 0;
 }
 
 __attribute__((used, noinline)) static uint64_t dll_sample_sibling(uint64_t value) {

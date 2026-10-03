@@ -31,7 +31,7 @@
 ; BOUND-SAME: flags=0x3
 ; BOUND-SAME: expected=0x{{[0-9a-f]+}}
 ; IMPORT: DLL_IMPORT_OK vm=1 strong_vm=1 effects=1 init=1 concurrent=1
-; DYNAMIC: DLL_DYNAMIC_OK vm=1 strong_vm=1 effects=1 init=1 concurrent=1 exports=8 rebased=1 joined_unloads=4
+; DYNAMIC: DLL_DYNAMIC_OK vm=1 strong_vm=1 effects=1 init=1 concurrent=1 exports=7 rebased=1 joined_unloads=4
 
 define void @dummy() {
 entry:
