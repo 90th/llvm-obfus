@@ -1,5 +1,5 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-strong-vm-no-global-plaintext.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o - | %FileCheck %s --check-prefix=IR
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-strong-vm-no-global-plaintext.yaml -passes=obf-feature-report -disable-output %s | jq -r '(.transforms[] | select(.pass == "string_encoding") | [.target_name, .status, (.count|tostring), .detail, (.strategy.kind // ""), (.strategy.helper_shape // ""), (.strategy.fallback_reason // "")] | join("|"))' | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-strong-vm-no-global-plaintext.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "string_encoding") | [.target_name, .status, (.count | tostring), .strategy.kind] | join("|")' | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-strong-vm-no-global-plaintext.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o %t
 ; RUN: %lli %t
 
@@ -35,4 +35,4 @@ entry:
 ; REPORT-NOT: helper_lazy_decode
 ; REPORT-NOT: global_ctor
 ; REPORT-NOT: helper_global_ctor
-; REPORT-DAG: .inline|applied|2|inline_stack_decode: 2 inline stack decode use(s)|inline_stack_decode|none|
+; REPORT-DAG: .inline|candidate|2|inline_stack_decode

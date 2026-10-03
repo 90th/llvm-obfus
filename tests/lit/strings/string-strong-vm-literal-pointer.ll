@@ -1,5 +1,5 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-strong-vm-literal-pointer.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o - | %FileCheck %s --check-prefix=IR
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-strong-vm-literal-pointer.yaml -passes=obf-feature-report -disable-output %s | jq -r '(.transforms[] | select(.pass == "string_encoding") | [.target_name, .status, (.count|tostring), .detail, (.strategy.kind // ""), (.strategy.helper_shape // ""), (.strategy.fallback_reason // ""), ((.strategy.use_kinds // []) | join(","))] | join("|"))' | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-strong-vm-literal-pointer.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "string_encoding") | [.target_name, .status, .strategy.kind, ((.strategy.use_kinds // []) | join(","))] | join("|")' | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-strong-vm-literal-pointer.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o %t
 ; RUN: %lli %t
 
@@ -75,4 +75,4 @@ entry:
 
 ; REPORT-NOT: lazy_decode
 ; REPORT-NOT: global_ctor
-; REPORT-DAG: .expected|applied|1|inline_stack_decode: 1 inline stack decode use(s)|inline_stack_decode|none||forwarded_pointer_load
+; REPORT-DAG: .expected|candidate|inline_stack_decode|forwarded_pointer_load

@@ -1,4 +1,4 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare.yaml -passes=obf-feature-report -disable-output %s | jq -r '(.transforms[] | select(.pass == "string_encoding") | [.target_name, .status, (.count|tostring), .detail, (.strategy.kind // "")] | join("|"))' | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "string_encoding") | [.target_name, .status, .strategy.kind] | join("|")' | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o - | %FileCheck %s
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare.yaml -passes='obf-string-encode,obf-cfg-state-cleanup' -S %s -o %t
 ; RUN: %opt -passes=verify -disable-output %t
@@ -158,15 +158,15 @@ entry:
 }
 
 ; Boundary and supported compare cases select the micro-slot strategy.
-; REPORT-DAG: .mem64|applied|1|ephemeral_slot: 2 ephemeral micro-slot use(s)|ephemeral_micro_slot
-; REPORT-DAG: .hello|applied|1|ephemeral_slot: 3 ephemeral micro-slot use(s)|ephemeral_micro_slot
-; REPORT-DAG: .bee|applied|1|ephemeral_slot: 2 ephemeral micro-slot use(s)|ephemeral_micro_slot
-; REPORT-DAG: .ab|applied|1|ephemeral_slot: 1 ephemeral micro-slot use(s)|ephemeral_micro_slot
-; REPORT-DAG: .mem65|applied|1|lazy_decode: 1 lazy use(s)|helper_lazy_decode
-; REPORT-DAG: .strcmp65|applied|1|lazy_decode: 1 lazy use(s)|helper_lazy_decode
-; REPORT-DAG: .dynamic|applied|1|inline_stack_decode: 1 inline stack decode use(s)|inline_stack_decode
-; REPORT-DAG: .pair_a|applied|1|inline_stack_decode: 1 inline stack decode use(s)|inline_stack_decode
-; REPORT-DAG: .pair_b|applied|1|inline_stack_decode: 1 inline stack decode use(s)|inline_stack_decode
+; REPORT-DAG: .mem64|candidate|ephemeral_micro_slot
+; REPORT-DAG: .hello|candidate|ephemeral_micro_slot
+; REPORT-DAG: .bee|candidate|ephemeral_micro_slot
+; REPORT-DAG: .ab|candidate|ephemeral_micro_slot
+; REPORT-DAG: .mem65|candidate|helper_lazy_decode
+; REPORT-DAG: .strcmp65|candidate|helper_lazy_decode
+; REPORT-DAG: .dynamic|candidate|inline_stack_decode
+; REPORT-DAG: .pair_a|candidate|inline_stack_decode
+; REPORT-DAG: .pair_b|candidate|inline_stack_decode
 
 ; CHECK-LABEL: define i32 @check_memcmp_lhs()
 ; CHECK-NOT: alloca

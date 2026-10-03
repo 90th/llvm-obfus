@@ -5,6 +5,8 @@
 ;
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-incoming-boundary-strict-strongvm.yaml -passes=obf-vm -disable-output %s 2>&1 | %FileCheck %s --check-prefix=STRONGVM
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-incoming-boundary-strict-fortress.yaml -passes=obf-vm -disable-output %s 2>&1 | %FileCheck %s --check-prefix=FORTRESS
+; RUN: env OBF_COVERAGE_REPORT=%t.coverage.json not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-incoming-boundary-strict-strongvm.yaml -passes=obf-vm -disable-output %s
+; RUN: %python %S/../Inputs/report_contract.py incoming %t.coverage.json --strict
 
 declare i32 @__gxx_personality_v0(...)
 

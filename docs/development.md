@@ -30,12 +30,16 @@ Build the project before you run CTest:
 
 ```sh
 cmake --build build --parallel 3
-ctest --test-dir build -j 3 --output-on-failure
+ctest --test-dir build --output-on-failure -j 1
 ```
 
 CTest runs the LLVM lit suite, transform and policy unit tests, runtime atomic tests, decode concurrency tests, and MBA lifetime tests.
 It also checks six malformed pending-decode cases through a trap observer.
 The configured lit test uses three workers.
+Keep outer CTest serial so native runtime tests do not overlap the lit workload.
+Windows VM tests can produce large IR modules and use several GiB of committed memory.
+Keep free disk space available for managed pagefile growth.
+Record the system commit limit and process allocations when an allocation fails.
 
 The trap observer waits up to two seconds for an illegal-instruction or breakpoint exit.
 Process creation occurs before that wait and can add time to the helper's total duration.
@@ -57,6 +61,11 @@ Run a focused lit selection with the `lit` executable from your build configurat
 ```sh
 lit -j 3 -sv build/tests --filter='vm-extrema'
 ```
+
+The hidden-token admission probe prunes unreachable definitions before it assembles each scenario.
+It follows the replacement entry point and keeps reachable protected bodies intact.
+Membership variants exist only for their own case, not across later targets.
+These rules limit full-module copies without reducing token cases or trap-before-effects checks.
 
 On Windows, run `obf-clang-dll-lifecycle-pe` and `obf-clang-dll-output-pe` separately with three lit workers for focused native DLL checks.
 They check protected constructors and `DllMain` callbacks, decoded strings, return values, effects, exact exports, rebasing, and joined unload cycles.
@@ -122,4 +131,7 @@ Before you run it on a resource-limited machine, inspect the [multiseed controll
 
 Keep source-assisted analysis separate from binary-only analysis.
 Record false positives, analysis limits, artifact hashes, and method versions with each result.
+Compiler coverage reports use a separate stage ledger, not recovery scores or native execution claims.
+Report contracts compare ABI rejection and regional emission with the actual pipeline.
+See [capture commands and schema boundaries](usage.md#compiler-coverage-reports).
 The [security contract](../SECURITY.md) defines guarantees independently of these scores.

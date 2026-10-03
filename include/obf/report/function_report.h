@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+namespace llvm::json {
+class Object;
+}
+
 namespace obf {
 
 struct function_report_entry {
@@ -18,7 +22,7 @@ struct function_report_entry {
   std::string annotation;
 };
 
-struct transform_report_entry {
+struct prediction_report_entry {
   std::string pass;
   std::string target_kind;
   std::string target_name;
@@ -36,13 +40,23 @@ struct transform_report_entry {
   std::size_t unprotected_use_count = 0;
   bool inline_eligible = false;
   bool has_strategy_payload = false;
-  bool has_mba_shape_payload = false;
-  mba::mba_shape_counts mba_counts;
   std::vector<std::string> use_kinds;
 };
 
+struct structural_observation_report_entry {
+  std::string mechanism;
+  std::string target_kind;
+  std::string target_name;
+  std::string detail;
+  std::size_t count = 0;
+  mba::mba_shape_counts mba_counts;
+};
+
+llvm::json::Object build_policy_report(const policy_decision& decision);
+
 std::string format_feature_report(llvm::StringRef module_name,
                                   llvm::ArrayRef<function_report_entry> entries,
-                                  llvm::ArrayRef<transform_report_entry> transforms);
+                                  llvm::ArrayRef<prediction_report_entry> predictions,
+                                  llvm::ArrayRef<structural_observation_report_entry> observations);
 
 }  // namespace obf

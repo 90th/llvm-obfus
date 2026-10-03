@@ -11,6 +11,8 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-incoming-callsite-boundary.yaml -passes='obf-safe-pipeline,verify' -S %s -o - | %FileCheck %s --check-prefix=PIPE
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-incoming-callsite-boundary.yaml -passes=obf-safe-pipeline -S %s -o %t.pipe
 ; RUN: %lli %t.pipe
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-incoming-callsite-boundary.yaml -passes='obf-coverage-start,obf-vm,obf-coverage-report' -disable-output %s > %t.coverage.json
+; RUN: %python %S/../Inputs/report_contract.py incoming %t.coverage.json
 
 define i32 @__gxx_personality_v0(...) {
   ret i32 0

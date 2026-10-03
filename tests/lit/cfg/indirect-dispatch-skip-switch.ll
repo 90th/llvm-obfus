@@ -1,4 +1,4 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/indirect-dispatch-skip-switch.yaml -passes=obf-feature-report -disable-output %s | jq -r '.transforms[] | select(.pass == "indirect_dispatch") | [.target_name, .status, .detail] | join("|")' | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/indirect-dispatch-skip-switch.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "indirect_dispatch") | [.target_name, .status, (.count | tostring)] | join("|")' | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/indirect-dispatch-skip-switch.yaml -passes=obf-indirect-dispatch -S %s -o - | %FileCheck %s --check-prefix=IR
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/indirect-dispatch-skip-switch.yaml -passes=obf-indirect-dispatch -S %s -o - | %opt -passes=verify -disable-output
 
@@ -62,13 +62,6 @@ right:
 ; IR-NOT: br i1 %cond
 ; IR: indirectbr
 
-; REPORT: oversized_switch|skipped|no supported branch or switch sites
-; REPORT-SAME: selected(branch_sites=0, switch_sites=0, shape=none)
-; REPORT-SAME: skipped(max_switch_targets=1, non_integral_program_as=0, unsupported_function_shape=0)
-; REPORT-SAME: first_oversized_switch_targets=12>3
-
-; REPORT: small_switch|applied|1 site(s) selected
-; REPORT-SAME: selected(branch_sites=0, switch_sites=1, shape=switch_only)
-
-; REPORT: small_branch|applied|1 site(s) selected
-; REPORT-SAME: selected(branch_sites=1, switch_sites=0, shape=branch_only)
+; REPORT-DAG: oversized_switch|not_candidate|0
+; REPORT-DAG: small_switch|candidate|1
+; REPORT-DAG: small_branch|candidate|1

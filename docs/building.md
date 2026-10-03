@@ -24,6 +24,7 @@ It does not accept a toolchain that needs an external atomic-library fallback fo
 
 The test suite also uses LLVM `FileCheck` and command-line utilities such as `cmp`, `not`, and `timeout`.
 Some tests need additional LLVM tools, such as `llvm-dis`.
+The lit suite also requires `jq` on `PATH` for JSON report checks.
 CMake detects `lli` and `strings` when available.
 See [Development](development.md) for test commands and platform-specific test requirements.
 

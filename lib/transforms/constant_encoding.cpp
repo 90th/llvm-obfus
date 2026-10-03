@@ -1,4 +1,5 @@
 #include "obf/transforms/constant_encoding.h"
+#include "obf/report/coverage_report.h"
 
 #include "obf/analysis/annotation_utils.h"
 #include "obf/support/auth_encoding.h"
@@ -12,6 +13,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
@@ -22,6 +24,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/Support/Alignment.h"
 
 #include <algorithm>
@@ -1249,6 +1252,19 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
 
   encoded_count += apply_mba_inline_uses(uses, options, seed);
 
+  const auto record_pool_helper = [&](llvm::Function& helper, const llvm::Function& source) {
+    if (!coverage_reporting_enabled(module)) { return; }
+    llvm::StringRef owner = source.getName();
+    if (const llvm::MDNode* metadata = source.getMetadata("obf.coverage.owner")) {
+      if (metadata->getNumOperands() == 1) {
+        if (const auto* name = llvm::dyn_cast<llvm::MDString>(metadata->getOperand(0))) {
+          owner = name->getString();
+        }
+      }
+    }
+    record_coverage_role(helper, owner, "constant_decoder", {"authenticated_constant_decode"});
+  };
+
   for (auto& source : plans) {
     llvm::SmallVector<keyed_pool_plan, 8> scalar_plans =
         build_scalar_keyed_pool_plans_for_function(
@@ -1264,6 +1280,7 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
                                                         payload.metadata.length,
                                                         payload.metadata.binding_id,
                                                         seed ^ plan.pool_id);
+      record_pool_helper(*helper, *source.first);
 
       const keyed_pool_entry& entry = plan.entries.front();
       for (const keyed_pool_use& use : plan.uses) {
@@ -1300,10 +1317,15 @@ constant_encoding_result run_constant_encoding(llvm::Module& module,
                                                       payload.metadata.binding_id,
                                                       seed ^ plan.pool_id);
 
+    llvm::SmallPtrSet<const llvm::Function*, 8> reported_owners;
     for (const keyed_pool_table_use& use : plan.uses) {
       if (use.instruction == nullptr) { continue; }
       rewrite_keyed_pool_table_use(*use.instruction, use.operand_index, *plan.global, *helper);
       ++encoded_count;
+      if (coverage_reporting_enabled(module) &&
+          reported_owners.insert(use.instruction->getFunction()).second) {
+        record_pool_helper(*helper, *use.instruction->getFunction());
+      }
     }
   }
 

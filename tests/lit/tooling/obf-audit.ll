@@ -1,7 +1,6 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/obf-audit.yaml -passes=obf-audit -disable-output %s | %FileCheck %s --check-prefix=TABLE
 ; RUN: rm -f %t.audit.json
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/obf-audit.yaml --obf-audit-out=%t.audit.json -passes=obf-audit -disable-output %s >/dev/null
-; RUN: %python -c "import json,pathlib,sys; rows=json.loads(pathlib.Path(sys.argv[1]).read_text())['functions']; got=[(row['function'], row['final_level'], row['source_of_truth']) for row in rows]; expected=[('declared_only()','none','implicit (declaration forced none)'),('annotated()','strong_vm','source annotation (OBF_ANNOTATE)'),('risky_vm()','light','automatic analysis (downgrade)'),('floored()','strong','automatic analysis (minimum security floor)'),('defaulted()','light','yaml default policy')]; sys.exit(0 if got==expected else 1)" %t.audit.json
+; RUN: %python -c "import json,pathlib,sys; d=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert d['schema']=='obf.audit.v2' and d['evidence']=='policy_selection'; rows={r['function']:r for r in d['functions']}; expected={'declared_only()':'none','annotated()':'strong_vm','risky_vm()':'light','floored()':'strong','defaulted()':'light'}; assert {n:r['policy']['level'] for n,r in rows.items()}==expected; assert all('final_level' not in r and 'source_of_truth' not in r for r in rows.values()); assert rows['annotated()']['policy']['source']=='source_annotation'; assert 'annotation:' in rows['annotated()']['policy']['detail']; assert 'downgraded' in rows['risky_vm()']['policy']['detail']; assert 'minimum security floor' in rows['floored()']['policy']['detail']" %t.audit.json
 
 @.obf.strong_vm = private unnamed_addr constant [14 x i8] c"obf:strong_vm\00", section "llvm.metadata"
 @.obf.audit.file = private unnamed_addr constant [13 x i8] c"obf-audit.ll\00", section "llvm.metadata"
@@ -60,11 +59,3 @@ entry:
   ret i32 %sum
 }
 
-; TABLE: [ llvm-obfus policy resolution ]
-; TABLE-NEXT: function        | final level | source of truth
-; TABLE-NEXT: ---------------------------------------------------------------------------
-; TABLE-NEXT: declared_only() | none        | implicit (declaration forced none)
-; TABLE-NEXT: annotated()     | strong_vm   | source annotation (OBF_ANNOTATE)
-; TABLE-NEXT: risky_vm()      | light       | automatic analysis (downgrade)
-; TABLE-NEXT: floored()       | strong      | automatic analysis (minimum security floor)
-; TABLE-NEXT: defaulted()     | light       | yaml default policy

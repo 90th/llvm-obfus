@@ -2,6 +2,7 @@
 #include "obf/plugin/internal/plugin_vm_binding_prep.h"
 
 #include "obf/plugin/obfuscator_plugin_internal.h"
+#include "obf/report/coverage_report.h"
 
 #include "obf/support/function_attrs.h"
 #include "obf/support/generated_names.h"
@@ -34,6 +35,22 @@ struct vm_region_candidate {
   llvm::SmallVector<llvm::BasicBlock*, 8> region_blocks;
   std::size_t score = 0;
 };
+
+void record_regional_vm_event(llvm::Function& function,
+                              llvm::StringRef owner,
+                              llvm::StringRef mechanism,
+                              llvm::StringRef status,
+                              llvm::StringRef reason,
+                              const llvm::BasicBlock* header = nullptr,
+                              std::size_t count = 0) {
+  llvm::Module* module = function.getParent();
+  if (module == nullptr || !coverage_reporting_enabled(*module)) { return; }
+  const std::string detail =
+      header == nullptr ? reason.str()
+                        : llvm::formatv("{0}; region_header={1}", reason, header->getName()).str();
+  record_coverage_event(*module, "admission", mechanism, owner, function.getName(),
+                        status, detail, count, "regional");
+}
 
 std::string build_vm_region_helper_name(llvm::Function& function,
                                         std::uint64_t ordinal,
@@ -77,10 +94,16 @@ bool region_contains_vararg_intrinsic(llvm::ArrayRef<llvm::BasicBlock*> region_b
 }
 
 void append_vm_region_candidate(llvm::Function& function,
+                                llvm::StringRef owner,
                                 llvm::BasicBlock* header,
                                 llvm::ArrayRef<llvm::BasicBlock*> region_blocks,
                                 llvm::SmallVectorImpl<vm_region_candidate>& candidates) {
-  if (header == nullptr || region_contains_vararg_intrinsic(region_blocks)) { return; }
+  if (header == nullptr) { return; }
+  if (region_contains_vararg_intrinsic(region_blocks)) {
+    record_regional_vm_event(function, owner, "vm_regional_discovery", "skipped",
+                             "region contains a variadic instruction or intrinsic", header);
+    return;
+  }
 
   llvm::CodeExtractorAnalysisCache cache(function);
   llvm::DominatorTree dom_tree(function);
@@ -95,7 +118,11 @@ void append_vm_region_candidate(llvm::Function& function,
                                 /*AllowAlloca=*/false,
                                 /*AllocationBlock=*/nullptr,
                                 "obf.vm.region.check");
-  if (!extractor.isEligible()) { return; }
+  if (!extractor.isEligible()) {
+    record_regional_vm_event(function, owner, "vm_regional_discovery", "skipped",
+                             "region is not eligible for code extraction", header);
+    return;
+  }
 
   std::size_t instruction_count = 0;
   for (llvm::BasicBlock* region_block : region_blocks) {
@@ -107,14 +134,19 @@ void append_vm_region_candidate(llvm::Function& function,
   candidates.push_back(vm_region_candidate{.header = header,
                                            .region_blocks = std::move(stored_blocks),
                                            .score = instruction_count});
+  record_regional_vm_event(function, owner, "vm_regional_discovery", "discovered",
+                           "extractable regional candidate", header, instruction_count);
 }
 
 void collect_loop_region_candidates(llvm::Function& function,
+                                    llvm::StringRef owner,
                                     llvm::Loop& loop,
                                     llvm::SmallVectorImpl<vm_region_candidate>& candidates) {
   if (!loop.isInnermost()) {
     for (llvm::Loop* subloop : loop) {
-      if (subloop != nullptr) { collect_loop_region_candidates(function, *subloop, candidates); }
+      if (subloop != nullptr) {
+        collect_loop_region_candidates(function, owner, *subloop, candidates);
+      }
     }
     return;
   }
@@ -125,11 +157,13 @@ void collect_loop_region_candidates(llvm::Function& function,
   }
 
   if (region_blocks.empty()) { return; }
-  append_vm_region_candidate(function, loop.getHeader(), region_blocks, candidates);
+  append_vm_region_candidate(function, owner, loop.getHeader(), region_blocks, candidates);
 }
 
 llvm::SmallVector<vm_region_candidate, 8>
-find_regional_vm_candidates(llvm::Function& function, const llvm::StringSet<>& skip_functions) {
+find_regional_vm_candidates(llvm::Function& function,
+                            llvm::StringRef owner,
+                            const llvm::StringSet<>& skip_functions) {
   llvm::SmallVector<vm_region_candidate, 8> candidates;
   if (skip_functions.contains(function.getName())) { return candidates; }
 
@@ -159,7 +193,7 @@ find_regional_vm_candidates(llvm::Function& function, const llvm::StringSet<>& s
         if (merge_block != &block && merge_block != true_block && merge_block != false_block &&
             llvm::pred_size(merge_block) == 2) {
           region_blocks = {&block, true_block, false_block};
-          append_vm_region_candidate(function, &block, region_blocks, candidates);
+          append_vm_region_candidate(function, owner, &block, region_blocks, candidates);
         }
       }
     }
@@ -172,13 +206,13 @@ find_regional_vm_candidates(llvm::Function& function, const llvm::StringSet<>& s
       auto* succ_term = llvm::dyn_cast<llvm::BranchInst>(successor->getTerminator());
       if (succ_term != nullptr && succ_term->isUnconditional()) {
         region_blocks = {&block, successor};
-        append_vm_region_candidate(function, &block, region_blocks, candidates);
+        append_vm_region_candidate(function, owner, &block, region_blocks, candidates);
       }
     }
   }
 
   for (llvm::Loop* loop : loop_info) {
-    if (loop != nullptr) { collect_loop_region_candidates(function, *loop, candidates); }
+    if (loop != nullptr) { collect_loop_region_candidates(function, owner, *loop, candidates); }
   }
 
   llvm::sort(candidates, [](const vm_region_candidate& lhs, const vm_region_candidate& rhs) {
@@ -189,6 +223,7 @@ find_regional_vm_candidates(llvm::Function& function, const llvm::StringSet<>& s
 }
 
 bool can_virtualize_extracted_region(llvm::Function& function,
+                                     llvm::StringRef owner,
                                      const vm_region_candidate& candidate,
                                      std::uint64_t helper_ordinal,
                                      std::uint64_t seed,
@@ -196,7 +231,11 @@ bool can_virtualize_extracted_region(llvm::Function& function,
                                      std::uint32_t max_virtual_instructions) {
   llvm::ValueToValueMapTy value_map;
   llvm::Function* clone = llvm::CloneFunction(&function, value_map);
-  if (clone == nullptr) { return false; }
+  if (clone == nullptr) {
+    record_regional_vm_event(function, owner, "vm_regional_extraction", "skipped",
+                             "regional extraction probe clone creation failed", candidate.header);
+    return false;
+  }
 
   clone->setName(
       build_vm_region_helper_name(function, helper_ordinal, seed, preserve_generated_names) +
@@ -225,6 +264,8 @@ bool can_virtualize_extracted_region(llvm::Function& function,
                                 /*AllocationBlock=*/nullptr,
                                 "obf.vm.region.probe");
   if (!extractor.isEligible()) {
+    record_regional_vm_event(function, owner, "vm_regional_extraction", "skipped",
+                             "regional extraction probe is not eligible", candidate.header);
     clone->eraseFromParent();
     return false;
   }
@@ -232,16 +273,33 @@ bool can_virtualize_extracted_region(llvm::Function& function,
   llvm::SetVector<llvm::Value*> inputs;
   llvm::SetVector<llvm::Value*> outputs;
   llvm::Function* extracted = extractor.extractCodeRegion(cache, inputs, outputs);
-  bool eligible =
-      extracted != nullptr &&
-      vm::analyze_candidate(*extracted, nullptr, max_virtual_instructions).eligible &&
-      analyze_vm_boundary(*extracted, {}).target_supported;
+  bool eligible = false;
+  if (extracted == nullptr) {
+    record_regional_vm_event(function, owner, "vm_regional_extraction", "skipped",
+                             "regional extraction probe failed to extract a helper", candidate.header);
+  } else {
+    const vm::candidate_result analysis =
+        vm::analyze_candidate(*extracted, nullptr, max_virtual_instructions);
+    if (!analysis.eligible) {
+      record_regional_vm_event(function, owner, "vm_regional_extraction", "skipped",
+                               analysis.detail, candidate.header, analysis.instruction_count);
+    } else {
+      const vm_boundary_analysis boundary = analyze_vm_boundary(*extracted, {});
+      eligible = boundary.target_supported;
+      record_regional_vm_event(function, owner, "vm_regional_extraction",
+                               eligible ? "eligible" : "skipped",
+                               eligible ? llvm::StringRef("regional extraction probe supports VM and ABI")
+                                        : llvm::StringRef(boundary.target_reason),
+                               candidate.header, analysis.instruction_count);
+    }
+  }
   if (extracted != nullptr) { extracted->eraseFromParent(); }
   clone->eraseFromParent();
   return eligible;
 }
 
 llvm::Function* extract_regional_vm_helper(llvm::Function& function,
+                                           llvm::StringRef owner,
                                            const vm_region_candidate& candidate,
                                            std::uint64_t helper_ordinal,
                                            std::uint64_t seed,
@@ -262,15 +320,30 @@ llvm::Function* extract_regional_vm_helper(llvm::Function& function,
       /*AllowAlloca=*/false,
       /*AllocationBlock=*/nullptr,
       build_vm_region_helper_name(function, helper_ordinal, seed, preserve_generated_names));
-  if (!extractor.isEligible()) { return nullptr; }
+  if (!extractor.isEligible()) {
+    record_regional_vm_event(function, owner, "vm_regional_extraction", "skipped",
+                             "regional extraction became ineligible", candidate.header);
+    return nullptr;
+  }
 
   llvm::Function* helper = extractor.extractCodeRegion(cache);
-  if (helper == nullptr) { return nullptr; }
+  if (helper == nullptr) {
+    record_regional_vm_event(function, owner, "vm_regional_extraction", "skipped",
+                             "regional helper extraction failed", candidate.header);
+    return nullptr;
+  }
 
   helper->setAttributes(support::build_preserved_source_function_attributes(function, *helper));
   helper->setName(build_vm_region_helper_name(function, helper_ordinal, seed, preserve_generated_names));
   helper->setLinkage(llvm::GlobalValue::InternalLinkage);
   helper->setDSOLocal(true);
+  if (llvm::Module* module = helper->getParent();
+      module != nullptr && coverage_reporting_enabled(*module)) {
+    llvm::SmallVector<llvm::StringRef, 2> obligations;
+    if (read_string_protection_owner(*helper).has_value()) { obligations.push_back("string_owner"); }
+    if (helper->hasFnAttribute("vm.string.owner")) { obligations.push_back("vm_string_owner"); }
+    record_coverage_role(*helper, owner, "regional_helper", obligations);
+  }
   return helper;
 }
 
@@ -284,14 +357,20 @@ bool collect_regional_vm_targets(llvm::Function& function,
                                  bool preserve_generated_names,
                                  std::uint32_t max_virtual_instructions,
                                  llvm::SmallVectorImpl<vm_target_candidate>& targets) {
+  const llvm::StringRef owner = read_vm_coverage_owner(state);
   bool extracted_any = false;
   std::size_t extracted_count = 0;
   while (extracted_count < max_regions) {
     const llvm::SmallVector<vm_region_candidate, 8> candidates =
-        find_regional_vm_candidates(function, skip_functions);
+        find_regional_vm_candidates(function, owner, skip_functions);
+    if (candidates.empty()) {
+      record_regional_vm_event(function, owner, "vm_regional_discovery",
+                               "skipped", "no extractable regional candidates");
+    }
     bool extracted_this_round = false;
     for (const vm_region_candidate& candidate : candidates) {
       if (!can_virtualize_extracted_region(function,
+                                           owner,
                                            candidate,
                                            helper_ordinal,
                                            state.report.decision.seed,
@@ -301,11 +380,20 @@ bool collect_regional_vm_targets(llvm::Function& function,
       }
 
       llvm::Function* helper = extract_regional_vm_helper(function,
+                                                          owner,
                                                           candidate,
                                                           helper_ordinal++,
                                                           state.report.decision.seed,
                                                           preserve_generated_names);
       if (helper == nullptr) { continue; }
+      if (llvm::Module* module = helper->getParent();
+          module != nullptr && coverage_reporting_enabled(*module)) {
+        const std::string reason =
+            llvm::formatv("regional helper extracted; nesting_depth={0}", nesting_depth + 1).str();
+        record_coverage_event(*module, "admission", "vm_regional_extraction",
+                              owner, helper->getName(), "extracted",
+                              reason, candidate.score, "regional");
+      }
 
       llvm::SmallVector<vm_target_candidate, 4> nested_targets;
       if (nesting_depth < max_nesting_depth) {
@@ -321,7 +409,12 @@ bool collect_regional_vm_targets(llvm::Function& function,
                                           nested_targets);
       }
 
-      if (vm::analyze_candidate(*helper, nullptr, max_virtual_instructions).eligible) {
+      const vm::candidate_result helper_analysis =
+          vm::analyze_candidate(*helper, nullptr, max_virtual_instructions);
+      record_regional_vm_event(*helper, owner, "vm_candidate",
+                               helper_analysis.eligible ? "eligible" : "skipped",
+                               helper_analysis.detail, nullptr, helper_analysis.instruction_count);
+      if (helper_analysis.eligible) {
         targets.push_back(
             {.function = helper, .state = &state, .nesting_depth = nesting_depth + 1});
       }
@@ -355,10 +448,29 @@ discover_vm_targets_for_state(const function_pipeline_state& state,
     return targets;
   }
 
-  if (state.function->isVarArg()) { return targets; }
+  llvm::Module* module = state.function->getParent();
+  const bool reporting = module != nullptr && coverage_reporting_enabled(*module);
+  const llvm::StringRef owner = read_vm_coverage_owner(state);
+  if (state.function->isVarArg()) {
+    if (reporting) {
+      record_coverage_event(*module, "admission", "vm", owner,
+                            state.function->getName(), "skipped",
+                            "variadic functions are unsupported at the VM boundary",
+                            0, "whole_function");
+    }
+    return targets;
+  }
 
   const vm::candidate_result whole_function_analysis =
       vm::analyze_candidate(*state.function, nullptr, max_virtual_instructions);
+  if (reporting) {
+    record_coverage_event(*module, "admission",
+                          whole_function_analysis.eligible ? "vm_candidate" : "vm",
+                          owner, state.function->getName(),
+                          whole_function_analysis.eligible ? "eligible" : "skipped",
+                          whole_function_analysis.detail, whole_function_analysis.instruction_count,
+                          "whole_function");
+  }
 
   if (state.report.decision.policy.level == protection_level::strong_vm) {
     if (whole_function_analysis.eligible) {
@@ -376,11 +488,26 @@ discover_vm_targets_for_state(const function_pipeline_state& state,
                                                                preserve_generated_names,
                                                                max_virtual_instructions,
                                                                targets);
-    if (extracted_regions) { return targets; }
+    if (extracted_regions) {
+      if (reporting && targets.empty()) {
+        record_coverage_event(*module, "admission", "vm", owner, state.function->getName(),
+                              "skipped", "regional extraction produced no eligible VM targets",
+                              0, "regional");
+      }
+      return targets;
+    }
   }
 
   if (whole_function_analysis.eligible) {
     targets.push_back({.function = state.function, .state = &state, .nesting_depth = 0});
+  }
+  if (reporting && targets.empty() &&
+      state.report.decision.policy.level == protection_level::strong_vm) {
+    const std::string reason =
+        llvm::formatv("no eligible whole-function or regional VM target; whole_function_reason={0}",
+                      whole_function_analysis.detail).str();
+    record_coverage_event(*module, "admission", "vm", owner, state.function->getName(),
+                          "skipped", reason, 0, "whole_function");
   }
   return targets;
 }

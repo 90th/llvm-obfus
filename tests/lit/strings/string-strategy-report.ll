@@ -1,4 +1,4 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-strategy-report.yaml -passes=obf-feature-report -disable-output %s | %FileCheck %s
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-strategy-report.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "string_encoding") | [.target_name, .status, .strategy.kind, (.strategy.inline_eligible | tostring), (.strategy.use_kinds | join(","))] | join("|")' | %FileCheck %s
 
 @.compare = private unnamed_addr constant [8 x i8] c"delta-7\00"
 @.shared = private unnamed_addr constant [7 x i8] c"shared\00"
@@ -21,5 +21,5 @@ entry:
   ret i32 %ret
 }
 
-; CHECK: "inline_eligible":true{{.*}}"kind":"inline_stack_decode"{{.*}}"compare_call_operand"{{.*}}"target_name":".compare"
-; CHECK: "detail":"lazy_decode: 3 lazy use(s)"{{.*}}"kind":"helper_lazy_decode"{{.*}}"compare_call_operand"{{.*}}"return_operand"{{.*}}"target_name":".shared"
+; CHECK-DAG: .compare|candidate|inline_stack_decode|true|compare_call_operand
+; CHECK-DAG: .shared|candidate|helper_lazy_decode|false|{{.*}}compare_call_operand{{.*}}return_operand

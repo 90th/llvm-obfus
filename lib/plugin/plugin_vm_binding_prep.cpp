@@ -2,6 +2,7 @@
 
 #include "obf/plugin/obfuscator_plugin_internal.h"
 #include "obf/frontend/config.h"
+#include "obf/report/coverage_report.h"
 
 #include "obf/support/function_attrs.h"
 #include "obf/support/generated_names.h"
@@ -14,6 +15,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -148,6 +150,20 @@ bool requires_strict_vm_boundary(const obfuscation_config& config, protection_le
 }
 
 }  // namespace
+
+llvm::StringRef read_vm_coverage_owner(const function_pipeline_state& state) {
+  if (state.lto.present && !state.lto.selector_name.empty()) { return state.lto.selector_name; }
+  if (state.function != nullptr) {
+    if (const llvm::MDNode* metadata = state.function->getMetadata("obf.coverage.owner")) {
+      if (metadata->getNumOperands() == 1) {
+        if (const auto* owner = llvm::dyn_cast<llvm::MDString>(metadata->getOperand(0))) {
+          return owner->getString();
+        }
+      }
+    }
+  }
+  return state.report.features.name;
+}
 
 llvm::AttributeList build_vm_abi_attribute_list(const llvm::Function& function) {
   llvm::LLVMContext& context = function.getContext();
@@ -402,13 +418,23 @@ llvm::Function* clone_vm_implementation(llvm::Function& interface_function,
 
 virtualized_function_binding
 prepare_virtualized_function_binding(const function_pipeline_state& state,
-                                     const obfuscation_config& config) {
+                                     const obfuscation_config& config,
+                                     llvm::StringRef scope,
+                                     llvm::StringRef owner) {
   virtualized_function_binding binding;
   llvm::Function* interface_function = state.function;
   if (interface_function == nullptr || interface_function->isDeclaration()) { return binding; }
   llvm::Module* module = interface_function->getParent();
   if (module == nullptr) { return binding; }
-  if (get_vm_pointer_int_type(*interface_function) == nullptr) { return binding; }
+  const bool reporting = coverage_reporting_enabled(*module);
+  if (get_vm_pointer_int_type(*interface_function) == nullptr) {
+    if (reporting) {
+      record_coverage_event(*module, "admission", "vm", owner, interface_function->getName(),
+                            "skipped", "VM binding requires an integral pointer address space",
+                            0, scope);
+    }
+    return binding;
+  }
 
   llvm::SmallVector<llvm::CallBase*, 16> direct_call_sites;
   for (llvm::User* user : interface_function->users()) {
@@ -423,15 +449,33 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
   const protection_level level = state.report.decision.policy.level;
   const bool strict = requires_strict_vm_boundary(config, level);
   if (!boundary.target_supported) {
+    if (reporting) {
+      record_coverage_event(*module, "admission", "vm", owner, interface_function->getName(),
+                            strict ? "rejected" : "skipped", boundary.target_reason, 0, scope);
+    }
     if (strict) {
       std::string message = "vm strict boundary violation: function ";
       message += interface_function->getName().str();
       message += " cannot be virtualized safely (";
       message += boundary.target_reason;
       message += "); lower its protection level or adjust its ABI";
+      write_coverage_report(*module);
       llvm::report_fatal_error(llvm::StringRef(message));
     }
     return binding;
+  }
+  if (reporting) {
+    for (const vm_boundary_site& site : boundary.sites) {
+      if (site.rewritable) { continue; }
+      const llvm::Function* caller = site.call == nullptr ? nullptr : site.call->getFunction();
+      const std::string reason =
+          llvm::formatv("preserved incoming restriction: kind={0}, caller={1}",
+                        vm_incoming_site_kind_name(site.kind),
+                        caller == nullptr ? llvm::StringRef("<unknown>") : caller->getName()).str();
+      record_coverage_event(*module, "admission", "vm_incoming_site", owner,
+                            interface_function->getName(), strict ? "rejected" : "preserved",
+                            reason, 1, scope);
+    }
   }
   if (strict && boundary.has_preserved_site) {
     vm_incoming_site_kind preserved_kind = vm_incoming_site_kind::abi_mismatch;
@@ -447,6 +491,7 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
     message += vm_incoming_site_kind_name(preserved_kind).str();
     message += " site that cannot be safely virtualized; rewrite the caller to an "
                "ordinary call or lower the protection level";
+    write_coverage_report(*module);
     llvm::report_fatal_error(llvm::StringRef(message));
   }
 
@@ -485,7 +530,13 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
 
   llvm::Function* implementation_function =
       clone_vm_implementation(*interface_function, implementation_name);
-  if (implementation_function == nullptr) { return binding; }
+  if (implementation_function == nullptr) {
+    if (reporting) {
+      record_coverage_event(*module, "admission", "vm", owner, interface_function->getName(),
+                            "skipped", "VM implementation clone creation failed", 0, scope);
+    }
+    return binding;
+  }
 
   binding.interface_function = interface_function;
   binding.implementation_function = implementation_function;
@@ -508,6 +559,12 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
                                                 callsite_ordinal++),
          .kind = boundary_site.kind,
          .rewritable = boundary_site.rewritable});
+  }
+
+  if (reporting) {
+    record_coverage_event(*module, "admission", "vm", owner, interface_function->getName(),
+                          "admitted", "VM boundary and implementation binding prepared",
+                          binding.call_sites.size(), scope);
   }
 
   return binding;

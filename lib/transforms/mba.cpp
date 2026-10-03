@@ -1,4 +1,5 @@
 #include "obf/transforms/mba.h"
+#include "obf/report/coverage_report.h"
 
 #include "obf/frontend/config.h"
 #include "obf/support/affine_helpers.h"
@@ -11,6 +12,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -735,6 +737,17 @@ llvm::Function* get_or_create_entropy_thunk(llvm::Module& module,
       thunk_type, llvm::GlobalValue::InternalLinkage, thunk_name, module);
   thunk->setDSOLocal(true);
   thunk->addFnAttr(llvm::Attribute::NoInline);
+  if (coverage_reporting_enabled(module)) {
+    llvm::StringRef original_owner = owner.getName();
+    if (const llvm::MDNode* metadata = owner.getMetadata("obf.coverage.owner")) {
+      if (metadata->getNumOperands() == 1) {
+        if (const auto* name = llvm::dyn_cast<llvm::MDString>(metadata->getOperand(0))) {
+          original_owner = name->getString();
+        }
+      }
+    }
+    record_coverage_role(*thunk, original_owner, "entropy_thunk", {"entropy_access"});
+  }
 
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(llvm_context, "entry", thunk);
   llvm::IRBuilder<> builder(entry);

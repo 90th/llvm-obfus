@@ -1,4 +1,5 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/orchestrator-promotion.yaml -passes=obf-feature-report -disable-output %s | %FileCheck %s
+; RUN: env OBF_COVERAGE_REPORT=%t.coverage.json %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/orchestrator-promotion.yaml -passes=obf-feature-report -disable-output %s > %t.predictions.json
+; RUN: %python %S/../Inputs/report_contract.py promotion %t.predictions.json --coverage %t.coverage.json
 
 define i32 @secret_core(i32 %x) {
 entry:
@@ -21,5 +22,3 @@ entry:
   ret i32 %ret
 }
 
-; CHECK: "name":"secret_core"{{.*}}"level":"strong_vm"
-; CHECK: "name":"relay"{{.*}}"detail":"default; orchestrator promotion raised to strong via protected callee secret_core (protected result escapes through a return)"{{.*}}"level":"strong"{{.*}}"name":"main"{{.*}}"detail":"default; orchestrator promotion raised to strong via protected callee relay (top-level protected call)"{{.*}}"level":"strong"
