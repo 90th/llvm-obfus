@@ -172,6 +172,7 @@ Windows x86-64 PE32+ binding operates under these rules:
 Native Windows DLL regressions block the preferred image range before they call `LoadLibraryA`.
 The consumer requires a different load address and checks a real, unrelated `DIR64` data fixup.
 It then calls a protected export and checks the result.
+The `UNBOUND` case requires an illegal-instruction or breakpoint trap, not only a nonzero exit.
 The negative test changes an unexecuted sampled sibling.
 A checksum mismatch corrupts the protected result through the existing XOR transformation.
 This test does not require a new trap behavior.

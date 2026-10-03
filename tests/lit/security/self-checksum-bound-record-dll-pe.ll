@@ -5,7 +5,7 @@
 ; RUN: %raw_clang -O2 %S/../Inputs/self-checksum-pe-dll-loader.c -o %t.loader.exe
 ; RUN: %python %S/../Inputs/self_checksum_pe_tool.py inspect %t.dll | %FileCheck %s --check-prefix=UNBOUND
 ; RUN: %obf_checksum_bind --probe %t.dll | %FileCheck %s --check-prefix=PROBE
-; RUN: %expect_failure %t.loader.exe %t.dll 2>&1 | %FileCheck %s --check-prefix=UNBOUND-RUNTIME
+; RUN: %python %S/../Inputs/assert_trap_within.py %t.loader.exe %t.dll 2>&1 | %FileCheck %s --check-prefix=UNBOUND-RUNTIME
 ; RUN: %obf_checksum_bind %t.dll | %FileCheck %s --check-prefix=BIND
 ; RUN: %python %S/../Inputs/self_checksum_pe_tool.py inspect %t.dll | %FileCheck %s --check-prefix=BOUND
 ; RUN: cp %t.dll %t.bound-copy.dll
