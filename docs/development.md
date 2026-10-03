@@ -30,12 +30,16 @@ Build the project before you run CTest:
 
 ```sh
 cmake --build build --parallel 3
-ctest --test-dir build -j 3 --output-on-failure
+ctest --test-dir build --output-on-failure -j 1
 ```
 
 CTest runs the LLVM lit suite, transform and policy unit tests, runtime atomic tests, decode concurrency tests, and MBA lifetime tests.
 It also checks six malformed pending-decode cases through a trap observer.
 The configured lit test uses three workers.
+Keep outer CTest serial so native runtime tests do not overlap the lit workload.
+Windows VM tests can produce large IR modules and use several GiB of committed memory.
+Keep free disk space available for managed pagefile growth.
+Record the system commit limit and process allocations when an allocation fails.
 
 The trap observer waits up to two seconds for an illegal-instruction or breakpoint exit.
 Process creation occurs before that wait and can add time to the helper's total duration.
