@@ -37,6 +37,21 @@ CTest runs the LLVM lit suite, transform and policy unit tests, runtime atomic t
 It also checks six malformed pending-decode cases through a trap observer.
 The configured lit test uses three workers.
 
+The trap observer waits up to two seconds for an illegal-instruction or breakpoint exit.
+Process creation occurs before that wait and can add time to the helper's total duration.
+On Windows, it disables Windows Error Reporting for the child through inherited `SEM_NOGPFAULTERRORBOX`.
+It preserves the other error-mode flags and restores its previous mode after the subprocess exits or fails.
+The exception still terminates the child. Other exit codes and timeouts still fail the check.
+This matches the observer's existing Linux core-collection control.
+
+Windows phase measurements found a 1.53–1.57-second delay between `C000001D` and process exit with normal crash reporting.
+The same diagnostic image exited 0.30–0.61 milliseconds after that exception with reporting disabled.
+Rejection execution took less than one millisecond. Parent exit observation took less than two milliseconds.
+Historical events also show a 1.97-second crash-report interval for this executable, with `C000001D` recorded within 100 milliseconds of creation.
+The original timeout lacks child/parent phase timestamps and a recorded PID.
+Its exact timing and any contention contribution remain unknown.
+See the [Windows error-mode contract](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-seterrormode).
+
 Run a focused lit selection with the `lit` executable from your build configuration:
 
 ```sh
