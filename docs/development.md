@@ -58,6 +58,11 @@ Run a focused lit selection with the `lit` executable from your build configurat
 lit -j 3 -sv build/tests --filter='vm-extrema'
 ```
 
+The hidden-token admission probe prunes unreachable definitions before it assembles each scenario.
+It follows the replacement entry point and keeps reachable protected bodies intact.
+Membership variants exist only for their own case, not across later targets.
+These rules limit full-module copies without reducing token cases or trap-before-effects checks.
+
 On Windows, run `obf-clang-dll-lifecycle-pe` and `obf-clang-dll-output-pe` separately with three lit workers for focused native DLL checks.
 They check protected constructors and `DllMain` callbacks, decoded strings, return values, effects, exact exports, rebasing, and joined unload cycles.
 

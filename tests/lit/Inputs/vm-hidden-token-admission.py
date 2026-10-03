@@ -114,9 +114,12 @@ def return_key(text, target):
 
 
 def replace_spans(text, replacements):
-    for start, end, replacement in sorted(replacements, reverse=True):
-        text = text[:start] + replacement + text[end:]
-    return text
+    pieces, cursor = [], 0
+    for start, end, replacement in sorted(replacements):
+        pieces.extend((text[cursor:start], replacement))
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
 
 
 def wrapper_checks():
@@ -233,8 +236,9 @@ def captured_values(path):
     return tokens, [next(iter(values)) for values in seeds]
 
 
-def reachable_module(text):
+def reachable_module(text, replacements=None):
     # Follow globals as well as functions. Keep each reachable body intact.
+    replacements = dict(replacements or {})
     definitions = {function["name"]: function for function in FUNCTION.finditer(text)}
     definitions.update({global_value["name"]: global_value for global_value in
                         re.finditer(rf"(?m)^@(?P<name>{SYMBOL}) = [^\n]*$", text)})
@@ -272,7 +276,7 @@ def reachable_module(text):
                 continue
             reachable.add(name)
             if name != seed_ctor_name and name not in retention_lists:
-                pending.extend(re.findall(rf"@({SYMBOL})", definitions[name].group()))
+                pending.extend(re.findall(rf"@({SYMBOL})", replacements.get(name, definitions[name].group())))
         if seed_ctor_name not in reachable:
             break
         # Seed stores can retain wrappers with further resolver dependencies.
@@ -284,7 +288,6 @@ def reachable_module(text):
             retained_seeds.add(destination)
             pending.extend(re.findall(rf"@({SYMBOL})", line))
 
-    replacements = {}
     if seed_ctor_name in reachable:
         replacements[seed_ctor_name] = "\n".join(
             lines[:2] + [line for destination, line in seed_stores if destination in retained_seeds]
@@ -334,7 +337,6 @@ def scenario(text, target, token):
     if result_check is not None:
         checks = ("  %effect.ok = icmp eq i32 %effect, 37\n" + result_check
                   + "\n  %ok = and i1 %effect.ok, %result.ok")
-    main = next(function for function in FUNCTION.finditer(text) if function.group("name") == "main")
     replacement = f'''define i32 @main() {{
 entry:
   store i32 -1, ptr @fixture_effect
@@ -346,7 +348,7 @@ entry:
   %exit = select i1 %ok, i32 0, i32 1
   ret i32 %exit
 }}'''
-    return reachable_module(bind_fixture_writer(replace_spans(text, [(main.start(), main.end(), replacement)])))
+    return bind_fixture_writer(reachable_module(text, {"main": replacement}))
 
 
 def register_tokens(text, target, values):
@@ -426,11 +428,11 @@ def check(text, captures, prefix, command):
             run(text, target, token, False, label)
         # These membership-only fixture variants leave bytecode, target
         # encoding, and the full admission CFG unchanged.
-        member_text = register_tokens(text, target, [canonical])
-        run(member_text, target, canonical, True, "canonical-registered")
-        duplicate_text = register_tokens(text, target, [registered[0], registered[0]])
-        run(duplicate_text, target, registered[0], True, "duplicate-member")
-        run(duplicate_text, target, other, False, "duplicate-nonmember")
+        run(register_tokens(text, target, [canonical]), target, canonical, True, "canonical-registered")
+        for token, admitted, label in ((registered[0], True, "duplicate-member"),
+                                       (other, False, "duplicate-nonmember")):
+            run(register_tokens(text, target, [registered[0], registered[0]]),
+                target, token, admitted, label)
     print("VM hidden-token admission: registered callers admitted; impostors trap before side effects")
 
 
