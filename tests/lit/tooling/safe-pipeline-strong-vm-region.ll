@@ -1,8 +1,10 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region.yaml -passes=obf-vm,verify -S %s -o %t.vm
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region.yaml -passes='obf-coverage-start,obf-vm,obf-coverage-report,verify' -S %s -o %t.vm > %t.vm.json
+; RUN: %python %S/../Inputs/report_contract.py region %t.vm.json --ir %t.vm
 ; RUN: %lli %t.vm
 ; RUN: %opt -passes='default<O2>,verify' -S %t.vm -o %t.vm.optimized
 ; RUN: %lli %t.vm.optimized
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region.yaml -passes=obf-safe-pipeline -S %s -o %t
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region.yaml -passes='obf-coverage-start,obf-safe-pipeline,obf-coverage-report' -S %s -o %t > %t.coverage.json
+; RUN: %python %S/../Inputs/report_contract.py region %t.coverage.json
 ; RUN: %lli %t
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-region-strip.yaml -passes=obf-safe-pipeline -S %s -o %t.strip
 ; RUN: %lli %t.strip

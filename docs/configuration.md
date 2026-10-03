@@ -113,6 +113,11 @@ Selection does not guarantee that every eligible pass changes a function.
 - An exact generic override keeps its selected level despite these risky features, but disables VM lowering.
 - Individual transforms also reject unsupported instructions, address spaces, or control-flow shapes.
 
+The feature report labels these results as candidate predictions.
+The outcome ledger retains original selection reasons and later caller-promotion reasons.
+It records actual admission and emission separately.
+See [compiler coverage reports](usage.md#compiler-coverage-reports).
+
 ## Pass eligibility
 
 This table shows the initial function-policy flags, before feature restrictions and configuration switches.

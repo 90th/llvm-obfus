@@ -72,9 +72,13 @@ void sanitize_vm_wrapper_attributes(llvm::Function& interface_function);
 llvm::Function* clone_vm_implementation(llvm::Function& interface_function,
                                         llvm::StringRef implementation_name);
 
+llvm::StringRef read_vm_coverage_owner(const function_pipeline_state& state);
+
 virtualized_function_binding
 prepare_virtualized_function_binding(const function_pipeline_state& state,
-                                     const obfuscation_config& config);
+                                     const obfuscation_config& config,
+                                     llvm::StringRef scope,
+                                     llvm::StringRef owner);
 struct vm_boundary_site {
   llvm::CallBase* call = nullptr;
   vm_incoming_site_kind kind = vm_incoming_site_kind::ordinary_call;

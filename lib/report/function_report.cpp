@@ -10,11 +10,39 @@
 
 namespace obf {
 
+llvm::json::Object build_policy_report(const policy_decision& decision) {
+  llvm::json::Object policy_json;
+  policy_json["level"] = std::string(to_string(decision.policy.level));
+  policy_json["source"] = std::string(to_string(decision.source));
+  policy_json["detail"] = decision.detail;
+  policy_json["seed"] = "0x" + llvm::utohexstr(decision.seed, true);
+  if (decision.minimum_security_floor.has_value()) {
+    policy_json["minimum_security_floor"] =
+        std::string(to_string(*decision.minimum_security_floor));
+  }
+  policy_json["allow_string_encoding"] = decision.policy.allow_string_encoding;
+  policy_json["allow_zero_comparison"] = decision.policy.allow_zero_comparison;
+  policy_json["allow_constant_encoding"] = decision.policy.allow_constant_encoding;
+  policy_json["allow_instruction_substitution"] = decision.policy.allow_instruction_substitution;
+  policy_json["allow_opaque_gep"] = decision.policy.allow_opaque_gep;
+  policy_json["allow_function_outlining"] = decision.policy.allow_function_outlining;
+  policy_json["allow_bogus_control_flow"] = decision.policy.allow_bogus_control_flow;
+  policy_json["allow_opaque_predicates"] = decision.policy.allow_opaque_predicates;
+  policy_json["allow_flattening"] = decision.policy.allow_flattening;
+  policy_json["allow_split"] = decision.policy.allow_split;
+  policy_json["allow_indirect_calls"] = decision.policy.allow_indirect_calls;
+  policy_json["allow_vm"] = decision.policy.allow_vm;
+  policy_json["allow_self_checksum"] = decision.policy.allow_self_checksum;
+  return policy_json;
+}
+
 std::string format_feature_report(llvm::StringRef module_name,
                                   llvm::ArrayRef<function_report_entry> entries,
-                                  llvm::ArrayRef<transform_report_entry> transforms) {
+                                  llvm::ArrayRef<prediction_report_entry> predictions,
+                                  llvm::ArrayRef<structural_observation_report_entry> observations) {
   llvm::json::Array functions_json;
-  llvm::json::Array transforms_json;
+  llvm::json::Array predictions_json;
+  llvm::json::Array observations_json;
 
   for (const function_report_entry& entry : entries) {
     const function_features& feature = entry.features;
@@ -34,41 +62,22 @@ std::string format_feature_report(llvm::StringRef module_name,
     function_json["address_taken"] = feature.address_taken;
     function_json["is_declaration"] = feature.is_declaration;
 
-    llvm::json::Object policy_json;
-    policy_json["level"] = std::string(to_string(entry.decision.policy.level));
-    policy_json["source"] = std::string(to_string(entry.decision.source));
-    policy_json["detail"] = entry.decision.detail;
-    policy_json["seed"] = "0x" + llvm::utohexstr(entry.decision.seed, true);
-    if (entry.decision.minimum_security_floor.has_value()) {
-      policy_json["minimum_security_floor"] =
-          std::string(to_string(*entry.decision.minimum_security_floor));
-    }
-    policy_json["allow_string_encoding"] = entry.decision.policy.allow_string_encoding;
-    policy_json["allow_constant_encoding"] = entry.decision.policy.allow_constant_encoding;
-    policy_json["allow_instruction_substitution"] =
-        entry.decision.policy.allow_instruction_substitution;
-    policy_json["allow_function_outlining"] = entry.decision.policy.allow_function_outlining;
-    policy_json["allow_bogus_control_flow"] = entry.decision.policy.allow_bogus_control_flow;
-    policy_json["allow_opaque_predicates"] = entry.decision.policy.allow_opaque_predicates;
-    policy_json["allow_flattening"] = entry.decision.policy.allow_flattening;
-    policy_json["allow_split"] = entry.decision.policy.allow_split;
-    policy_json["allow_indirect_calls"] = entry.decision.policy.allow_indirect_calls;
-    policy_json["allow_vm"] = entry.decision.policy.allow_vm;
-    function_json["policy"] = llvm::json::Value(std::move(policy_json));
+    function_json["policy"] = build_policy_report(entry.decision);
 
     if (!entry.annotation.empty()) { function_json["annotation"] = entry.annotation; }
 
     functions_json.push_back(llvm::json::Value(std::move(function_json)));
   }
 
-  for (const transform_report_entry& entry : transforms) {
-    llvm::json::Object transform_json;
-    transform_json["pass"] = entry.pass;
-    transform_json["target_kind"] = entry.target_kind;
-    transform_json["target_name"] = entry.target_name;
-    transform_json["status"] = entry.status;
-    transform_json["detail"] = entry.detail;
-    transform_json["count"] = static_cast<std::int64_t>(entry.count);
+  for (const prediction_report_entry& entry : predictions) {
+    llvm::json::Object prediction_json;
+    prediction_json["pass"] = entry.pass;
+    prediction_json["target_kind"] = entry.target_kind;
+    prediction_json["target_name"] = entry.target_name;
+    prediction_json["status"] = entry.status;
+    prediction_json["evidence"] = "candidate_analysis";
+    prediction_json["detail"] = entry.detail;
+    prediction_json["count"] = static_cast<std::int64_t>(entry.count);
 
     if (entry.has_strategy_payload) {
       llvm::json::Object strategy_json;
@@ -90,27 +99,37 @@ std::string format_feature_report(llvm::StringRef module_name,
       llvm::json::Array use_kinds_json;
       for (const std::string& use_kind : entry.use_kinds) { use_kinds_json.push_back(use_kind); }
       strategy_json["use_kinds"] = std::move(use_kinds_json);
-      transform_json["strategy"] = llvm::json::Value(std::move(strategy_json));
+      prediction_json["strategy"] = llvm::json::Value(std::move(strategy_json));
     }
 
-    if (entry.has_mba_shape_payload) {
-      llvm::json::Object mba_json;
-      mba_json["linear"] = static_cast<std::int64_t>(entry.mba_counts.linear_count);
-      mba_json["affine"] = static_cast<std::int64_t>(entry.mba_counts.affine_count);
-      mba_json["polynomial"] = static_cast<std::int64_t>(entry.mba_counts.polynomial_count);
-      mba_json["mul"] = static_cast<std::int64_t>(entry.mba_counts.mul_count);
-      transform_json["mba"] = llvm::json::Value(std::move(mba_json));
-    }
+    predictions_json.push_back(llvm::json::Value(std::move(prediction_json)));
+  }
 
-    transforms_json.push_back(llvm::json::Value(std::move(transform_json)));
+  for (const structural_observation_report_entry& entry : observations) {
+    llvm::json::Object observation_json;
+    observation_json["mechanism"] = entry.mechanism;
+    observation_json["target_kind"] = entry.target_kind;
+    observation_json["target_name"] = entry.target_name;
+    observation_json["status"] = "observed";
+    observation_json["evidence"] = "structural_observation";
+    observation_json["detail"] = entry.detail;
+    observation_json["count"] = static_cast<std::int64_t>(entry.count);
+    llvm::json::Object mba_json;
+    mba_json["linear"] = static_cast<std::int64_t>(entry.mba_counts.linear_count);
+    mba_json["affine"] = static_cast<std::int64_t>(entry.mba_counts.affine_count);
+    mba_json["polynomial"] = static_cast<std::int64_t>(entry.mba_counts.polynomial_count);
+    mba_json["mul"] = static_cast<std::int64_t>(entry.mba_counts.mul_count);
+    observation_json["mba"] = std::move(mba_json);
+    observations_json.push_back(std::move(observation_json));
   }
 
   llvm::json::Object root;
-  root["schema"] = "obf.feature_report.v3";
+  root["schema"] = "obf.feature_report.v4";
   root["module"] = module_name.str();
   root["function_count"] = static_cast<std::int64_t>(entries.size());
   root["functions"] = std::move(functions_json);
-  root["transforms"] = std::move(transforms_json);
+  root["predictions"] = std::move(predictions_json);
+  root["observations"] = std::move(observations_json);
 
   std::string output;
   llvm::raw_string_ostream stream(output);

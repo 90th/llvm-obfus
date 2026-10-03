@@ -1,4 +1,4 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema-width.yaml -passes=obf-feature-report -disable-output %s | jq -r '.transforms[] | select(.pass == "vm") | [.target_name, .status, (.count | tostring), .detail] | join("|")' | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema-width.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "vm") | [.target_name, .status, (.count | tostring), .detail] | join("|")' | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema-width.yaml -passes='obf-vm,verify' -S %s -o - | %FileCheck %s --check-prefix=SKIPPED --implicit-check-not='@__obf_vm_bc_'
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema-width-strong.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=STRICT
 
@@ -18,8 +18,8 @@ entry:
   ret i1 %less
 }
 
-; REPORT-DAG: vm_wide_max|skipped|0|integer comparison width exceeds VM widening limit
-; REPORT-DAG: vm_wide_ordered_cmp|skipped|0|integer comparison width exceeds VM widening limit
+; REPORT-DAG: vm_wide_max|not_candidate|0|integer comparison width exceeds VM widening limit
+; REPORT-DAG: vm_wide_ordered_cmp|not_candidate|0|integer comparison width exceeds VM widening limit
 ; SKIPPED-LABEL: define i8388608 @vm_wide_max(
 ; SKIPPED: call i8388608 @llvm.umax.i8388608
 ; SKIPPED-LABEL: define i1 @vm_wide_ordered_cmp(

@@ -1,5 +1,5 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema.yaml -passes=obf-feature-report -disable-output %s | jq -r '.transforms[] | select(.pass == "vm") | [.target_name, .status, (.count | tostring), .detail] | join("|")' | %FileCheck %s --check-prefix=ADMIT
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema-budget.yaml -passes=obf-feature-report -disable-output %s | jq -r '.transforms[] | select(.pass == "vm") | [.target_name, .status, (.count | tostring), .detail] | join("|")' | %FileCheck %s --check-prefix=BUDGET
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "vm") | [.target_name, .status, (.count | tostring), .detail] | join("|")' | %FileCheck %s --check-prefix=ADMIT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema-budget.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "vm") | [.target_name, .status, (.count | tostring), .detail] | join("|")' | %FileCheck %s --check-prefix=BUDGET
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema.yaml -passes='obf-vm,verify' -S %s -o %t.ll
 ; RUN: %FileCheck %s --check-prefix=PROTECTED < %t.ll
 ; RUN: %lli %s
@@ -111,15 +111,15 @@ entry:
   ret i32 %code
 }
 
-; ADMIT-DAG: vm_smax8|applied|5|eligible: 5 virtual instruction(s) across 1 block(s)
-; ADMIT-DAG: vm_umax8|applied|5|eligible: 5 virtual instruction(s) across 1 block(s)
-; ADMIT-DAG: vm_smax64|applied|5|eligible: 5 virtual instruction(s) across 1 block(s)
-; ADMIT-DAG: vm_umax64|applied|5|eligible: 5 virtual instruction(s) across 1 block(s)
-; ADMIT-DAG: vm_smin32|applied|5|eligible: 5 virtual instruction(s) across 1 block(s)
-; ADMIT-DAG: vm_umin32|applied|5|eligible: 5 virtual instruction(s) across 1 block(s)
-; ADMIT-DAG: vm_vector_max|skipped|0|unsupported intrinsic: llvm.smax.v2i8
-; BUDGET-DAG: vm_smax8|skipped|0|too many virtual instructions (5 > 4)
-; BUDGET-DAG: vm_umax64|skipped|0|too many virtual instructions (5 > 4)
+; ADMIT-DAG: vm_smax8|candidate|5|
+; ADMIT-DAG: vm_umax8|candidate|5|
+; ADMIT-DAG: vm_smax64|candidate|5|
+; ADMIT-DAG: vm_umax64|candidate|5|
+; ADMIT-DAG: vm_smin32|candidate|5|
+; ADMIT-DAG: vm_umin32|candidate|5|
+; ADMIT-DAG: vm_vector_max|not_candidate|0|unsupported intrinsic: llvm.smax.v2i8
+; BUDGET-DAG: vm_smax8|not_candidate|0|too many virtual instructions (5 > 4)
+; BUDGET-DAG: vm_umax64|not_candidate|0|too many virtual instructions (5 > 4)
 
 ; PROTECTED-DAG: @__obf_vm_bc_i_{{[A-Za-z0-9_]+}} = private unnamed_addr constant
 ; PROTECTED-LABEL: define i8 @vm_smax8(

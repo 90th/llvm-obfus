@@ -1,7 +1,9 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/orchestrator-preserve-vm.yaml -passes=obf-feature-report -disable-output %s | %FileCheck %s --check-prefix=POLICY
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/orchestrator-preserve-vm.yaml -passes=obf-safe-pipeline,verify -S %s -o %t.ll
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/orchestrator-preserve-vm.yaml -passes=obf-feature-report -disable-output %s > %t.predictions.json
+; RUN: %FileCheck %s --check-prefix=POLICY < %t.predictions.json
+; RUN: env OBF_COVERAGE_REPORT=%t.coverage.json %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/orchestrator-preserve-vm.yaml -passes=obf-safe-pipeline,verify -S %s -o %t.ll
 ; RUN: %FileCheck %s --check-prefix=BINDING < %t.ll
 ; RUN: %lli %t.ll
+; RUN: %python -c "import json,sys; d=json.load(open(sys.argv[1])); original={x['name']:x['policy'] for x in json.load(open(sys.argv[2]))['functions']}; p=[x for x in d['requested_policy'] if x['owner']=='vm_relay']; s=[x for x in p if x['phase']=='selected']; e=[x for x in p if x['phase']=='effective']; assert len(s)==len(e)==1; assert s[0]['policy']['level']=='vm' and s[0]['policy']['source']=='explicit_override'; assert e[0]['policy']==original['vm_relay']; assert e[0]['policy']['allow_vm'] and e[0]['policy']['allow_instruction_substitution']; assert 'protected_core' in e[0]['policy']['detail']; assert all(r['owner'] in ('','protected_core','vm_relay','restricted_vm_relay','main') for r in d['roles'] if r['role']!='source'); assert any(x['mechanism']=='vm' and x['owner']=='vm_relay' and x['status']=='emitted' for x in d['emission'])" %t.coverage.json %t.predictions.json
 ;
 ; Adding classical caller protection must not replace a selected VM obligation.
 ; POLICY: "name":"vm_relay"{{[^}]*}}"allow_instruction_substitution":true{{[^}]*}}"allow_vm":true{{[^}]*}}"level":"vm"

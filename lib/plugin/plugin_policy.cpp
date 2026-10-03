@@ -3,6 +3,7 @@
 #include "obf/analysis/function_features.h"
 #include "obf/frontend/annotations.h"
 #include "obf/policy/policy_engine.h"
+#include "obf/report/coverage_report.h"
 #include "obf/support/stable_hash.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
@@ -575,6 +576,7 @@ build_lto_pipeline_state(llvm::Module& module, const obfuscation_config& config,
   const std::uint64_t config_identity = compute_lto_config_identity(config);
   llvm::SmallVector<function_pipeline_state, 32> states;
   states.reserve(module.size());
+  llvm::SmallPtrSet<const llvm::Function*, 32> selected_for_report;
 
   for (llvm::Function& function : module) {
     function_pipeline_state state;
@@ -603,9 +605,35 @@ build_lto_pipeline_state(llvm::Module& module, const obfuscation_config& config,
           module, state.report.features, policy_config, state.report.annotation);
     }
     states.push_back(std::move(state));
+    if (coverage_reporting_enabled(module) &&
+        function.getMetadata("obf.coverage.owner") == nullptr) {
+      function_report_entry snapshot = states.back().report;
+      if (states.back().lto.present) { snapshot.features.name = states.back().lto.selector_name; }
+      record_coverage_policy(module, snapshot, "selected");
+      record_coverage_role(function, snapshot.features.name, "source", {"selected_policy"});
+      selected_for_report.insert(&function);
+    }
   }
 
-  if (config.frontend == frontend_kind::generic) { apply_orchestrator_policy_promotions(states); }
+  if (config.frontend == frontend_kind::generic) {
+    if (coverage_reporting_enabled(module)) {
+      llvm::SmallVector<std::size_t, 32> detail_sizes;
+      detail_sizes.reserve(states.size());
+      for (const auto& state : states) { detail_sizes.push_back(state.report.decision.detail.size()); }
+      apply_orchestrator_policy_promotions(states);
+      for (std::size_t index = 0; index < states.size(); ++index) {
+        if (states[index].report.decision.detail.size() != detail_sizes[index]) {
+          if (selected_for_report.contains(states[index].function)) {
+            record_coverage_policy(module, states[index].report, "effective");
+          } else if (states[index].lto.present) {
+            record_coverage_policy(module, states[index].report, "retained_effective");
+          }
+        }
+      }
+    } else {
+      apply_orchestrator_policy_promotions(states);
+    }
+  }
   return states;
 }
 

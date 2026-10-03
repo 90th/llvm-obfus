@@ -1,5 +1,5 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extended-semantics.yaml -passes=obf-vm -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extended-semantics.yaml -passes=obf-feature-report -disable-output %s | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extended-semantics.yaml -passes=obf-feature-report -disable-output %s | jq -r '(.functions[] | select(.name == "extended_semantics") | [.name, (.has_vector_ops | tostring), (.policy.allow_vm | tostring)] | join("|")), (.predictions[] | select(.pass == "vm" and .target_name == "extended_semantics") | [.target_name, .status, .evidence] | join("|"))' | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extended-semantics.yaml -passes=obf-vm -S %s -o %t
 ; RUN: %lli %t
 
@@ -74,8 +74,5 @@ entry:
 ; CHECK-DAG: call void @llvm.memset.p0.i64
 ; CHECK: indirectbr ptr
 
-; REPORT-DAG: "name":"extended_semantics",
-; REPORT-DAG: "has_vector_ops":true
-; REPORT-DAG: "allow_vm":true
-; REPORT-DAG: "detail":"config match:extended_semantics"
-; REPORT-DAG: "pass":"vm","status":"applied","target_kind":"function","target_name":"extended_semantics"
+; REPORT-DAG: extended_semantics|true|true
+; REPORT-DAG: extended_semantics|candidate|candidate_analysis

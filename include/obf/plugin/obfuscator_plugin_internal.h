@@ -140,10 +140,15 @@ bogus_control_flow_options build_bogus_control_flow_options(const obfuscation_co
 opaque_predicate_options build_opaque_predicate_options(const obfuscation_config& config,
                                                         const policy_decision& decision);
 
-llvm::SmallVector<transform_report_entry, 64>
-build_transform_reports(llvm::Module& module,
+llvm::SmallVector<prediction_report_entry, 64>
+build_prediction_reports(llvm::Module& module,
                         const llvm::SmallVectorImpl<function_pipeline_state>& states,
                         const obfuscation_config& config);
+
+llvm::SmallVector<structural_observation_report_entry, 16>
+build_structural_observation_reports(
+    llvm::Module& module,
+    const llvm::SmallVectorImpl<function_pipeline_state>& states);
 
 void verify_changed_module(llvm::Module& module);
 

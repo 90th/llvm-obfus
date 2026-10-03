@@ -4,7 +4,6 @@
 #include "obf/vm/candidate_analysis.h"
 
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
 
@@ -16,16 +15,16 @@ namespace obf {
 
 namespace {
 
-transform_report_entry make_transform_report(llvm::StringRef pass,
+prediction_report_entry make_prediction_report(llvm::StringRef pass,
                                              llvm::StringRef target_kind,
                                              llvm::StringRef target_name,
-                                             bool applied,
+                                             bool candidate,
                                              llvm::StringRef detail,
                                              std::size_t count) {
   return {.pass = pass.str(),
           .target_kind = target_kind.str(),
           .target_name = target_name.str(),
-          .status = applied ? "applied" : "skipped",
+          .status = candidate ? "candidate" : "not_candidate",
           .detail = detail.str(),
           .count = count,
           .strategy_kind = {},
@@ -39,52 +38,33 @@ transform_report_entry make_transform_report(llvm::StringRef pass,
           .unprotected_use_count = 0,
           .inline_eligible = false,
           .has_strategy_payload = false,
-          .has_mba_shape_payload = false,
-          .mba_counts = {},
           .use_kinds = {}};
 }
 
 }  // namespace
 
-llvm::SmallVector<transform_report_entry, 64>
-build_transform_reports(llvm::Module& module,
+llvm::SmallVector<prediction_report_entry, 64>
+build_prediction_reports(llvm::Module& module,
                         const llvm::SmallVectorImpl<function_pipeline_state>& states,
                         const obfuscation_config& config) {
-  llvm::SmallVector<transform_report_entry, 64> reports;
-  llvm::StringSet<> virtualized_functions;
-
-  for (const function_pipeline_state& state : states) {
-    if (state.function == nullptr || !state.report.decision.policy.allow_vm) { continue; }
-
-    if (vm::analyze_candidate(*state.function, nullptr, config.vm.max_virtual_instructions)
-            .eligible) {
-      virtualized_functions.insert(state.function->getName());
-    }
-  }
-
+  llvm::SmallVector<prediction_report_entry, 64> reports;
   for (const function_pipeline_state& state : states) {
     const llvm::Function* function = state.function;
     if (function == nullptr) { continue; }
 
-    const bool suppressed_by_vm = virtualized_functions.contains(function->getName()) &&
-                                  state.report.decision.policy.level != protection_level::strong_vm;
-    const bool deferred_to_vm_hardening =
-        virtualized_functions.contains(function->getName()) &&
-        state.report.decision.policy.level == protection_level::strong_vm;
-
-    const vm::candidate_result vm_result =
-        vm::analyze_candidate(*function, nullptr, config.vm.max_virtual_instructions);
     if (!state.report.decision.policy.allow_vm) {
       reports.push_back(
-          make_transform_report("vm",
+          make_prediction_report("vm",
                                 "function",
                                 function->getName(),
                                 false,
                                 function->isDeclaration() ? "declaration" : "policy disallows vm",
                                 0));
     } else {
+      const vm::candidate_result vm_result =
+          vm::analyze_candidate(*function, nullptr, config.vm.max_virtual_instructions);
       reports.push_back(
-          make_transform_report("vm",
+          make_prediction_report("vm",
                                 "function",
                                 function->getName(),
                                 vm_result.eligible,
@@ -92,11 +72,8 @@ build_transform_reports(llvm::Module& module,
                                 vm_result.eligible ? vm_result.instruction_count : 0));
     }
 
-    if (suppressed_by_vm) {
-      reports.push_back(make_transform_report(
-          "block_split", "function", function->getName(), false, "suppressed after vm", 0));
-    } else if (!state.report.decision.policy.allow_split) {
-      reports.push_back(make_transform_report("block_split",
+    if (!state.report.decision.policy.allow_split) {
+      reports.push_back(make_prediction_report("block_split",
                                               "function",
                                               function->getName(),
                                               false,
@@ -107,7 +84,7 @@ build_transform_reports(llvm::Module& module,
       const block_split_options options = build_block_split_options(config, state.report.decision);
       const block_split_result result =
           analyze_block_split(*function, options, state.report.decision.seed);
-      reports.push_back(make_transform_report("block_split",
+      reports.push_back(make_prediction_report("block_split",
                                               "function",
                                               function->getName(),
                                               result.split_count > 0,
@@ -115,11 +92,8 @@ build_transform_reports(llvm::Module& module,
                                               result.split_count));
     }
 
-    if (suppressed_by_vm) {
-      reports.push_back(make_transform_report(
-          "constant_encoding", "function", function->getName(), false, "suppressed after vm", 0));
-    } else if (!state.report.decision.policy.allow_constant_encoding) {
-      reports.push_back(make_transform_report(
+    if (!state.report.decision.policy.allow_constant_encoding) {
+      reports.push_back(make_prediction_report(
           "constant_encoding",
           "function",
           function->getName(),
@@ -131,7 +105,7 @@ build_transform_reports(llvm::Module& module,
           build_constant_encoding_options(config, state.report.decision);
       const constant_encoding_result result =
           analyze_constant_encoding(*function, options, state.report.decision.seed);
-      reports.push_back(make_transform_report("constant_encoding",
+      reports.push_back(make_prediction_report("constant_encoding",
                                               "function",
                                               function->getName(),
                                               result.encoded_count > 0,
@@ -139,22 +113,8 @@ build_transform_reports(llvm::Module& module,
                                               result.encoded_count));
     }
 
-    if (suppressed_by_vm) {
-      reports.push_back(make_transform_report("instruction_substitution",
-                                              "function",
-                                              function->getName(),
-                                              false,
-                                              "suppressed after vm",
-                                              0));
-    } else if (deferred_to_vm_hardening) {
-      reports.push_back(make_transform_report("instruction_substitution",
-                                              "function",
-                                              function->getName(),
-                                              false,
-                                              "deferred to vm hardening",
-                                              0));
-    } else if (!state.report.decision.policy.allow_instruction_substitution) {
-      reports.push_back(make_transform_report(
+    if (!state.report.decision.policy.allow_instruction_substitution) {
+      reports.push_back(make_prediction_report(
           "instruction_substitution",
           "function",
           function->getName(),
@@ -166,7 +126,7 @@ build_transform_reports(llvm::Module& module,
           build_instruction_substitution_options(config, state.report.decision);
       const instruction_substitution_result result =
           analyze_instruction_substitution(*function, options);
-      reports.push_back(make_transform_report("instruction_substitution",
+      reports.push_back(make_prediction_report("instruction_substitution",
                                               "function",
                                               function->getName(),
                                               result.substitution_count > 0,
@@ -174,18 +134,8 @@ build_transform_reports(llvm::Module& module,
                                               result.substitution_count));
     }
 
-    if (suppressed_by_vm) {
-      reports.push_back(make_transform_report(
-          "control_flattening", "function", function->getName(), false, "suppressed after vm", 0));
-    } else if (deferred_to_vm_hardening) {
-      reports.push_back(make_transform_report("control_flattening",
-                                              "function",
-                                              function->getName(),
-                                              false,
-                                              "deferred to vm hardening",
-                                              0));
-    } else if (!state.report.decision.policy.allow_flattening) {
-      reports.push_back(make_transform_report(
+    if (!state.report.decision.policy.allow_flattening) {
+      reports.push_back(make_prediction_report(
           "control_flattening",
           "function",
           function->getName(),
@@ -196,7 +146,7 @@ build_transform_reports(llvm::Module& module,
       const control_flattening_options options =
           build_control_flattening_options(config, state.report.decision);
       const control_flattening_result result = analyze_control_flattening(*function, options);
-      reports.push_back(make_transform_report("control_flattening",
+      reports.push_back(make_prediction_report("control_flattening",
                                               "function",
                                               function->getName(),
                                               result.flattened,
@@ -204,18 +154,8 @@ build_transform_reports(llvm::Module& module,
                                               result.state_count));
     }
 
-    if (suppressed_by_vm) {
-      reports.push_back(make_transform_report(
-          "function_outlining", "function", function->getName(), false, "suppressed after vm", 0));
-    } else if (deferred_to_vm_hardening) {
-      reports.push_back(make_transform_report("function_outlining",
-                                              "function",
-                                              function->getName(),
-                                              false,
-                                              "deferred to vm hardening",
-                                              0));
-    } else if (!state.report.decision.policy.allow_function_outlining) {
-      reports.push_back(make_transform_report(
+    if (!state.report.decision.policy.allow_function_outlining) {
+      reports.push_back(make_prediction_report(
           "function_outlining",
           "function",
           function->getName(),
@@ -226,7 +166,7 @@ build_transform_reports(llvm::Module& module,
       const function_outlining_options options =
           build_function_outlining_options(config, state.report.decision);
       const function_outlining_result result = analyze_function_outlining(*function, options);
-      reports.push_back(make_transform_report("function_outlining",
+      reports.push_back(make_prediction_report("function_outlining",
                                               "function",
                                               function->getName(),
                                               result.shard_count > 0,
@@ -234,11 +174,8 @@ build_transform_reports(llvm::Module& module,
                                               result.shard_count));
     }
 
-    if (suppressed_by_vm) {
-      reports.push_back(make_transform_report(
-          "opaque_predicates", "function", function->getName(), false, "suppressed after vm", 0));
-    } else if (!state.report.decision.policy.allow_opaque_predicates) {
-      reports.push_back(make_transform_report(
+    if (!state.report.decision.policy.allow_opaque_predicates) {
+      reports.push_back(make_prediction_report(
           "opaque_predicates",
           "function",
           function->getName(),
@@ -249,7 +186,7 @@ build_transform_reports(llvm::Module& module,
       const opaque_predicate_options options =
           build_opaque_predicate_options(config, state.report.decision);
       const opaque_predicate_result result = analyze_opaque_predicates(*function, options);
-      reports.push_back(make_transform_report("opaque_predicates",
+      reports.push_back(make_prediction_report("opaque_predicates",
                                               "function",
                                               function->getName(),
                                               result.insertion_count > 0,
@@ -257,11 +194,8 @@ build_transform_reports(llvm::Module& module,
                                               result.insertion_count));
     }
 
-    if (suppressed_by_vm) {
-      reports.push_back(make_transform_report(
-          "bogus_control_flow", "function", function->getName(), false, "suppressed after vm", 0));
-    } else if (!state.report.decision.policy.allow_bogus_control_flow) {
-      reports.push_back(make_transform_report(
+    if (!state.report.decision.policy.allow_bogus_control_flow) {
+      reports.push_back(make_prediction_report(
           "bogus_control_flow",
           "function",
           function->getName(),
@@ -272,7 +206,7 @@ build_transform_reports(llvm::Module& module,
       const bogus_control_flow_options options =
           build_bogus_control_flow_options(config, state.report.decision);
       const bogus_control_flow_result result = analyze_bogus_control_flow(*function, options);
-      reports.push_back(make_transform_report("bogus_control_flow",
+      reports.push_back(make_prediction_report("bogus_control_flow",
                                               "function",
                                               function->getName(),
                                               result.insertion_count > 0,
@@ -285,34 +219,13 @@ build_transform_reports(llvm::Module& module,
           build_indirect_dispatch_options(config, state.report.decision);
       const indirect_dispatch_result result =
           analyze_indirect_dispatch(*function, options);
-      reports.push_back(make_transform_report("indirect_dispatch",
+      reports.push_back(make_prediction_report("indirect_dispatch",
                                               "function",
                                               function->getName(),
                                               result.site_count > 0,
                                               result.detail,
                                               result.site_count));
     }
-  }
-
-  for (const function_pipeline_state& state : states) {
-    if (state.function == nullptr) { continue; }
-    if (state.mba_counts.linear_count == 0 && state.mba_counts.affine_count == 0 &&
-        state.mba_counts.polynomial_count == 0 && state.mba_counts.mul_count == 0) {
-      continue;
-    }
-
-    auto entry = make_transform_report(
-        "mba", "function", state.function->getName(), true, "", 0);
-    const std::size_t total = state.mba_counts.linear_count + state.mba_counts.affine_count +
-                              state.mba_counts.polynomial_count + state.mba_counts.mul_count;
-    entry.detail = "linear:" + std::to_string(state.mba_counts.linear_count) +
-                   " affine:" + std::to_string(state.mba_counts.affine_count) +
-                   " polynomial:" + std::to_string(state.mba_counts.polynomial_count) +
-                   " mul:" + std::to_string(state.mba_counts.mul_count);
-    entry.count = total;
-    entry.has_mba_shape_payload = true;
-    entry.mba_counts = state.mba_counts;
-    reports.push_back(std::move(entry));
   }
 
   const llvm::StringMap<string_protection_owner> string_owners =
@@ -342,7 +255,7 @@ build_transform_reports(llvm::Module& module,
                                result.mode == string_encoding_mode::inline_stack_decode)
                                   ? result.rewritten_use_count
                                   : (result.applied ? 1U : 0U);
-    transform_report_entry entry = make_transform_report(
+    prediction_report_entry entry = make_prediction_report(
         "string_encoding", "global", result.global_name, result.applied, detail, count);
     entry.has_strategy_payload = true;
     entry.strategy_kind = to_string(result.strategy_kind);
@@ -359,8 +272,31 @@ build_transform_reports(llvm::Module& module,
     reports.push_back(std::move(entry));
   }
 
-  mba::clear_mba_counters(&module);
+  return reports;
+}
 
+llvm::SmallVector<structural_observation_report_entry, 16>
+build_structural_observation_reports(
+    llvm::Module& module, const llvm::SmallVectorImpl<function_pipeline_state>& states) {
+  llvm::SmallVector<structural_observation_report_entry, 16> reports;
+  for (const function_pipeline_state& state : states) {
+    if (state.function == nullptr) { continue; }
+    const mba::mba_shape_counts& counts = state.mba_counts;
+    const std::size_t total = counts.linear_count + counts.affine_count +
+                              counts.polynomial_count + counts.mul_count;
+    if (total == 0) { continue; }
+
+    reports.push_back({.mechanism = "mba",
+                       .target_kind = "function",
+                       .target_name = state.function->getName().str(),
+                       .detail = "linear:" + std::to_string(counts.linear_count) +
+                                 " affine:" + std::to_string(counts.affine_count) +
+                                 " polynomial:" + std::to_string(counts.polynomial_count) +
+                                 " mul:" + std::to_string(counts.mul_count),
+                       .count = total,
+                       .mba_counts = counts});
+  }
+  mba::clear_mba_counters(&module);
   return reports;
 }
 

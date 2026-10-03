@@ -242,6 +242,76 @@ On Windows, set `OBF_CONFIG` and `OBF_SEED` instead of passing plugin-owned opti
 The `obf-opt.cmd` launcher maps `--obf-config`, `--obf-seed`, `--obf-audit-out`, and `--obf-enable` to environment variables.
 That launcher does not load a plugin or select a pipeline for you.
 
+## Compiler coverage reports
+
+Use the feature report for candidate predictions only:
+
+```sh
+opt -load-pass-plugin=build/obf_plugin.so \
+  --obf-config=tests/lit/Inputs/transform-report.yaml \
+  -passes=obf-feature-report -disable-output \
+  tests/lit/tooling/transform-report.ll
+```
+
+The `obf.feature_report.v4` schema uses `predictions`, not `transforms`.
+Prediction statuses are `candidate` and `not_candidate`.
+The separate `observations` array describes compiler structural counters, not execution.
+The policy audit uses `obf.audit.v2` and reports a `policy` object, not a final protection level.
+
+To capture actual stage outcomes, start capture before the transforms:
+
+```sh
+opt -load-pass-plugin=build/obf_plugin.so \
+  --obf-config=tests/lit/Inputs/vm-boundary-abi-attr.yaml \
+  -passes='obf-coverage-start,obf-vm,obf-coverage-report' \
+  -disable-output tests/lit/vm/vm-boundary-abi-attr.ll
+```
+
+This fixture reports an ABI-boundary skip, even though its body is a VM candidate.
+For the complete compiler pipeline, replace `obf-vm` with `obf-safe-pipeline`.
+
+For a wrapper invocation, set an output path:
+
+```sh
+OBF_COVERAGE_REPORT=build/usage-demo/coverage.json \
+  build/obf-clang -O1 -fno-inline \
+  --obf-config=build/usage-demo/protect.yaml \
+  build/usage-demo/sample.c -o build/usage-demo/sample
+```
+
+On Windows, set `OBF_COVERAGE_REPORT` before the compiler invocation.
+Use a distinct path for each concurrent compiler process.
+The sidecar describes one module invocation, not an automatically merged build report.
+Compiler stages replace the sidecar with the current snapshot.
+Report I/O errors produce diagnostics.
+
+The `obf.coverage_report.v1` schema separates:
+
+- `requested_policy`: selection snapshots and changed effective policies, with selection and promotion reasons.
+- `admission`: actual candidate, ABI, incoming-call, and regional extraction decisions.
+- `emission`: actual transform results, including whole-function and regional VM outcomes.
+- `roles`: original owners, generated roles, and separate protection obligations.
+- `finalization`: compiler gates and pending or validated LTO obligations.
+
+An absent event means `not_observed`, not native execution or successful protection.
+Capture starts only when requested. Earlier stages cannot be reconstructed.
+Event names describe stage snapshots before cleanup. They need not match final image symbols.
+Each event retains its originating module identity.
+The ledger resolves helper ancestry through recorded creation relationships.
+`parent` retains an immediate generated owner when it differs from the original owner.
+Shared ancestry uses `owners` and `owner_resolution`, without choosing an arbitrary source.
+Original selection and promotion snapshots remain intact when later stages rebuild policy state.
+`retained_effective` records a later retained-policy promotion, not a replacement for original selection.
+Shared module helpers and aggregate results can have an empty owner.
+
+Prelink finalization remains `pending` until the managed backend validates retained obligations.
+Compiler completion does not prove final-link checksum binding, native execution, or security strength.
+Keep native probes and final-image checks separate.
+
+Capture retains source names and decision details in report metadata and sidecars.
+Do not distribute report-enabled bitcode as a stripped artifact.
+Ordinary builds do not retain this ledger.
+
 ## Managed Full LTO and ThinLTO
 
 Use the C/C++ wrappers for the managed LTO contract.

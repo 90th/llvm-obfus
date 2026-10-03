@@ -49,22 +49,22 @@
 ; string-encode-ephemeral-compare-flatten.ll checks in-budget comparisons and
 ; definition-site state captures at runtime. The feature report independently
 ; proves that the sentinel globals retain the ephemeral micro-slot strategy.
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o0.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['transforms'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o0.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['predictions'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-control-flatten,obf-cfg-state-cleanup' -S %t.pre.o0.ll -o %t.direct.o0.ll
 ; RUN: %opt -passes=verify -disable-output %t.direct.o0.ll
 ; RUN: timeout 120 %raw_clang -O0 %t.direct.o0.ll %obf_runtime -o %t.direct.o0.exe
 ; RUN: %t.direct.o0.exe | %FileCheck %s --check-prefix=RESULT
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o1.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['transforms'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o1.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['predictions'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-control-flatten,obf-cfg-state-cleanup' -S %t.pre.o1.ll -o %t.direct.o1.ll
 ; RUN: %opt -passes=verify -disable-output %t.direct.o1.ll
 ; RUN: timeout 120 %raw_clang -O0 %t.direct.o1.ll %obf_runtime -o %t.direct.o1.exe
 ; RUN: %t.direct.o1.exe | %FileCheck %s --check-prefix=RESULT
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o2.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['transforms'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o2.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['predictions'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-control-flatten,obf-cfg-state-cleanup' -S %t.pre.o2.ll -o %t.direct.o2.ll
 ; RUN: %opt -passes=verify -disable-output %t.direct.o2.ll
 ; RUN: timeout 120 %raw_clang -O0 %t.direct.o2.ll %obf_runtime -o %t.direct.o2.exe
 ; RUN: %t.direct.o2.exe | %FileCheck %s --check-prefix=RESULT
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o3.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['transforms'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes=obf-feature-report -disable-output %t.pre.o3.ll | %python -c "import json,sys; d=json.load(sys.stdin); print(*('|'.join((x['target_name'],x['status'],(x.get('strategy') or {}).get('kind',''))) for x in d['predictions'] if x.get('pass') == 'string_encoding' and x.get('target_name','').startswith('g_probe_')), sep=chr(10))" | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-ephemeral-compare-e2e.yaml -passes='obf-string-encode,obf-control-flatten,obf-cfg-state-cleanup' -S %t.pre.o3.ll -o %t.direct.o3.ll
 ; RUN: %opt -passes=verify -disable-output %t.direct.o3.ll
 ; RUN: timeout 120 %raw_clang -O0 %t.direct.o3.ll %obf_runtime -o %t.direct.o3.exe
@@ -91,9 +91,9 @@
 ; ORACLE-LABEL: define{{.*}} @oracle_strncmp(
 ; ORACLE: call i32 @strncmp
 
-; REPORT-DAG: g_probe_memcmp|applied|ephemeral_micro_slot
-; REPORT-DAG: g_probe_strcmp|applied|ephemeral_micro_slot
-; REPORT-DAG: g_probe_strncmp|applied|ephemeral_micro_slot
+; REPORT-DAG: g_probe_memcmp|candidate|ephemeral_micro_slot
+; REPORT-DAG: g_probe_strcmp|candidate|ephemeral_micro_slot
+; REPORT-DAG: g_probe_strncmp|candidate|ephemeral_micro_slot
 
 ; POST-RESULT: [ALL E2E PASS] 43 assertions passed
 ; RESULT: [ALL E2E PASS] 43 assertions passed

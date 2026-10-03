@@ -5,16 +5,64 @@
 #include "obf/plugin/internal/plugin_vm_resolvers.h"
 #include "obf/plugin/internal/plugin_vm_target_discovery.h"
 #include "obf/plugin/internal/plugin_vm_wrapper_emission.h"
+#include "obf/report/coverage_report.h"
 
 #include "obf/vm/virtualize.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Metadata.h"
 
 #include <utility>
 
 namespace obf {
+
+namespace {
+
+void record_vm_function_role(llvm::Function& function,
+                             llvm::StringRef owner,
+                             llvm::StringRef role,
+                             llvm::ArrayRef<llvm::StringRef> obligations) {
+  llvm::SmallVector<llvm::StringRef, 8> actual_obligations(obligations.begin(), obligations.end());
+  if (read_string_protection_owner(function).has_value()) {
+    actual_obligations.push_back("string_owner");
+  }
+  if (function.hasFnAttribute("vm.string.owner")) {
+    actual_obligations.push_back("vm_string_owner");
+  }
+  record_coverage_role(function, owner, role, actual_obligations);
+}
+
+void snapshot_vm_functions(const llvm::Module& module,
+                           llvm::SmallPtrSetImpl<const llvm::Function*>& functions) {
+  for (const llvm::Function& function : module) { functions.insert(&function); }
+}
+
+void record_new_vm_helpers(llvm::Module& module,
+                           llvm::StringRef owner,
+                           const llvm::SmallPtrSetImpl<const llvm::Function*>& existing_functions,
+                           bool lowering_helpers) {
+  for (llvm::Function& function : module) {
+    if (function.isDeclaration() || existing_functions.contains(&function)) { continue; }
+    llvm::SmallVector<llvm::StringRef, 4> obligations;
+    if (lowering_helpers) {
+      obligations.push_back(function.hasFnAttribute("vm.island.helper") ? "vm_execution"
+                                                                     : "vm_lowering_support");
+      if (function.hasFnAttribute("vm.island.state")) {
+        obligations.push_back("hidden_token_state");
+      }
+    } else {
+      obligations.push_back("vm_entry_resolution");
+    }
+    record_vm_function_role(function, owner, "generated_vm_helper", obligations);
+  }
+}
+
+}  // namespace
 
 virtualized_function_map
 apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
@@ -24,6 +72,7 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
   llvm::SmallVector<virtualized_function_binding*, 8> successful_bindings;
   llvm::StringSet<> skip_functions;
   std::uint64_t regional_helper_ordinal = 0;
+  llvm::DenseMap<const llvm::Function*, std::size_t> lowering_instruction_counts;
 
   for (const function_pipeline_state& state : states) {
     if (state.function == nullptr || state.function->isDeclaration() || state.skip_transform_stages ||
@@ -46,14 +95,25 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
     for (const vm_target_candidate& target_candidate : target_candidates) {
       llvm::Function* target_function = target_candidate.function;
       if (target_function == nullptr || target_candidate.state == nullptr) { continue; }
+      llvm::Module& target_module = *target_function->getParent();
+      const bool reporting = coverage_reporting_enabled(target_module);
+      const llvm::StringRef owner = read_vm_coverage_owner(*target_candidate.state);
+      const llvm::StringRef scope =
+          target_candidate.nesting_depth == 0 ? "whole_function" : "regional";
 
       const function_pipeline_state target_state{.function = target_function,
                                                  .report = target_candidate.state->report,
                                                  .mba_counts = target_candidate.state->mba_counts};
       virtualized_function_binding binding =
-          prepare_virtualized_function_binding(target_state, config);
+          prepare_virtualized_function_binding(target_state, config, scope, owner);
       if (binding.implementation_function == nullptr) { continue; }
       binding.state = target_candidate.state;
+      if (reporting) {
+        binding.implementation_function->setMetadata(
+            "obf.coverage.owner",
+            llvm::MDNode::get(target_module.getContext(),
+                              {llvm::MDString::get(target_module.getContext(), owner)}));
+      }
 
       vm::virtualization_options vm_options{
           .mba_depth = effective_vm_mba_depth(config),
@@ -71,9 +131,25 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
         if (site.rewritable) { vm_options.valid_hidden_tokens.push_back(site.hidden_token); }
       }
 
+      // The snapshot stores only identities of existing functions and is bounded
+      // by the current module size. Disabled reporting does not populate it.
+      llvm::SmallPtrSet<const llvm::Function*, 32> existing_functions;
+      if (reporting) { snapshot_vm_functions(target_module, existing_functions); }
       const vm::virtualization_result result =
           vm::run_virtualization(*binding.implementation_function, vm_options);
-      if (!result.virtualized) { continue; }
+      if (reporting) {
+        record_new_vm_helpers(target_module, owner, existing_functions, /*lowering_helpers=*/true);
+      }
+      if (!result.virtualized) {
+        if (reporting) {
+          record_coverage_event(target_module, "emission", "vm", owner, target_function->getName(),
+                                "failed", result.detail, result.instruction_count, scope);
+        }
+        continue;
+      }
+      if (reporting) {
+        lowering_instruction_counts[binding.implementation_function] = result.instruction_count;
+      }
 
       binding.implementation_function->setDSOLocal(true);
       virtualized_function_binding& stored_binding =
@@ -106,12 +182,21 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
 
       for (std::size_t index = 0; index < successful_bindings.size(); ++index) {
         virtualized_function_binding& binding = *successful_bindings[index];
+        const bool reporting = coverage_reporting_enabled(*module);
+        const llvm::StringRef owner = read_vm_coverage_owner(*binding.state);
+        const llvm::StringRef scope =
+            binding.interface_function == binding.state->function ? "whole_function" : "regional";
         llvm::Function* entry_thunk_function =
             create_vm_entry_thunk(*binding.interface_function,
                                   *binding.implementation_function,
                                   binding.entry_thunk_function_name,
                                   entry_thunk_shapes[index]);
         if (entry_thunk_function == nullptr) {
+          if (reporting) {
+            record_coverage_event(*module, "emission", "vm", owner,
+                                  binding.interface_function->getName(), "failed",
+                                  "VM entry thunk creation failed", 0, scope);
+          }
           virtualized_functions.erase(binding.interface_function->getName());
           continue;
         }
@@ -126,6 +211,8 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
         binding.uses_target_cache = resolver_shape == vm_resolver_shape::cached_sentinel_global;
         binding.uses_shared_seed_resolver =
             seed_resolver_shape == vm_seed_resolver_shape::shared_switch_resolver;
+        llvm::SmallPtrSet<const llvm::Function*, 32> existing_functions;
+        if (reporting) { snapshot_vm_functions(*module, existing_functions); }
         rewrite_vm_interface_wrapper(*binding.interface_function,
                                      *binding.implementation_function,
                                      binding,
@@ -133,6 +220,21 @@ apply_vm_stage(const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                      resolver_shape,
                                      seed_resolver_shape,
                                      effective_vm_mba_depth(config));
+        if (reporting) {
+          record_new_vm_helpers(*module, owner, existing_functions, /*lowering_helpers=*/false);
+          record_vm_function_role(*binding.interface_function, owner,
+                                  scope == "regional" ? "regional_wrapper" : "public_wrapper",
+                                  {"vm_dispatch", "hidden_token_production"});
+          record_vm_function_role(*binding.implementation_function, owner, "vm_implementation",
+                                  {"vm_execution", "hidden_token_validation"});
+          record_vm_function_role(*binding.entry_thunk_function, owner, "vm_entry_thunk",
+                                  {"vm_entry_dispatch", "hidden_token_forwarding"});
+          record_coverage_event(*module, "emission", "vm", owner,
+                                binding.interface_function->getName(), "emitted",
+                                "wrapper rewritten to VM implementation",
+                                lowering_instruction_counts.lookup(binding.implementation_function),
+                                scope);
+        }
       }
     }
   }

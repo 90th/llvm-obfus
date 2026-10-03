@@ -1,4 +1,4 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema-semantics.yaml -passes=obf-feature-report -disable-output %s | jq -r '.transforms[] | select(.pass == "vm") | [.target_name, .status, (.count | tostring)] | join("|")' | %FileCheck %s --check-prefix=ADMIT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema-semantics.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "vm") | [.target_name, .status, (.count | tostring)] | join("|")' | %FileCheck %s --check-prefix=ADMIT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-extrema-semantics.yaml -passes='obf-vm,verify' -S %s -o %t.raw.ll
 ; RUN: %FileCheck %s --check-prefix=VM < %t.raw.ll
 ; RUN: %lli %s
@@ -60,10 +60,10 @@ entry:
   ret i32 %ret
 }
 
-; ADMIT-DAG: vm_undef_umax|applied|5
-; ADMIT-DAG: vm_undef_smin|applied|5
-; ADMIT-DAG: vm_discard_poison|applied|5
-; ADMIT-DAG: vm_freeze_poison|applied|6
+; ADMIT-DAG: vm_undef_umax|candidate|5
+; ADMIT-DAG: vm_undef_smin|candidate|5
+; ADMIT-DAG: vm_discard_poison|candidate|5
+; ADMIT-DAG: vm_freeze_poison|candidate|6
 
 ; VM-LABEL: define i8 @vm_undef_umax()
 ; VM: entry.obf.vm.wrapper:

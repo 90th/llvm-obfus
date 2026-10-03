@@ -56,6 +56,7 @@ set(OBF_CORE_SOURCES
   lib/analysis/function_features.cpp
   lib/policy/policy_engine.cpp
   lib/report/function_report.cpp
+  lib/report/coverage_report.cpp
   lib/transforms/block_split.cpp
   lib/transforms/bogus_control_flow.cpp
   lib/transforms/constant_encoding.cpp

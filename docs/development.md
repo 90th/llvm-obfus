@@ -122,4 +122,7 @@ Before you run it on a resource-limited machine, inspect the [multiseed controll
 
 Keep source-assisted analysis separate from binary-only analysis.
 Record false positives, analysis limits, artifact hashes, and method versions with each result.
+Compiler coverage reports use a separate stage ledger, not recovery scores or native execution claims.
+Report contracts compare ABI rejection and regional emission with the actual pipeline.
+See [capture commands and schema boundaries](usage.md#compiler-coverage-reports).
 The [security contract](../SECURITY.md) defines guarantees independently of these scores.

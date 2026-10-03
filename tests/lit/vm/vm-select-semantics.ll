@@ -1,4 +1,4 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-select-semantics.yaml -passes=obf-feature-report -disable-output %s | jq -r '.transforms[] | select(.pass == "vm") | [.target_name, .status] | join("|")' | %FileCheck %s --check-prefix=ADMIT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-select-semantics.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "vm") | [.target_name, .status] | join("|")' | %FileCheck %s --check-prefix=ADMIT
 ; RUN: %lli %s
 ; RUN: for seed in 1 2 111 222; do \
 ; RUN:   %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-select-semantics.yaml --obf-seed=$seed -passes='obf-vm,verify' -S %s -o %t.$seed.ll && \
@@ -256,19 +256,19 @@ entry:
   ret i32 %code
 }
 
-; ADMIT-DAG: vm_select_discard|applied
-; ADMIT-DAG: vm_select_freeze|applied
-; ADMIT-DAG: vm_select_undef|applied
-; ADMIT-DAG: vm_select_integer|applied
-; ADMIT-DAG: vm_select_float|applied
-; ADMIT-DAG: vm_select_pointer|applied
-; ADMIT-DAG: vm_select_scalar_vector|applied
-; ADMIT-DAG: vm_select_lanes|applied
-; ADMIT-DAG: vm_select_float_lanes|applied
-; ADMIT-DAG: vm_select_lane_poison|applied
-; ADMIT-DAG: vm_select_lane_undef|applied
-; ADMIT-DAG: vm_select_lane_freeze|applied
-; ADMIT-DAG: vm_select_island|applied
+; ADMIT-DAG: vm_select_discard|candidate
+; ADMIT-DAG: vm_select_freeze|candidate
+; ADMIT-DAG: vm_select_undef|candidate
+; ADMIT-DAG: vm_select_integer|candidate
+; ADMIT-DAG: vm_select_float|candidate
+; ADMIT-DAG: vm_select_pointer|candidate
+; ADMIT-DAG: vm_select_scalar_vector|candidate
+; ADMIT-DAG: vm_select_lanes|candidate
+; ADMIT-DAG: vm_select_float_lanes|candidate
+; ADMIT-DAG: vm_select_lane_poison|candidate
+; ADMIT-DAG: vm_select_lane_undef|candidate
+; ADMIT-DAG: vm_select_lane_freeze|candidate
+; ADMIT-DAG: vm_select_island|candidate
 
 ; VM-DAG: define internal {{.*}} @__obf_vm_i_{{[A-Za-z0-9_]+}}({{.*}}i64 %obf.hidden_token)
 ; VM-DAG: vm.island.topology.helper_shards

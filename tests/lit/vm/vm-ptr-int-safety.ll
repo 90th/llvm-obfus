@@ -1,5 +1,5 @@
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-ptr-int-safety-integral.yaml -passes=obf-vm -S %s -o - | %FileCheck %s --check-prefix=INTEGRAL
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-ptr-int-safety-nonintegral.yaml -passes=obf-feature-report -disable-output %s | jq -r '.transforms[] | select(.pass == "vm") | [.target_name, .status, .detail] | join("|")' | %FileCheck %s --check-prefix=REPORT
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-ptr-int-safety-nonintegral.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "vm") | [.target_name, .status, .detail] | join("|")' | %FileCheck %s --check-prefix=REPORT
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-ptr-int-safety-nonintegral.yaml -passes=obf-vm -S %s -o - | %FileCheck %s --check-prefix=NONINTEGRAL --implicit-check-not='ptrtoint' --implicit-check-not='inttoptr' --implicit-check-not='__obf_vm_'
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-ptr-int-safety-nonintegral-strong.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=STRONG
 
@@ -40,7 +40,7 @@ entry:
 ; INTEGRAL-LABEL: define i32 @integral_vm(i32 %x)
 ; INTEGRAL: inttoptr i{{[0-9]+}} %integral_vm.obf.wrapper.decoded{{(\.poison[0-9]*)?}} to ptr
 
-; REPORT: nonintegral_vm|skipped|non-integral pointer space unsupported by VM lowering
+; REPORT: nonintegral_vm|not_candidate|non-integral pointer space unsupported by VM lowering
 
 ; NONINTEGRAL-LABEL: define i32 @nonintegral_vm(i32 %x) addrspace(1)
 ; NONINTEGRAL: %add = add i32 %x, 9

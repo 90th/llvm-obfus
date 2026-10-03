@@ -1,4 +1,5 @@
 #include "obf/transforms/string_encoding.h"
+#include "obf/report/coverage_report.h"
 #include "obf/support/libc_comparison.h"
 
 #include "obf/analysis/annotation_utils.h"
@@ -18,6 +19,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -1216,6 +1218,24 @@ void report_strong_vm_plaintext_violation(const string_strategy_plan& plan,
   message += plan.result.detail.empty() ? "no local string strategy" : plan.result.detail;
   message += "; owner=";
   message += describe_strong_vm_owners(candidate);
+  if (plan.global != nullptr) {
+    llvm::Module& module = *plan.global->getParent();
+    if (coverage_reporting_enabled(module)) {
+      for (const llvm::Function* function : candidate.strong_vm_functions) {
+        llvm::StringRef owner = function->getName();
+        if (const llvm::MDNode* metadata = function->getMetadata("obf.coverage.owner")) {
+          if (metadata->getNumOperands() == 1) {
+            if (const auto* name = llvm::dyn_cast<llvm::MDString>(metadata->getOperand(0))) {
+              owner = name->getString();
+            }
+          }
+        }
+        record_coverage_event(module, "finalization", "string_plaintext_gate", owner,
+                              plan.result.global_name, "rejected", message, 0, "global");
+      }
+      write_coverage_report(module);
+    }
+  }
   llvm::report_fatal_error(llvm::StringRef(message));
 }
 
@@ -2935,6 +2955,23 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
     string_strategy_plan& plan = plans[plan_index];
     if (plan.global == nullptr) { continue; }
 
+    const auto record_helper = [&](llvm::Function& helper) {
+      if (!coverage_reporting_enabled(module)) { return; }
+      for (const llvm::Function* user : candidates[plan_index].summary.protected_functions) {
+        llvm::StringRef owner = user->getName();
+        if (const llvm::MDNode* metadata = user->getMetadata("obf.coverage.owner")) {
+          if (metadata->getNumOperands() != 0) {
+            if (const auto* name = llvm::dyn_cast<llvm::MDString>(metadata->getOperand(0))) {
+              owner = name->getString();
+            }
+          }
+        }
+        record_coverage_role(helper, owner, "string_decoder",
+                             {is_authenticated_plan(plan) ? "authenticated_string_decode"
+                                                          : "string_decode"});
+      }
+    };
+
     if (apply_changes && plan.result.applied) {
       if (is_authenticated_plan(plan)) {
         if (plan.result.mode == string_encoding_mode::lazy_decode) {
@@ -2942,6 +2979,7 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
               plan.isolate_lazy_helper
                   ? create_isolated_lazy_helper(module, plan, options)
                   : get_or_create_lazy_family_helper(module, plan.result.helper_shape);
+          record_helper(*family_helper);
           rewrite_lazy_uses(*family_helper,
                             descriptor_ptrs[plan_index],
                             plan.lazy_uses,
@@ -2965,6 +3003,7 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
               authenticated_payloads[plan_index]->metadata.binding_id,
               options);
           llvm::appendToGlobalCtors(module, decoder, options.ctor_priority);
+          record_helper(*decoder);
         } else if (plan.result.mode == string_encoding_mode::inline_stack_decode) {
           if (!authenticated_payloads[plan_index].has_value()) {
             authenticated_payloads[plan_index].emplace(
@@ -2989,11 +3028,29 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
               plan.isolate_lazy_helper
                   ? create_isolated_lazy_helper(module, plan, options)
                   : get_or_create_lazy_family_helper(module, plan.result.helper_shape);
+          record_helper(*family_helper);
           rewrite_lazy_uses(*family_helper, descriptor_ptrs[plan_index], plan.lazy_uses);
         } else if (plan.result.mode == string_encoding_mode::global_ctor) {
           llvm::Function* decoder = create_ctor_decoder(module, plan, options);
           llvm::appendToGlobalCtors(module, decoder, options.ctor_priority);
+          record_helper(*decoder);
         }
+      }
+    }
+    if (apply_changes && coverage_reporting_enabled(module)) {
+      for (const llvm::Function* user : candidates[plan_index].summary.protected_functions) {
+        llvm::StringRef owner = user->getName();
+        if (const llvm::MDNode* metadata = user->getMetadata("obf.coverage.owner")) {
+          if (metadata->getNumOperands() != 0) {
+            if (const auto* name = llvm::dyn_cast<llvm::MDString>(metadata->getOperand(0))) {
+              owner = name->getString();
+            }
+          }
+        }
+        record_coverage_event(module, "emission", "string_encoding", owner,
+                              plan.result.global_name,
+                              plan.result.applied ? "emitted" : "not_emitted",
+                              plan.result.detail, plan.result.rewritten_use_count, "global");
       }
     }
 

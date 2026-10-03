@@ -48,6 +48,12 @@ The build check skips functions whose policy disables VM eligibility.
 The level label alone does not prove VM execution.
 See [feature restrictions](configuration.md#feature-restrictions) for the policy rules.
 
+Candidate predictions do not establish admission or emission.
+The compiler coverage ledger records actual ABI decisions and whole-function or regional VM outcomes.
+It also keeps original owners and generated-helper obligations separate from generic policy labels.
+Compiler finalization does not establish native execution or final-image security strength.
+See [compiler coverage reports](usage.md#compiler-coverage-reports) for capture commands and reporting limits.
+
 The VM boundary also checks the function ABI and incoming calls.
 It rejects parameters such as `byval`, `sret`, `inalloca`, and other unsupported ABI-changing attributes.
 Incoming `invoke`, `callbr`, `musttail`, operand-bundle calls, and ABI mismatches cannot use ordinary call rewriting.

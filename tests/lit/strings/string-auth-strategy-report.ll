@@ -1,4 +1,4 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-auth-lazy.yaml -passes=obf-feature-report -disable-output %s | jq -r '(.transforms[] | select(.pass == "string_encoding") | [.target_name, .status, (.count|tostring), .detail, (.strategy.kind // ""), (.strategy.helper_shape // ""), (.strategy.key_schedule // "")] | join("|"))' | %FileCheck %s
+; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/string-encode-auth-lazy.yaml -passes=obf-feature-report -disable-output %s | jq -r '.predictions[] | select(.pass == "string_encoding") | [.target_name, .status, (.count | tostring), .strategy.kind] | join("|")' | %FileCheck %s
 
 @.secret = private unnamed_addr constant [7 x i8] c"secret\00"
 @.ephem = private unnamed_addr constant [6 x i8] c"ephem\00"
@@ -22,5 +22,5 @@ entry:
   ret i32 %result
 }
 
-; CHECK-DAG: .secret|applied|1|lazy_decode: 1 lazy use(s)|helper_lazy_decode|lazy_auth_runtime_v3|blake2s_keyed_auth_v3
-; CHECK-DAG: .ephem|applied|2|inline_stack_decode: 2 authenticated ephemeral stack decode use(s)|inline_stack_decode|authenticated_ephemeral_stack_decode|blake2s_keyed_auth_v3
+; CHECK-DAG: .secret|candidate|1|helper_lazy_decode
+; CHECK-DAG: .ephem|candidate|2|inline_stack_decode
