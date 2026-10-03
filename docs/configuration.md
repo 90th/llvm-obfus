@@ -76,6 +76,8 @@ Therefore, `default_level: none` is a fallback, not an exact-selection mode.
 The generic pipeline can also promote callers of `strong`, `vm`, or `strong_vm` functions.
 It considers `main` and callers whose protected results drive control flow or escape through returns, stores, or calls.
 These promotions can include functions with an explicit `none` selection.
+A selected `vm` caller keeps its VM level and eligibility when this promotion adds classical protection.
+Existing feature restrictions still apply.
 
 ### Rust, Zig, and TinyGo frontends
 

@@ -1,0 +1,9 @@
+seed: 40404
+default_level: none
+overrides:
+  - name: protected_core
+    level: strong
+  - name: vm_relay
+    level: vm
+  - name: restricted_vm_relay
+    level: vm
