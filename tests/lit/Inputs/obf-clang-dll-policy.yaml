@@ -11,6 +11,8 @@ targets:
     level: strong
   - match: dll_initialize
     level: strong_vm
+  - match: DllMain
+    level: strong_vm
   - match: dll_checksum
     level: strong
 string_encoding:

@@ -44,7 +44,7 @@ lit -j 3 -sv build/tests --filter='vm-extrema'
 ```
 
 On Windows, run `obf-clang-dll-lifecycle-pe` and `obf-clang-dll-output-pe` separately with three lit workers for focused native DLL checks.
-They check protected constructor results, decoded string publication, return values, effects, exact exports, rebasing, and joined unload cycles.
+They check protected constructors and `DllMain` callbacks, decoded strings, return values, effects, exact exports, rebasing, and joined unload cycles.
 
 Individual runtime and unit executables are also available:
 

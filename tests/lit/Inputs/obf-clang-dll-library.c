@@ -1,3 +1,5 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <stdint.h>
 
 static const uint64_t vm_table[4] = {0x11223344ULL, 0x55667788ULL, 0x99aabbccULL, 0xddeeff11ULL};
@@ -42,6 +44,16 @@ __attribute__((noinline)) static uint64_t dll_initialize(const char **text, uint
 
 __attribute__((constructor(200))) static void dll_constructor(void) {
   initialization_value = dll_initialize(&initialization_text, 0);
+}
+
+BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved) {
+  (void)module;
+  (void)reserved;
+  if (reason == DLL_PROCESS_ATTACH) {
+    const uint64_t value = dll_initialize(&initialization_text, 0);
+    return value == initialization_value && initialization_text != NULL;
+  }
+  return TRUE;
 }
 
 __declspec(dllexport) uint64_t dll_init_value(void) {
