@@ -18,7 +18,7 @@ The self-checksum lifecycle proceeds through four stages:
    The expected checksum field remains zero.
 
 2. **Final Link**
-   The linker combines object files and static archives into a final executable image.
+   The linker combines object files and static archives into a final executable or DLL image.
    Section `.obfsc$M` contributions merge into `.obfsc`.
    The linker resolves record-relative relocations to target code.
 
@@ -33,7 +33,7 @@ The self-checksum lifecycle proceeds through four stages:
    The XOR difference between actual and expected checksums propagates into protected program logic.
 
 Compile-only object files and static archives can contain `UNBOUND` records.
-Bind required records before execution reaches a protected site in the final executable.
+Bind required records before execution reaches a protected site in the final image.
 
 ## Record States
 
@@ -138,9 +138,10 @@ Linux x86-64 ELF binding operates under these rules:
 
 Windows x86-64 PE32+ binding operates under these rules:
 
-- **Target Scope**: 64-bit PE32+ (`IMAGE_FILE_MACHINE_AMD64`) executable images (`.exe`).
-- **DLL Status**: DLL binding is disabled in v1. The binder rejects images with `IMAGE_FILE_DLL`.
-- **Section Layout**: Compiler emits records into `.obfsc$M`. The linker merges them into `.obfsc`.
+- **Target Scope**: AMD64 PE32+ user-mode executable and DLL images.
+  The binder accepts `IMAGE_SUBSYSTEM_WINDOWS_GUI` and `IMAGE_SUBSYSTEM_WINDOWS_CUI`.
+  Native, EFI, unknown, and all other subsystems remain unsupported.
+- **Section Layout**: The compiler emits records into `.obfsc$M`. The linker merges them into `.obfsc`.
 - **Section Flags**: `.obfsc` must have `IMAGE_SCN_MEM_READ` set.
   `.obfsc` must not have `IMAGE_SCN_MEM_WRITE`, `IMAGE_SCN_MEM_EXECUTE`, or `IMAGE_SCN_MEM_DISCARDABLE`.
   The section virtual size must be an exact multiple of 96 bytes.
@@ -149,22 +150,41 @@ Windows x86-64 PE32+ binding operates under these rules:
   The high 32 bits are zero.
   The binder sign-extends the low 32 bits.
   This representation is invariant under ASLR and `/FIXED` base addresses.
+  DLL rebasing moves the record and target by the same amount.
+  The binder does not normalize relocations or change the v1 record format.
 - **Section Mapping**: Sample ranges and records must map to exactly one section.
   The sampled bytes must fall within both `VirtualSize` and `SizeOfRawData`.
   Overlapping sections are rejected.
 - **Base Relocation Validation**: The binder parses the PE base relocation directory.
-  It rejects a supported base relocation that overlaps sampled code or a record.
+  It rejects a supported base relocation that overlaps sampled code or any byte of a 96-byte record.
   It also rejects unsupported base-relocation types in an AMD64 image.
 - **Header CheckSum**: Binaries must have `OptionalHeader.CheckSum` set to `0`. Non-zero checksums are rejected.
 - **Security Directory**: `IMAGE_DIRECTORY_ENTRY_SECURITY` must have both address and size set to zero.
   The binder rejects a nonzero PE Security directory, including an embedded Authenticode certificate table.
+- **Repeated Binding**: The binder hashes final sampled bytes again for each `BOUND` record.
+  It rejects a checksum mismatch instead of replacing the bound value.
+  If every record is already valid and `BOUND`, the binder leaves the file unchanged.
+- **Publication**: The binder validates all records before it replaces the input.
+  It checks the complete candidate image before it writes a temporary file.
+  It flushes the temporary file and uses `ReplaceFileW` for atomic publication.
+  Validation failures leave the input unchanged.
+
+Native Windows DLL regressions block the preferred image range before they call `LoadLibraryA`.
+The consumer requires a different load address and checks a real, unrelated `DIR64` data fixup.
+It then calls a protected export and checks the result.
+The `UNBOUND` case requires an illegal-instruction or breakpoint trap, not only a nonzero exit.
+The negative test changes an unexecuted sampled sibling.
+A checksum mismatch corrupts the protected result through the existing XOR transformation.
+This test does not require a new trap behavior.
 
 ## Objects and Static Archives
 
 Compiler passes emit `UNBOUND` records into object files (`.o`, `.obj`).
 Static archives (`.a`, `.lib`) can contain those object files and their records.
 Do not run the binder on intermediate object files or static archives.
-The binder must run on the final linked executable image after section layout and relocations are resolved.
+Run the binder on the final linked executable or DLL after the linker resolves section layout and relocations.
+On Windows, `obf-clang` and `obf-clang++` bind required records after final user-mode EXE and DLL links.
+The wrappers also find records inherited from object files and static archives.
 
 ## C++ Symbol Selection
 
@@ -178,15 +198,16 @@ To protect C++ functions:
 
 ## Unsupported Targets
 
-The v1 post-link bound format supports Linux x86-64 ELF and Windows x86-64 PE32+ executables.
+The v1 post-link bound format supports Linux x86-64 ELF executables and Windows x86-64 user-mode PE32+ executables and DLLs.
 Other targets do not support post-link binding in v1:
 
 - 32-bit x86 (Linux, Windows)
 - ARM and ARM64 (Linux, Windows, macOS, iOS)
 - macOS Mach-O (x86-64, ARM64)
-- Windows PE DLL files
 
 When `self_checksum` runs on an unsupported target, the compiler uses the legacy neutral transformation path and emits no bound record.
+Windows native images, including drivers, and EFI images do not support PE v1 binding.
+The PE binder rejects these subsystems instead of changing the protection policy.
 
 `obf-clang` and `obf-clang++` reject an active `self_checksum` Windows final link on a non-Windows host.
 They do not auto-finalize inherited PE records during that unsupported cross-host workflow.
@@ -196,12 +217,14 @@ They do not auto-finalize inherited PE records during that unsupported cross-hos
 On Windows, code signing must follow post-link binding.
 Use this sequence:
 
-1. **Link**: `lld-link` or `link.exe` creates the final PE32+ executable.
+1. **Link**: `lld-link` or `link.exe` creates the final user-mode PE32+ executable or DLL.
 2. **Bind**: `obf-checksum-bind` writes expected checksums and sets `BOUND` flags.
-3. **Sign**: `signtool.exe` applies the Authenticode signature to the bound executable.
+3. **Sign**: `signtool.exe` applies the Authenticode signature to the bound image.
 
 For embedded Authenticode signing, run the binder before signing.
 Binding mode rejects an image with a nonzero PE Security directory.
+The binder checks the Security directory before the header checksum.
+An embedded signed image therefore reports the bind-before-sign error, even when signing sets a nonzero `CheckSum`.
 
 ## Security Limits
 

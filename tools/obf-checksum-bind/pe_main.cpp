@@ -278,9 +278,6 @@ pe_view parse_pe(const std::vector<std::uint8_t>& data,
   if ((file_header.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) == 0) {
     throw bind_error("input is not a final PE executable image");
   }
-  if (reject_mutation_hazards && (file_header.Characteristics & IMAGE_FILE_DLL) != 0) {
-    throw bind_error("Phase 3 supports PE32+ AMD64 executables only; DLL binding is not enabled");
-  }
   if (file_header.NumberOfSections == 0) { throw bind_error("PE section table is required"); }
   if (file_header.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64)) {
     throw bind_error("truncated PE32+ optional header");
@@ -298,12 +295,19 @@ pe_view parse_pe(const std::vector<std::uint8_t>& data,
   if (optional.SizeOfImage == 0 || optional.SizeOfHeaders > data.size()) {
     throw bind_error("invalid PE32+ image/header size");
   }
-  if (reject_mutation_hazards && optional.CheckSum != 0) {
-    throw bind_error("PE v1 binding requires a zero PE header checksum");
+  if (reject_mutation_hazards &&
+      optional.Subsystem != IMAGE_SUBSYSTEM_WINDOWS_GUI &&
+      optional.Subsystem != IMAGE_SUBSYSTEM_WINDOWS_CUI) {
+    throw bind_error(
+        "PE v1 binding supports only Windows GUI/console user-mode images. "
+        "Native and EFI subsystems are unsupported");
   }
   const IMAGE_DATA_DIRECTORY security = optional.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
   if (reject_mutation_hazards && (security.VirtualAddress != 0 || security.Size != 0)) {
     throw bind_error("PE v1 binding refuses Authenticode-signed/certificate-bearing images; bind before signing");
+  }
+  if (reject_mutation_hazards && optional.CheckSum != 0) {
+    throw bind_error("PE v1 binding requires a zero PE header checksum");
   }
 
   const std::uint64_t section_table_offset = optional_offset + file_header.SizeOfOptionalHeader;

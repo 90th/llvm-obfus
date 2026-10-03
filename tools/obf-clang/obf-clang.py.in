@@ -119,13 +119,64 @@ def _split_arguments(text: str, *, comments: bool = False) -> list[str]:
     return list(lexer)
 
 
-def _read_argument_file(reference: str, *, base_dir: Path, comments: bool = False) -> tuple[Path, list[str]]:
+def _split_windows_linker_arguments(text: str) -> list[str]:
+    tokens: list[str] = []
+    token: list[str] = []
+    quoted = False
+    started = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in " \t\r\n\0" and not quoted:
+            if started:
+                tokens.append("".join(token))
+                token = []
+                started = False
+            index += 1
+            continue
+        started = True
+        if char == "\\":
+            end = index
+            while end < len(text) and text[end] == "\\":
+                end += 1
+            count = end - index
+            if end < len(text) and text[end] == '"':
+                token.append("\\" * (count // 2))
+                if count % 2:
+                    token.append('"')
+                    index = end + 1
+                    continue
+            else:
+                token.append("\\" * count)
+            index = end
+            continue
+        if char == '"':
+            if quoted and index + 1 < len(text) and text[index + 1] == '"':
+                token.append('"')
+                index += 2
+                continue
+            quoted = not quoted
+        else:
+            token.append(char)
+        index += 1
+    if started:
+        tokens.append("".join(token))
+    return tokens
+
+
+def _read_argument_file(reference: str, *, base_dir: Path, comments: bool = False,
+                        windows_quoting: bool = False) -> tuple[Path, list[str]]:
     path = Path(reference)
     if not path.is_absolute():
         path = base_dir / path
     try:
-        raw = path.read_text(encoding="utf-8-sig")
-        tokens = _split_arguments(raw, comments=comments)
+        if windows_quoting:
+            data = path.read_bytes()
+            raw = data.decode("utf-16" if data.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig")
+        else:
+            raw = path.read_text(encoding="utf-8-sig")
+        tokens = (_split_windows_linker_arguments(raw) if windows_quoting
+                  else _split_arguments(raw, comments=comments))
     except (OSError, UnicodeError, ValueError) as error:
         raise _wrapper_error(f"cannot read argument file {path}: {error}") from error
     if comments:
@@ -157,17 +208,25 @@ def _expand_response_args(args: list[str], *, base_dir: Path | None = None, dept
     return expanded
 
 
-def _expand_linker_response_args(args: list[str], *, depth: int = 0) -> list[str]:
+def _expand_linker_response_args(args: list[str], *, depth: int = 0,
+                                 windows_quoting: bool = False) -> list[str]:
     if depth > _ARGUMENT_FILE_DEPTH_LIMIT:
         raise _wrapper_error("linker response file nesting exceeds 20 levels")
     expanded: list[str] = []
     for arg in args:
         if arg.startswith("@") and len(arg) > 1:
-            _, tokens = _read_argument_file(arg[1:], base_dir=Path.cwd())
-            expanded.extend(_expand_linker_response_args(tokens, depth=depth + 1))
+            _, tokens = _read_argument_file(arg[1:], base_dir=Path.cwd(), windows_quoting=windows_quoting)
+            expanded.extend(_expand_linker_response_args(tokens, depth=depth + 1, windows_quoting=windows_quoting))
         else:
             expanded.append(arg)
     return expanded
+
+
+def _linker_job_args(linker: list[str]) -> list[str]:
+    name = Path(linker[0]).name.lower()
+    windows_quoting = name in {"link", "link.exe", "lld-link", "lld-link.exe"} or any(
+        arg.lower().startswith(("-out:", "/out:")) for arg in linker[1:])
+    return _expand_linker_response_args(linker[1:], windows_quoting=windows_quoting)
 
 
 def _driver_plan(compiler: list[str], clang_args: list[str], env: dict[str, str]) -> tuple[list[list[str]], list[str]]:
@@ -588,6 +647,8 @@ def _link_input_paths(linker_args: list[str]) -> list[Path]:
             library_dirs.append(_sysroot_path(linker_args[index + 1], sysroot))
         elif arg.startswith("-L") and len(arg) > 2:
             library_dirs.append(_sysroot_path(arg[2:], sysroot))
+        elif arg.lower().startswith(("-libpath:", "/libpath:")):
+            library_dirs.append(Path(arg.split(":", 1)[1]))
     relocatable = "-r" in linker_args
     static = relocatable
     explicit_script = any(arg == "--script" or arg.startswith("--script=") for arg in linker_args)
@@ -628,6 +689,16 @@ def _link_input_paths(linker_args: list[str]) -> list[Path]:
                     inputs.append(candidate)
             index += 1
             continue
+        elif arg.lower().startswith(("-wholearchive:", "/wholearchive:")):
+            reference = Path(arg.split(":", 1)[1])
+            directories = [*library_dirs]
+            if os.name == "nt":
+                directories.extend(Path(directory) for directory in os.environ.get("LIB", "").split(";") if directory)
+            candidate = next((path for path in [reference, *(directory / reference for directory in directories)]
+                              if path.is_file()), None)
+            if candidate is not None and candidate.resolve() not in seen:
+                seen.add(candidate.resolve())
+                inputs.append(candidate)
         elif arg == "-l" or (arg.startswith("-l") and len(arg) > 2):
             if arg == "-l":
                 if index + 1 >= len(linker_args):
@@ -955,26 +1026,49 @@ def _linker_build_id_modes(linker_args: list[str]) -> list[str]:
             for arg in linker_args if arg == "--build-id" or arg.startswith("--build-id=")]
 
 
-def _link_output_path(clang_args: list[str], require_explicit: bool, default_output: str) -> Path:
-    output: str | None = None
+def _link_output_path(linker_args: list[str], clang_args: list[str], require_explicit: bool) -> Path:
+    explicit_output: str | None = None
     index = 0
     while index < len(clang_args):
         arg = clang_args[index]
         if arg == "-o":
             if index + 1 >= len(clang_args) or clang_args[index + 1] == "":
                 raise _wrapper_error("-o requires an output path")
-            output = clang_args[index + 1]
+            explicit_output = clang_args[index + 1]
             index += 2
             continue
         if (arg.startswith("-o") and len(arg) > 2 and
                 not arg.startswith("-objcmt-") and
                 not arg.startswith("-object-file-name=")):
+            explicit_output = arg[2:]
+        index += 1
+    if require_explicit and explicit_output is None:
+        raise _wrapper_error("self_checksum auto-binding requires an explicit '-o <path>' final-link output")
+    if explicit_output == "-":
+        raise _wrapper_error("self_checksum final links cannot bind an output written to stdout")
+
+    # MSVC jobs use -out:, including driver defaults. Later /out: operands
+    # can override it. GNU jobs use -o and can add a filename extension.
+    coff_output = any(arg.lower().startswith(("-out:", "/out:")) for arg in linker_args)
+    output: str | None = None
+    index = 0
+    while index < len(linker_args):
+        arg = linker_args[index]
+        if coff_output:
+            if arg.lower().startswith(("-out:", "/out:")):
+                output = arg[5:]
+        elif arg in {"-o", "--output"}:
+            if index + 1 >= len(linker_args):
+                raise _wrapper_error(f"linker option {arg} requires an output path")
+            output = linker_args[index + 1]
+            index += 1
+        elif arg.startswith("--output="):
+            output = arg.split("=", 1)[1]
+        elif arg.startswith("-o") and len(arg) > 2:
             output = arg[2:]
         index += 1
-    if output is None:
-        if require_explicit:
-            raise _wrapper_error("self_checksum auto-binding requires an explicit '-o <path>' final-link output")
-        output = default_output
+    if not output:
+        raise _wrapper_error("cannot determine self_checksum output from the final linker job")
     if output == "-":
         raise _wrapper_error("self_checksum final links cannot bind an output written to stdout")
     return Path(output)
@@ -1063,8 +1157,7 @@ def main() -> int:
         linker = _linker_job(commands)
         link_action = linker is not None
         dry_run = "-###" in effective_args
-        linker_args = _normalize_linker_selection_options(
-            _expand_linker_response_args(linker[1:])) if linker is not None else []
+        linker_args = _normalize_linker_selection_options(_linker_job_args(linker)) if linker is not None else []
         final_link_action = link_action and "-r" not in linker_args
         target_triple = next((_last_option_value(command, "-triple") for command in frontend_jobs), None)
         if target_triple is None and (link_action or frontend_lto_mode is not None):
@@ -1114,7 +1207,7 @@ def main() -> int:
             routed_linker = _linker_job(routed_commands)
             if routed_linker is None or not _same_path(routed_linker[0], linker_dispatch):
                 raise _wrapper_error("compiler config overrides the required managed ELF LLD linker")
-            routed_args = _normalize_linker_selection_options(_expand_linker_response_args(routed_linker[1:]))
+            routed_args = _normalize_linker_selection_options(_linker_job_args(routed_linker))
             if not _has_plugin(routed_args, "--load-pass-plugin"):
                 raise _wrapper_error("compiler config removes the required managed LTO backend plugin")
             if cache_dir is not None and _last_option_value(routed_args, "--thinlto-cache-dir") != managed_cache:
@@ -1137,13 +1230,7 @@ def main() -> int:
             if self_checksum_requested:
                 raise _wrapper_error("PE self_checksum auto-binding currently requires a native Windows host")
             bound_object_format = None
-        if bound_object_format is not None and (self_checksum_requested or binder_available):
-            bind_output = _link_output_path(
-                effective_args,
-                require_explicit=self_checksum_requested,
-                default_output="a.exe" if bound_object_format == "pe" else "a.out",
-            )
-        build_id_modes = _linker_build_id_modes(_user_linker_args(effective_args))
+        build_id_modes = _linker_build_id_modes(_user_linker_args(effective_args)) if bound_object_format == "elf" else []
         if self_checksum_requested and bound_object_format is not None:
             if not binder_available:
                 raise _wrapper_error(f"missing self-checksum binder: {CHECKSUM_BINDER or '<not configured>'}")
@@ -1154,6 +1241,16 @@ def main() -> int:
                     clang_args.append("-Wl,--build-id=none")
                     build_id_modes.append("none")
         final_args = _compiler_command(compiler, clang_args, False, final_link_action, frontend_has_plugin)
+        if bound_object_format is not None and (self_checksum_requested or binder_available):
+            final_commands, _ = _driver_plan(compiler, final_args[len(compiler):], env)
+            final_linker = _linker_job(final_commands)
+            if final_linker is None:
+                raise _wrapper_error("compiler config removes the expected final linker job")
+            bind_output = _link_output_path(
+                _linker_job_args(final_linker),
+                effective_args,
+                require_explicit=self_checksum_requested,
+            )
         completed = subprocess.run(final_args, env=env)
         if completed.returncode != 0 or dry_run or bound_object_format is None or not binder_available:
             return completed.returncode

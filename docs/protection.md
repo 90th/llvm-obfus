@@ -26,8 +26,8 @@ The [security contracts](../SECURITY.md) define the checked scope and reporting 
 ### VM lowering and build checks
 
 `vm` and `strong_vm` lower supported functions into bytecode-backed execution paths.
-The interface wrapper keeps the selected function's linkage and visibility.
-The implementation has internal linkage and default visibility.
+The interface wrapper keeps the selected function's linkage, visibility, and DLL export storage class.
+The implementation has internal linkage and default visibility, without DLL export or import storage classes.
 
 Candidate analysis rejects unsupported IR, not only exception handlers.
 Important limits include:
@@ -271,6 +271,28 @@ The runtime does not guarantee scheduler fairness or recovery after the decoding
 It also does not guarantee key erasure when a thread is canceled.
 See [authenticated decode waiting](../runtime/README.md#authenticated-decode-waiting) for the canonical publication and validation contract.
 
+### Windows DLL lifecycle
+
+Normal Windows x64 user-mode DLLs use the same VM, authentication, and self-checksum contracts as executables.
+The normal CRT startup sequence runs generated initialization constructors.
+VM initialization prepares address-dependent state before normal user constructors.
+Runtime entropy initialization does not bind authentication keys.
+Custom entry points must not omit the required CRT initialization sequence.
+Calls from pre-CRT TLS callbacks, before required constructors complete, are outside the supported lifecycle.
+
+Windows holds the loader lock during DLL initialization and `DllMain`.
+Protected calls there must not contend with another thread that owns an authenticated decoder.
+Decoder waiters can block indefinitely. They do not bypass authentication under the loader lock.
+Do not start workers or wait for other threads there.
+Protection of a `DllMain` function is not categorically unsupported.
+Its code must satisfy Windows loader-lock restrictions and the selected protection policy.
+
+Stop new calls and join all DLL callers before unload.
+Remove callbacks and release borrowed function and data addresses before `FreeLibrary`.
+Decoded string addresses remain valid only while the DLL remains loaded.
+No runtime state can make a call or borrowed address safe after unload.
+See [Windows x64 DLLs](usage.md#windows-x64-dlls) for wrapper commands and signing order.
+
 ## Self-checksum
 
 `self_checksum` adds a runtime dependency on 16 to 32 sampled machine-code bytes.
@@ -280,7 +302,7 @@ A bound site injects the XOR of actual and expected checksums into a protected i
 Narrow sites truncate that difference and can lose a mismatch.
 
 The v1 hash is not cryptographic. It does not authenticate the complete binary or stop simultaneous code and record changes.
-The bound path supports Linux x86-64 ELF executables/PIE and native Windows x86-64 PE32+ executables, not DLLs.
+The bound path supports Linux x86-64 ELF executables/PIE and native Windows x86-64 PE32+ executables or user-mode DLLs.
 Use the [binding guide](self-checksum.md) for workflows and binary rules.
 Use the [self-checksum security contract](../SECURITY.md#self-checksum-security-contract) for limits.
 

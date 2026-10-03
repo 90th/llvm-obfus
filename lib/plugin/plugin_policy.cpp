@@ -91,8 +91,10 @@ const llvm::Function* resolve_pipeline_configured_function(const llvm::Module& m
   return nullptr;
 }
 
-bool has_strong_classical(protection_level level) {
-  return level == protection_level::strong || level == protection_level::strong_vm;
+bool has_strong_classical(const function_policy& policy) {
+  return policy.level == protection_level::strong || policy.level == protection_level::strong_vm ||
+         (policy.level == protection_level::vm && policy.allow_instruction_substitution &&
+          policy.allow_opaque_gep && policy.allow_function_outlining);
 }
 
 bool is_orchestrator_seed_level(protection_level level) {
@@ -187,9 +189,19 @@ void append_policy_detail(std::string& detail, llvm::StringRef suffix) {
   detail += suffix.str();
 }
 
-function_policy build_orchestrator_promotion_policy(const function_features& features) {
+function_policy build_orchestrator_promotion_policy(const function_features& features,
+                                                   const function_policy& current) {
+  const bool retain_vm = current.level == protection_level::vm;
   function_policy policy = make_function_policy(protection_level::strong);
-  if (!(features.has_exception_edges || features.has_inline_asm)) { return policy; }
+  if (!(features.has_exception_edges || features.has_inline_asm)) {
+    if (retain_vm) {
+      policy.level = current.level;
+      policy.allow_vm = current.allow_vm;
+    }
+    return policy;
+  }
+  // A restricted VM selection must not lose its existing obligations.
+  if (retain_vm) { return current; }
 
   policy = make_function_policy(protection_level::light);
   policy.allow_instruction_substitution = false;
@@ -321,7 +333,7 @@ void apply_orchestrator_policy_promotions(llvm::SmallVectorImpl<function_pipelin
       llvm::Function* function = state.function;
       if (function == nullptr || function->isDeclaration() ||
           !can_revisit_orchestrator_promotion(state) || !is_user_pipeline_function(*function) ||
-          has_strong_classical(state.report.decision.policy.level)) {
+          has_strong_classical(state.report.decision.policy)) {
         continue;
       }
 
@@ -329,13 +341,19 @@ void apply_orchestrator_policy_promotions(llvm::SmallVectorImpl<function_pipelin
       if (!reason.has_value()) { continue; }
 
       const function_policy promoted_policy =
-          build_orchestrator_promotion_policy(state.report.features);
-      if (promoted_policy.level == state.report.decision.policy.level) { continue; }
+          build_orchestrator_promotion_policy(state.report.features, state.report.decision.policy);
+      if (promoted_policy.level == state.report.decision.policy.level &&
+          has_strong_classical(promoted_policy) == has_strong_classical(state.report.decision.policy)) {
+        continue;
+      }
 
       state.report.decision.policy = promoted_policy;
       append_policy_detail(
           state.report.decision.detail,
-          llvm::formatv("orchestrator promotion raised to {0} via protected callee {1} ({2})",
+          llvm::formatv(promoted_policy.level == protection_level::vm
+                            ? "orchestrator promotion retained {0} and added classical protection "
+                              "via protected callee {1} ({2})"
+                            : "orchestrator promotion raised to {0} via protected callee {1} ({2})",
                         to_string(promoted_policy.level),
                         reason->callee_name,
                         describe_orchestrator_observation(reason->observation))
@@ -765,7 +783,7 @@ control_flattening_options build_control_flattening_options(const obfuscation_co
   options.mba_enable_polynomial = config.mba.enable_polynomial;
   options.mba_enable_multiplication = config.mba.enable_multiplication;
   options.seed = decision.seed;
-  if (has_strong_classical(decision.policy.level)) {
+  if (has_strong_classical(decision.policy)) {
     options.max_blocks = 20;
     options.max_instructions = 192;
     options.max_decoy_states = 3;
@@ -794,7 +812,7 @@ instruction_substitution_options
 build_instruction_substitution_options(const obfuscation_config& config,
                                        const policy_decision& decision) {
   instruction_substitution_options options;
-  if (has_strong_classical(decision.policy.level)) {
+  if (has_strong_classical(decision.policy)) {
     options.max_substitutions_per_function = 6;
   } else {
     options.max_substitutions_per_function = 2;
@@ -805,7 +823,7 @@ build_instruction_substitution_options(const obfuscation_config& config,
   options.mba_max_ir_instructions = config.mba.max_ir_instructions;
   options.mba_enable_polynomial = config.mba.enable_polynomial;
   options.mba_enable_multiplication = config.mba.enable_multiplication;
-  options.max_padded_sites = has_strong_classical(decision.policy.level) ? 2 : 0;
+  options.max_padded_sites = has_strong_classical(decision.policy) ? 2 : 0;
 
   return options;
 }
@@ -829,7 +847,7 @@ function_outlining_options build_function_outlining_options(const obfuscation_co
   options.mba_enable_polynomial = config.mba.enable_polynomial;
   options.mba_enable_multiplication = config.mba.enable_multiplication;
   options.seed = decision.seed;
-  if (has_strong_classical(decision.policy.level)) {
+  if (has_strong_classical(decision.policy)) {
     options.min_cluster_size = 2;
     options.max_cluster_size = 4;
   }
@@ -840,7 +858,7 @@ function_outlining_options build_function_outlining_options(const obfuscation_co
 bogus_control_flow_options build_bogus_control_flow_options(const obfuscation_config& config,
                                                             const policy_decision& decision) {
   bogus_control_flow_options options;
-  if (has_strong_classical(decision.policy.level)) { options.max_insertions_per_function = 2; }
+  if (has_strong_classical(decision.policy)) { options.max_insertions_per_function = 2; }
 
   options.mba_depth = config.mba.depth;
   options.mba_max_ir_instructions = config.mba.max_ir_instructions;
@@ -853,7 +871,7 @@ bogus_control_flow_options build_bogus_control_flow_options(const obfuscation_co
 opaque_predicate_options build_opaque_predicate_options(const obfuscation_config& config,
                                                         const policy_decision& decision) {
   opaque_predicate_options options;
-  if (has_strong_classical(decision.policy.level)) { options.max_insertions_per_function = 2; }
+  if (has_strong_classical(decision.policy)) { options.max_insertions_per_function = 2; }
 
   options.mba_depth = config.mba.depth;
   options.mba_max_ir_instructions = config.mba.max_ir_instructions;

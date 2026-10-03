@@ -342,10 +342,10 @@ Version and closure checks still apply to overrides.
 ## Final-file binding
 
 `obf-rustc`, the Zig bitcode workflow, and `obf-tinygo` do not bind self-checksum records automatically.
-Keep `self_checksum.enabled: false` unless you will bind the final executable manually.
+Keep `self_checksum.enabled: false` unless you will bind the final image manually.
 
-Binding supports Linux x86-64 ELF executables and PIE files, plus native Windows x86-64 PE32+ executables.
-Rust `cdylib` support does not imply Windows DLL checksum-binding support.
+Binding supports Linux x86-64 ELF executables and PIE files, plus native Windows x86-64 user-mode PE32+ executables and DLLs.
+Other frontend routes still need their own native verification and manual final-file binding.
 TinyGo's recognized ARM hosts do not imply ARM checksum-binding support.
 
 Use [Self-Checksum](self-checksum.md) for the supported artifacts, bind order, and platform binder commands.

@@ -182,24 +182,94 @@ def mark_signed(path):
     Path(path).write_bytes(data)
     print("SELF_CHECKSUM_PE_MARKED_SECURITY_DIRECTORY")
 
+
+def tamper_checksum(path):
+    data, record, _, _, _, _ = first_record(path)
+    expected = u64(data, record + OFF_EXPECTED)
+    struct.pack_into("<Q", data, record + OFF_EXPECTED, expected ^ 1)
+    Path(path).write_bytes(data)
+    print(f"SELF_CHECKSUM_PE_TAMPERED_CHECKSUM before=0x{expected:x} after=0x{expected ^ 1:x}")
+
+
+def mark_subsystem(path, subsystem):
+    data = bytearray(Path(path).read_bytes())
+    pe = u32(data, 0x3C)
+    struct.pack_into("<H", data, pe + 24 + 68, subsystem)
+    Path(path).write_bytes(data)
+    print(f"SELF_CHECKSUM_PE_MARKED_SUBSYSTEM subsystem={subsystem}")
+
+
+def retarget_relocation(path, target, displacement):
+    data, sections, record_sections = parse(path)
+    _, _, record_rva, _, record, _ = record_sections[0]
+    if target == "record":
+        target_rva = record_rva + displacement
+    else:
+        if u64(data, record + OFF_DELTA) >> 32:
+            raise SystemExit("unexpected PE REL32 upper bits")
+        target_rva = record_rva + struct.unpack_from("<i", data, record + OFF_DELTA)[0]
+        target_rva += displacement
+    if not 0 <= target_rva <= 0xFFFFFFFF:
+        raise SystemExit("relocation target RVA is out of range")
+
+    pe = u32(data, 0x3C)
+    directory = pe + 24 + 112 + 5 * 8
+    reloc_rva, reloc_size = struct.unpack_from("<II", data, directory)
+    mappings = [
+        raw_off + reloc_rva - rva
+        for _, virtual_size, rva, raw_size, raw_off, _ in sections
+        if rva <= reloc_rva
+        and reloc_rva - rva + reloc_size <= min(virtual_size, raw_size)
+    ]
+    if reloc_size < 8 or len(mappings) != 1:
+        raise SystemExit("relocation directory does not map uniquely to file bytes")
+    cursor = mappings[0]
+    end = cursor + reloc_size
+    while cursor < end:
+        block_size = u32(data, cursor + 4)
+        if block_size < 8 or block_size % 2 or cursor + block_size > end:
+            raise SystemExit("malformed relocation block")
+        entries = range(cursor + 8, cursor + block_size, 2)
+        fixups = [off for off in entries if u16(data, off) >> 12]
+        if len(fixups) == 1 and u16(data, fixups[0]) >> 12 == 10:
+            struct.pack_into("<I", data, cursor, target_rva & ~0xFFF)
+            struct.pack_into("<H", data, fixups[0], 0xA000 | (target_rva & 0xFFF))
+            Path(path).write_bytes(data)
+            print(f"SELF_CHECKSUM_PE_RETARGETED_DIR64 target_rva=0x{target_rva:x}")
+            return
+        cursor += block_size
+    raise SystemExit("fixture needs a relocation block with one DIR64 fixup")
+
 def main():
+    if len(sys.argv) == 5 and sys.argv[1] == "retarget-relocation":
+        if sys.argv[3] not in {"record", "sample"}:
+            raise SystemExit("relocation target must be record or sample")
+        retarget_relocation(sys.argv[2], sys.argv[3], int(sys.argv[4], 0))
+        return
     if len(sys.argv) != 3 or sys.argv[1] not in {
-        "inspect", "tamper", "overlap-record", "mark-checksum", "mark-signed"
+        "inspect", "tamper", "tamper-checksum", "overlap-record", "mark-checksum", "mark-signed",
+        "mark-native", "mark-efi", "mark-unknown",
     }:
         raise SystemExit(
             "usage: self_checksum_pe_tool.py "
-            "<inspect|tamper|overlap-record|mark-checksum|mark-signed> <pe>"
+            "<inspect|tamper|tamper-checksum|overlap-record|mark-checksum|mark-signed|"
+            "mark-native|mark-efi|mark-unknown> <pe>\n"
+            "       self_checksum_pe_tool.py retarget-relocation <pe> <record|sample> <offset>"
         )
     if sys.argv[1] == "inspect":
         inspect(sys.argv[2])
     elif sys.argv[1] == "tamper":
         tamper(sys.argv[2])
+    elif sys.argv[1] == "tamper-checksum":
+        tamper_checksum(sys.argv[2])
     elif sys.argv[1] == "overlap-record":
         overlap_record_mapping(sys.argv[2])
     elif sys.argv[1] == "mark-checksum":
         mark_header_checksum(sys.argv[2])
-    else:
+    elif sys.argv[1] == "mark-signed":
         mark_signed(sys.argv[2])
+    else:
+        mark_subsystem(sys.argv[2], {"mark-native": 1, "mark-efi": 10, "mark-unknown": 0}[sys.argv[1]])
 
 
 if __name__ == "__main__":

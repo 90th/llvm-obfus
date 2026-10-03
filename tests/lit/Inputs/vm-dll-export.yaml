@@ -1,0 +1,9 @@
+seed: 2031
+default_level: none
+targets:
+  - match: dll_vm
+    level: vm
+  - match: dll_strong_vm
+    level: strong_vm
+security:
+  fail_on_public_obf_symbol: true
