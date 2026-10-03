@@ -1,0 +1,30 @@
+seed: 8675309
+default_level: none
+targets:
+  - match: dll_vm
+    level: vm
+  - match: dll_vm_text
+    level: strong
+  - match: dll_strong_vm
+    level: strong_vm
+  - match: dll_strong_vm_text
+    level: strong
+  - match: dll_initialize
+    level: strong_vm
+  - match: dll_checksum
+    level: strong
+string_encoding:
+  authenticated_mode: true
+  prefer_lazy_decode: true
+  allow_ctor_fallback: true
+constant_encoding:
+  mode: keyed_pool
+  min_bit_width: 8
+  max_constants_per_function: 16
+self_checksum:
+  enabled: true
+  window_size: 16
+  max_sites: 1
+  seed: 991827
+security:
+  fail_on_public_obf_symbol: true

@@ -333,15 +333,59 @@ Use the wrapper unless your integration implements the same linker, pipeline, po
 The [LTO integration test](../tests/lit/tooling/obf-clang-lto-linker-plugin.ll) shows lower-level plugin commands.
 Those commands are not a replacement for the managed contract.
 
+## Windows x64 DLLs
+
+Use the native Windows wrappers for normal Windows x64 user-mode DLLs.
+The wrapper links the matching runtime and binds required records after the final DLL link.
+Object-only links also bind records inherited from protected objects and extracted archive members.
+The wrapper reads the final output path from Clang's linker job, including linker response files and configuration tails.
+An active `self_checksum` policy still requires an explicit driver `-o <path>`.
+Managed LTO remains unsupported for PE targets and Windows-hosted final links.
+EFI images and kernel drivers are outside this workflow.
+
+For an MSVC-target build, compile and link an exported function with:
+
+```bat
+build\obf-clang.cmd -shared -O2 --obf-config=library.yaml library.c -o library.dll
+build\obf-clang.cmd consumer.c library.lib -o consumer.exe
+```
+
+Declare DLL entry functions with `__declspec(dllexport)`.
+Declare import-library calls with `__declspec(dllimport)` in the consumer.
+For dynamic calls, retain the `LoadLibrary` reference while you use `GetProcAddress` results.
+The same protection policies apply to DLL functions. DLL support does not disable VM lowering or authenticated decoding.
+
+### Initialization and unload
+
+Keep the normal CRT entry point and initialization sequence.
+Generated constructors initialize address-dependent VM state before normal user constructors.
+The runtime also initializes its entropy anchor through CRT initialization.
+Authenticated keys do not depend on that runtime entropy value.
+Do not bypass these constructors with a custom entry point or omitted startup code.
+Calls before required constructors complete are outside the supported lifecycle.
+This includes calls from pre-CRT TLS callbacks.
+
+DLL initialization and `DllMain` run under the Windows loader lock.
+Keep protected calls there single-threaded, without blocking decoder contention.
+Do not start workers or wait for other threads under the loader lock.
+This constraint does not make every protected `DllMain` function unsupported.
+Its operations must obey both Windows loader-lock rules and the selected protection policy.
+See [Microsoft's DLL guidance](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-best-practices) for loader-lock restrictions.
+
+Before `FreeLibrary`, stop new calls and join every thread that can execute DLL code.
+Remove callbacks and release every borrowed function or data address before unload.
+Decoded string addresses belong to the loaded DLL.
+Do not retain or dereference them after unload.
+Concurrent calls after initialization remain subject to the [authenticated decoder waiting contract](protection.md#waiting-and-availability).
+
 ## Self-checksum finalization
 
-The C/C++ wrappers automatically bind records for supported final executable links.
+The C/C++ wrappers automatically bind records for supported final executable and DLL links.
 An active `self_checksum` final wrapper link requires an explicit `-o <path>`.
 Objects and static archives can contain `UNBOUND` records.
-Bind those records only after the final executable link.
+Bind those records only after the final executable or DLL link.
 
-The supported v1 executable workflows are Linux x86-64 ELF/PIE and native Windows x86-64 PE32+ EXE.
-Windows DLL binding is not supported.
+The supported v1 workflows are Linux x86-64 ELF/PIE and native Windows x86-64 PE32+ EXE or user-mode DLL.
 Other architectures and formats do not provide the supported v1 bound workflow.
 An active Windows self-checksum final wrapper link on a non-Windows host is unsupported.
 The wrapper rejects it and does not auto-finalize inherited PE records there.
@@ -356,9 +400,9 @@ build/obf-checksum-bind protected-app
 ```
 
 On Windows, use `link -> bind -> sign`.
-Run `build\obf-checksum-bind.exe` on the final EXE before embedded Authenticode signing.
-The binder rejects a nonzero PE Security directory.
-Do not run the binder on an object, static archive, or DLL.
+Run `build\obf-checksum-bind.exe` on the final EXE or DLL before embedded Authenticode signing.
+The binder rejects certificate-bearing inputs and a nonzero PE `CheckSum`.
+Do not run the binder on an object or static archive.
 
 `--probe` inspects record slots without modifying the file.
 A successful probe does not prove that binding will succeed.

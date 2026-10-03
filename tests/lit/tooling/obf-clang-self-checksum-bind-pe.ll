@@ -22,17 +22,16 @@
 ; RUN: %t.normal.exe
 ; RUN: %expect_failure %obf_checksum_bind --probe %t.normal.exe 2>&1 | %FileCheck %s --check-prefix=NO-RECORDS
 ;
-; Ordinary DLL links without records remain unaffected, while protected DLLs fail closed as unsupported.
+; Ordinary DLL links keep no-record behavior. Protected DLL final links bind normally.
 ; RUN: %obf_clang -shared -O0 --obf-config=%S/../Inputs/obf-clang-wrapper.yaml %S/../Inputs/obf-clang-self-checksum-dll.c -o %t.normal.dll
 ; RUN: %expect_failure %obf_checksum_bind --probe %t.normal.dll 2>&1 | %FileCheck %s --check-prefix=NO-RECORDS
-; RUN: %expect_failure %obf_clang -shared -O0 --obf-config=%S/../Inputs/self-checksum-bound.yaml %S/../Inputs/obf-clang-self-checksum-dll.c -o %t.protected.dll 2>&1 | %FileCheck %s --check-prefix=DLL-REJECT
+; RUN: %obf_clang -shared -O0 --obf-config=%S/../Inputs/self-checksum-bound.yaml %S/../Inputs/obf-clang-self-checksum-dll.c -o %t.protected.dll
+; RUN: %python %S/../Inputs/self_checksum_pe_tool.py inspect %t.protected.dll | %FileCheck %s --check-prefix=BOUND
 ;
 ; BOUND: SELF_CHECKSUM_PE_RECORD
 ; BOUND-SAME: flags=0x3
 ; BOUND-SAME: expected=0x{{[0-9a-f]+}}
 ; NO-RECORDS: SELF_CHECKSUM_PROBE: records=0
-; DLL-REJECT: obf-clang: self-checksum binding failed
-; DLL-REJECT-SAME: Phase 3 supports PE32+ AMD64 executables only; DLL binding is not enabled
 
 define void @dummy() {
 entry:
