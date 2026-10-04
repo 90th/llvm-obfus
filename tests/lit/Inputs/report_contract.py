@@ -197,6 +197,46 @@ def region_contract(args):
                         "ledger claims generated roles absent from actual output IR")
 
 
+def prepare_shards(args):
+    text = Path(args.report).read_text()
+    text = text.replace(
+        "define i32 @strong_vm_fold(i32 %a, i32 %b, i32 %c) {",
+        'define i32 @strong_vm_fold(i32 %a, i32 %b, i32 %c) !obf.coverage.owner !0 {')
+    role = json.dumps({
+        "stage": "roles", "module": Path(args.ir).as_posix(),
+        "owner": "source_target", "target": "strong_vm_fold",
+        "role": "vm_implementation", "obligations": ["vm_execution", "string_owner"],
+    }).replace('"', r'\22')
+    text += ('\n!0 = !{!"source_target"}\n'
+             '!obf.coverage = !{!1}\n!1 = !{!"v1"}\n'
+             '!obf.coverage.events = !{!2}\n!2 = !{!"' + role + '"}\n')
+    Path(args.ir).write_text(text)
+
+
+def shard_contract(args):
+    report = coverage_contract(load(args.report))
+    implementations = {role["target"]: role for role in report["roles"]
+                       if role["role"] == "vm_implementation"
+                       and role["owner"] == "source_target"}
+    require(implementations, "source target lost its VM implementation role")
+    shards = [role for role in report["roles"] if role["role"] == "outlined_shard"]
+    vm_shards = [role for role in shards if role["owner"] == "source_target"]
+    require(vm_shards, "fixture did not outline the VM implementation")
+    for shard in vm_shards:
+        require(shard.get("parent") in implementations,
+                "outlined shard lost its immediate VM implementation parent")
+        require(shard["target"] != shard["parent"],
+                "outlined shard must have its own identity")
+        require("obf.string.owner.level=strong_vm" in shard["obligations"]
+                and any(item.startswith("obf.string.owner.seed=")
+                        for item in shard["obligations"]),
+                "outlined shard lost original string-protection obligations")
+    direct_shards = [role for role in shards if role["owner"] == "native_fold"]
+    require(direct_shards, "fixture did not outline the direct source function")
+    require(all("parent" not in role for role in direct_shards),
+            "direct source outlining acquired a generated parent")
+
+
 def policy_snapshots(report):
     no_emission(report)
     snapshots = {}
@@ -254,7 +294,7 @@ def promotion_contract(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("case", choices=("predictions", "abi", "incoming", "region", "selection", "promotion"))
+    parser.add_argument("case", choices=("predictions", "abi", "incoming", "region", "selection", "promotion", "shards", "prepare-shards"))
     parser.add_argument("report")
     parser.add_argument("--coverage")
     parser.add_argument("--uncaptured")
@@ -264,7 +304,8 @@ def main():
     args = parser.parse_args()
     {"predictions": prediction_contract, "abi": abi_contract, "incoming": incoming_contract,
      "region": region_contract, "selection": selection_contract,
-     "promotion": promotion_contract}[args.case](args)
+     "promotion": promotion_contract, "shards": shard_contract,
+     "prepare-shards": prepare_shards}[args.case](args)
 
 
 if __name__ == "__main__":

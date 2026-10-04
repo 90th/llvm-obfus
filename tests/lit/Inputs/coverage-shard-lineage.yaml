@@ -1,0 +1,12 @@
+seed: 20240602
+default_level: none
+targets:
+  - match: strong_vm_fold
+    level: strong_vm
+  - match: native_fold
+    level: strong
+constant_encoding:
+  max_constants_per_function: 2
+  min_bit_width: 8
+security:
+  fail_on_public_obf_symbol: true
