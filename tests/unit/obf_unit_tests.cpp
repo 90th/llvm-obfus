@@ -110,6 +110,69 @@ void TestPolicySelection() {
   const auto parsed = obf::parse_protection_level("obf:strong_vm");
   ExpectTrue(parsed.has_value() && *parsed == obf::protection_level::strong_vm,
              "parse_protection_level should parse annotation prefix form");
+
+  for (const char* name : {"verify_obf_token", "compute_obf_hash", "my__obf_handler"}) {
+    obf::function_features user;
+    user.name = name;
+    user.instruction_count = 40;
+    user.cyclomatic_complexity = 4;
+
+    obf::obfuscation_config selected;
+    selected.targets.push_back({.match = name, .level = obf::protection_level::strong_vm});
+    const auto target = obf::select_policy(module, user, selected, "");
+    ExpectTrue(target.policy.level == obf::protection_level::strong_vm &&
+                   target.source == obf::policy_source::config_rule,
+               "embedded obf names must retain mandatory VM target selection");
+    ExpectTrue(target.minimum_security_floor == obf::protection_level::strong,
+               "embedded obf names must retain their control-sensitive security floor");
+
+    selected.overrides.push_back({.name = name, .level = obf::protection_level::strong});
+    const auto override = obf::select_policy(module, user, selected, "");
+    ExpectTrue(override.policy.level == obf::protection_level::strong &&
+                   override.source == obf::policy_source::explicit_override,
+               "embedded obf names must retain override precedence");
+
+    obf::obfuscation_config automatic;
+    const auto annotation = obf::select_policy(module, user, automatic, "obf:strong_vm");
+    ExpectTrue(annotation.policy.level == obf::protection_level::strong_vm &&
+                   annotation.source == obf::policy_source::source_annotation,
+               "embedded obf names must retain annotation selection");
+    const auto control = obf::select_policy(module, user, automatic, "");
+    ExpectTrue(control.policy.level == obf::protection_level::strong &&
+                   control.source == obf::policy_source::automatic_analysis,
+               "embedded obf names must retain automatic control selection");
+    user.cyclomatic_complexity = 1;
+    user.string_ref_count = 1;
+    const auto string = obf::select_policy(module, user, automatic, "");
+    ExpectTrue(string.policy.level == obf::protection_level::light &&
+                   string.source == obf::policy_source::automatic_analysis &&
+                   string.minimum_security_floor == obf::protection_level::light,
+               "embedded obf names must retain automatic string selection and floor");
+
+    selected.overrides.clear();
+    selected.frontend = obf::frontend_kind::rust;
+    const auto exact = obf::select_policy(module, user, selected, "");
+    ExpectTrue(exact.policy.level == obf::protection_level::strong_vm &&
+                   exact.source == obf::policy_source::config_rule,
+               "embedded obf names must retain exact non-generic selection");
+  }
+
+  for (const char* name : {"__obf_vm_impl", "_obf_helper", "rt_core_sd3",
+                           "ObfEntropy", "ObfBlake", "llvm.trap"}) {
+    obf::function_features runtime;
+    runtime.name = name;
+    runtime.instruction_count = 40;
+    runtime.cyclomatic_complexity = 4;
+    runtime.string_ref_count = 1;
+    obf::obfuscation_config selected;
+    selected.targets.push_back({.match = "*", .level = obf::protection_level::strong_vm});
+    selected.overrides.push_back({.name = name, .level = obf::protection_level::strong_vm});
+    const auto decision = obf::select_policy(module, runtime, selected, "obf:strong_vm");
+    ExpectTrue(decision.policy.level == obf::protection_level::none &&
+                   decision.source == obf::policy_source::default_policy &&
+                   !decision.minimum_security_floor.has_value(),
+               "runtime helpers must remain excluded before all explicit selection");
+  }
 }
 
 void TestFrontendPolicyConfigAndSelection() {
