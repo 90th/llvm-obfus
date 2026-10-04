@@ -484,6 +484,28 @@ static int ObfConstantTimeEqual(const uint8_t *lhs, const uint8_t *rhs, size_t s
 }
 
 static OBF_NORETURN void ObfTrap(void) {
+#if defined(_WIN32)
+  /*
+   * On Windows, an ordinary hardware trap (ud2) during DLL initialization is
+   * intercepted by NTDLL's loader exception filter (LdrpCallInitRoutine).
+   * NTDLL aborts the load and unmaps the DLL, but fails to unregister MSVC CRT
+   * Fiber Local Storage (FLS) callbacks registered during _DllMainCRTStartup.
+   * When the host process later exits, ntdll!LdrShutdownProcess invokes the
+   * dangling FLS callback in unmapped memory, causing a deferred C0000005 access
+   * violation.
+   *
+   * RaiseFailFastException bypasses all user-mode SEH filters, ensuring an
+   * immediate fail-closed halt with the canonical native trap code (0xC000001D)
+   * without allowing loader recovery to leave dangling callbacks in the process.
+   */
+  EXCEPTION_RECORD record;
+  memset(&record, 0, sizeof(record));
+  record.ExceptionCode = (DWORD)0xC000001D;  /* STATUS_ILLEGAL_INSTRUCTION */
+  record.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+  record.ExceptionAddress = (void *)&ObfTrap;
+  RaiseFailFastException(&record, NULL, 0);
+  TerminateProcess(GetCurrentProcess(), (UINT)0xC000001D);
+#endif
 #if defined(__clang__) || defined(__GNUC__)
   __builtin_trap();
   __builtin_unreachable();

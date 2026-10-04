@@ -6,6 +6,12 @@
 #include "obf/support/runtime_atomic.h"
 #include "obf/support/blake2s_internal.h"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 #if defined(_MSC_VER)
 #include <intrin.h>
 #pragma section(".CRT$XCU", read)
@@ -33,6 +39,15 @@ uint64_t OBF_RT_ENTROPY_ANCHOR = 0;
 OBF_HIDDEN
 void OBF_RT_SELF_CHECKSUM_REQUIRE_BOUND(uint32_t flags) {
   if (flags != (OBF_SC_FLAG_REQUIRED | OBF_SC_FLAG_BOUND)) {
+#if defined(_WIN32)
+    EXCEPTION_RECORD record;
+    memset(&record, 0, sizeof(record));
+    record.ExceptionCode = (DWORD)0xC000001D;  /* STATUS_ILLEGAL_INSTRUCTION */
+    record.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+    record.ExceptionAddress = (void *)&OBF_RT_SELF_CHECKSUM_REQUIRE_BOUND;
+    RaiseFailFastException(&record, NULL, 0);
+    TerminateProcess(GetCurrentProcess(), (UINT)0xC000001D);
+#endif
 #if defined(__clang__) || defined(__GNUC__)
     __builtin_trap();
     __builtin_unreachable();
@@ -41,7 +56,6 @@ void OBF_RT_SELF_CHECKSUM_REQUIRE_BOUND(uint32_t flags) {
 #endif
   }
 }
-
 OBF_HIDDEN
 uint64_t OBF_RT_CODE_CHECKSUM(const void* func_ptr, size_t size, uint64_t seed) {
   if (func_ptr == NULL) { return seed ^ 0x9e3779b97f4a7c15ULL; }
