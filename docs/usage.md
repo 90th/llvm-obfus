@@ -434,6 +434,23 @@ Declare import-library calls with `__declspec(dllimport)` in the consumer.
 For dynamic calls, retain the `LoadLibrary` reference while you use `GetProcAddress` results.
 The same protection policies apply to DLL functions. DLL support does not disable VM lowering or authenticated decoding.
 
+### C++ ABI boundaries
+
+Use `obf-clang++.cmd` for C++ DLL compilation and linking.
+Use compatible compiler, CRT, and C++ runtime settings on both sides of the DLL boundary.
+
+VM admission uses the frontend's lowered LLVM ABI, not the aggregate's source size.
+Supported register-coerced values and ordinary pointer parameters can use VM execution.
+Non-escaping aggregate locals receive scalar replacement during O0 preparation.
+`strong_vm` still rejects protected entries with `sret`, `byval`, or other unsupported ABI attributes.
+Escaping stack buffers remain unsupported.
+
+Outgoing imports and callbacks keep their original calling convention and ABI attributes.
+The native regression checks plain throwing imports and callbacks with shared CRT settings.
+This does not add VM support for local EH pads or `invoke` instructions.
+Local EH bodies and module-local address-taking retain the documented [feature restrictions](configuration.md#feature-restrictions).
+Same-module incoming `invoke` sites still reject under the strict VM boundary.
+
 ### Initialization and unload
 
 Keep the normal CRT entry point and initialization sequence.

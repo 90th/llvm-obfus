@@ -114,6 +114,11 @@ The recipe creates `bin/opt.exe`, `bin/clang.exe`, `lib/opt.lib`, and `lib/clang
 It also builds `FileCheck` and `not` for tests.
 Keep the generated Clang resource directory with the host build.
 
+The recipe exports required inline and template APIs through `llvm-api-exports.cpp`.
+O0 aggregate preparation uses the host's function-analysis manager and its real proxy key.
+If you use an older host build, rebuild both hosts and their import libraries before rebuilding the plugin DLLs.
+Do not replace missing analysis APIs with local keys or an independent LLVM runtime.
+
 ### Build the project
 
 Use the same SDK and exported host build.

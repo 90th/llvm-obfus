@@ -181,6 +181,16 @@ bool is_integer_extremum_intrinsic(const llvm::IntrinsicInst& instruction) {
   }
 }
 
+bool is_scalar_funnel_shift_intrinsic(const llvm::IntrinsicInst& instruction) {
+  switch (instruction.getIntrinsicID()) {
+    case llvm::Intrinsic::fshl:
+    case llvm::Intrinsic::fshr:
+      return instruction.getType()->isIntegerTy() && instruction.arg_size() == 3;
+    default:
+      return false;
+  }
+}
+
 opcode extremum_compare_opcode(const llvm::IntrinsicInst& instruction) {
   switch (instruction.getIntrinsicID()) {
     case llvm::Intrinsic::umin:
@@ -535,6 +545,70 @@ candidate_result build_program(const llvm::Function& function,
         continue;
       }
 
+      if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction);
+          intrinsic != nullptr && is_scalar_funnel_shift_intrinsic(*intrinsic)) {
+        const std::optional<value_ref> lhs = lower_value(*intrinsic->getArgOperand(0), detail);
+        const std::optional<value_ref> rhs = lower_value(*intrinsic->getArgOperand(1), detail);
+        const std::optional<value_ref> shift = lower_value(*intrinsic->getArgOperand(2), detail);
+        if (!lhs || !rhs || !shift) { return reject(detail); }
+
+        llvm::Type* type = intrinsic->getType();
+        const unsigned width = type->getIntegerBitWidth();
+        const bool power_of_two_width = (width & (width - 1)) == 0;
+        const opcode normalize_opcode = power_of_two_width ? opcode::and_op : opcode::urem;
+        const value_ref width_value{.kind = value_ref_kind::constant,
+                                    .constant = llvm::ConstantInt::get(type, width)};
+        const value_ref modulus{
+            .kind = value_ref_kind::constant,
+            .constant = llvm::ConstantInt::get(type, power_of_two_width ? width - 1 : width)};
+        const value_ref zero{.kind = value_ref_kind::constant,
+                             .constant = llvm::ConstantInt::get(type, 0)};
+
+        // Freeze once per argument: repeated count uses must agree for undef,
+        // and a poison count must not reach the select handler's branch.
+        const auto freeze_operand = [&](const value_ref& operand) {
+          const std::uint32_t slot = add_slot(program, type);
+          micro_instruction frozen;
+          frozen.op = opcode::freeze;
+          frozen.result_slot = slot;
+          frozen.operands.push_back(operand);
+          program.instructions.push_back(std::move(frozen));
+          return value_ref{.kind = value_ref_kind::slot, .slot = slot};
+        };
+        const auto emit_binary = [&](opcode operation,
+                                     const value_ref& left,
+                                     const value_ref& right,
+                                     const llvm::Type* result_type) {
+          const std::uint32_t slot = add_slot(program, result_type);
+          micro_instruction expanded;
+          expanded.op = operation;
+          expanded.result_slot = slot;
+          expanded.operands = {left, right};
+          program.instructions.push_back(std::move(expanded));
+          return value_ref{.kind = value_ref_kind::slot, .slot = slot};
+        };
+        const value_ref stable_lhs = freeze_operand(*lhs);
+        const value_ref stable_rhs = freeze_operand(*rhs);
+        const value_ref stable_shift = freeze_operand(*shift);
+        const value_ref count = emit_binary(normalize_opcode, stable_shift, modulus, type);
+        const value_ref complement = emit_binary(opcode::sub, width_value, count, type);
+        // Normalize the complementary count as well, so even count == 0 and
+        // i1 use in-range shifts instead of eagerly evaluating a shift by width.
+        const value_ref reverse_count = emit_binary(normalize_opcode, complement, modulus, type);
+        const bool left = intrinsic->getIntrinsicID() == llvm::Intrinsic::fshl;
+        const value_ref high =
+            emit_binary(opcode::shl, stable_lhs, left ? count : reverse_count, type);
+        const value_ref low =
+            emit_binary(opcode::lshr, stable_rhs, left ? reverse_count : count, type);
+        const value_ref combined = emit_binary(opcode::or_op, high, low, type);
+        const value_ref is_zero =
+            emit_binary(opcode::icmp_eq, count, zero, llvm::Type::getInt1Ty(function.getContext()));
+        vm_instruction.op = opcode::select;
+        vm_instruction.operands = {is_zero, left ? stable_lhs : stable_rhs, combined};
+        program.instructions.push_back(std::move(vm_instruction));
+        continue;
+      }
+
       if (const auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(&instruction)) {
         const std::optional<opcode> lowered_opcode = map_binary_opcode(*binary);
         if (!lowered_opcode) {
@@ -811,9 +885,8 @@ candidate_result build_program(const llvm::Function& function,
   if (program.instructions.empty()) { return reject("missing virtual instructions"); }
 
   if (program.instructions.size() > max_virtual_instructions) {
-    return reject("too many virtual instructions (" +
-                  std::to_string(program.instructions.size()) + " > " +
-                  std::to_string(max_virtual_instructions) + ")");
+    return reject("too many virtual instructions (" + std::to_string(program.instructions.size()) +
+                  " > " + std::to_string(max_virtual_instructions) + ")");
   }
 
   if (program_output != nullptr) { *program_output = program; }

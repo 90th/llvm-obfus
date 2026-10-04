@@ -29,6 +29,11 @@ The [security contracts](../SECURITY.md) define the checked scope and reporting 
 The interface wrapper keeps the selected function's linkage, visibility, and DLL export storage class.
 The implementation has internal linkage and default visibility, without DLL export or import storage classes.
 
+Native O0 preparation and managed backend preparation scalar-replace non-escaping aggregate locals before VM admission.
+Preparation keeps the source ABI and optimization attributes.
+It does not add VM support for arbitrary stack allocations.
+Direct `obf-vm` does not run this preparation automatically.
+
 Candidate analysis rejects unsupported IR, not only exception handlers.
 Important limits include:
 
@@ -94,10 +99,18 @@ Each extremum uses two operand freezes, one integer comparison, and one select: 
 Vector extremum intrinsics remain unsupported.
 Ordered comparisons at LLVM's maximum integer width fail VM lowering because the operation needs a wider integer type.
 
+Scalar `llvm.fshl` and `llvm.fshr` use VM arithmetic rather than native intrinsic calls.
+Counts use unsigned modulo-width semantics, including zero, non-power-of-two widths, and widths above 64 bits.
+The lowering freezes repeated inputs and keeps both shift counts below the operand width.
+Vector funnel shifts remain unsupported.
+
 Vector select conditions remain lane-wise LLVM selects.
 When a scalar select handler introduces a branch, it freezes the condition first.
 Do not extend this rule to all VM branches or all poison behavior.
 The transforms use specific freeze and operand-reuse rules, not a general promise to remove undefined behavior.
+
+Struct GEP field selectors stay compile-time constants, as LLVM requires.
+Sequential pointer, array, and vector indices retain runtime encoding.
 
 Generated wrappers, implementations, and entry thunks use the selected function's address space and pointer width.
 Island, decoy, and split helpers accept state pointers in the module's alloca address space.
