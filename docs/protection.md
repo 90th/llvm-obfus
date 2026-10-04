@@ -293,6 +293,8 @@ Do not start workers or wait for other threads there.
 Protection of a `DllMain` function is not categorically unsupported.
 Its code must satisfy Windows loader-lock restrictions and the selected protection policy.
 
+When authentication fails during DLL initialization, the runtime triggers a non-continuable illegal-instruction trap (`0xC000001D`).
+This stops execution immediately before the Windows loader can unmap the DLL with uncleaned runtime or CRT callbacks.
 Stop new calls and join all DLL callers before unload.
 Remove callbacks and release borrowed function and data addresses before `FreeLibrary`.
 Decoded string addresses remain valid only while the DLL remains loaded.
