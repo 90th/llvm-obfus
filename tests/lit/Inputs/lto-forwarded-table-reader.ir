@@ -1,0 +1,11 @@
+@forwarded_table = external constant [2 x ptr]
+
+define i32 @protected_table_read(i64 %slot, i64 %index) {
+entry:
+  %cell = getelementptr inbounds [2 x ptr], ptr @forwarded_table, i64 0, i64 %slot
+  %string = load ptr, ptr %cell, align 8
+  %address = getelementptr inbounds i8, ptr %string, i64 %index
+  %byte = load i8, ptr %address, align 1
+  %result = zext i8 %byte to i32
+  ret i32 %result
+}

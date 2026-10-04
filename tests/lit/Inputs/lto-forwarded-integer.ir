@@ -1,0 +1,4 @@
+; Same external pointer-cell topology, but the initializer graph has no CString.
+; Valid byte indices 0..3 read DE C0 AD 0B on the required Linux x86-64 target.
+@forwarded_integer = private constant i32 195936478, align 4
+@forwarded_cell = constant ptr @forwarded_integer, align 8

@@ -1,0 +1,5 @@
+; The original bytes live only in this TU. Native harness expectations are numeric
+; output checked by Python, not a second embedded copy of the secret.
+@forwarded_secret = private constant [33 x i8] c"forwarded-lto-private-secret-73!\00", align 1
+@forwarded_cell = constant ptr @forwarded_secret, align 8
+@forwarded_table = constant [2 x ptr] [ptr @forwarded_secret, ptr getelementptr inbounds ([33 x i8], ptr @forwarded_secret, i64 0, i64 1)], align 8
