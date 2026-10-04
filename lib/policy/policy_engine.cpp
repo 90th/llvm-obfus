@@ -81,7 +81,8 @@ const function_override* find_explicit_override(const obfuscation_config& config
 }
 
 bool is_runtime_internal_name(llvm::StringRef name) {
-  return name.contains("rt_core_") || name.contains("_obf_") || name.contains("ObfEntropy") ||
+  return name.contains("rt_core_") || name.starts_with("__obf_") ||
+         name.starts_with("_obf_") || name.contains("ObfEntropy") ||
          name.contains("ObfBlake") || name.contains("llvm.");
 }
 

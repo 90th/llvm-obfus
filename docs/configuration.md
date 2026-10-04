@@ -42,6 +42,11 @@ Use [the frontend guide](frontends.md) for Rust, Zig, or TinyGo configuration re
 
 ## Selection and precedence
 
+The engine excludes runtime-internal names before it applies user selection.
+Names that start with `__obf_` or `_obf_` remain excluded, even with an explicit target, override, or annotation.
+An embedded `_obf_` does not exclude a user function, such as `verify_obf_token`.
+The existing exclusions for names that contain `rt_core_`, `ObfEntropy`, `ObfBlake`, or `llvm.` still apply.
+
 ### Generic frontend
 
 The policy engine compares selectors with LLVM function names. It does not demangle C++ names.
