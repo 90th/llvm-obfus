@@ -1,0 +1,10 @@
+@forwarded_cell = external constant ptr
+
+define i32 @protected_cell_read(i64 %index) {
+entry:
+  %string = load ptr, ptr @forwarded_cell, align 8
+  %address = getelementptr inbounds i8, ptr %string, i64 %index
+  %byte = load i8, ptr %address, align 1
+  %result = zext i8 %byte to i32
+  ret i32 %result
+}

@@ -9,10 +9,10 @@ import tempfile
 
 def run(command, *, succeeds=True, cwd=None):
     env = os.environ.copy()
-    for key in ("OBF_CONFIG", "OBF_ENABLE", "OBF_SEED", "OBF_LTO_MODE"):
+    for key in ("OBF_CONFIG", "OBF_ENABLE", "OBF_SEED", "OBF_LTO_MODE", "OBF_LTO_INPUTS_VALIDATED"):
         env.pop(key, None)
     result = subprocess.run(command, env=env, cwd=cwd, capture_output=True, text=True, timeout=300)
-    if (result.returncode == 0) != succeeds:
+    if succeeds is not None and (result.returncode == 0) != succeeds:
         raise RuntimeError(
             f"unexpected exit {result.returncode}: {command!r}\n{result.stdout}\n{result.stderr}"
         )
@@ -49,44 +49,38 @@ def check_binary(binary, args, *, regional=False):
         raise RuntimeError("pending finalization survived into the native artifact")
 
 
-def check_backend_ir(case, args):
-    modules = [run([args.dis, str(path), "-o", "-"]).stdout
-               for path in case.rglob("*.opt.bc")]
+def backend_modules(case, args, suffix="opt"):
+    return {path: run([args.dis, str(path), "-o", "-"]).stdout
+            for path in sorted(case.rglob(f"*.{suffix}.bc"))}
+
+
+def check_backend_ir(case, args, *, entry="protected_calc", parameters=("i32",), modules=None):
+    if modules is None:
+        modules = backend_modules(case, args)
+    vm_parameters = (*parameters, "i64")
     entries = []
     engines = []
-    for module in modules:
+    for module in modules.values():
         for function in re.finditer(
             r"^define ([^\n]+)\{(.*?)^\}", module, re.MULTILINE | re.DOTALL
         ):
             header, body = function.groups()
-            if "@protected_calc(" in header:
+            if f"@{entry}(" in header:
                 entries.append(body)
-            elif re.search(r"\([^)]*i32[^)]*,\s*i64[^)]*\)", header):
+            elif any(tuple(re.findall(r"\bi(?:8|16|32|64)\b", signature)) == vm_parameters
+                     for signature in re.findall(r"\(([^)]*)\)", header)):
                 engines.append(body)
-    if not any(re.search(r"call i32 %[^(\s]+\([^)]*i32[^)]*,\s*i64", body)
-               for body in entries):
-        raise RuntimeError("post-LTO entry lost its indirect hidden-token VM boundary")
+    if not any(tuple(re.findall(r"\bi(?:8|16|32|64)\b", call)) == vm_parameters
+               for body in entries
+               for call in re.findall(r"call i32 %[^(\s]+\(([^)]*)\)", body)):
+        raise RuntimeError(f"post-LTO {entry} lost its indirect hidden-token VM boundary")
     if not any(re.search(r"(?:getelementptr|ptrtoint)[^\n]*@", body) and
                re.search(r"load i(?:8|16|32|64),", body) and "indirectbr " in body
                for body in engines):
         raise RuntimeError("post-LTO VM implementation lost table-backed execution")
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--wrapper", required=True)
-    parser.add_argument("--clang", required=True)
-    parser.add_argument("--dis", default="llvm-dis")
-    parser.add_argument("--ar", required=True)
-    parser.add_argument("--nm", required=True)
-    parser.add_argument("--objdump", required=True)
-    parser.add_argument("--runtime", required=True)
-    parser.add_argument("--work", required=True)
-    args = parser.parse_args()
-    inputs = Path(__file__).resolve().parent
-    work = Path(args.work).resolve()
-    work.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix="run-", dir=work))
+def contract_matrix(args, inputs, work):
 
     for mode in ("full", "thin"):
         for optimization in ("0", "2"):
@@ -323,6 +317,238 @@ def main():
         check_binary(binary, args)
         print(f"passed {mode} ordinary VM")
     print("LTO contract native matrix passed")
+
+
+FORWARDED_SECRET = b"forwarded-lto-private-secret-73!"
+
+
+def forwarded_output(shape, topology):
+    data = (0x0BADC0DE).to_bytes(4, "little") if topology == "integer" else FORWARDED_SECRET + b"\0"
+    values = ",".join(str(byte) for byte in data)
+    if shape == "cell":
+        return f"cell={values}\n"
+    output = ""
+    for slot in range(2):
+        values = ",".join(str(byte) for byte in data[slot:])
+        output += f"table[{slot}]={values}\n"
+        if topology == "shared":
+            output += f"shared[{slot}]={values}\n"
+        elif topology == "escape":
+            output += f"escaped[{slot}]={values}\n"
+    return output
+
+
+def check_forwarded_binary(binary, args, shape, topology, level):
+    result = run([str(binary)])
+    expected = forwarded_output(shape, topology)
+    if result.stdout != expected:
+        raise RuntimeError(f"incorrect forwarded native result: {result.stdout!r} != {expected!r}")
+    if level == "strong_vm" and FORWARDED_SECRET in binary.read_bytes():
+        raise RuntimeError(f"strong_vm forwarded original plaintext survived in {binary}")
+    symbols = run([args.nm, "--defined-only", "--extern-only", str(binary)]).stdout
+    if "__obf_" in symbols:
+        raise RuntimeError(f"public forwarded protection symbols: {symbols}")
+    reader = f"protected_{shape}_read"
+    assembly = run([args.objdump, f"--disassemble-symbols={reader}", str(binary)]).stdout
+    if not re.search(r"\b(?:callq?|jmpq?)\s+\*", assembly):
+        raise RuntimeError(f"forwarded VM entry was not retained: {assembly}")
+    undefined = run([args.nm, "--undefined-only", str(binary)]).stdout
+    if "__obf_lto_finalize_required" in undefined:
+        raise RuntimeError("pending forwarded finalization survived into the native artifact")
+
+
+def check_forwarded_visibility(case, args, mode, shape, topology):
+    modules = backend_modules(case, args, "preopt")
+    if not modules:
+        # Whole-input ThinLTO rejection deliberately happens before a backend.
+        return
+    reader = f"protected_{shape}_read"
+    readers = [text for text in modules.values()
+               if re.search(rf"^define [^\n]*@{reader}\(", text, re.MULTILINE)]
+    if len(readers) != 1:
+        raise RuntimeError(f"expected one preopt partition defining {reader}, found {len(readers)}")
+    def has_data(text):
+        if topology == "integer":
+            return bool(re.search(r"= [^\n]*constant i32 195936478\b", text))
+        return FORWARDED_SECRET.decode() in text
+
+    if mode == "thin" and topology in ("cross", "escape", "integer"):
+        if has_data(readers[0]):
+            raise RuntimeError("ThinLTO preimport reader unexpectedly owns the provider's private data")
+        if not any(has_data(text) for text in modules.values() if text != readers[0]):
+            raise RuntimeError("ThinLTO provider partition lost its private data definition")
+        if not re.search(rf"^@forwarded_{shape} = external\b", readers[0], re.MULTILINE):
+            raise RuntimeError("ThinLTO reader partition lost its external forwarding declaration")
+    elif not has_data(readers[0]):
+        raise RuntimeError("local/FullLTO reader backend did not receive the secret definition")
+
+
+def check_forwarded_rejection(result, mode, shape, topology, *, retained=False):
+    diagnostic = result.stdout + result.stderr
+    if retained and "LTO protection structure lost:" in diagnostic:
+        return
+    if mode == "thin" and topology in ("cross", "escape"):
+        required = ("strong_vm", "ThinLTO",
+                    f"forwarded_{shape}", f"protected_{shape}_read")
+    else:
+        required = ("strong_vm", "plaintext")
+    if any(term not in diagnostic for term in required):
+        raise RuntimeError(f"forwarded rejection lacks {required!r}: {diagnostic}")
+
+
+def forwarded_case(args, inputs, work, mode, optimization, preparation, shape, topology, level):
+    name = f"{mode}-{optimization}-{preparation}-{shape}-{topology}-{level}"
+    case = work / name
+    case.mkdir()
+    reader = f"protected_{shape}_read"
+    policy = case / "policy.yaml"
+    policy.write_text(
+        f"seed: 424242\ndefault_level: none\ntargets:\n"
+        f"  - match: {reader}\n    level: {level}\n"
+        "mba:\n  max_ir_instructions: 96\n"
+        "vm:\n  max_mba_depth: 0\n"
+        "string_encoding:\n  authenticated_mode: true\n"
+        "security:\n  fail_on_public_obf_symbol: true\n"
+    )
+    config = f"--obf-config={policy}"
+    opt = f"-O{optimization}"
+    common = [opt, f"-flto={mode}", "-x", "ir", "-c"]
+    compiler = [args.clang] if preparation == "raw" else [args.wrapper, config]
+    reader_source = inputs / f"lto-forwarded-{shape}-reader.ir"
+    provider_source = inputs / ("lto-forwarded-integer.ir" if topology == "integer"
+                                else "lto-forwarded-strings.ir")
+    objects = []
+    if topology in ("local", "shared"):
+        # Derive the local control from precisely the same forwarding globals
+        # and load instructions as the paired-TU probe.
+        local_source = case / "local.ir"
+        declaration = (f"@forwarded_{shape} = external constant "
+                       + ("ptr" if shape == "cell" else "[2 x ptr]") + "\n")
+        reader_ir = reader_source.read_text()
+        if reader_ir.count(declaration) != 1:
+            raise RuntimeError(f"unexpected forwarding declaration in {reader_source}")
+        reader_ir = reader_ir.replace(declaration, "")
+        if topology == "shared":
+            reader_ir += "\n" + reader_ir.replace(f"@{reader}(", "@unprotected_read(")
+        local_source.write_text(
+            provider_source.read_text().replace(" = constant ", " = internal constant ") + reader_ir
+        )
+        reader_source = local_source
+    else:
+        provider = case / "provider.o"
+        run(compiler + common + [str(provider_source), "-o", str(provider)])
+        objects.append(provider)
+    consumer = case / "reader.o"
+    run(compiler + common + [str(reader_source), "-o", str(consumer)])
+    objects.append(consumer)
+    if topology in ("cross", "escape", "integer"):
+        provider_ir = run([args.dis, str(objects[0]), "-o", "-"]).stdout
+        consumer_ir = run([args.dis, str(consumer), "-o", "-"]).stdout
+        if topology == "integer":
+            if "constant i32 195936478" not in provider_ir or 'c"' in provider_ir:
+                raise RuntimeError("integer-only provider gained string data")
+        elif FORWARDED_SECRET.decode() not in provider_ir:
+            raise RuntimeError("paired provider input lost the original secret")
+        if FORWARDED_SECRET.decode() in consumer_ir or not re.search(
+                rf"^@forwarded_{shape} = external\b", consumer_ir, re.MULTILINE):
+            raise RuntimeError("paired reader no longer exercises external forwarding")
+    native = case / "main.o"
+    defines = ["-DFORWARDED_TABLE"] if shape == "table" else []
+    if topology == "integer":
+        defines.append("-DFORWARDED_BYTES=4")
+    if topology in ("shared", "escape"):
+        defines.append(f"-DFORWARDED_{topology.upper()}")
+    run([args.clang, opt, *defines, "-c", str(inputs / "lto-forwarded-main.c"),
+         "-o", str(native)])
+    binary = case / "program"
+    link = [args.wrapper, config, opt, f"-flto={mode}", "-Wl,--save-temps",
+            str(native), *(str(path) for path in objects), "-o", str(binary)]
+    cache = case / "cache"
+    if mode == "thin":
+        cache.mkdir()
+        link.insert(5, f"-Wl,--thinlto-cache-dir={cache}")
+        link.insert(6, "-Wl,--thinlto-jobs=1")
+    rejects = level == "strong_vm" and (
+        (mode == "thin" and topology == "cross") or topology in ("shared", "escape")
+    )
+    # Retained frontend VM shapes can fail the existing structure or lazy-use
+    # proof. Require a specific fail-closed gate, never an arbitrary link error.
+    guarded_retained = preparation == "frontend" and not rejects
+    # Successful Thin links populate this cache before the second link. Rejected
+    # Thin links must remain rejected on a repeat with the same cache namespace.
+    for attempt in range(2 if mode == "thin" else 1):
+        result = run(link, succeeds=None if guarded_retained else not rejects)
+        if result.returncode:
+            check_forwarded_rejection(result, mode, shape, topology, retained=guarded_retained)
+            if binary.exists():
+                raise RuntimeError(f"rejected forwarded topology produced {binary}")
+        else:
+            check_forwarded_binary(binary, args, shape, topology, level)
+            modules = backend_modules(case, args)
+            check_backend_ir(case, args, entry=reader,
+                             parameters=("i64",) if shape == "cell" else ("i64", "i64"),
+                             modules=modules)
+            if level == "strong_vm" and any(FORWARDED_SECRET.decode() in text
+                                            for text in modules.values()):
+                raise RuntimeError("strong_vm forwarded original plaintext survived in backend IR")
+            if level == "strong_vm" and topology != "integer" and not any(
+                    re.search(r"\bcall ptr @rt_core_sd3\(", text) for text in modules.values()):
+                raise RuntimeError("strong_vm forwarded backend lost authenticated string decoding")
+            if mode == "thin" and not any(path.is_file() for path in cache.rglob("llvmcache-*")):
+                raise RuntimeError("successful ThinLTO link did not populate its managed cache")
+        if attempt == 0:
+            check_forwarded_visibility(case, args, mode, shape, topology)
+    outcome = "rejected" if result.returncode else "native+VM"
+    cache_note = (" repeat-cache rejection" if result.returncode else " cold/warm-cache") if mode == "thin" else ""
+    print(f"passed forwarded {name}: {outcome}{cache_note}")
+
+
+def forwarded_matrix(args, inputs, work):
+    for mode in ("full", "thin"):
+        for optimization in ("0", "2"):
+            for preparation in ("raw", "frontend"):
+                for shape in ("cell", "table"):
+                    for level in ("strong_vm", "vm"):
+                        forwarded_case(args, inputs, work, mode, optimization,
+                                       preparation, shape, "cross", level)
+            # Both local controls use the exact paired fixtures but give the
+            # selected backend ownership of the table and original string.
+            for shape in ("cell", "table"):
+                forwarded_case(args, inputs, work, mode, optimization,
+                               "raw", shape, "local", "strong_vm")
+        # Bound the boundary probes to raw O0; the cross-TU matrix above owns
+        # frontend preparation and optimization coverage.
+        for topology in ("shared", "escape"):
+            for level in ("strong_vm", "vm"):
+                forwarded_case(args, inputs, work, mode, "0",
+                               "raw", "table", topology, level)
+    # A pointer cell alone is not evidence of string forwarding: this paired
+    # integer-only provider must keep working under strong_vm ThinLTO.
+    forwarded_case(args, inputs, work, "thin", "0", "raw", "cell", "integer", "strong_vm")
+    print("LTO forwarded string matrix passed")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--wrapper", required=True)
+    parser.add_argument("--clang", required=True)
+    parser.add_argument("--dis", default="llvm-dis")
+    parser.add_argument("--ar", required=True)
+    parser.add_argument("--nm", required=True)
+    parser.add_argument("--objdump", required=True)
+    parser.add_argument("--runtime", required=True)
+    parser.add_argument("--work", required=True)
+    parser.add_argument("--matrix", choices=("all", "contract", "forwarded"), default="all")
+    args = parser.parse_args()
+    inputs = Path(__file__).resolve().parent
+    work = Path(args.work).resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="run-", dir=work))
+    for matrix, action in (("contract", contract_matrix), ("forwarded", forwarded_matrix)):
+        if args.matrix in ("all", matrix):
+            case = work / matrix
+            case.mkdir()
+            action(args, inputs, case)
 
 
 if __name__ == "__main__":

@@ -388,9 +388,15 @@ It rejects:
 - Implicit native `.deplibs` inputs and nonempty bitcode `llvm.dependent-libraries` metadata, including archive members.
 - Required exact protection targets without bitcode definitions.
 - Selected protection targets with competing native definitions, including native definitions alongside unused archive bitcode.
+- ThinLTO `strong_vm` readers whose external global references reach string initializers in other bitcode inputs.
 
 Pass bitcode objects and archives directly to the linker.
 Remove dependent-library metadata and pass the complete library set explicitly.
+Whole-input validation follows constant initializers and aliases across the supplied bitcode objects and archive members.
+It rejects cross-module string forwarding before ThinLTO imports or cache reuse can hide the original ownership.
+Keep the string data and protected reader in one translation unit, or use Full LTO.
+Full LTO and local ThinLTO still apply the existing string-sharing, escape, and finalization gates.
+Ordinary `vm` remains best-effort and does not acquire the mandatory `strong_vm` string rule.
 Simple native library-wrapper scripts with direct filenames remain supported.
 Move script `-l` operands to the linker command line.
 Managed script validation rejects `INCLUDE`, `STARTUP`, and `SEARCH_DIR`.

@@ -3,11 +3,15 @@
 #include "obf/frontend/annotations.h"
 #include "obf/policy/policy_engine.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 
 #include "llvm/ADT/StringSet.h"
 #include "llvm/BinaryFormat/Magic.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Object/Archive.h"
@@ -22,6 +26,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <optional>
+#include <memory>
 
 namespace {
 llvm::Error reject_dependent_library_metadata(
@@ -39,11 +44,115 @@ llvm::Error reject_dependent_library_metadata(
 }
 
 
+bool references_string(
+    const llvm::Constant& root,
+    const llvm::StringMap<llvm::SmallVector<const llvm::GlobalValue*, 1>>& definitions,
+    llvm::SmallPtrSetImpl<const llvm::Constant*>& visited) {
+  if (!visited.insert(&root).second) { return false; }
+  if (const auto* data = llvm::dyn_cast<llvm::ConstantDataSequential>(&root)) {
+    return data->isCString();
+  }
+  if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(&root)) {
+    if (global->hasInitializer()) {
+      return references_string(*global->getInitializer(), definitions, visited);
+    }
+    const auto found = definitions.find(global->getName());
+    if (found == definitions.end()) { return false; }
+    for (const llvm::GlobalValue* definition : found->second) {
+      if (references_string(*definition, definitions, visited)) { return true; }
+    }
+    return false;
+  }
+  if (const auto* alias = llvm::dyn_cast<llvm::GlobalAlias>(&root)) {
+    return references_string(*alias->getAliasee(), definitions, visited);
+  }
+  if (llvm::isa<llvm::GlobalValue>(&root) || llvm::isa<llvm::BlockAddress>(&root)) { return false; }
+  for (const llvm::Use& operand : root.operands()) {
+    if (const auto* constant = llvm::dyn_cast<llvm::Constant>(operand.get())) {
+      if (references_string(*constant, definitions, visited)) { return true; }
+    }
+  }
+  return false;
+}
+
+llvm::Error validate_thin_string_references(
+    llvm::ArrayRef<std::unique_ptr<llvm::Module>> modules,
+    const llvm::SmallPtrSetImpl<const llvm::Function*>& readers) {
+  if (readers.empty()) { return llvm::Error::success(); }
+  llvm::StringMap<llvm::SmallVector<const llvm::GlobalValue*, 1>> definitions;
+  for (const auto& module : modules) {
+    for (const llvm::GlobalVariable& global : module->globals()) {
+      if (!global.hasLocalLinkage() && global.hasInitializer()) {
+        definitions[global.getName()].push_back(&global);
+      }
+    }
+    for (const llvm::GlobalAlias& alias : module->aliases()) {
+      if (!alias.hasLocalLinkage()) { definitions[alias.getName()].push_back(&alias); }
+    }
+  }
+  for (const llvm::Function* reader : readers) {
+    llvm::SmallVector<const llvm::Constant*, 16> pending;
+    llvm::SmallPtrSet<const llvm::Constant*, 32> visited;
+    const auto enqueue = [&](const llvm::Constant* value) {
+      if (llvm::isa<llvm::GlobalVariable, llvm::GlobalAlias,
+                    llvm::ConstantExpr, llvm::ConstantAggregate>(value) &&
+          visited.insert(value).second) {
+        pending.push_back(value);
+      }
+    };
+    for (const llvm::BasicBlock& block : *reader) {
+      for (const llvm::Instruction& instruction : block) {
+        for (const llvm::Use& operand : instruction.operands()) {
+          if (const auto* constant = llvm::dyn_cast<llvm::Constant>(operand.get())) {
+            enqueue(constant);
+          }
+        }
+      }
+    }
+    while (!pending.empty()) {
+      const llvm::Constant* value = pending.pop_back_val();
+      if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(value)) {
+        if (global->hasInitializer()) {
+          enqueue(global->getInitializer());
+          continue;
+        }
+        llvm::SmallPtrSet<const llvm::Constant*, 32> string_visited;
+        if (references_string(*global, definitions, string_visited)) {
+          llvm::StringRef owner = reader->getName();
+          if (reader->hasFnAttribute("obf.lto.selector")) {
+            const auto selector = reader->getFnAttribute("obf.lto.selector").getValueAsString();
+            if (!selector.empty()) { owner = selector; }
+          }
+          return llvm::createStringError(
+              llvm::inconvertibleErrorCode(),
+              llvm::Twine("strong_vm ThinLTO cannot validate cross-module forwarded string global ") +
+                  global->getName() + " referenced by " + owner +
+                  ". Keep the string and reader in one translation unit or use Full LTO.");
+        }
+        continue;
+      }
+      if (const auto* alias = llvm::dyn_cast<llvm::GlobalAlias>(value)) {
+        enqueue(alias->getAliasee());
+        continue;
+      }
+      if (llvm::isa<llvm::GlobalValue>(value) || llvm::isa<llvm::BlockAddress>(value)) { continue; }
+      for (const llvm::Use& operand : value->operands()) {
+        if (const auto* constant = llvm::dyn_cast<llvm::Constant>(operand.get())) {
+          enqueue(constant);
+        }
+      }
+    }
+  }
+  return llvm::Error::success();
+}
+
 llvm::Error collect_lto_definitions(
     llvm::MemoryBufferRef buffer, llvm::StringRef source_name,
     llvm::LLVMContext& context, llvm::StringSet<>& names,
     llvm::StringSet<>& native_names, llvm::StringSet<>& selected_names,
-    const obf::obfuscation_config& config) {
+    const obf::obfuscation_config& config,
+    llvm::SmallVectorImpl<std::unique_ptr<llvm::Module>>& modules,
+    llvm::SmallPtrSetImpl<const llvm::Function*>& thin_string_readers) {
   const llvm::file_magic magic = llvm::identify_magic(buffer.getBuffer());
   if (magic == llvm::file_magic::archive) {
     auto archive = llvm::object::Archive::create(buffer);
@@ -57,7 +166,8 @@ llvm::Error collect_lto_definitions(
       member_source.append(member->getBufferIdentifier().begin(), member->getBufferIdentifier().end());
       member_source.push_back(')');
       if (llvm::Error member_error = collect_lto_definitions(
-              *member, member_source, context, names, native_names, selected_names, config)) {
+              *member, member_source, context, names, native_names, selected_names, config,
+              modules, thin_string_readers)) {
         return member_error;
       }
     }
@@ -93,6 +203,8 @@ llvm::Error collect_lto_definitions(
     }
     return llvm::Error::success();
   }
+  auto lto_info = llvm::getBitcodeLTOInfo(buffer);
+  if (!lto_info) { return lto_info.takeError(); }
   auto module = llvm::parseBitcodeFile(buffer, context);
   if (!module) { return module.takeError(); }
   if (llvm::Error error = reject_dependent_library_metadata(**module, source_name)) {
@@ -126,13 +238,19 @@ llvm::Error collect_lto_definitions(
     const bool retained =
         has_retained_level && function.getFnAttribute("obf.lto.level").getValueAsString() != "none";
     bool selected = retained;
+    bool strong_string = retained &&
+        function.getFnAttribute("obf.lto.level").getValueAsString() == "strong_vm";
+    strong_string |= function.hasFnAttribute("obf.string.owner.level") &&
+        function.getFnAttribute("obf.string.owner.level").getValueAsString() == "strong_vm";
     if (!has_retained_level) {
       const std::string* annotation = obf::find_function_annotation(annotations, function.getName());
       const auto decision = obf::select_policy(
           **module, obf::collect_function_features(function), policy_config,
           annotation == nullptr ? llvm::StringRef{} : llvm::StringRef(*annotation));
       selected = decision.policy.level != obf::protection_level::none;
+      strong_string |= decision.policy.level == obf::protection_level::strong_vm;
     }
+    if (lto_info->IsThinLTO && strong_string) { thin_string_readers.insert(&function); }
     if (selected) { selected_functions.insert(&function); }
     if (selected && !function.hasLocalLinkage()) {
       selected_names.insert(function.getName());
@@ -162,6 +280,7 @@ llvm::Error collect_lto_definitions(
       }
     }
   }
+  modules.push_back(std::move(*module));
   return llvm::Error::success();
 }
 
@@ -171,6 +290,8 @@ llvm::Error validate_lto_inputs(
   llvm::StringSet<> names;
   llvm::StringSet<> native_names;
   llvm::StringSet<> selected_names;
+  llvm::SmallVector<std::unique_ptr<llvm::Module>, 8> modules;
+  llvm::SmallPtrSet<const llvm::Function*, 16> thin_string_readers;
   for (const std::string& path : paths) {
     auto buffer = llvm::MemoryBuffer::getFile(path);
     if (!buffer) {
@@ -178,7 +299,7 @@ llvm::Error validate_lto_inputs(
     }
     if (llvm::Error error = collect_lto_definitions(
             (*buffer)->getMemBufferRef(), path, context, names, native_names, selected_names,
-            config)) {
+            config, modules, thin_string_readers)) {
       return error;
     }
   }
@@ -214,7 +335,7 @@ llvm::Error validate_lto_inputs(
       return error;
     }
   }
-  return llvm::Error::success();
+  return validate_thin_string_references(modules, thin_string_readers);
 }
 
 }  // namespace
