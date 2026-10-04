@@ -299,6 +299,9 @@ Event names describe stage snapshots before cleanup. They need not match final i
 Each event retains its originating module identity.
 The ledger resolves helper ancestry through recorded creation relationships.
 `parent` retains an immediate generated owner when it differs from the original owner.
+For a shard outlined from a VM implementation, `parent` names that implementation and `owner` names the original source function.
+This records `shard -> vm_implementation -> source` without changing the v1 schema.
+String-protection seeds, levels, and obligations remain separate from this report ancestry.
 Shared ancestry uses `owners` and `owner_resolution`, without choosing an arbitrary source.
 Original selection and promotion snapshots remain intact when later stages rebuild policy state.
 `retained_effective` records a later retained-policy promotion, not a replacement for original selection.

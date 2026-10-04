@@ -105,7 +105,7 @@ function_outlining_result run_reported_function_outlining(
       function, state, "function_outlining", result.shard_count != 0, result.shard_count, result.detail);
   if (!reporting || result.shard_count == 0) { return result; }
 
-  const llvm::StringRef owner = coverage_owner(function, state);
+  const llvm::StringRef owner = function.getName();
   for (llvm::Function& shard : module) {
     if (shard.isDeclaration() || functions_before.contains(&shard)) { continue; }
     llvm::SmallVector<std::string, 3> preserved;
