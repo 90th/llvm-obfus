@@ -1,0 +1,19 @@
+seed: 9001
+default_level: none
+targets:
+  - match: struct_fields
+    level: vm
+  - match: nested_fields
+    level: strong_vm
+  - match: packed_fields
+    level: vm
+  - match: vector_fields
+    level: strong_vm
+  - match: addrspace_fields
+    level: vm
+mba:
+  depth: 2
+vm:
+  max_mba_depth: 0
+security:
+  fail_on_public_obf_symbol: true

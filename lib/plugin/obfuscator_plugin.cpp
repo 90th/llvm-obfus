@@ -41,6 +41,7 @@
 #else
 #include "llvm/Passes/PassPlugin.h"
 #endif
+#include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -595,7 +596,9 @@ class bogus_control_flow_pass : public llvm::PassInfoMixin<bogus_control_flow_pa
   }
 };
 
-bool promote_target_allocas_for_o0(llvm::Function& function) {
+bool promote_target_allocas_for_o0(llvm::Function& function,
+                                   llvm::FunctionAnalysisManager& fam,
+                                   bool normalize_aggregates) {
   llvm::DominatorTree dom_tree(function);
   llvm::AssumptionCache assumption_cache(function);
   llvm::BasicBlock& entry_block = function.getEntryBlock();
@@ -617,20 +620,33 @@ bool promote_target_allocas_for_o0(llvm::Function& function) {
     changed = true;
   }
 
+  if (changed) { fam.invalidate(function, llvm::PreservedAnalyses::none()); }
+
+  if (normalize_aggregates) {
+    // Invoke SROA directly so optnone does not suppress the selected VM
+    // preparation. LLVM retains escaping/volatile storage and its memory
+    // semantics; VM admission still rejects any allocas that remain.
+    const llvm::PreservedAnalyses preserved =
+        llvm::SROAPass(llvm::SROAOptions::PreserveCFG).run(function, fam);
+    changed |= !preserved.areAllPreserved();
+    fam.invalidate(function, preserved);
+  }
+
   return changed;
 }
 
 class prepare_o0_pass : public llvm::PassInfoMixin<prepare_o0_pass> {
  public:
-  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& mam) {
     const obfuscation_config config = load_active_config();
     const llvm::SmallVector<function_pipeline_state, 32> states =
         build_pipeline_state(module, config);
+    llvm::FunctionAnalysisManager& fam =
+        mam.getResult<llvm::FunctionAnalysisManagerModuleProxy>(module).getManager();
 
-    // PromotePass is skipped on optnone functions by the standard pass
-    // instrumentation. The O0 obfuscation callback still needs targeted,
-    // promotable locals in SSA form before strong_vm lowering, so invoke the
-    // mem2reg utility directly on eligible entry-block allocas.
+    // Standard pass instrumentation skips promotion on optnone functions.
+    // Prepare selected locals directly without changing optimization or ABI
+    // attributes; only VM-eligible functions need aggregate scalar replacement.
     bool changed = false;
     for (const function_pipeline_state& state : states) {
       if (state.report.decision.policy.level == protection_level::none ||
@@ -639,7 +655,8 @@ class prepare_o0_pass : public llvm::PassInfoMixin<prepare_o0_pass> {
         continue;
       }
 
-      changed |= promote_target_allocas_for_o0(*state.function);
+      changed |= promote_target_allocas_for_o0(
+          *state.function, fam, state.report.decision.policy.allow_vm);
     }
 
     if (!changed) { return llvm::PreservedAnalyses::all(); }
@@ -686,13 +703,16 @@ void require_lto_input_validation(pipeline_route route, const obfuscation_config
   if (route != pipeline_route::thin_postlink || has_managed_lto_input_validation()) { return; }
   const bool has_required_selectors =
       config.frontend != frontend_kind::generic ||
-      std::any_of(config.targets.begin(), config.targets.end(), [](const target_rule& rule) {
-        return rule.level != protection_level::none &&
-               llvm::StringRef(rule.match).find_first_of("*?") == llvm::StringRef::npos;
-      }) ||
-      std::any_of(config.overrides.begin(), config.overrides.end(), [](const function_override& rule) {
-        return rule.level != protection_level::none;
-      });
+      std::any_of(config.targets.begin(),
+                  config.targets.end(),
+                  [](const target_rule& rule) {
+                    return rule.level != protection_level::none &&
+                           llvm::StringRef(rule.match).find_first_of("*?") == llvm::StringRef::npos;
+                  }) ||
+      std::any_of(
+          config.overrides.begin(), config.overrides.end(), [](const function_override& rule) {
+            return rule.level != protection_level::none;
+          });
   if (has_required_selectors) {
     llvm::report_fatal_error(
         "ThinLTO configured selectors require whole-input validation by the managed linker route");
@@ -716,7 +736,7 @@ void validate_direct_full_lto_selectors(llvm::Module& module, const obfuscation_
       }
     }
     llvm::report_fatal_error(llvm::Twine("unresolved required LTO obfuscation target '") +
-                            selector + "'");
+                             selector + "'");
   };
   for (const target_rule& rule : config.targets) { validate(rule.match, rule.level); }
   for (const function_override& rule : config.overrides) { validate(rule.name, rule.level); }
@@ -758,13 +778,13 @@ lto_shape_counts count_lto_shapes(const llvm::Function& function) {
 }
 
 [[noreturn]] void report_coverage_finalization_failure(llvm::Module& module,
-                                                      const llvm::Twine& reason);
+                                                       const llvm::Twine& reason);
 
 void retain_lto_shapes(llvm::Function& function, bool vm_implementation) {
   const lto_shape_counts counts = count_lto_shapes(function);
   if (vm_implementation && counts.values[3] == 0) {
-    report_coverage_finalization_failure(*function.getParent(),
-        "strong_vm invariant violation: missing VM hidden-token check");
+    report_coverage_finalization_failure(
+        *function.getParent(), "strong_vm invariant violation: missing VM hidden-token check");
   }
   for (unsigned index = 0; index < std::size(kLtoShapes); ++index) {
     function.addFnAttr((llvm::Twine("obf.lto.shape.") + kLtoShapes[index]).str(),
@@ -781,8 +801,8 @@ void validate_lto_shapes(llvm::Function& function) {
     if (!attribute.isStringAttribute() || attribute.getValueAsString().getAsInteger(10, required) ||
         counts.values[index] < required) {
       report_coverage_finalization_failure(*function.getParent(),
-          llvm::Twine("LTO protection structure lost in '") + function.getName() + "': " +
-              kLtoShapes[index]);
+                                           llvm::Twine("LTO protection structure lost in '") +
+                                               function.getName() + "': " + kLtoShapes[index]);
     }
   }
 }
@@ -791,12 +811,13 @@ llvm::Function& get_lto_finalize_guard(llvm::Module& module) {
   auto* type = llvm::FunctionType::get(llvm::Type::getVoidTy(module.getContext()), false);
   llvm::GlobalValue* existing = module.getNamedValue(kLtoFinalizeGuard);
   auto* guard = llvm::dyn_cast_or_null<llvm::Function>(existing);
-  if (existing != nullptr && (guard == nullptr || !guard->isDeclaration() ||
-                              guard->getFunctionType() != type)) {
+  if (existing != nullptr &&
+      (guard == nullptr || !guard->isDeclaration() || guard->getFunctionType() != type)) {
     llvm::report_fatal_error("reserved LTO finalization guard must remain an undefined function");
   }
   if (guard == nullptr) {
-    guard = llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage, kLtoFinalizeGuard, module);
+    guard =
+        llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage, kLtoFinalizeGuard, module);
   }
   guard->setVisibility(llvm::GlobalValue::HiddenVisibility);
   guard->setDSOLocal(true);
@@ -813,11 +834,11 @@ void pin_lto_protected_boundary(llvm::Function& function) {
   // The undefined pending call has unknown effects. Do not let stale source
   // memory/progress promises erase it or the hardening surrounding it in LTO.
   for (llvm::Attribute::AttrKind attribute : {llvm::Attribute::MustProgress,
-                                             llvm::Attribute::NoFree,
-                                             llvm::Attribute::NoRecurse,
-                                             llvm::Attribute::NoSync,
-                                             llvm::Attribute::WillReturn,
-                                             llvm::Attribute::Speculatable}) {
+                                              llvm::Attribute::NoFree,
+                                              llvm::Attribute::NoRecurse,
+                                              llvm::Attribute::NoSync,
+                                              llvm::Attribute::WillReturn,
+                                              llvm::Attribute::Speculatable}) {
     function.removeFnAttr(attribute);
   }
   function.removeFnAttr(llvm::Attribute::Memory);
@@ -855,7 +876,8 @@ bool function_has_pending_lto_finalize_guard(const llvm::Function& function,
 
 bool prepare_retained_native_orchestrator_promotions(
     llvm::Module& module,
-    llvm::SmallVectorImpl<function_pipeline_state>& states) {
+    llvm::SmallVectorImpl<function_pipeline_state>& states,
+    llvm::FunctionAnalysisManager& fam) {
   llvm::Function* guard = nullptr;
   bool changed = false;
   for (function_pipeline_state& state : states) {
@@ -884,6 +906,8 @@ bool prepare_retained_native_orchestrator_promotions(
       llvm::IRBuilder<> builder(&*function->getEntryBlock().getFirstInsertionPt());
       builder.CreateCall(guard);
     }
+
+    fam.invalidate(*function, llvm::PreservedAnalyses::none());
 
     state.lto = record;
     state.skip_transform_stages = false;
@@ -922,9 +946,9 @@ capture_lto_contracts(llvm::Module& module,
     }
     lto_obligation_record record;
     record.present = true;
-    record.role = excluded ? lto_obligation_role::explicit_none
-                           : internal ? lto_obligation_role::generated_internal
-                                      : lto_obligation_role::protected_entry;
+    record.role = excluded   ? lto_obligation_role::explicit_none
+                  : internal ? lto_obligation_role::generated_internal
+                             : lto_obligation_role::protected_entry;
     record.selector_name = state.report.features.name;
     record.selection_detail = state.report.decision.detail;
     record.annotation = state.report.annotation;
@@ -950,8 +974,8 @@ capture_lto_contracts(llvm::Module& module,
     record.policy = binding.state->report.decision.policy;
     record.config_identity = config_identity;
     record.decision_seed = binding.state->report.decision.seed;
-    record.entry_identity = stable_hash_string(binding.interface_function->getName(),
-                                               record.decision_seed);
+    record.entry_identity =
+        stable_hash_string(binding.interface_function->getName(), record.decision_seed);
     record.requires_finalization = true;
     record.uses_target_cache = binding.uses_target_cache;
     record.uses_shared_seed_resolver = binding.uses_shared_seed_resolver;
@@ -975,7 +999,9 @@ capture_lto_contracts(llvm::Module& module,
   }
   for (llvm::Function& function : module) {
     if (function.isDeclaration() || function_has_lto_obligation(function) ||
-        original_functions.contains(&function)) { continue; }
+        original_functions.contains(&function)) {
+      continue;
+    }
     if (contract_indices.contains(&function)) { continue; }
     lto_obligation_record record;
     record.present = true;
@@ -990,15 +1016,15 @@ capture_lto_contracts(llvm::Module& module,
   return contracts;
 }
 
-void retain_lto_contracts(llvm::Module& module, std::vector<retained_function_contract>& contracts) {
+void retain_lto_contracts(llvm::Module& module,
+                          std::vector<retained_function_contract>& contracts) {
   llvm::Function* guard = nullptr;
   for (retained_function_contract& contract : contracts) {
     llvm::Function* function = contract.function;
     if (function == nullptr || function->isDeclaration()) { continue; }
     if (contract.record.role == lto_obligation_role::generated_internal) {
-      contract.record.pinned_noinline =
-          function->hasFnAttribute(llvm::Attribute::NoInline) &&
-          function->hasFnAttribute(llvm::Attribute::OptimizeNone);
+      contract.record.pinned_noinline = function->hasFnAttribute(llvm::Attribute::NoInline) &&
+                                        function->hasFnAttribute(llvm::Attribute::OptimizeNone);
       if (contract.record.pinned_noinline) { retain_lto_shapes(*function, false); }
     } else if (contract.record.role != lto_obligation_role::explicit_none) {
       pin_lto_protected_boundary(*function);
@@ -1014,17 +1040,24 @@ void retain_lto_contracts(llvm::Module& module, std::vector<retained_function_co
 }
 
 [[noreturn]] void report_coverage_finalization_failure(llvm::Module& module,
-                                                      const llvm::Twine& reason) {
+                                                       const llvm::Twine& reason) {
   if (coverage_reporting_enabled(module)) {
-    record_coverage_event(module, "finalization", "lto_contracts", "", module.getName(),
-                          "rejected", reason.str(), 0, "module");
+    record_coverage_event(module,
+                          "finalization",
+                          "lto_contracts",
+                          "",
+                          module.getName(),
+                          "rejected",
+                          reason.str(),
+                          0,
+                          "module");
     write_coverage_report(module);
   }
   llvm::report_fatal_error(reason);
 }
 
-virtualized_function_map recover_lto_bindings(
-    const llvm::SmallVectorImpl<function_pipeline_state>& states) {
+virtualized_function_map
+recover_lto_bindings(const llvm::SmallVectorImpl<function_pipeline_state>& states) {
   struct retained_vm_roles {
     const function_pipeline_state* implementation = nullptr;
     const function_pipeline_state* thunk = nullptr;
@@ -1034,7 +1067,9 @@ virtualized_function_map recover_lto_bindings(
   llvm::DenseMap<std::uint64_t, const function_pipeline_state*> covered_owners;
   virtualized_function_map bindings;
   for (const function_pipeline_state& state : states) {
-    if (state.function == nullptr || state.function->isDeclaration() || !state.lto.present) { continue; }
+    if (state.function == nullptr || state.function->isDeclaration() || !state.lto.present) {
+      continue;
+    }
     if (state.lto.role == lto_obligation_role::raw_entry ||
         state.lto.role == lto_obligation_role::raw_none) {
       continue;
@@ -1043,8 +1078,9 @@ virtualized_function_map recover_lto_bindings(
         (state.lto.role != lto_obligation_role::generated_internal || state.lto.pinned_noinline)) {
       if (!state.function->hasFnAttribute(llvm::Attribute::NoInline) ||
           !state.function->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
-        report_coverage_finalization_failure(*state.function->getParent(),
-                                             "LTO protection structure lost: unpinned protected boundary");
+        report_coverage_finalization_failure(
+            *state.function->getParent(),
+            "LTO protection structure lost: unpinned protected boundary");
       }
       validate_lto_shapes(*state.function);
       // Re-establish the encoded boundary's conservative optimizer contract
@@ -1066,16 +1102,19 @@ virtualized_function_map recover_lto_bindings(
             state.lto.uses_target_cache || state.lto.uses_shared_seed_resolver ||
             shapes.values[2] != 0 ||
             (is_implementation ? shapes.values[3] == 0 : shapes.values[1] == 0)) {
-          report_coverage_finalization_failure(*state.function->getParent(),
-                                               "strong_vm invariant violation: live retained VM role lost protection");
+          report_coverage_finalization_failure(
+              *state.function->getParent(),
+              "strong_vm invariant violation: live retained VM role lost protection");
         }
       }
       retained_vm_roles& group = roles[state.lto.entry_identity];
       const function_pipeline_state*& slot =
-          state.lto.role == lto_obligation_role::vm_implementation ? group.implementation : group.thunk;
+          state.lto.role == lto_obligation_role::vm_implementation ? group.implementation
+                                                                   : group.thunk;
       if (slot != nullptr) {
-        report_coverage_finalization_failure(*state.function->getParent(),
-                                             "LTO protection structure lost: duplicate retained VM role");
+        report_coverage_finalization_failure(
+            *state.function->getParent(),
+            "LTO protection structure lost: duplicate retained VM role");
       }
       slot = &state;
     }
@@ -1083,15 +1122,17 @@ virtualized_function_map recover_lto_bindings(
       const std::uint64_t owner_identity =
           stable_hash_string(state.lto.selector_name, state.lto.decision_seed);
       if (!covered_owners.try_emplace(owner_identity, &state).second) {
-        report_coverage_finalization_failure(*state.function->getParent(),
-                                             "LTO protection structure lost: duplicate retained VM owner");
+        report_coverage_finalization_failure(
+            *state.function->getParent(),
+            "LTO protection structure lost: duplicate retained VM owner");
       }
     }
     if (state.lto.role == lto_obligation_role::protected_entry) {
       retained_vm_roles& group = roles[state.lto.entry_identity];
       if (group.interface != nullptr) {
-        report_coverage_finalization_failure(*state.function->getParent(),
-                                             "LTO protection structure lost: duplicate retained VM interface");
+        report_coverage_finalization_failure(
+            *state.function->getParent(),
+            "LTO protection structure lost: duplicate retained VM interface");
       }
       group.interface = &state;
     }
@@ -1101,8 +1142,9 @@ virtualized_function_map recover_lto_bindings(
     if (group.implementation == nullptr && group.thunk == nullptr) { continue; }
     if (group.implementation == nullptr || group.thunk == nullptr) {
       const auto* live = group.implementation != nullptr ? group.implementation : group.thunk;
-      report_coverage_finalization_failure(*live->function->getParent(),
-                                           "LTO protection structure lost: incomplete retained VM boundary");
+      report_coverage_finalization_failure(
+          *live->function->getParent(),
+          "LTO protection structure lost: incomplete retained VM boundary");
     }
     const function_pipeline_state& representative = *group.implementation;
     virtualized_function_binding binding;
@@ -1116,8 +1158,9 @@ virtualized_function_map recover_lto_bindings(
       if (candidate == nullptr) { continue; }
       if (candidate->lto.selector_name != representative.lto.selector_name ||
           candidate->lto.decision_seed != representative.lto.decision_seed) {
-        report_coverage_finalization_failure(*candidate->function->getParent(),
-                                             "LTO protection structure lost: inconsistent retained VM identity");
+        report_coverage_finalization_failure(
+            *candidate->function->getParent(),
+            "LTO protection structure lost: inconsistent retained VM identity");
       }
     }
     const std::uint64_t owner_identity =
@@ -1125,8 +1168,9 @@ virtualized_function_map recover_lto_bindings(
     if (const auto owner = covered_owners.find(owner_identity); owner != covered_owners.end()) {
       if (owner->second->lto.selector_name != representative.lto.selector_name ||
           owner->second->lto.decision_seed != representative.lto.decision_seed) {
-        report_coverage_finalization_failure(*representative.function->getParent(),
-                                             "LTO protection structure lost: inconsistent retained VM owner");
+        report_coverage_finalization_failure(
+            *representative.function->getParent(),
+            "LTO protection structure lost: inconsistent retained VM owner");
       }
       binding.state = owner->second;
     }
@@ -1144,19 +1188,20 @@ virtualized_function_map recover_lto_bindings(
                         implementation.getCallingConv() == interface.getCallingConv();
       if (boundary_valid) {
         for (unsigned index = 0; index < interface.arg_size(); ++index) {
-          boundary_valid &= interface.getArg(index)->getType() == implementation.getArg(index)->getType();
+          boundary_valid &=
+              interface.getArg(index)->getType() == implementation.getArg(index)->getType();
         }
       }
     }
     if (!boundary_valid) {
-      report_coverage_finalization_failure(*representative.function->getParent(),
-                                           "LTO protection structure lost: retained VM ABI/token mismatch");
+      report_coverage_finalization_failure(
+          *representative.function->getParent(),
+          "LTO protection structure lost: retained VM ABI/token mismatch");
     }
     if (representative.lto.policy.level == protection_level::strong_vm) {
       const lto_shape_counts implementation_shapes = count_lto_shapes(implementation);
       const lto_shape_counts thunk_shapes = count_lto_shapes(thunk);
-      bool forwarding_valid = thunk_shapes.values[1] != 0 &&
-                              implementation_shapes.values[3] != 0 &&
+      bool forwarding_valid = thunk_shapes.values[1] != 0 && implementation_shapes.values[3] != 0 &&
                               implementation_shapes.values[2] == 0 && thunk_shapes.values[2] == 0;
       if (binding.interface_function != nullptr) {
         const lto_shape_counts interface_shapes = count_lto_shapes(*binding.interface_function);
@@ -1164,15 +1209,14 @@ virtualized_function_map recover_lto_bindings(
       }
       if (!forwarding_valid) {
         report_coverage_finalization_failure(*representative.function->getParent(),
-            "strong_vm invariant violation: retained encoded forwarding/token/no-cache boundary lost");
+                                             "strong_vm invariant violation: retained encoded "
+                                             "forwarding/token/no-cache boundary lost");
       }
     }
     // A dead source interface does not invalidate live regional owner coverage.
     // Completely orphaned implementation/thunk roles were checked above, but
     // there is no live source state for the source-coverage gates in that case.
-    if (binding.state != nullptr) {
-      bindings[implementation.getName()] = std::move(binding);
-    }
+    if (binding.state != nullptr) { bindings[implementation.getName()] = std::move(binding); }
   }
   return bindings;
 }
@@ -1183,8 +1227,8 @@ bool release_lto_contracts(llvm::Module& module) {
   llvm::SmallPtrSet<llvm::Function*, 32> guarded_functions;
   if (guard != nullptr) {
     if (!guard->isDeclaration() || guard->getVisibility() != llvm::GlobalValue::HiddenVisibility) {
-      report_coverage_finalization_failure(module,
-          "LTO finalization guard must remain undefined and hidden until release");
+      report_coverage_finalization_failure(
+          module, "LTO finalization guard must remain undefined and hidden until release");
     }
     for (llvm::User* user : guard->users()) {
       auto* call = llvm::dyn_cast<llvm::CallInst>(user);
@@ -1193,8 +1237,8 @@ bool release_lto_contracts(llvm::Module& module) {
       }
       const lto_obligation_record record = read_lto_obligation(*call->getFunction());
       if (!record.present || !record.requires_finalization) {
-        report_coverage_finalization_failure(module,
-            "pending LTO finalization guard has no retained obligation");
+        report_coverage_finalization_failure(
+            module, "pending LTO finalization guard has no retained obligation");
       }
       calls.push_back(call);
       guarded_functions.insert(call->getFunction());
@@ -1206,7 +1250,8 @@ bool release_lto_contracts(llvm::Module& module) {
     if (!record.present) { continue; }
     if (!function.isDeclaration() && record.requires_finalization) {
       if (!guarded_functions.contains(&function)) {
-        report_coverage_finalization_failure(module,
+        report_coverage_finalization_failure(
+            module,
             llvm::Twine("missing pending LTO finalization guard in '") + function.getName() + "'");
       }
     }
@@ -1274,21 +1319,23 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& mam) {
     const obfuscation_config config = load_active_config();
     require_lto_input_validation(route_, config);
-    const bool allow_unresolved =
-        route_ == pipeline_route::prelink ||
-        (is_postlink(route_) && has_managed_lto_input_validation());
+    const bool allow_unresolved = route_ == pipeline_route::prelink ||
+                                  (is_postlink(route_) && has_managed_lto_input_validation());
     llvm::SmallVector<function_pipeline_state, 32> states =
         build_lto_pipeline_state(module, config, allow_unresolved);
     bool changed = false;
     if (is_postlink(route_)) {
-      changed |= prepare_retained_native_orchestrator_promotions(module, states);
-      // The backend may receive raw optnone IR; keep the same targeted O0
-      // mem2reg preparation rather than changing VM admission or budgets.
+      llvm::FunctionAnalysisManager& fam =
+          mam.getResult<llvm::FunctionAnalysisManagerModuleProxy>(module).getManager();
+      changed |= prepare_retained_native_orchestrator_promotions(module, states, fam);
+      // The backend may receive raw optnone IR; use the same targeted scalar
+      // preparation as native O0 without changing VM admission or budgets.
       for (const function_pipeline_state& state : states) {
         if (state.function != nullptr && !state.function->isDeclaration() &&
             !state.skip_transform_stages &&
             state.report.decision.policy.level != protection_level::none) {
-          changed |= promote_target_allocas_for_o0(*state.function);
+          changed |= promote_target_allocas_for_o0(
+              *state.function, fam, state.report.decision.policy.allow_vm);
         }
       }
     }
@@ -1384,13 +1431,27 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
       validation_bindings[entry.getKey()] = entry.second;
     }
     if (coverage_reporting_enabled(module)) {
-      record_coverage_event(module, "finalization", "security_gates", "", module.getName(),
-                            "started", "compiler validation started", 0, "module");
+      record_coverage_event(module,
+                            "finalization",
+                            "security_gates",
+                            "",
+                            module.getName(),
+                            "started",
+                            "compiler validation started",
+                            0,
+                            "module");
       write_coverage_report(module);
     }
     changed |= enforce_security_gates(module, states, validation_bindings, config);
-    record_coverage_event(module, "finalization", "security_gates", "", module.getName(),
-                          "validated", "compiler security gates passed", 0, "module");
+    record_coverage_event(module,
+                          "finalization",
+                          "security_gates",
+                          "",
+                          module.getName(),
+                          "validated",
+                          "compiler security gates passed",
+                          0,
+                          "module");
     std::vector<retained_function_contract> contracts;
     if (route_ == pipeline_route::prelink) {
       contracts = capture_lto_contracts(module, states, post_vm_virtualized, config);
@@ -1400,9 +1461,15 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     if (is_postlink(route_)) {
       verify_changed_module(module);
       changed |= release_lto_contracts(module);
-      record_coverage_event(module, "finalization", "lto_contracts", "", module.getName(),
-                            "validated", "retained obligations validated and guards released",
-                            0, "module");
+      record_coverage_event(module,
+                            "finalization",
+                            "lto_contracts",
+                            "",
+                            module.getName(),
+                            "validated",
+                            "retained obligations validated and guards released",
+                            0,
+                            "module");
     }
     if (!is_postlink(route_) || has_fresh_target) {
       changed |= apply_artifact_cleanup_stage(module, config);
@@ -1410,18 +1477,30 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     if (route_ == pipeline_route::prelink) {
       retain_lto_contracts(module, contracts);
       changed |= !contracts.empty();
-      record_coverage_event(module, "finalization", "lto_contracts", "", module.getName(),
-                            "pending", "backend finalization required", contracts.size(), "module");
+      record_coverage_event(module,
+                            "finalization",
+                            "lto_contracts",
+                            "",
+                            module.getName(),
+                            "pending",
+                            "backend finalization required",
+                            contracts.size(),
+                            "module");
     }
 
     if (!changed && !coverage_reporting_enabled(module)) { return llvm::PreservedAnalyses::all(); }
 
     verify_changed_module(module);
-    record_coverage_event(module, "finalization", "compiler_pipeline", "", module.getName(),
+    record_coverage_event(module,
+                          "finalization",
+                          "compiler_pipeline",
+                          "",
+                          module.getName(),
                           route_ == pipeline_route::prelink ? "pending" : "completed",
                           route_ == pipeline_route::prelink ? "backend finalization required"
-                                                           : "compiler pipeline and IR validated",
-                          0, "module");
+                                                            : "compiler pipeline and IR validated",
+                          0,
+                          "module");
     write_coverage_report(module);
     return llvm::PreservedAnalyses::none();
   }
@@ -1564,10 +1643,13 @@ extern "C" OBF_PLUGIN_EXPORT ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo
                       obf::capture_lto_selection_pass(obf::pipeline_route::full_postlink));
                 });
             pass_builder.registerPipelineEarlySimplificationEPCallback(
-                [](llvm::ModulePassManager& module_pm, llvm::OptimizationLevel,
+                [](llvm::ModulePassManager& module_pm,
+                   llvm::OptimizationLevel,
                    llvm::ThinOrFullLTOPhase phase) {
                   if (!obf::is_obfuscation_enabled() ||
-                      phase != llvm::ThinOrFullLTOPhase::ThinLTOPostLink) { return; }
+                      phase != llvm::ThinOrFullLTOPhase::ThinLTOPostLink) {
+                    return;
+                  }
                   module_pm.addPass(
                       obf::capture_lto_selection_pass(obf::pipeline_route::thin_postlink));
                 });

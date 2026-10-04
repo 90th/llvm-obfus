@@ -1,6 +1,7 @@
 #include "obf/vm/virtualize_internal.h"
 
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/GetElementPtrTypeIterator.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 
@@ -183,13 +184,19 @@ llvm::Value* apply_memory_value_shape(llvm::IRBuilder<>& builder,
 }
 
 bool apply_gep_index_shape(llvm::IRBuilder<>& builder,
+                           llvm::Type* source_type,
                            llvm::SmallVectorImpl<llvm::Value*>& indices,
                            gep_handler_shape shape) {
   if (shape != gep_handler_shape::split_index_add && shape != gep_handler_shape::offset_bias) {
     return false;
   }
 
-  for (llvm::Value*& index : indices) {
+  auto index_type = llvm::gep_type_begin(source_type, llvm::ArrayRef<llvm::Value*>(indices));
+  for (std::size_t index_position = 0; index_position < indices.size();
+       ++index_position, ++index_type) {
+    if (index_type.getStructTypeOrNull() != nullptr) { continue; }
+
+    llvm::Value*& index = indices[index_position];
     auto* integer_type = llvm::dyn_cast<llvm::IntegerType>(index->getType());
     if (integer_type == nullptr || llvm::isa<llvm::Constant>(index)) { continue; }
 
@@ -656,19 +663,33 @@ bool lower_memory_instruction(llvm::IRBuilder<>& builder,
     case opcode::gep_inbounds: {
       gep_handler_shape shape = select_gep_handler_shape(
           function_context, instruction, instruction_index, 0x12f00 + instruction_index);
+      llvm::Type* const source_type = const_cast<llvm::Type*>(instruction.type);
+      llvm::Type* indexed_type = source_type;
       llvm::SmallVector<llvm::Value*, 4> indices;
       indices.reserve(instruction.operands.size() - 1);
       for (std::size_t operand_index = 1; operand_index < instruction.operands.size();
            ++operand_index) {
-        indices.push_back(materialize_value(builder,
-                                            function_context.slot_allocas,
-                                            context.current_slot_mapping,
-                                            function_context.program,
-                                            instruction.operands[operand_index],
-                                            function_context.opaque_seed_slot,
-                                            function_context.opaque_seed_base,
-                                            function_context.mba_context,
-                                            0x13000 + instruction_index * 16 + operand_index));
+        const value_ref& operand = instruction.operands[operand_index];
+        // The first index steps through pointers to the source type. Only later
+        // indices can select struct fields, which LLVM requires to be ConstantInt.
+        llvm::Value* index = nullptr;
+        if (operand_index != 1 && indexed_type->isStructTy()) {
+          index = const_cast<llvm::ConstantInt*>(llvm::cast<llvm::ConstantInt>(operand.constant));
+        } else {
+          index = materialize_value(builder,
+                                    function_context.slot_allocas,
+                                    context.current_slot_mapping,
+                                    function_context.program,
+                                    operand,
+                                    function_context.opaque_seed_slot,
+                                    function_context.opaque_seed_base,
+                                    function_context.mba_context,
+                                    0x13000 + instruction_index * 16 + operand_index);
+        }
+        indices.push_back(index);
+        if (operand_index != 1) {
+          indexed_type = llvm::GetElementPtrInst::getTypeAtIndex(indexed_type, index);
+        }
       }
 
       llvm::Value* const pointer = materialize_value(builder,
@@ -682,17 +703,15 @@ bool lower_memory_instruction(llvm::IRBuilder<>& builder,
                                                      0x13100 + instruction_index);
       if ((shape == gep_handler_shape::split_index_add ||
            shape == gep_handler_shape::offset_bias) &&
-          !apply_gep_index_shape(builder, indices, shape)) {
+          !apply_gep_index_shape(builder, source_type, indices, shape)) {
         shape = gep_handler_shape::select_equivalent_base;
       }
       llvm::Value* base_pointer = apply_gep_base_shape(builder, pointer, instruction, shape);
       llvm::Value* gep = nullptr;
       if (instruction.op == opcode::gep_inbounds) {
-        gep = builder.CreateInBoundsGEP(
-            const_cast<llvm::Type*>(instruction.type), base_pointer, indices, "obf.vm.gep");
+        gep = builder.CreateInBoundsGEP(source_type, base_pointer, indices, "obf.vm.gep");
       } else {
-        gep = builder.CreateGEP(
-            const_cast<llvm::Type*>(instruction.type), base_pointer, indices, "obf.vm.gep");
+        gep = builder.CreateGEP(source_type, base_pointer, indices, "obf.vm.gep");
       }
       gep = tag_vm_handler_value(gep, gep_shape_marker(shape));
       finish_value(builder, context, gep);

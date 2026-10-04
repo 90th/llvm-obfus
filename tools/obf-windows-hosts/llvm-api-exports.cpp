@@ -41,3 +41,6 @@ template class LLVM_EXPORT_TEMPLATE llvm::DominatorTreeBase<llvm::BasicBlock, fa
 template LLVM_EXPORT_TEMPLATE void
 llvm::DomTreeBuilder::Calculate<llvm::DominatorTreeBase<llvm::BasicBlock, false>>(
     llvm::DominatorTreeBase<llvm::BasicBlock, false>&);
+
+template LLVM_EXPORT_TEMPLATE llvm::AnalysisKey*
+llvm::AnalysisInfoMixin<llvm::FunctionAnalysisManagerModuleProxy>::ID();

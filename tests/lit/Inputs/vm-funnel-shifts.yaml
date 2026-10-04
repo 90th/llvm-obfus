@@ -1,0 +1,8 @@
+seed: 387541
+default_level: none
+targets:
+  - match: "vm_funnel_*"
+    level: vm
+vm:
+  max_virtual_instructions: 256
+  max_mba_depth: 0
