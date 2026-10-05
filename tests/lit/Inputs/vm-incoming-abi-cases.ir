@@ -1,0 +1,295 @@
+; Standalone modules for the ordinary and strict incoming-ABI matrices.
+; Opaque pointers make each mismatched prototype valid input IR.
+; Only surplus arguments under ccc, a variadic-shape-only ccc call, and fully
+; matching calls are executed. Count/type/return/convention/extension mismatches
+; that have undefined calling semantics deliberately have no main.
+; Each executable main checks two exact results and both cumulative stores.
+
+;--- too_few
+source_filename = "too_few"
+
+define i32 @vm_target(i32 %x, ptr %effect) {
+entry:
+  %result = add i32 %x, 3
+  %before = load i32, ptr %effect
+  %after = add i32 %before, %result
+  store i32 %after, ptr %effect
+  ret i32 %result
+}
+
+define i32 @caller(i32 %x) {
+entry:
+  %result = call i32 (i32) @vm_target(i32 %x)
+  ret i32 %result
+}
+
+;--- surplus
+source_filename = "surplus"
+
+@effect = global i32 0
+
+define i32 @vm_target(i32 %x, ptr %effect) {
+entry:
+  %result = add i32 %x, 3
+  %before = load i32, ptr %effect
+  %after = add i32 %before, %result
+  store i32 %after, ptr %effect
+  ret i32 %result
+}
+
+define i32 @caller(i32 %x, ptr %effect) {
+entry:
+  %result = call i32 (i32, ptr, i32) @vm_target(i32 %x, ptr %effect, i32 99)
+  ret i32 %result
+}
+
+define i32 @main() {
+entry:
+  store i32 40, ptr @effect
+  %first = call i32 @caller(i32 5, ptr @effect)
+  %first_effect = load i32, ptr @effect
+  %second = call i32 @caller(i32 -2, ptr @effect)
+  %second_effect = load i32, ptr @effect
+  %first_ok = icmp eq i32 %first, 8
+  %first_effect_ok = icmp eq i32 %first_effect, 48
+  %second_ok = icmp eq i32 %second, 1
+  %second_effect_ok = icmp eq i32 %second_effect, 49
+  %results_ok = and i1 %first_ok, %second_ok
+  %effects_ok = and i1 %first_effect_ok, %second_effect_ok
+  %ok = and i1 %results_ok, %effects_ok
+  %status = select i1 %ok, i32 0, i32 1
+  ret i32 %status
+}
+
+;--- parameter_type
+source_filename = "parameter_type"
+
+define i32 @vm_target(i32 %x, ptr %effect) {
+entry:
+  %result = add i32 %x, 3
+  %before = load i32, ptr %effect
+  %after = add i32 %before, %result
+  store i32 %after, ptr %effect
+  ret i32 %result
+}
+
+define i32 @caller(i64 %x, ptr %effect) {
+entry:
+  %result = call i32 (i64, ptr) @vm_target(i64 %x, ptr %effect)
+  ret i32 %result
+}
+
+;--- return_type
+source_filename = "return_type"
+
+define i32 @vm_target(i32 %x, ptr %effect) {
+entry:
+  %result = add i32 %x, 3
+  %before = load i32, ptr %effect
+  %after = add i32 %before, %result
+  store i32 %after, ptr %effect
+  ret i32 %result
+}
+
+define i64 @caller(i32 %x, ptr %effect) {
+entry:
+  %result = call i64 (i32, ptr) @vm_target(i32 %x, ptr %effect)
+  ret i64 %result
+}
+
+;--- variadic_shape
+source_filename = "variadic_shape"
+
+@effect = global i32 0
+
+define i32 @vm_target(i32 %x, ptr %effect) {
+entry:
+  %result = add i32 %x, 3
+  %before = load i32, ptr %effect
+  %after = add i32 %before, %result
+  store i32 %after, ptr %effect
+  ret i32 %result
+}
+
+define i32 @caller(i32 %x, ptr %effect) {
+entry:
+  ; Only FunctionType.isVarArg differs: the fixed parameters and actual
+  ; argument count/types are identical to vm_target's definition.
+  %result = call i32 (i32, ptr, ...) @vm_target(i32 %x, ptr %effect)
+  ret i32 %result
+}
+
+define i32 @main() {
+entry:
+  store i32 40, ptr @effect
+  %first = call i32 @caller(i32 5, ptr @effect)
+  %first_effect = load i32, ptr @effect
+  %second = call i32 @caller(i32 -2, ptr @effect)
+  %second_effect = load i32, ptr @effect
+  %first_ok = icmp eq i32 %first, 8
+  %first_effect_ok = icmp eq i32 %first_effect, 48
+  %second_ok = icmp eq i32 %second, 1
+  %second_effect_ok = icmp eq i32 %second_effect, 49
+  %results_ok = and i1 %first_ok, %second_ok
+  %effects_ok = and i1 %first_effect_ok, %second_effect_ok
+  %ok = and i1 %results_ok, %effects_ok
+  %status = select i1 %ok, i32 0, i32 1
+  ret i32 %status
+}
+
+;--- calling_convention
+source_filename = "calling_convention"
+
+define fastcc i32 @vm_target(i32 %x, ptr %effect) {
+entry:
+  %result = add i32 %x, 3
+  %before = load i32, ptr %effect
+  %after = add i32 %before, %result
+  store i32 %after, ptr %effect
+  ret i32 %result
+}
+
+define i32 @caller(i32 %x, ptr %effect) {
+entry:
+  ; A ccc call to a fastcc definition verifies but has undefined behavior.
+  %result = call i32 @vm_target(i32 %x, ptr %effect)
+  ret i32 %result
+}
+
+;--- extension_attribute
+source_filename = "extension_attribute"
+
+define signext i16 @vm_target(i8 signext %x, i8 zeroext %y, ptr %effect) {
+entry:
+  %signed = sext i8 %x to i16
+  %unsigned = zext i8 %y to i16
+  %result = add i16 %signed, %unsigned
+  %wide = sext i16 %result to i32
+  %before = load i32, ptr %effect
+  %after = add i32 %before, %wide
+  store i32 %after, ptr %effect
+  ret i16 %result
+}
+
+define zeroext i16 @caller(i8 zeroext %x, i8 signext %y, ptr %effect) {
+entry:
+  %result = call zeroext i16 @vm_target(i8 zeroext %x, i8 signext %y, ptr %effect)
+  ret i16 %result
+}
+
+;--- matching_c
+source_filename = "matching_c"
+
+@effect = global i32 0
+
+define i32 @vm_target(i32 %x, ptr %effect) {
+entry:
+  %result = add i32 %x, 3
+  %before = load i32, ptr %effect
+  %after = add i32 %before, %result
+  store i32 %after, ptr %effect
+  ret i32 %result
+}
+
+define i32 @caller(i32 %x, ptr %effect) {
+entry:
+  %result = call i32 @vm_target(i32 %x, ptr %effect)
+  ret i32 %result
+}
+
+define i32 @main() {
+entry:
+  store i32 40, ptr @effect
+  %first = call i32 @caller(i32 5, ptr @effect)
+  %first_effect = load i32, ptr @effect
+  %second = call i32 @caller(i32 -2, ptr @effect)
+  %second_effect = load i32, ptr @effect
+  %first_ok = icmp eq i32 %first, 8
+  %first_effect_ok = icmp eq i32 %first_effect, 48
+  %second_ok = icmp eq i32 %second, 1
+  %second_effect_ok = icmp eq i32 %second_effect, 49
+  %results_ok = and i1 %first_ok, %second_ok
+  %effects_ok = and i1 %first_effect_ok, %second_effect_ok
+  %ok = and i1 %results_ok, %effects_ok
+  %status = select i1 %ok, i32 0, i32 1
+  ret i32 %status
+}
+
+;--- matching_fast
+source_filename = "matching_fast"
+
+@effect = global i32 0
+
+define fastcc i32 @vm_target(i32 %x, ptr %effect) {
+entry:
+  %result = add i32 %x, 3
+  %before = load i32, ptr %effect
+  %after = add i32 %before, %result
+  store i32 %after, ptr %effect
+  ret i32 %result
+}
+
+define fastcc i32 @caller(i32 %x, ptr %effect) {
+entry:
+  %result = call fastcc i32 @vm_target(i32 %x, ptr %effect)
+  ret i32 %result
+}
+
+define i32 @main() {
+entry:
+  store i32 40, ptr @effect
+  %first = call fastcc i32 @caller(i32 5, ptr @effect)
+  %first_effect = load i32, ptr @effect
+  %second = call fastcc i32 @caller(i32 -2, ptr @effect)
+  %second_effect = load i32, ptr @effect
+  %first_ok = icmp eq i32 %first, 8
+  %first_effect_ok = icmp eq i32 %first_effect, 48
+  %second_ok = icmp eq i32 %second, 1
+  %second_effect_ok = icmp eq i32 %second_effect, 49
+  %results_ok = and i1 %first_ok, %second_ok
+  %effects_ok = and i1 %first_effect_ok, %second_effect_ok
+  %ok = and i1 %results_ok, %effects_ok
+  %status = select i1 %ok, i32 0, i32 1
+  ret i32 %status
+}
+
+;--- matching_extensions
+source_filename = "matching_extensions"
+
+@effect = global i32 0
+
+define signext i16 @vm_target(i8 signext %x, i8 zeroext %y, ptr %effect) {
+entry:
+  %signed = sext i8 %x to i16
+  %unsigned = zext i8 %y to i16
+  %result = add i16 %signed, %unsigned
+  %wide = sext i16 %result to i32
+  %before = load i32, ptr %effect
+  %after = add i32 %before, %wide
+  store i32 %after, ptr %effect
+  ret i16 %result
+}
+
+define signext i16 @caller(i8 signext %x, i8 zeroext %y, ptr %effect) {
+entry:
+  %result = call signext i16 @vm_target(i8 signext %x, i8 zeroext %y, ptr %effect)
+  ret i16 %result
+}
+
+define i32 @main() {
+entry:
+  store i32 40, ptr @effect
+  %first = call signext i16 @caller(i8 signext -3, i8 zeroext 250, ptr @effect)
+  %first_effect = load i32, ptr @effect
+  %second = call signext i16 @caller(i8 signext -128, i8 zeroext 7, ptr @effect)
+  %second_effect = load i32, ptr @effect
+  %first_ok = icmp eq i16 %first, 247
+  %first_effect_ok = icmp eq i32 %first_effect, 287
+  %second_ok = icmp eq i16 %second, -121
+  %second_effect_ok = icmp eq i32 %second_effect, 166
+  %results_ok = and i1 %first_ok, %second_ok
+  %effects_ok = and i1 %first_effect_ok, %second_effect_ok
+  %ok = and i1 %results_ok, %effects_ok
+  %status = select i1 %ok, i32 0, i32 1
+  ret i32 %status
+}

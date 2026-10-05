@@ -61,8 +61,13 @@ See [compiler coverage reports](usage.md#compiler-coverage-reports) for capture 
 
 The VM boundary also checks the function ABI and incoming calls.
 It rejects parameters such as `byval`, `sret`, `inalloca`, and other unsupported ABI-changing attributes.
+The incoming function type must match the target, including return type, parameter types, count, and variadic status.
+The calling convention and ABI-relevant return and parameter attributes must also match.
 Incoming `invoke`, `callbr`, `musttail`, operand-bundle calls, and ABI mismatches cannot use ordinary call rewriting.
 `strong_vm`, `fortress`, and `lab` require a strict VM boundary and reject these cases.
+
+For supported targets, ordinary `vm` keeps incompatible incoming calls at the original-signature interface wrapper.
+This preserves the input call. It does not make undefined calls valid.
 
 Plugin-generated VM implementations check registered caller tokens before executing bytecode.
 An unregistered token traps before protected side effects.

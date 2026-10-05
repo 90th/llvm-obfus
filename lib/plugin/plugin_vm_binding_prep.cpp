@@ -105,10 +105,15 @@ bool attribute_set_abi_relevant_differs(llvm::AttributeSet lhs, llvm::AttributeS
   return false;
 }
 
-// A rewritable ordinary call must share the callee's ABI contract. Any
-// disagreement on sign/zero extension or an ABI-affecting attribute at a
-// matching index is preserved as an ABI mismatch rather than rewritten.
+// A rewritable call must share the callee's signature, calling convention, and
+// ABI attributes. Opaque pointers can hide a prototype mismatch at a direct call.
+// Preserve incompatible sites instead of forwarding them through a typed thunk.
 bool callsite_abi_mismatches_target(const llvm::CallBase& call, const llvm::Function& target) {
+  if (call.getFunctionType() != target.getFunctionType() ||
+      call.getCallingConv() != target.getCallingConv()) {
+    return true;
+  }
+
   const llvm::AttributeList call_attributes = call.getAttributes();
   const llvm::AttributeList target_attributes = target.getAttributes();
   if (attribute_set_abi_relevant_differs(call_attributes.getRetAttrs(),
