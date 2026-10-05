@@ -1,4 +1,5 @@
 #include "obf/plugin/obfuscator_plugin_internal.h"
+#include "obf/plugin/internal/native_string_ownership.h"
 #include "obf/policy/policy_engine.h"
 
 #include "obf/report/function_report.h"
@@ -452,7 +453,8 @@ class string_encoding_pass : public llvm::PassInfoMixin<string_encoding_pass> {
                               [](llvm::Module& current_module,
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config) {
-                                return apply_string_encoding_stage(current_module, states, config);
+                                return apply_string_encoding_stage(
+                                    current_module, states, config, nullptr, nullptr);
                               });
   }
 };
@@ -1323,6 +1325,9 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
                                   (is_postlink(route_) && has_managed_lto_input_validation());
     llvm::SmallVector<function_pipeline_state, 32> states =
         build_lto_pipeline_state(module, config, allow_unresolved);
+    native_string_ownership native_ownership(
+        module, states,
+        route_ == pipeline_route::native && get_active_lto_mode() == obf_lto_mode::none);
     bool changed = false;
     if (is_postlink(route_)) {
       llvm::FunctionAnalysisManager& fam =
@@ -1375,7 +1380,8 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     const llvm::SmallVector<function_pipeline_state, 32> post_vm_states =
         build_lto_pipeline_state(module, config, allow_unresolved);
 
-    changed |= apply_string_encoding_stage(module, post_vm_states, config, &post_vm_virtualized);
+    changed |= apply_string_encoding_stage(
+        module, post_vm_states, config, &post_vm_virtualized, &native_ownership);
     llvm::StringSet<> all_vm_virtualized = collect_virtualized_function_names(vm_only);
     const llvm::StringSet<> strong_vm_names =
         collect_virtualized_function_names(strong_vm_virtualized);
@@ -1487,6 +1493,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
                             contracts.size(),
                             "module");
     }
+    changed |= native_ownership.emit(module);
 
     if (!changed && !coverage_reporting_enabled(module)) { return llvm::PreservedAnalyses::all(); }
 

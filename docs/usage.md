@@ -6,7 +6,7 @@
 
 | Input | Recommended route | Final-link responsibility |
 |---|---|---|
-| C | `obf-clang` | Wrapper links the matching runtime and binds supported self-checksum records |
+| C | `obf-clang` | Wrapper validates native ownership, links the matching runtime, and binds supported self-checksum records |
 | C++ | `obf-clang++` | Same wrapper contract, with C++ driver mode |
 | LLVM `.bc` | `obf-bc` | You compile, link the runtime, and bind records when required |
 | C/C++ Full LTO or ThinLTO | Managed C/C++ wrapper route | Wrapper validates inputs and loads the backend plugin |
@@ -99,6 +99,122 @@ Use the same plugin build and its runtime archive throughout the application bui
 The archive contains the entropy-anchor and authenticated-decoder support.
 See the [Runtime contract](../runtime/README.md) for runtime behavior and ABI details.
 
+### Native static-data ownership
+
+Use the wrapper for the final native ELF or COFF link, including object-only links.
+The wrapper routes the actual linker job through `obf-native-link`.
+This keeps combined-job temporary objects available until ownership validation finishes.
+The proxy runs the real linker before it validates original `strong_vm` static-data dependencies.
+Managed LTO uses its existing backend route instead.
+
+Compile every managed provider with the matching wrapper, even when its policy requests no protection.
+The compiler then supplies definition classifications for later native links.
+The final check does not depend on `OBF_COVERAGE_REPORT`.
+Ordinary `vm` and runtime argument buffers keep their existing behavior.
+
+The actual linker chooses prevailing definitions and extracts archive members.
+The validator does not simulate archive search or use the first matching library basename.
+It checks only prevailing providers and actually extracted members.
+Unsupported or ambiguous authority for a required dependency rejects the link.
+The proxy preserves requested user maps and forwards the real linker's diagnostics and exit status.
+A rejected ownership check removes the newly linked primary image.
+
+GNU ld and ld.lld provide ELF map/cross-reference authority.
+MSVC link and lld-link provide native COFF map and library-search authority.
+Keep the normal Windows CRT startup and the matching runtime.
+An ELF partial `-r` link retains ownership records but does not establish final enforcement.
+Compile-only, dry-run, and query actions also do not establish final enforcement.
+See [native static-data ownership](protection.md#native-static-data-ownership) for the record ABI and scope limits.
+
+### Raw native provider manifests
+
+An unknown raw provider rejects when a `strong_vm` owner's static dependency requires its classification.
+This also applies to raw integer data.
+Pass `--obf-native-provenance=<json-path>` at the final wrapper link.
+One manifest can describe multiple objects or archive members.
+
+A manifest has version `1` and a `providers` array.
+Each provider has these fields:
+
+| Field | Meaning |
+|---|---|
+| `path` | Object or archive path. Relative paths start at the manifest directory. |
+| `member` | Exact archive member name. Omit this field for an object provider. |
+| `sha256` | SHA256 of the exact object bytes, or exact uncompressed member bytes. |
+| `definitions` | Definition records for actual symbols in that provider. |
+
+Each definition contains `symbol`, `local`, `kind`, and `targets`.
+Set `local` to `true` for an object-local symbol.
+Allowed raw kinds are `plaintext`, `forward`, `non_string`, and `unknown`.
+`forward` describes a supported statically initialized one-level pointer cell or table.
+Each target contains its `symbol` and `local` identity.
+Use an empty `targets` array for a leaf definition.
+Raw manifests cannot declare `protected`.
+
+Supply truthful classifications from the producer's source or equivalent provenance.
+A hash binds the declaration to the provider bytes. It does not prove that the declaration is true.
+Do not classify source strings as `non_string` to bypass rejection.
+`plaintext` and `unknown` remain rejecting classifications for required string ownership.
+
+This example supplies provenance for a raw integer provider:
+
+```sh
+cat > build/usage-demo/native-provider.c <<'EOF'
+const unsigned native_numbers[2] = {110, 78};
+EOF
+cat > build/usage-demo/native-reader.c <<'EOF'
+extern const unsigned native_numbers[2];
+__attribute__((noinline))
+unsigned protected_value(unsigned index) {
+    return native_numbers[index];
+}
+int main(void) {
+    return protected_value(1) != 78;
+}
+EOF
+
+clang -O2 -c build/usage-demo/native-provider.c \
+  -o build/usage-demo/native-provider.o
+build/obf-clang -O1 --obf-config=build/usage-demo/protect.yaml \
+  -c build/usage-demo/native-reader.c -o build/usage-demo/native-reader.o
+
+python3 - <<'PY'
+import hashlib
+import json
+from pathlib import Path
+
+obj = Path("build/usage-demo/native-provider.o")
+provider = {
+    "path": obj.name,
+    "sha256": hashlib.sha256(obj.read_bytes()).hexdigest(),
+    "definitions": [{
+        "symbol": "native_numbers", "local": False,
+        "kind": "non_string", "targets": []
+    }]
+}
+obj.with_suffix(".json").write_text(
+    json.dumps({"version": 1, "providers": [provider]}) + "\n"
+)
+PY
+
+build/obf-clang --obf-config=build/usage-demo/protect.yaml \
+  --obf-native-provenance=build/usage-demo/native-provider.json \
+  build/usage-demo/native-reader.o build/usage-demo/native-provider.o \
+  -o build/usage-demo/native-reader
+build/usage-demo/native-reader
+```
+
+For an archive, use its path and the exact member name.
+Hash the retained object bytes that the archiver stored as that member.
+Recreate the manifest after any provider change.
+Required missing definitions, hash mismatches, invalid records, and conflicting declarations reject the link.
+Declarations that conflict with managed provenance also reject.
+
+The validator checks a provider entry only when its selected input needs that classification.
+Unextracted string members do not reject, and unused member declarations do not add obligations.
+Cross-DSO ownership and runtime buffer contents remain outside this contract.
+
+
 ## C++ use
 
 Use `obf-clang++` for C++ compilation and final linking.
@@ -162,18 +278,21 @@ Do not use that fallback as evidence that another compiler applied protection.
 
 ## Direct Clang use
 
-For a non-LTO Linux build, set the configuration, load the plugin, and link the runtime yourself.
+For a non-LTO Linux build, set the configuration and load the plugin for compilation.
 The following commands reuse the quick-start files.
 
 ```sh
 OBF_CONFIG=build/usage-demo/protect.yaml \
 clang -O1 -fno-inline -fpass-plugin=build/obf_plugin.so \
   -c build/usage-demo/sample.c -o build/usage-demo/direct.o
-clang build/usage-demo/direct.o build/libobf_runtime.a \
-  -o build/usage-demo/direct
+build/obf-clang --obf-config=build/usage-demo/protect.yaml \
+  build/usage-demo/direct.o -o build/usage-demo/direct
 ```
 
-For C++, use the matching `clang++` for compilation and final linking.
+For C++, use the matching `clang++` for compilation and `obf-clang++` for the final link.
+The wrapper supplies the runtime and native ownership validator.
+Linking directly with Clang and the runtime does not enforce native ownership.
+A direct final-link integration must implement the same records, linker authority, and ownership validation.
 For self-checksum records, follow the [manual finalization rules](#self-checksum-finalization) below.
 
 ### Windows plugin choice

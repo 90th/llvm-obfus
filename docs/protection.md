@@ -228,6 +228,87 @@ Generated ciphertext, build keys, local encoded strings, and VM bytecode have ex
 Discovery uses these roles instead of treating every C-string-shaped byte array as source text.
 This prevents another string-encoding pass from re-encoding generated binary data.
 
+### Native static-data ownership
+
+Native ELF and COFF final links enforce the original `strong_vm` owner's static-string obligation.
+This includes direct string globals and supported one-level pointer cells or tables.
+The compiler captures these dependencies before VM lowering or outlining moves their uses.
+Coverage reports do not enable or satisfy this check.
+
+Managed producers classify definitions as `plaintext`, `forward`, `non_string`, `protected`, or `unknown`.
+`protected` requires the compiler's actual encoding and ownership proof.
+An unclassified raw provider remains `unknown`, including a raw integer provider.
+Use a [hash-bound raw manifest](usage.md#raw-native-provider-manifests) to classify required raw definitions.
+A manifest cannot declare `protected`.
+
+The validator follows one static forwarding level to its leaf definitions.
+A second forwarding level rejects, even when the final leaf is non-string data.
+Required `plaintext` or `unknown` definitions reject the final link.
+Proven `non_string` data does not acquire a string obligation.
+Wholly numeric arrays and structs can establish non-string provenance, including nested numeric aggregates.
+The validator does not infer strings from byte loads or search final-image bytes for source text.
+
+The actual native linker determines the prevailing definitions and extracted archive members.
+Discarded weak definitions, discarded local readers, and unextracted string members do not add obligations.
+The proxy uses GNU ld or ld.lld map/cross-reference evidence for ELF.
+For native COFF, it uses MSVC link or lld-link map and library-search evidence.
+
+Required dependencies reject when the validator cannot identify their actual provider without ambiguity.
+The proxy preserves a requested user map.
+After rejection, it removes the newly linked primary image.
+
+Each managed object stores records in `.obfns`.
+ELF uses non-allocating `PROGBITS`.
+COFF uses link-information and remove section flags.
+Records have no symbol relocations, guard references, or public symbols.
+They do not force archive extraction.
+
+The version 1 wire format uses little-endian integers.
+The 32-byte header has these fields:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | Magic bytes `OBNS` |
+| 4 | 2 | Version, `1` |
+| 6 | 2 | Header size, `32` |
+| 8 | 4 | Payload byte count |
+| 12 | 4 | Entry count |
+| 16 | 8 | Module identity |
+| 24 | 4 | Flags, `0` |
+| 28 | 4 | Reserved, `0` |
+
+Each entry starts with an eight-byte header: JSON byte count (`uint32`), kind (`uint16`), and flags (`uint16`, zero).
+Kind `1` identifies a reader.
+Kind `2` identifies a definition.
+UTF-8 JSON follows each entry header without padding.
+The payload byte count includes all entry headers and JSON bodies.
+Records contain symbol identities, dependency edges, and classifications, not source string contents.
+`local: true` identifies an object-local symbol, not a global symbol with the same spelling.
+Malformed selected records reject the link.
+
+Reader JSON names the final object function symbol and its static-data dependencies:
+
+```json
+{"owner":"owned_reader","local":false,"dependencies":[{"symbol":"provider_cell","local":false}]}
+```
+
+Definition JSON names the final object data symbol, its classification, and any forwarding targets:
+
+```json
+{"symbol":"provider_cell","local":false,"kind":"forward","targets":[{"symbol":"local_leaf","local":true}]}
+```
+
+This contract covers native objects and actually extracted archive members in one final image.
+It does not establish ownership across a DSO or DLL boundary.
+It does not cover runtime argument buffers, dynamically initialized pointers, arbitrary pointer graphs, or unavailable provider provenance.
+An unsupported required static dependency rejects instead of receiving a guessed classification.
+
+Ordinary `vm` remains best-effort and does not acquire this mandatory check.
+Compile-only and query actions do not enforce a final link.
+An ELF partial `-r` link retains the records for the later native final link.
+Managed LTO keeps its separate validation contract.
+
+
 ## Constants
 
 `constant_encoding.mode` supports `off`, `mba_inline`, `keyed_pool`, `auto`, and `all`.

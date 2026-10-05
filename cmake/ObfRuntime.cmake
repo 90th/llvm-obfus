@@ -87,7 +87,7 @@ if(OBF_PLUGIN_IS_LOADABLE)
       "${CMAKE_CURRENT_BINARY_DIR}/obf-clang++"
       "${CMAKE_CURRENT_BINARY_DIR}/obf-clang.cmd"
       "${CMAKE_CURRENT_BINARY_DIR}/obf-clang++.cmd")
-  add_dependencies(obf-clang-wrappers obf-driver obf_plugin obf-runtime)
+  add_dependencies(obf-clang-wrappers obf-driver obf-native-link obf_plugin obf-runtime)
   if(TARGET obf_clang_plugin)
     add_dependencies(obf-clang-wrappers obf_clang_plugin)
   endif()
