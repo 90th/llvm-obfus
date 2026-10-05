@@ -1,4 +1,4 @@
-# ![llvm-obfus logo](images/logo-header.png) llvm-obfus
+# <h1><img src="images/logo-header.png" width="40" height="40" align="top" alt=""> llvm-obfus</h1>
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![LLVM](https://img.shields.io/badge/LLVM-21%2B-262D3A?logo=llvm&logoColor=white)](docs/building.md)
