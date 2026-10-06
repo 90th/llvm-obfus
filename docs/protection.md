@@ -69,6 +69,25 @@ Incoming `invoke`, `callbr`, `musttail`, operand-bundle calls, and ABI mismatche
 For supported targets, ordinary `vm` keeps incompatible incoming calls at the original-signature interface wrapper.
 This preserves the input call. It does not make undefined calls valid.
 
+### Native C++ exception propagation
+
+A VM-eligible function can call an external function or callback that throws a C++ exception.
+The exception can unwind through generated VM frames to a native caller's handler.
+This does not add VM support for local EH pads, `invoke`, or `resume`.
+
+The Linux x86-64 native regression uses an independent C++ provider, a protected ELF shared library, and a native consumer.
+It checks typed payloads, exact memory effects, ordered cleanup, and repeated throwing and non-throwing calls.
+It covers O0/O2, `vm`/`strong_vm`, and coverage reports enabled or disabled.
+The provider and consumer use the normal C++ exception runtime.
+Compiler reports establish emission, not execution through the VM.
+
+Functions with local handlers or exception cleanup retain their VM policy exclusions.
+Ordinary `vm` preserves same-module incoming `invoke` calls at the original-signature wrapper.
+Strict VM levels reject these incoming calls.
+These checks do not establish support for arbitrary exception runtimes or cross-toolchain exception ABIs.
+
+### VM caller tokens
+
 Plugin-generated VM implementations check registered caller tokens before executing bytecode.
 An unregistered token traps before protected side effects.
 The bytecode entry-state value alone does not pass this check.
