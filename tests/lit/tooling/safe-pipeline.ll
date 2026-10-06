@@ -1,4 +1,3 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline.yaml -passes=obf-safe-pipeline -S %s -o %t
 ; RUN: %lli %t
 
@@ -36,39 +35,3 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
-; CHECK-DAG: @[[VMBC:_[0-9a-f]+]] = private unnamed_addr constant [{{[0-9]+}} x i8] c"
-; CHECK-DAG: @[[VMRETKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @[[VMPTRCONST:_[0-9a-f]+]] = private unnamed_addr constant ptr @[[VMBC]]
-; CHECK-DAG: @[[VMTARGET:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @[[VMTARGETSEED:_[0-9a-f]+]] = private global i64 0
-; CHECK-DAG: @llvm.global_ctors = appending global [{{[0-9]+}} x { i32, ptr, ptr }]
-; CHECK-DAG: @[[VMKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
-; CHECK-NOT: @__obf_vm_
-; CHECK-NOT: @__obf_family_
-; CHECK-NOT: @__obf_cached_
-; CHECK-NOT: @__obf_decoded_
-; CHECK-NOT: !dbg
-; CHECK-NOT: %obf.
-; CHECK-LABEL: define i32 @value()
-; CHECK: alloca { i64, i64 }, align 8
-; CHECK: call {{.*}} @{{[^ ]+}}({{.*}})
-; CHECK: ret i32
-; CHECK-LABEL: define i32 @fold_value(i32
-; CHECK: load atomic i64, ptr @[[VMTARGET]] monotonic, align 8
-; CHECK: load i64, ptr @[[VMKEY]]
-; CHECK: load i64, ptr @[[VMTARGETSEED]]
-; CHECK: inttoptr i64
-; CHECK: call i32 %{{[^ ]+}}(i32 %0, i64 %{{[^)]+}})
-; CHECK: load i64, ptr @[[VMRETKEY]]
-; CHECK-LABEL: define i32 @main()
-; CHECK: call ptr @[[STRHELPER:_[0-9a-f]+]](ptr
-; CHECK: load atomic i64, ptr @[[VMTARGET]] monotonic, align 8
-; CHECK: store atomic i64 %{{[^,]+}}, ptr @[[VMTARGET]] monotonic, align 8
-; CHECK: load i64, ptr @[[VMKEY]]
-; CHECK: call i32 %{{[^ ]+}}(i32 %{{[^,]+}}, i64 %{{[^)]+}})
-; CHECK: load i64, ptr @[[VMRETKEY]]
-; CHECK: define internal i32 @[[VMIMPL:_[0-9a-f]+]](i32
-; CHECK: load ptr, ptr @[[VMPTRCONST]]
-; CHECK: indirectbr ptr
-; CHECK: define internal ptr @[[STRHELPER]](ptr

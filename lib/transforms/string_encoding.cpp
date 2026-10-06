@@ -2806,21 +2806,7 @@ void rewrite_authenticated_inline_stack_uses(llvm::GlobalVariable& global,
 llvm::SmallVector<llvm::GlobalVariable*, 16> discover_string_candidates(llvm::Module& module) {
   llvm::SmallVector<llvm::GlobalVariable*, 16> globals;
   for (llvm::GlobalVariable& global : module.globals()) {
-    const support::encoded_data_kind kind = support::get_encoded_data_kind(global);
-    if (vm::has_encoded_bytecode_payload(global)) {
-      if (kind != support::encoded_data_kind::none) {
-        llvm::report_fatal_error("conflicting encoded data provenance");
-      }
-      continue;
-    }
-    if (kind == support::encoded_data_kind::ciphertext ||
-        kind == support::encoded_data_kind::build_key ||
-        kind == support::encoded_data_kind::local_string) {
-      continue;
-    }
-    if (kind == support::encoded_data_kind::global_string || is_string_like_global(global)) {
-      globals.push_back(&global);
-    }
+    if (is_source_string_candidate(global)) { globals.push_back(&global); }
   }
 
   std::sort(globals.begin(),
@@ -3061,6 +3047,22 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
 }
 
 }  // namespace
+
+bool is_source_string_candidate(const llvm::GlobalVariable& global) {
+  const support::encoded_data_kind kind = support::get_encoded_data_kind(global);
+  if (vm::has_encoded_bytecode_payload(global)) {
+    if (kind != support::encoded_data_kind::none) {
+      llvm::report_fatal_error("conflicting encoded data provenance");
+    }
+    return false;
+  }
+  if (kind == support::encoded_data_kind::ciphertext ||
+      kind == support::encoded_data_kind::build_key ||
+      kind == support::encoded_data_kind::local_string) {
+    return false;
+  }
+  return kind == support::encoded_data_kind::global_string || is_string_like_global(global);
+}
 
 std::string to_string(string_encoding_mode mode) {
   switch (mode) {

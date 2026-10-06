@@ -16,6 +16,7 @@ PLUGIN = r"@OBF_CLANG_PLUGIN_PATH@"
 RUNTIME_ARCHIVE = r"@OBF_RUNTIME_ARCHIVE@"
 DRIVER = r"@CMAKE_CURRENT_BINARY_DIR@/obf-driver@CMAKE_EXECUTABLE_SUFFIX@"
 CHECKSUM_BINDER = r"@OBF_CHECKSUM_BIND@"
+NATIVE_LINKER = r"@OBF_NATIVE_LINK@"
 
 _QUERY_ARGS = {
     "--help",
@@ -78,6 +79,41 @@ def _parse_args(argv: list[str]) -> tuple[list[str], str | None, int | None]:
         clang_args.append(arg)
         index += 1
     return clang_args, config_path, None
+
+def _native_provenance_args(args: list[str]) -> tuple[list[str], list[str]]:
+    retained: list[str] = []
+    manifests: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "-Xlinker" and index + 1 < len(args):
+            retained.extend(args[index:index + 2])
+            index += 2
+            continue
+        if arg == "--obf-native-provenance":
+            if index + 1 >= len(args) or not args[index + 1]:
+                raise _wrapper_error("--obf-native-provenance requires a path")
+            manifests.append(args[index + 1])
+            index += 2
+            continue
+        if arg.startswith("--obf-native-provenance="):
+            path = arg.split("=", 1)[1]
+            if not path:
+                raise _wrapper_error("--obf-native-provenance requires a path")
+            manifests.append(path)
+        else:
+            retained.append(arg)
+        index += 1
+    return retained, manifests
+
+
+def _verify_native_dispatch(commands: list[list[str]], real_linker: str) -> list[str]:
+    routed = _linker_job(commands)
+    if routed is None or not _same_path(routed[0], NATIVE_LINKER):
+        raise _wrapper_error("compiler config overrides the required native ownership linker proxy")
+    if _same_path(real_linker, NATIVE_LINKER):
+        raise _wrapper_error("native ownership linker proxy cannot dispatch to itself")
+    return _linker_job_args(routed)
 
 def _compiler_invocation(argv0: str, args: list[str]) -> list[str]:
     if "++" not in Path(argv0).name:
@@ -1026,7 +1062,7 @@ def _linker_build_id_modes(linker_args: list[str]) -> list[str]:
             for arg in linker_args if arg == "--build-id" or arg.startswith("--build-id=")]
 
 
-def _link_output_path(linker_args: list[str], clang_args: list[str], require_explicit: bool) -> Path:
+def _validate_driver_bind_output(clang_args: list[str], require_explicit: bool) -> None:
     explicit_output: str | None = None
     index = 0
     while index < len(clang_args):
@@ -1046,6 +1082,10 @@ def _link_output_path(linker_args: list[str], clang_args: list[str], require_exp
         raise _wrapper_error("self_checksum auto-binding requires an explicit '-o <path>' final-link output")
     if explicit_output == "-":
         raise _wrapper_error("self_checksum final links cannot bind an output written to stdout")
+
+
+def _link_output_path(linker_args: list[str], clang_args: list[str], require_explicit: bool) -> Path:
+    _validate_driver_bind_output(clang_args, require_explicit)
 
     # MSVC jobs use -out:, including driver defaults. Later /out: operands
     # can override it. GNU jobs use -o and can add a filename extension.
@@ -1071,6 +1111,16 @@ def _link_output_path(linker_args: list[str], clang_args: list[str], require_exp
         raise _wrapper_error("cannot determine self_checksum output from the final linker job")
     if output == "-":
         raise _wrapper_error("self_checksum final links cannot bind an output written to stdout")
+    return Path(output)
+
+
+def _native_link_output(result_file: Path) -> Path:
+    try:
+        output = result_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise _wrapper_error(f"cannot read validated native linker output: {error}") from error
+    if not output or "\0" in output or not Path(output).is_absolute():
+        raise _wrapper_error("native linker returned an invalid final output identity")
     return Path(output)
 
 
@@ -1100,7 +1150,7 @@ def _compiler_command(compiler: list[str], clang_args: list[str], query_action: 
         final_args.append(f"-fpass-plugin={PLUGIN}")
     final_args.extend(clang_args)
     if link_action:
-        final_args.append(RUNTIME_ARCHIVE)
+        final_args.extend(["-x", "none", RUNTIME_ARCHIVE])
     return final_args
 
 
@@ -1124,12 +1174,22 @@ def main() -> int:
     env.pop("OBF_LTO_MODE", None)
     env.pop("OBF_LTO_INPUTS_VALIDATED", None)
     env.pop("OBF_MANAGED_LLD", None)
+    env.pop("OBF_NATIVE_REAL_LINKER", None)
+    env.pop("OBF_NATIVE_LINK_FLAVOR", None)
+    env.pop("OBF_NATIVE_LINK_RESULT", None)
 
     bound_object_format: str | None = None
     bind_output: Path | None = None
     binder_available = bool(CHECKSUM_BINDER) and Path(CHECKSUM_BINDER).is_file()
+    native_real_linker: str | None = None
+    native_result_directory: tempfile.TemporaryDirectory | None = None
+    native_result_file: Path | None = None
     try:
-        response_args = _expand_response_args(clang_args)
+        response_args, provenance_manifests = _native_provenance_args(_expand_response_args(clang_args))
+        if provenance_manifests:
+            # A manifest may live in a driver response file. Re-emit its other
+            # tokens as driver operands, never expanding -Xlinker responses.
+            clang_args = response_args
         compiler = _compiler_invocation(sys.argv[0], response_args)
         query_action = any(arg in _QUERY_ARGS or arg.startswith(_QUERY_ARG_PREFIXES) for arg in response_args)
         if query_action:
@@ -1158,13 +1218,15 @@ def main() -> int:
         link_action = linker is not None
         dry_run = "-###" in effective_args
         linker_args = _normalize_linker_selection_options(_linker_job_args(linker)) if linker is not None else []
-        final_link_action = link_action and "-r" not in linker_args
+        final_link_action = link_action and not any(arg in {"-r", "--relocatable", "-i"} for arg in linker_args)
         target_triple = next((_last_option_value(command, "-triple") for command in frontend_jobs), None)
         if target_triple is None and (link_action or frontend_lto_mode is not None):
             target_triple = _compiler_target_triple(compiler, effective_args, env)
         object_format = _target_object_format(target_triple) if target_triple else None
         lto_inputs = _lto_input_paths(linker_args) if link_action else []
         needs_backend = link_action and (lto_mode is not None or bool(lto_inputs))
+        if provenance_manifests and (not final_link_action or needs_backend):
+            raise _wrapper_error("--obf-native-provenance requires a native final link, not compilation, partial linking, or managed LTO")
         if (frontend_lto_mode is not None or needs_backend) and object_format != "elf":
             raise _wrapper_error(
                 "managed obfuscation LTO currently supports ELF targets only; "
@@ -1230,6 +1292,41 @@ def main() -> int:
             if self_checksum_requested:
                 raise _wrapper_error("PE self_checksum auto-binding currently requires a native Windows host")
             bound_object_format = None
+        if final_link_action and bound_object_format is not None and (self_checksum_requested or binder_available):
+            _validate_driver_bind_output(effective_args, require_explicit=self_checksum_requested)
+        if (link_action and not needs_backend and not dry_run and
+                (object_format == "elf" or (final_link_action and object_format == "coff"))):
+            if not NATIVE_LINKER or not Path(NATIVE_LINKER).is_file():
+                raise _wrapper_error(f"missing native ownership linker proxy: {NATIVE_LINKER or '<not configured>'}")
+            native_real_linker = _resolve_executable(linker[0])
+            if native_real_linker is None:
+                raise _wrapper_error(f"cannot resolve actual native linker: {linker[0]}")
+            env["OBF_NATIVE_REAL_LINKER"] = native_real_linker
+            env["OBF_NATIVE_LINK_FLAVOR"] = object_format
+            if final_link_action:
+                native_result_directory = tempfile.TemporaryDirectory(prefix="obf-native-result-")
+                native_result_file = Path(native_result_directory.name) / "output"
+                env["OBF_NATIVE_LINK_RESULT"] = str(native_result_file)
+            msvc_link_job = any(arg.lower().startswith(("-out:", "/out:")) for arg in linker_args)
+            if msvc_link_job:
+                # The MSVC toolchain selects a tool name with -fuse-ld; it
+                # ignores --ld-path and does not accept an absolute tool name.
+                proxy = Path(NATIVE_LINKER)
+                clang_args.extend([f"-B{proxy.parent}", f"-fuse-ld={proxy.name}"])
+                # These arguments are conditional on the original linker
+                # spelling in Clang's MSVC driver, not on its argument flavor.
+                for arg in linker_args:
+                    if (arg.lower() == "/inferasanlibs:no" or
+                            arg.lower().startswith(("/vfsoverlay:", "/dwodir:"))):
+                        clang_args.extend(["-Xlinker", arg])
+            else:
+                clang_args.append(f"--ld-path={NATIVE_LINKER}")
+            for manifest in provenance_manifests:
+                clang_args.extend(["-Xlinker", f"--obf-native-provenance={Path(manifest).absolute()}"])
+            routed_commands, _ = _driver_plan(compiler, clang_args, env)
+            linker_args = _verify_native_dispatch(routed_commands, native_real_linker)
+        elif provenance_manifests and object_format not in {"elf", "coff"}:
+            raise _wrapper_error("--obf-native-provenance supports native ELF and COFF final links only")
         build_id_modes = _linker_build_id_modes(_user_linker_args(effective_args)) if bound_object_format == "elf" else []
         if self_checksum_requested and bound_object_format is not None:
             if not binder_available:
@@ -1241,18 +1338,28 @@ def main() -> int:
                     clang_args.append("-Wl,--build-id=none")
                     build_id_modes.append("none")
         final_args = _compiler_command(compiler, clang_args, False, final_link_action, frontend_has_plugin)
+        if native_real_linker is not None:
+            native_commands, _ = _driver_plan(compiler, final_args[len(compiler):], env)
+            _verify_native_dispatch(native_commands, native_real_linker)
         if bound_object_format is not None and (self_checksum_requested or binder_available):
             final_commands, _ = _driver_plan(compiler, final_args[len(compiler):], env)
             final_linker = _linker_job(final_commands)
             if final_linker is None:
                 raise _wrapper_error("compiler config removes the expected final linker job")
-            bind_output = _link_output_path(
-                _linker_job_args(final_linker),
-                effective_args,
-                require_explicit=self_checksum_requested,
-            )
+            if native_real_linker is None:
+                predicted_output = _link_output_path(
+                    _linker_job_args(final_linker),
+                    effective_args,
+                    require_explicit=self_checksum_requested,
+                )
+                if native_real_linker is None:
+                    bind_output = predicted_output
         completed = subprocess.run(final_args, env=env)
-        if completed.returncode != 0 or dry_run or bound_object_format is None or not binder_available:
+        if completed.returncode != 0 or dry_run:
+            return completed.returncode
+        if native_result_file is not None:
+            bind_output = _native_link_output(native_result_file)
+        if bound_object_format is None or not binder_available:
             return completed.returncode
         if bind_output is None or not bind_output.is_file():
             raise _wrapper_error(f"successful link did not produce expected output for self_checksum probe: {bind_output}")
@@ -1266,15 +1373,23 @@ def main() -> int:
                 # a GNU build ID. Keep the same LTO backend and cache contract.
                 clang_args.append("-Wl,--build-id=none")
                 relink_args = _compiler_command(compiler, clang_args, False, final_link_action, frontend_has_plugin)
+                if native_real_linker is not None:
+                    relink_commands, _ = _driver_plan(compiler, relink_args[len(compiler):], env)
+                    _verify_native_dispatch(relink_commands, native_real_linker)
                 relinked = subprocess.run(relink_args, env=env)
                 if relinked.returncode != 0:
                     return relinked.returncode
+                if native_result_file is not None:
+                    bind_output = _native_link_output(native_result_file)
                 if not bind_output.is_file() or not _probe_checksum_records(bind_output, env):
                     raise _wrapper_error("self_checksum records disappeared during final --build-id=none relink")
         _bind_checksum_records(bind_output, env)
         return 0
     except _wrapper_error as error:
         return _fail(str(error))
+    finally:
+        if native_result_directory is not None:
+            native_result_directory.cleanup()
 
 
 if __name__ == "__main__":

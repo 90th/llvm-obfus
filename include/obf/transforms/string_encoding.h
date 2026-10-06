@@ -13,6 +13,7 @@
 
 namespace llvm {
 class Module;
+class GlobalVariable;
 }
 
 namespace obf {
@@ -97,6 +98,9 @@ std::string to_string(string_encoding_mode mode);
 std::string to_string(string_strategy_kind kind);
 std::string to_string(string_helper_shape shape);
 std::string to_string(string_key_schedule_kind schedule);
+
+// Shared initializer/provenance discovery only; no use or strategy analysis.
+bool is_source_string_candidate(const llvm::GlobalVariable& global);
 
 std::vector<string_encoding_result>
 analyze_string_encoding(const llvm::Module& module,

@@ -20,6 +20,7 @@ namespace obf {
 struct function_pipeline_state;
 struct obfuscation_config;
 struct function_report_entry;
+class native_string_ownership;
 // Note: protection_level is defined in config.h (included above), no forward needed
 
 using instruction_substitution_stage_candidates =
@@ -43,7 +44,8 @@ bool apply_indirect_dispatch_stage(const llvm::SmallVectorImpl<function_pipeline
 bool apply_string_encoding_stage(llvm::Module& module,
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config,
-                                 const virtualized_function_map* virtualized_functions = nullptr);
+                                 const virtualized_function_map* virtualized_functions,
+                                 native_string_ownership* native_ownership);
 
 bool apply_entropy_initialization_stage(llvm::Module& module, std::uint64_t seed_override = 0);
 

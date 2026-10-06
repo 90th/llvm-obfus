@@ -1,4 +1,5 @@
 #include "obf/plugin/obfuscator_plugin_internal.h"
+#include "obf/plugin/internal/native_string_ownership.h"
 #include "obf/report/coverage_report.h"
 
 #include "obf/transforms/entropy_initialization.h"
@@ -601,7 +602,8 @@ bool apply_indirect_dispatch_stage(const llvm::SmallVectorImpl<function_pipeline
 bool apply_string_encoding_stage(llvm::Module& module,
                                  const llvm::SmallVectorImpl<function_pipeline_state>& states,
                                  const obfuscation_config& config,
-                                 const virtualized_function_map* virtualized_functions) {
+                                 const virtualized_function_map* virtualized_functions,
+                                 native_string_ownership* native_ownership) {
   const llvm::StringMap<string_protection_owner> protected_functions =
       build_string_protection_map(module, states, virtualized_functions);
 
@@ -622,6 +624,7 @@ bool apply_string_encoding_stage(llvm::Module& module,
       },
       options,
       config.seed);
+  if (native_ownership != nullptr) { native_ownership->record_string_encoding(results); }
 
   if (coverage_reporting_enabled(module)) {
     for (const string_encoding_result& result : results) {

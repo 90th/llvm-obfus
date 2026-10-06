@@ -228,6 +228,150 @@ Generated ciphertext, build keys, local encoded strings, and VM bytecode have ex
 Discovery uses these roles instead of treating every C-string-shaped byte array as source text.
 This prevents another string-encoding pass from re-encoding generated binary data.
 
+### Native static-data ownership
+
+Native ELF and COFF final links enforce the original `strong_vm` owner's static-string obligation.
+This includes direct string globals and supported one-level pointer cells or tables.
+The compiler captures these dependencies before VM lowering or outlining moves their uses.
+Coverage reports do not enable or satisfy this check.
+
+Managed producers classify definitions as `plaintext`, `forward`, `non_string`, `protected`, or `unknown`.
+`protected` requires the compiler's actual encoding and ownership proof.
+An unclassified raw provider remains `unknown`, including a raw integer provider.
+Use a [hash-bound raw manifest](usage.md#raw-native-provider-manifests) to classify required raw definitions.
+A manifest cannot declare `protected`.
+
+The validator follows one static forwarding level to its leaf definitions.
+A second forwarding level rejects, even when the final leaf is non-string data.
+Required `plaintext` or `unknown` definitions reject the final link.
+Proven `non_string` data does not acquire a string obligation.
+Wholly numeric arrays and structs can establish non-string provenance, including nested numeric aggregates.
+The validator does not infer strings from byte loads or search final-image bytes for source text.
+
+The actual native linker determines the prevailing definitions and extracted archive members.
+Discarded weak definitions, discarded local readers, and unextracted string members do not add obligations.
+The proxy uses GNU ld or ld.lld map/cross-reference evidence for ELF.
+For native COFF, it uses MSVC link or lld-link map and library-search evidence.
+
+Required dependencies reject when the validator cannot identify their actual provider without ambiguity.
+The proxy preserves a requested user map.
+After rejection, it removes the newly linked primary image.
+
+Each managed object stores records in `.obfns`.
+ELF uses non-allocating `PROGBITS`.
+COFF uses link-information and remove section flags.
+Records have no symbol relocations, guard references, or public symbols.
+They do not force archive extraction.
+
+Compiler objects use the version 1 wire format with little-endian integers.
+Its 32-byte header has these fields:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | Magic bytes `OBNS` |
+| 4 | 2 | Version, `1` |
+| 6 | 2 | Header size, `32` |
+| 8 | 4 | Payload byte count |
+| 12 | 4 | Entry count |
+| 16 | 8 | Module identity |
+| 24 | 4 | Flags, `0` |
+| 28 | 4 | Reserved, `0` |
+
+Each entry starts with an eight-byte header: JSON byte count (`uint32`), kind (`uint16`), and flags (`uint16`, zero).
+Kind `1` identifies a reader.
+Kind `2` identifies a definition.
+UTF-8 JSON follows each entry header without padding.
+The payload byte count includes all entry headers and JSON bodies.
+Records contain symbol identities, dependency edges, and classifications, not source string contents.
+`local: true` identifies object-scoped compiler provenance, not a global symbol with the same spelling.
+Private managed data keeps its original linkage and can use a logical identity without a retained object symbol.
+Reader owners retain native symbols so the validator can check actual linker liveness.
+Raw manifest definitions require actual symbols, including local leaves.
+Malformed selected records reject the link.
+
+Reader JSON names the final object function symbol and its static-data dependencies:
+
+```json
+{"owner":"owned_reader","local":false,"dependencies":[{"symbol":"provider_cell","local":false}]}
+```
+
+Definition JSON names a data identity, its classification, and any forwarding targets:
+
+```json
+{"symbol":"provider_cell","local":false,"kind":"forward","targets":[{"symbol":"local_leaf","local":true}]}
+```
+
+Managed non-LTO ELF partial links use `obf-native-link` for `-r`, `-i`, and `--relocatable`.
+The proxy uses the actual partial linker's map and cross-reference evidence.
+It reconciles prevailing external definitions even when the partial inputs contain only providers.
+It preserves unresolved external dependencies for later links.
+A later link can select a new global winner.
+The partial link does not enforce the final `strong_vm` string obligation.
+
+The proxy writes scoped version 2 frames into the partial object's non-allocating `.obfns` section.
+The version 2 header uses little-endian integers:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | Magic bytes `OBNS` |
+| 4 | 2 | Version, `2` |
+| 6 | 2 | Header size, `64` |
+| 8 | 4 | Payload byte count |
+| 12 | 4 | Entry count |
+| 16 | 8 | Original module identity |
+| 24 | 4 | Flags. Bit `0` marks resolved authority. All other bits are zero. |
+| 28 | 4 | Nonzero scope identity |
+| 32 | 32 | Aggregate SHA256 digest |
+
+Version 2 uses the same eight-byte entry headers and reader/definition kinds as version 1.
+The proxy assigns distinct, dense scope identities within each canonical partial object.
+The enclosing frame's scope identifies its local definitions and local dependency edges.
+Two input instances can have the same original module identity without sharing a local scope.
+This includes separate compilations from the same source path.
+Logical private-data identities remain local to their original scope.
+
+Version 2 reader JSON also contains `source_owner`.
+`source_owner` preserves the original reader identity.
+Resolved readers also contain a `binding` object.
+For a resolved reader, `owner` identifies the actual output function symbol.
+`binding.section` names its actual output section.
+`binding.value` gives its hexadecimal section-relative offset.
+`binding.type` is `2`, the ELF function-symbol type.
+The proxy binds local readers through actual input-section placement and source-symbol offsets.
+It requires a unique output match and does not guess a renamed local symbol.
+Repeated managed partial links preserve scopes and bind readers to the new output.
+Unresolved readers omit `binding` instead of using a guessed placement.
+
+Each version 2 frame contains the same aggregate SHA256 digest.
+The digest covers the exact partial-object bytes with every version 2 digest field set to zero.
+For an extracted archive member, it covers the exact member bytes.
+The proxy validates this digest before it trusts reconciled authority.
+It replaces the partial output only after reconciliation, record replacement, and digest binding succeed.
+The digest binds the authority to an object. It does not prove a source classification.
+
+Raw partial links of ownership-bearing objects are not a supported workflow.
+Raw links can lose original winner choices, local scopes, or physical reader bindings.
+Multiple version 1 frames or a stale version 2 digest leave unresolved provenance.
+A later managed partial link preserves this limit. It does not restore lost authority.
+A final strict reader rejects when its required provenance remains unresolved.
+A raw manifest cannot reconstruct that authority or override conflicting managed records.
+One version 1 frame can be indistinguishable from an original compiler object.
+The validator cannot detect every raw partial-link history.
+
+This contract covers native objects, managed ELF partial links, and actually extracted archive members in one final image.
+It does not establish ownership across a DSO or DLL boundary.
+It does not cover runtime argument buffers, dynamically initialized pointers, arbitrary pointer graphs, or unavailable provider provenance.
+An unsupported required static dependency rejects instead of receiving a guessed classification.
+
+Ordinary `vm` remains best-effort and does not acquire this mandatory check.
+Ordinary `vm` or `none` can accept unresolved raw collections when no strict ownership proof is required.
+Malformed selected metadata still rejects.
+Compile-only, partial-link, and query actions do not establish final enforcement.
+Runtime injection and checksum binding remain final-link actions.
+Native return/effect checks do not prove VM execution at every accepted site.
+Managed LTO keeps its separate validation contract.
+
+
 ## Constants
 
 `constant_encoding.mode` supports `off`, `mba_inline`, `keyed_pool`, `auto`, and `all`.
