@@ -283,7 +283,10 @@ Kind `2` identifies a definition.
 UTF-8 JSON follows each entry header without padding.
 The payload byte count includes all entry headers and JSON bodies.
 Records contain symbol identities, dependency edges, and classifications, not source string contents.
-`local: true` identifies an object-local symbol, not a global symbol with the same spelling.
+`local: true` identifies object-scoped compiler provenance, not a global symbol with the same spelling.
+Private managed data keeps its original linkage and can use a logical identity without a retained object symbol.
+Reader owners retain native symbols so the validator can check actual linker liveness.
+Raw manifest definitions require actual symbols, including local leaves.
 Malformed selected records reject the link.
 
 Reader JSON names the final object function symbol and its static-data dependencies:
@@ -292,7 +295,7 @@ Reader JSON names the final object function symbol and its static-data dependenc
 {"owner":"owned_reader","local":false,"dependencies":[{"symbol":"provider_cell","local":false}]}
 ```
 
-Definition JSON names the final object data symbol, its classification, and any forwarding targets:
+Definition JSON names a data identity, its classification, and any forwarding targets:
 
 ```json
 {"symbol":"provider_cell","local":false,"kind":"forward","targets":[{"symbol":"local_leaf","local":true}]}

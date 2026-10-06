@@ -1277,7 +1277,18 @@ def main() -> int:
             if required_args and _last_option_value(routed_args, "--lto-newpm-passes") != "obf-lto-finalize,verify":
                 raise _wrapper_error("compiler config overrides the required O0 LTO finalization pipeline")
             linker_args = routed_args
-        elif final_link_action and object_format in {"elf", "coff"}:
+
+        if final_link_action:
+            if not Path(RUNTIME_ARCHIVE).is_file():
+                raise _wrapper_error(f"missing runtime archive: {RUNTIME_ARCHIVE}")
+            bound_object_format = _bound_object_format(target_triple, effective_args, os.name == "nt")
+        resolved_config = _resolved_config_path(config_path, env)
+        self_checksum_requested = final_link_action and _query_self_checksum(resolved_config, env)
+        if bound_object_format == "pe-unsupported-host":
+            if self_checksum_requested:
+                raise _wrapper_error("PE self_checksum auto-binding currently requires a native Windows host")
+            bound_object_format = None
+        if final_link_action and not needs_backend and not dry_run and object_format in {"elf", "coff"}:
             if not NATIVE_LINKER or not Path(NATIVE_LINKER).is_file():
                 raise _wrapper_error(f"missing native ownership linker proxy: {NATIVE_LINKER or '<not configured>'}")
             native_real_linker = _resolve_executable(linker[0])
@@ -1293,19 +1304,8 @@ def main() -> int:
                 clang_args.extend(["-Xlinker", f"--obf-native-provenance={Path(manifest).absolute()}"])
             routed_commands, _ = _driver_plan(compiler, clang_args, env)
             linker_args = _verify_native_dispatch(routed_commands, native_real_linker)
-        elif provenance_manifests:
+        elif provenance_manifests and object_format not in {"elf", "coff"}:
             raise _wrapper_error("--obf-native-provenance supports native ELF and COFF final links only")
-
-        if final_link_action:
-            if not Path(RUNTIME_ARCHIVE).is_file():
-                raise _wrapper_error(f"missing runtime archive: {RUNTIME_ARCHIVE}")
-            bound_object_format = _bound_object_format(target_triple, effective_args, os.name == "nt")
-        resolved_config = _resolved_config_path(config_path, env)
-        self_checksum_requested = final_link_action and _query_self_checksum(resolved_config, env)
-        if bound_object_format == "pe-unsupported-host":
-            if self_checksum_requested:
-                raise _wrapper_error("PE self_checksum auto-binding currently requires a native Windows host")
-            bound_object_format = None
         build_id_modes = _linker_build_id_modes(_user_linker_args(effective_args)) if bound_object_format == "elf" else []
         if self_checksum_requested and bound_object_format is not None:
             if not binder_available:

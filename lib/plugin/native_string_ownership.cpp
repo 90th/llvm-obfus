@@ -356,17 +356,16 @@ bool native_string_ownership::emit(llvm::Module& module) {
     }
   }
 
-  // Private assembler labels are commonly omitted from object symbol tables.
-  // Internal linkage retains the same object-local identity without exporting
-  // anything, keeping data live, or introducing an archive-extraction edge.
-  for (const snapshot::identity& identity : snapshot_->identities) {
-    auto* value = llvm::dyn_cast_or_null<llvm::GlobalValue>(static_cast<llvm::Value*>(identity.value));
-    if (value != nullptr && !value->isDeclarationForLinker()) {
-      if (value->hasPrivateLinkage()) { value->setLinkage(llvm::GlobalValue::InternalLinkage); }
-      if (!value->hasName()) {
-        value->setName((llvm::Twine("ns_") + llvm::Twine(snapshot_->module_id) + "_" +
-                        llvm::Twine(&identity - snapshot_->identities.data())).str());
-      }
+  // Reader liveness is proved by the linker using a physical function symbol.
+  // Data records use object-scoped semantic identities: private source strings
+  // and generated binary providers must retain their original linkage.
+  for (const snapshot::reader& reader : snapshot_->readers) {
+    llvm::GlobalValue* owner = snapshot_->live_value(reader.owner);
+    if (owner == nullptr || owner->isDeclarationForLinker()) { continue; }
+    if (owner->hasPrivateLinkage()) { owner->setLinkage(llvm::GlobalValue::InternalLinkage); }
+    if (!owner->hasName()) {
+      owner->setName((llvm::Twine("ns_") + llvm::Twine(snapshot_->module_id) + "_" +
+                      llvm::Twine(reader.owner)).str());
     }
   }
 
@@ -377,7 +376,7 @@ bool native_string_ownership::emit(llvm::Module& module) {
       llvm::report_fatal_error("native string ownership has no live object symbol");
     }
     llvm::SmallString<128> symbol;
-    mangler.getNameWithPrefix(symbol, value, true);
+    mangler.getNameWithPrefix(symbol, value, false);
     return llvm::json::Object{{"symbol", symbol.str().str()}, {"local", value->hasLocalLinkage()}};
   };
   struct encoded_entry { std::string key; unsigned kind; llvm::json::Object body; };

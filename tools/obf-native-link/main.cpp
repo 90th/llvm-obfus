@@ -837,9 +837,6 @@ class validator {
     // cannot become an accepted second forwarding level on a later path.
     if (accepted.contains(key)) { return; }
     if (!active.insert(key).second) { fail("unresolved cyclic native provenance for " + ref.symbol + " required by " + owner); }
-    if (ref.local && def.kind == "forward" && !has_definition(*provider, ref)) {
-      fail("provider lacks actual forward definition " + ref.symbol + " required by " + owner);
-    }
     if (def.kind == "plaintext") { fail("strong_vm reader " + owner + " requires plaintext static string " + ref.symbol + " in " + provider->label); }
     if (def.kind == "unknown") { fail("unknown native provenance for " + ref.symbol + " required by " + owner); }
     if (def.kind == "forward") {

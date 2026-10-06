@@ -394,28 +394,103 @@ class Harness:
             return
         reader = self.compile("discarded-static-reader", "discarded-reader.c", "integer",
                               policy=self.strong, extra=["-ffunction-sections"])
+        owner = self.coff_local_reader(reader)
         integers = self.compile("discarded-integer-provider", "provider.c", "integer")
         plaintext = self.compile("discarded-plaintext-provider", "provider.c", "direct",
                                  managed=False)
         for linker in self.args.linker:
+            kept_authority = self.work / f"retained-{linker}-baseline.lldmap"
+            baseline_authority = self.work / f"discarded-{linker}-baseline.lldmap"
+            user_authority = self.work / f"discarded-{linker}-wrapped.lldmap"
+            kept_flags = ["-Wl,/OPT:NOREF"]
+            baseline_flags = ["-Wl,/OPT:REF"]
+            user_flags = ["-Wl,/OPT:REF"]
+            if linker == "lld":
+                kept_flags.append(f"-Wl,/lldmap:{kept_authority}")
+                baseline_flags.append(f"-Wl,/lldmap:{baseline_authority}")
+                user_flags.append(f"-Wl,/lldmap:{user_authority}")
             kept, kept_map = self.link(f"retained-{linker}-baseline", [reader, integers, plaintext],
-                                linker, managed=False, extra=["-Wl,/OPT:NOREF"])
+                                       linker, managed=False, extra=kept_flags)
             self.execute(kept, "integer")
-            require("audit_dead_read" in kept_map.read_text(encoding="utf-8", errors="replace"),
+            require(self.coff_reader_in_map(kept_authority if linker == "lld" else kept_map,
+                                            reader, owner),
                     "actual linker did not retain the local ownership reader under /OPT:NOREF")
             self.link(f"retained-{linker}-rejected", [reader, integers, plaintext],
                       linker, succeeds=False, extra=["-Wl,/OPT:NOREF"])
             baseline, baseline_map = self.link(f"discarded-{linker}-baseline", [reader, integers, plaintext],
-                                    linker, managed=False, extra=["-Wl,/OPT:REF"])
+                                               linker, managed=False, extra=baseline_flags)
             self.execute(baseline, "integer")
             image, user_map = self.link(f"discarded-{linker}-wrapped", [reader, integers, plaintext],
-                                 linker, extra=["-Wl,/OPT:REF"])
+                                       linker, extra=user_flags)
             self.execute(image, "integer")
-            for map_path in (baseline_map, user_map):
-                require("audit_dead_read" not in map_path.read_text(encoding="utf-8", errors="replace"),
+            authority_maps = (baseline_authority, user_authority) if linker == "lld" else (baseline_map, user_map)
+            for map_path in authority_maps:
+                require(not self.coff_reader_in_map(map_path, reader, owner),
                         "actual linker retained the local ownership reader under /OPT:REF")
             self.results.append({"case": "discarded-static-reader", "linker": linker,
                                  "accepted": True, "native_values_and_effects": True})
+
+    def coff_local_reader(self, obj):
+        import struct
+
+        data = obj.read_bytes()
+        require(len(data) >= 20 and struct.unpack_from("<H", data)[0] == 0x8664,
+                "local-reader authority requires a native x64 COFF object")
+        section_count = struct.unpack_from("<H", data, 2)[0]
+        section_start = 20 + struct.unpack_from("<H", data, 16)[0]
+        payloads = []
+        for index in range(section_count):
+            offset = section_start + index * 40
+            require(offset + 40 <= len(data), "truncated COFF section table")
+            if data[offset:offset + 8].rstrip(b"\0") == b".obfns":
+                size, start = struct.unpack_from("<II", data, offset + 16)
+                require(start + size <= len(data), "truncated native ownership section")
+                payloads.append(data[start:start + size])
+        owners = set()
+        for payload in payloads:
+            require(len(payload) >= 32, "truncated native ownership header")
+            magic, version, header_size, byte_count, count, _, flags, reserved = struct.unpack_from(
+                "<4sHHIIQII", payload)
+            require((magic, version, header_size, flags, reserved) == (b"OBNS", 1, 32, 0, 0)
+                    and byte_count == len(payload) - header_size,
+                    "cannot decode native ownership identities")
+            offset = header_size
+            for _ in range(count):
+                require(offset + 8 <= len(payload), "truncated native ownership entry")
+                size, kind, entry_flags = struct.unpack_from("<IHH", payload, offset)
+                offset += 8
+                require(entry_flags == 0 and offset + size <= len(payload),
+                        "cannot decode native ownership entry identity")
+                if kind == 1:
+                    record = json.loads(payload[offset:offset + size].decode("utf-8"))
+                    if record["local"]:
+                        owners.add(record["owner"])
+                offset += size
+            require(offset == len(payload), "unexpected native ownership payload bytes")
+        require(len(owners) == 1, "fixture must identify one actual local ownership reader")
+        return owners.pop()
+
+    def coff_reader_in_map(self, map_path, obj, owner):
+        contributor = None
+        for line in map_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            fields = line.split()
+            if len(fields) < 4:
+                continue
+            if ":" in fields[0] and fields[1] == owner:
+                section, _ = fields[0].split(":", 1)
+                source = fields[-1].replace("\\", "/").rsplit("/", 1)[-1]
+                if int(section, 16) != 0 and source == obj.name:
+                    return True
+            elif ":" not in fields[0]:
+                rendered = " ".join(fields[3:])
+                if ":(" in rendered:
+                    source = rendered.split(":(", 1)[0]
+                    contributor = source.replace("\\", "/").rsplit("/", 1)[-1]
+                elif rendered == owner and contributor == obj.name and int(fields[0], 16) != 0:
+                    return True
+                elif rendered.startswith("."):
+                    contributor = None
+        return False
 
     def cleanup_output(self):
         if self.args.format != "elf" or "bfd" not in self.args.linker:

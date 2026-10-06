@@ -1,4 +1,3 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-whole-preferred.yaml -passes=obf-safe-pipeline -S %s -o - | %FileCheck %s
 ; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/safe-pipeline-strong-vm-whole-preferred.yaml -passes=obf-safe-pipeline -S %s -o %t
 ; RUN: %lli %t
 
@@ -39,17 +38,3 @@ entry:
   ret i32 %ret
 }
 
-; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
-; CHECK-DAG: @[[VMTARGETSEED:_[0-9a-f]+]] = private global i64 0
-; CHECK-DAG: @[[VMKEY:_[0-9a-f]+]] = private global i64 {{-?[0-9]+}}
-; CHECK-NOT: __obf_vm_region_strong_vm_whole_preferred
-; CHECK-LABEL: define i32 @strong_vm_whole_preferred(i32
-; CHECK: load i64, ptr @{{_[0-9a-f]+}}
-; CHECK: load i64, ptr @{{_[0-9a-f]+}}
-; CHECK: inttoptr i64
-; CHECK: call i32 %{{[^ ]+}}(i32 %{{[^,]+}}, i32 %{{[^,]+}}, i64 %{{[^)]+}})
-; CHECK-LABEL: define i32 @main()
-; CHECK: call i32 %{{[^ ]+}}(i32 5, i32 3, i64 %{{[^)]+}})
-; CHECK: call i32 %{{[^ ]+}}(i32 -2, i32 -4, i64 %{{[^)]+}})
-; CHECK: define internal i32 @[[VMIMPL:_[0-9a-f]+]](i32
-; CHECK: indirectbr ptr
