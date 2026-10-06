@@ -44,6 +44,8 @@ struct Effects {
   unsigned local_cleanups;
   unsigned local_catches;
   unsigned payload_failures;
+  unsigned handler_entries;
+  unsigned handler_cleanup_failures;
 };
 struct CleanupLog {
   unsigned count;
@@ -54,6 +56,13 @@ static NOINLINE void append_cleanup(CleanupLog *log, unsigned id) noexcept {
   unsigned index = log->count++;
   if (index < 8) log->ids[index] = id;
   else ++log->overflow;
+}
+static NOINLINE void observe_handler_entry(Effects *e, const CleanupLog *log,
+                                           unsigned native, unsigned local) noexcept {
+  ++e->handler_entries;
+  if (e->local_cleanups != 1 || log->overflow != 0 || log->count != 2 ||
+      log->ids[0] != native || log->ids[1] != local)
+    ++e->handler_cleanup_failures;
 }
 using ThrowCB = U (*)(int, U, Effects *, CleanupLog *);
 extern "C" {
@@ -142,6 +151,7 @@ extern "C" NOINLINE U unwind_catch_import(int x, U cookie, Effects *e,
     ++e->completed;
     return result + 47;
   } catch (const Payload &p) {
+    observe_handler_entry(e, log, 31, 41);
     ++e->local_catches;
     U word = U(uint32_t(x));
     if (p.code != (word ^ 0x13579bdf2468ace0ULL) || p.cookie != cookie ||
@@ -160,6 +170,7 @@ extern "C" NOINLINE U unwind_catch_callback(ThrowCB cb, int x, U cookie,
     ++e->completed;
     return result + 59;
   } catch (const Payload &p) {
+    observe_handler_entry(e, log, 32, 42);
     ++e->local_catches;
     U word = U(uint32_t(x));
     if (p.code != (word ^ 0x3579bdf12468ace0ULL) || p.cookie != cookie ||
@@ -190,6 +201,7 @@ extern "C" NOINLINE U unwind_incoming_caller(int x, U cookie, Effects *e,
     e->value ^= cookie + 71;
     return result + 73;
   } catch (const Payload &p) {
+    observe_handler_entry(e, log, 31, 43);
     ++e->local_catches;
     U word = U(uint32_t(x));
     if (p.code != (word ^ 0x13579bdf2468ace0ULL) || p.cookie != cookie ||
@@ -268,7 +280,7 @@ int main(int argc, char **argv) {
   U seed = strtoull(argv[1], &end, 0);
   check(end && *end == 0, "numeric runtime seed");
   const int inputs[] = {17, -37, 23, -1009, 0, -1, 67, -37};
-  unsigned checks = 0, escapes = 0, local_catches = 0, cleanup_events = 0;
+  unsigned checks = 0, escapes = 0, local_catches = 0, cleanup_events = 0, handler_entries = 0;
   U digest = seed;
 #ifdef INCOMING
   const unsigned modes = 1;
@@ -284,7 +296,7 @@ int main(int argc, char **argv) {
         U word = U(uint32_t(x));
         U cookie = seed + round * 0x11223344556677ULL + index * 97 + mode * 101;
         U start = seed ^ (cookie * 11);
-        Effects e{start, start ^ cookie, 0, 0, 0, 0, 0};
+        Effects e{start, start ^ cookie, 0, 0, 0, 0, 0, 0, 0};
         CleanupLog log{};
 #ifdef INCOMING
         bool callback = false, local_catch = true;
@@ -340,16 +352,20 @@ int main(int argc, char **argv) {
         check(e.local_cleanups == unsigned(local != 0), "protected cleanup exact-once");
         check(e.local_catches == unsigned(x < 0 && local_catch) && e.payload_failures == 0,
               "local handler type and exact payload");
+        check(e.handler_entries == unsigned(x < 0 && local_catch) &&
+              e.handler_cleanup_failures == 0, "cleanup state at local-handler entry");
         ++checks;
         local_catches += e.local_catches;
         cleanup_events += log.count;
+        handler_entries += e.handler_entries;
         digest = ((digest << 9) | (digest >> 55)) ^ result ^ e.value ^ e.store ^ log.count;
       }
     }
   }
   printf("{\"ok\":true,\"checks\":%u,\"escapes\":%u,\"local_catches\":%u,"
-         "\"cleanup_events\":%u,\"digest\":%llu}\n",
-         checks, escapes, local_catches, cleanup_events, (unsigned long long)digest);
+         "\"cleanup_events\":%u,\"handler_entries\":%u,\"digest\":%llu}\n",
+         checks, escapes, local_catches, cleanup_events, handler_entries,
+         (unsigned long long)digest);
 }
 '''
 
@@ -436,6 +452,7 @@ class Harness:
         self.raw = [args.clang, "--driver-mode=g++"]
         self.commands = work / "commands.jsonl"
         self.result_path = work / "result.json"
+        self.strict_rejections = {}
         self.results = {
             "work": str(work), "commands": str(self.commands), "status": "running",
             "sources": {name: str(work / name) for name in
@@ -520,15 +537,31 @@ class Harness:
             owners = (*VM_OWNERS, *EXCLUDED_OWNERS) if kind == "positive" else (INCOMING_OWNER,)
             policy(config, owners, level)
         driver = [self.args.wrapper, f"--obf-config={config}"] if level else self.raw
-        compiled = self.run([*driver, *CXX_FLAGS, f"-O{optimization}", "-fPIC",
+        diagnostic_flags = ["-fdiagnostics-format=clang", "-fno-color-diagnostics",
+                            "-fmessage-length=0"] if strict else []
+        compiled = self.run([*driver, *CXX_FLAGS, *diagnostic_flags, f"-O{optimization}", "-fPIC",
                              "-c", source, "-o", obj], report=report, succeeds=not strict)
         if strict:
             require(not obj.exists(), "forbidden incoming invoke produced an object")
-            data = self.report(report) if report else None
-            if data is not None:
-                check_incoming(data, True)
+            # Parse the severity envelope, not the rejection prose. The reports-on
+            # run supplies the diagnostic after structured semantic validation.
+            fatal = [line.removeprefix("fatal error: ") for line in compiled.stderr.splitlines()
+                     if line.startswith("fatal error: ")]
+            require(len(fatal) == 1, "strict rejection lacks one fatal compiler diagnostic")
+            if report:
+                check_incoming(self.report(report), True)
+                self.strict_rejections[optimization] = {"diagnostic": fatal[0], "case": name}
+                reference = None
+            else:
+                reference = self.strict_rejections.get(optimization)
+                require(reference is not None, "missing reports-on semantic rejection reference")
+                require(fatal[0] == reference["diagnostic"],
+                        "reports-off failure differs from the semantic boundary rejection")
             record.update(status="rejected", compile_exit=compiled.returncode,
-                          rejection="incoming_invoke", compiler_evidence="semantic_report" if data else "not_available",
+                          rejection="incoming_invoke",
+                          compiler_evidence="semantic_report" if report else "matched_semantic_reference",
+                          fatal_diagnostic=fatal[0],
+                          rejection_reference=reference["case"] if reference else None,
                           library=None, consumer=None)
             self.save()
             return record
@@ -555,9 +588,9 @@ class Harness:
         native = self.run(record["runtime_command"])
         outcome = json.loads(native.stdout)
         expected = {"ok": True, "checks": 144, "escapes": 48, "local_catches": 24,
-                    "cleanup_events": 528} if kind == "positive" else {
+                    "cleanup_events": 528, "handler_entries": 24} if kind == "positive" else {
                         "ok": True, "checks": 24, "escapes": 0, "local_catches": 12,
-                        "cleanup_events": 96}
+                        "cleanup_events": 96, "handler_entries": 12}
         require(all(outcome.get(key) == value for key, value in expected.items()),
                 f"missing native semantic checks: {name}: {outcome}")
         require(type(outcome.get("digest")) is int, f"missing native outcome digest: {name}")

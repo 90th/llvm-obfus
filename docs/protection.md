@@ -84,6 +84,10 @@ Compiler reports establish emission, not execution through the VM.
 Functions with local handlers or exception cleanup retain their VM policy exclusions.
 Ordinary `vm` preserves same-module incoming `invoke` calls at the original-signature wrapper.
 Strict VM levels reject these incoming calls.
+
+The regression checks cleanup state at each local handler's entry, before host cleanup.
+Reports-off strict failures must match a reports-on failure with a validated semantic rejection record.
+The comparison does not hard-code diagnostic prose.
 These checks do not establish support for arbitrary exception runtimes or cross-toolchain exception ABIs.
 
 ### VM caller tokens
