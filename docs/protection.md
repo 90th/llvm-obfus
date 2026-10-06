@@ -263,8 +263,8 @@ COFF uses link-information and remove section flags.
 Records have no symbol relocations, guard references, or public symbols.
 They do not force archive extraction.
 
-The version 1 wire format uses little-endian integers.
-The 32-byte header has these fields:
+Compiler objects use the version 1 wire format with little-endian integers.
+Its 32-byte header has these fields:
 
 | Offset | Size | Field |
 |---|---|---|
@@ -301,14 +301,74 @@ Definition JSON names a data identity, its classification, and any forwarding ta
 {"symbol":"provider_cell","local":false,"kind":"forward","targets":[{"symbol":"local_leaf","local":true}]}
 ```
 
-This contract covers native objects and actually extracted archive members in one final image.
+Managed non-LTO ELF partial links use `obf-native-link` for `-r`, `-i`, and `--relocatable`.
+The proxy uses the actual partial linker's map and cross-reference evidence.
+It reconciles prevailing external definitions even when the partial inputs contain only providers.
+It preserves unresolved external dependencies for later links.
+A later link can select a new global winner.
+The partial link does not enforce the final `strong_vm` string obligation.
+
+The proxy writes scoped version 2 frames into the partial object's non-allocating `.obfns` section.
+The version 2 header uses little-endian integers:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | Magic bytes `OBNS` |
+| 4 | 2 | Version, `2` |
+| 6 | 2 | Header size, `64` |
+| 8 | 4 | Payload byte count |
+| 12 | 4 | Entry count |
+| 16 | 8 | Original module identity |
+| 24 | 4 | Flags. Bit `0` marks resolved authority. All other bits are zero. |
+| 28 | 4 | Nonzero scope identity |
+| 32 | 32 | Aggregate SHA256 digest |
+
+Version 2 uses the same eight-byte entry headers and reader/definition kinds as version 1.
+The proxy assigns distinct, dense scope identities within each canonical partial object.
+The enclosing frame's scope identifies its local definitions and local dependency edges.
+Two input instances can have the same original module identity without sharing a local scope.
+This includes separate compilations from the same source path.
+Logical private-data identities remain local to their original scope.
+
+Version 2 reader JSON also contains `source_owner`.
+`source_owner` preserves the original reader identity.
+Resolved readers also contain a `binding` object.
+For a resolved reader, `owner` identifies the actual output function symbol.
+`binding.section` names its actual output section.
+`binding.value` gives its hexadecimal section-relative offset.
+`binding.type` is `2`, the ELF function-symbol type.
+The proxy binds local readers through actual input-section placement and source-symbol offsets.
+It requires a unique output match and does not guess a renamed local symbol.
+Repeated managed partial links preserve scopes and bind readers to the new output.
+Unresolved readers omit `binding` instead of using a guessed placement.
+
+Each version 2 frame contains the same aggregate SHA256 digest.
+The digest covers the exact partial-object bytes with every version 2 digest field set to zero.
+For an extracted archive member, it covers the exact member bytes.
+The proxy validates this digest before it trusts reconciled authority.
+It replaces the partial output only after reconciliation, record replacement, and digest binding succeed.
+The digest binds the authority to an object. It does not prove a source classification.
+
+Raw partial links of ownership-bearing objects are not a supported workflow.
+Raw links can lose original winner choices, local scopes, or physical reader bindings.
+Multiple version 1 frames or a stale version 2 digest leave unresolved provenance.
+A later managed partial link preserves this limit. It does not restore lost authority.
+A final strict reader rejects when its required provenance remains unresolved.
+A raw manifest cannot reconstruct that authority or override conflicting managed records.
+One version 1 frame can be indistinguishable from an original compiler object.
+The validator cannot detect every raw partial-link history.
+
+This contract covers native objects, managed ELF partial links, and actually extracted archive members in one final image.
 It does not establish ownership across a DSO or DLL boundary.
 It does not cover runtime argument buffers, dynamically initialized pointers, arbitrary pointer graphs, or unavailable provider provenance.
 An unsupported required static dependency rejects instead of receiving a guessed classification.
 
 Ordinary `vm` remains best-effort and does not acquire this mandatory check.
-Compile-only and query actions do not enforce a final link.
-An ELF partial `-r` link retains the records for the later native final link.
+Ordinary `vm` or `none` can accept unresolved raw collections when no strict ownership proof is required.
+Malformed selected metadata still rejects.
+Compile-only, partial-link, and query actions do not establish final enforcement.
+Runtime injection and checksum binding remain final-link actions.
+Native return/effect checks do not prove VM execution at every accepted site.
 Managed LTO keeps its separate validation contract.
 
 

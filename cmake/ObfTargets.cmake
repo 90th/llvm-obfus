@@ -177,7 +177,7 @@ target_link_libraries(obf-driver PRIVATE obf_core ${OBF_LLVM_LIBS})
 
 add_executable(obf-native-link tools/obf-native-link/main.cpp)
 obf_apply_static_llvm_target_settings(obf-native-link)
-llvm_map_components_to_libnames(OBF_NATIVE_LINK_LIBS Object Support)
+llvm_map_components_to_libnames(OBF_NATIVE_LINK_LIBS Object ObjCopy Support)
 target_link_libraries(obf-native-link PRIVATE ${OBF_NATIVE_LINK_LIBS})
 set(OBF_NATIVE_LINK "${CMAKE_CURRENT_BINARY_DIR}/obf-native-link${CMAKE_EXECUTABLE_SUFFIX}")
 

@@ -122,8 +122,36 @@ A rejected ownership check removes the newly linked primary image.
 GNU ld and ld.lld provide ELF map/cross-reference authority.
 MSVC link and lld-link provide native COFF map and library-search authority.
 Keep the normal Windows CRT startup and the matching runtime.
-An ELF partial `-r` link retains ownership records but does not establish final enforcement.
+Use the matching wrapper for non-LTO ELF partial links as well as the final native link.
+For `-r`, `-i`, and `--relocatable`, the proxy reconciles ownership against the actual partial linker's map.
+It resolves prevailing providers even when no strict reader participates yet.
+It preserves local scopes, actual reader bindings, and unresolved external dependencies for later links.
+Repeated managed partial links preserve this information when a later link selects a new global winner.
+The partial object contains scoped, digest-bound version 2 records.
+The digest binds reconciled authority to the exact object bytes, not to a guessed source classification.
+
+For example, combine managed objects before the final link:
+
+```sh
+build/obf-clang --obf-config=build/usage-demo/protect.yaml \
+  -r -nostdlib build/usage-demo/sample.o -o build/usage-demo/sample-partial.o
+build/obf-clang --obf-config=build/usage-demo/protect.yaml \
+  build/usage-demo/sample-partial.o -o build/usage-demo/sample-partial
+```
+
+A partial link does not enforce the final `strong_vm` string obligation or inject the runtime.
+Use the wrapper for the final link to enforce that obligation.
 Compile-only, dry-run, and query actions also do not establish final enforcement.
+An accepted native run checks return values and effects. It does not prove VM execution at every site.
+
+Do not use a raw linker to combine objects that contain ownership records.
+Multiple version 1 frames and transformed version 2 objects can lose required ownership authority.
+A later managed partial link keeps that provenance unresolved.
+It does not restore the lost winner choices, local scopes, or reader bindings.
+A strict final link rejects when it needs unresolved provenance.
+Ordinary `vm` and `none` keep best-effort behavior when no strict proof is required.
+Malformed selected records still reject.
+One version 1 frame can hide raw partial-link history. The validator cannot detect every such case.
 See [native static-data ownership](protection.md#native-static-data-ownership) for the record ABI and scope limits.
 
 ### Raw native provider manifests
@@ -209,6 +237,8 @@ Hash the retained object bytes that the archiver stored as that member.
 Recreate the manifest after any provider change.
 Required missing definitions, hash mismatches, invalid records, and conflicting declarations reject the link.
 Declarations that conflict with managed provenance also reject.
+A raw manifest cannot reconstruct authority that a raw partial link lost.
+It cannot make a later managed partial link restore that authority.
 
 The validator checks a provider entry only when its selected input needs that classification.
 Unextracted string members do not reject, and unused member declarations do not add obligations.

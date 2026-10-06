@@ -1294,7 +1294,8 @@ def main() -> int:
             bound_object_format = None
         if final_link_action and bound_object_format is not None and (self_checksum_requested or binder_available):
             _validate_driver_bind_output(effective_args, require_explicit=self_checksum_requested)
-        if final_link_action and not needs_backend and not dry_run and object_format in {"elf", "coff"}:
+        if (link_action and not needs_backend and not dry_run and
+                (object_format == "elf" or (final_link_action and object_format == "coff"))):
             if not NATIVE_LINKER or not Path(NATIVE_LINKER).is_file():
                 raise _wrapper_error(f"missing native ownership linker proxy: {NATIVE_LINKER or '<not configured>'}")
             native_real_linker = _resolve_executable(linker[0])
@@ -1302,9 +1303,10 @@ def main() -> int:
                 raise _wrapper_error(f"cannot resolve actual native linker: {linker[0]}")
             env["OBF_NATIVE_REAL_LINKER"] = native_real_linker
             env["OBF_NATIVE_LINK_FLAVOR"] = object_format
-            native_result_directory = tempfile.TemporaryDirectory(prefix="obf-native-result-")
-            native_result_file = Path(native_result_directory.name) / "output"
-            env["OBF_NATIVE_LINK_RESULT"] = str(native_result_file)
+            if final_link_action:
+                native_result_directory = tempfile.TemporaryDirectory(prefix="obf-native-result-")
+                native_result_file = Path(native_result_directory.name) / "output"
+                env["OBF_NATIVE_LINK_RESULT"] = str(native_result_file)
             msvc_link_job = any(arg.lower().startswith(("-out:", "/out:")) for arg in linker_args)
             if msvc_link_job:
                 # The MSVC toolchain selects a tool name with -fuse-ld; it

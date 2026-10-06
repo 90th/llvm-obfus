@@ -15,7 +15,8 @@ from vm_incoming_abi import run_process
 
 
 KINDS = {"direct": 0, "cell": 1, "table": 2, "integer": 3, "unused": 4,
-         "integer-cell": 5, "integer-chain": 6, "matrix": 7, "struct": 8}
+         "integer-cell": 5, "integer-chain": 6, "matrix": 7, "struct": 8,
+         "indexed-direct": 9}
 VALUES = {
     "direct": [110] * 6,
     "cell": [110, 65, 84, 110, 65, 84],
@@ -25,6 +26,10 @@ VALUES = {
     "integer-chain": [110, 110, 110, 78, 78, 78],
     "matrix": [110, 78, 110, 31, 47, 31],
     "struct": [110, 110, 110, 78, 78, 78],
+    "indexed-numeric": [110, 78, 12, 110, 78, 12],
+    "indexed-plaintext": [110, 83, 84, 110, 83, 84],
+    "local-primary-plaintext": [110, 83, 84, 110, 78, 12],
+    "local-aux-plaintext": [110, 78, 12, 110, 83, 84],
 }
 
 
@@ -83,10 +88,10 @@ class Harness:
         self.vm = self.policy("vm", "vm")
         self.main = self.compile("consumer", "consumer.c", "integer", managed=False)
 
-    def policy(self, name, level):
+    def policy(self, name, level, *, owners=("audit_read", "audit_runtime")):
         path = self.work / f"{name}.yaml"
         lines = ["seed: 8675309", "default_level: none", "targets:"]
-        for owner in ("audit_read", "audit_runtime"):
+        for owner in owners:
             lines += [f"  - match: {owner}", f"    level: {level}"]
         lines += ["vm:", "  max_mba_depth: 0", "self_checksum:", "  enabled: false",
                   "security:", "  fail_on_public_obf_symbol: true"]
@@ -164,6 +169,17 @@ class Harness:
             require(not image.exists(), f"rejected native image survived: {image}")
         return image, map_path
 
+    def partial_link(self, name, inputs, linker, *, managed=True, action="-r",
+                     selected=(), unused=()):
+        obj = self.work / f"{name}.o"
+        map_path = self.work / f"{name}.map"
+        driver = [self.wrapper, f"--obf-config={self.none}"] if managed else self.raw
+        self.run([*driver, f"-fuse-ld={linker}", action, "-nostdlib", "-no-pie",
+                  f"-Wl,-Map,{map_path},--cref", *inputs, "-o", obj])
+        require(obj.is_file(), f"partial linker did not produce its object: {obj}")
+        self.map_members(map_path, selected=selected, unused=unused)
+        return obj
+
     def execute(self, image, kind):
         data = json.loads(self.run([image]).stdout)
         require(data == {"values": VALUES[kind], "effects": VALUES[kind],
@@ -177,8 +193,9 @@ class Harness:
         for member in unused:
             require(member.name.lower() not in text, f"actual linker extracted unused {member}: {map_path}")
 
-    def outcome(self, name, inputs, kind, *, accepts, manifest=None, selected=(), unused=()):
-        for linker in self.args.linker:
+    def outcome(self, name, inputs, kind, *, accepts, manifest=None, selected=(), unused=(),
+                linkers=None):
+        for linker in (self.args.linker if linkers is None else linkers):
             stem = f"{name}-{linker}"
             # The same protected reader and provider set must link and run without
             # the ownership validator before a rejection counts as an outcome.
@@ -373,6 +390,209 @@ class Harness:
                     self.execute(image, kind)
                 self.results.append({"case": f"partial-{kind}", "linker": linker,
                                      "accepted": accepts})
+
+    def partial(self):
+        reader = self.compile("partial-indexed-reader", "reader.c", "indexed-direct",
+                              policy=self.strong)
+        ordinary = {
+            "vm": self.compile("partial-indexed-vm", "reader.c", "indexed-direct", policy=self.vm),
+            "none": self.compile("partial-indexed-none", "reader.c", "indexed-direct"),
+        }
+        unused = self.compile("partial-unselected-provider", "provider.c", "unused")
+        providers = {}
+        for binary_strong in (True, False):
+            label = "numeric-winner" if binary_strong else "plaintext-winner"
+            weak_flags = ["-DAUDIT_WEAK"]
+            strong_flags = []
+            (strong_flags if binary_strong else weak_flags).append("-DAUDIT_BINARY")
+            providers[binary_strong] = (
+                self.compile(f"partial-{label}-weak", "provider.c", "indexed-direct",
+                             extra=weak_flags),
+                self.compile(f"partial-{label}-strong", "provider.c", "indexed-direct",
+                             extra=strong_flags),
+            )
+        for linker in self.args.linker:
+            reconciled = {}
+            unresolved = self.partial_link(f"partial-unresolved-{linker}", [reader], linker)
+            for binary_strong, (weak, strong) in providers.items():
+                label = "numeric-winner" if binary_strong else "plaintext-winner"
+                profile = "indexed-numeric" if binary_strong else "indexed-plaintext"
+                for included in (False, True):
+                    for reverse in (False, True):
+                        stem = (f"partial-{label}-{linker}-"
+                                f"{'included' if included else 'providers'}-"
+                                f"{'strong-first' if reverse else 'weak-first'}")
+                        inputs = [strong, weak] if reverse else [weak, strong]
+                        if included:
+                            inputs = [reader, *inputs]
+                        obj = self.partial_link(stem, inputs, linker)
+                        final_inputs = [obj] if included else [reader, obj]
+                        self.outcome(stem, final_inputs, profile, accepts=binary_strong,
+                                     linkers=[linker])
+                        if not included and not reverse:
+                            reconciled[binary_strong] = obj
+
+                # The first partial has an unresolved global dependency, or only
+                # a weak provider. A later job must still choose the real winner.
+                self.outcome(f"partial-unresolved-final-{label}-{linker}",
+                             [unresolved, strong], profile, accepts=binary_strong,
+                             linkers=[linker])
+                first = self.partial_link(f"partial-late-first-{label}-{linker}",
+                                          [reader, weak], linker)
+                self.outcome(f"partial-late-final-{label}-{linker}", [first, strong],
+                             profile, accepts=binary_strong, linkers=[linker])
+                second = self.partial_link(f"partial-late-second-{label}-{linker}",
+                                           [first, strong], linker,
+                                           action="-Wl,-i" if linker == "bfd" else "-r")
+                third = self.partial_link(f"partial-late-third-{label}-{linker}",
+                                          [second, unused], linker, action="-Wl,--relocatable")
+                self.outcome(f"partial-repeated-{label}-{linker}", [third], profile,
+                             accepts=binary_strong, linkers=[linker])
+                self.partial_archives(reader, unused, binary_strong, linker)
+
+            for level, ordinary_reader in ordinary.items():
+                obj = self.partial_link(f"partial-{level}-plaintext-{linker}",
+                                        [ordinary_reader, reconciled[False]], linker)
+                self.outcome(f"partial-{level}-plaintext-{linker}", [obj], "indexed-plaintext",
+                             accepts=True, linkers=[linker])
+            self.partial_manifest_boundaries(reader, reconciled[True], unresolved, linker)
+            self.partial_raw_boundaries(reader, ordinary, providers[True],
+                                        reconciled[True], unused, linker)
+            self.partial_local_scopes(linker)
+
+    def partial_archives(self, reader, unused, binary_strong, linker):
+        label = "numeric-winner" if binary_strong else "plaintext-winner"
+        stem = f"partial-archive-{label}-{linker}"
+        weak_flags = ["-DAUDIT_WEAK", "-DAUDIT_FORCE"]
+        strong_flags = ["-DAUDIT_PULL_FORCE"]
+        (strong_flags if binary_strong else weak_flags).append("-DAUDIT_BINARY")
+        weak = self.compile(stem + "-weak", "provider.c", "indexed-direct", extra=weak_flags)
+        strong = self.compile(stem + "-strong", "provider.c", "indexed-direct", extra=strong_flags)
+        archive = self.archive(stem + "-inputs", [weak, unused])
+        profile = "indexed-numeric" if binary_strong else "indexed-plaintext"
+        for included in (False, True):
+            name = stem + ("-included" if included else "-providers")
+            inputs = [strong, archive]
+            if included:
+                inputs.insert(0, reader)
+            obj = self.partial_link(name, inputs, linker, selected=[weak], unused=[unused])
+            self.outcome(name, [obj] if included else [reader, obj], profile,
+                         accepts=binary_strong, linkers=[linker])
+            if not included:
+                final_archive = self.archive(stem + "-final-inputs", [obj, unused])
+                self.outcome(stem + "-final-extraction", [reader, final_archive], profile,
+                             accepts=binary_strong, selected=[obj], unused=[unused],
+                             linkers=[linker])
+
+    def partial_manifest_boundaries(self, reader, obj, reader_partial, linker):
+        valid = self.manifest(f"partial-managed-truthful-{linker}", [
+            self.provider(obj, [definition("audit_direct", "non_string")])])
+        self.outcome(f"partial-managed-truthful-{linker}", [reader, obj], "indexed-numeric",
+                     accepts=True, manifest=valid, linkers=[linker])
+        conflict = self.manifest(f"partial-managed-conflict-{linker}", [
+            self.provider(obj, [definition("audit_direct", "plaintext")])])
+        self.outcome(f"partial-managed-conflict-{linker}", [reader, obj], "indexed-numeric",
+                     accepts=False, manifest=conflict, linkers=[linker])
+        raw = self.compile(f"partial-raw-manifest-provider-{linker}", "provider.c", "indexed-direct",
+                           managed=False, extra=["-DAUDIT_BINARY"])
+        raw_entry = self.provider(raw, [definition("audit_direct", "non_string")])
+        raw_valid = self.manifest(f"partial-raw-truthful-{linker}", [raw_entry])
+        self.outcome(f"partial-raw-truthful-{linker}", [reader_partial, raw], "indexed-numeric",
+                     accepts=True, manifest=raw_valid, linkers=[linker])
+        raw_conflict = self.manifest(f"partial-raw-conflict-{linker}", [
+            raw_entry, self.provider(raw, [definition("audit_direct", "unknown")])])
+        self.outcome(f"partial-raw-conflict-{linker}", [reader_partial, raw], "indexed-numeric",
+                     accepts=False, manifest=raw_conflict, linkers=[linker])
+
+    def partial_raw_boundaries(self, reader, ordinary, providers, reconciled, unused, linker):
+        weak, strong = providers
+        raw = self.partial_link(f"partial-raw-multi-{linker}", [weak, strong], linker,
+                                managed=False)
+        raw_included = self.partial_link(f"partial-raw-included-{linker}",
+                                         [reader, weak, strong], linker, managed=False)
+        stale = self.partial_link(f"partial-raw-stale-{linker}", [reconciled, unused], linker,
+                                  managed=False)
+        for label, obj, included in (("multi-v1", raw, False),
+                                     ("included-v1", raw_included, True),
+                                     ("stale-v2", stale, False)):
+            stem = f"partial-unresolved-{label}-{linker}"
+            inputs = [obj] if included else [reader, obj]
+            self.outcome(stem, inputs, "indexed-numeric", accepts=False, linkers=[linker])
+            rewrapped = self.partial_link(stem + "-rewrapped", inputs, linker)
+            self.outcome(stem + "-rewrapped", [rewrapped], "indexed-numeric",
+                         accepts=False, linkers=[linker])
+            truthful = self.manifest(stem + "-truthful", [
+                self.provider(obj, [definition("audit_direct", "non_string")])])
+            self.outcome(stem + "-truthful", inputs, "indexed-numeric",
+                         accepts=False, manifest=truthful, linkers=[linker])
+            rewrapped_manifest = self.manifest(stem + "-rewrapped-truthful", [
+                self.provider(rewrapped, [definition("audit_direct", "non_string")])])
+            self.outcome(stem + "-rewrapped-truthful", [rewrapped], "indexed-numeric",
+                         accepts=False, manifest=rewrapped_manifest, linkers=[linker])
+
+        # Collections without a mandatory reader keep their best-effort behavior.
+        for label, obj in (("multi-v1", raw), ("stale-v2", stale)):
+            for level, ordinary_reader in ordinary.items():
+                stem = f"partial-unresolved-{label}-{level}-{linker}"
+                self.outcome(stem, [ordinary_reader, obj], "indexed-numeric",
+                             accepts=True, linkers=[linker])
+                rewrapped = self.partial_link(stem + "-rewrapped", [ordinary_reader, obj], linker)
+                self.outcome(stem + "-rewrapped", [rewrapped], "indexed-numeric",
+                             accepts=True, linkers=[linker])
+
+    def partial_local_scopes(self, linker):
+        numeric_reader = self.compile(f"partial-local-leaf-numeric-reader-{linker}",
+                                      "reader.c", "integer-cell", policy=self.strong)
+        plaintext_reader = self.compile(f"partial-local-leaf-plaintext-reader-{linker}",
+                                        "reader.c", "cell", policy=self.strong)
+        local_policy = self.policy(f"partial-local-policy-{linker}", "strong_vm",
+                                   owners=("audit_owned", "audit_runtime"))
+        for origin in ("source-distinct", "same-source"):
+            stem = f"partial-local-{origin}-{linker}"
+            alternate_provider = "provider.c"
+            alternate_reader = "reader.c"
+            if origin == "source-distinct":
+                alternate_provider = "provider-distinct.c"
+                alternate_reader = "reader-distinct.c"
+                shutil.copyfile(self.work / "provider.c", self.work / alternate_provider)
+                shutil.copyfile(self.work / "reader.c", self.work / alternate_reader)
+            numeric = self.compile(stem + "-numeric-leaf", "provider.c", "integer-cell",
+                                   extra=['-DAUDIT_INTEGER_LEAF_SYMBOL="audit_shared_leaf"'])
+            plaintext = self.compile(stem + "-plaintext-leaf", alternate_provider, "cell",
+                                     extra=['-DAUDIT_CELL_LEAF_SYMBOL="audit_shared_leaf"'])
+            for kind, owned_reader, accepts in (("integer-cell", numeric_reader, True),
+                                               ("cell", plaintext_reader, False)):
+                name = stem + "-leaf-" + kind
+                obj = self.partial_link(name, [owned_reader, numeric, plaintext], linker)
+                rebound = self.partial_link(name + "-rebound", [obj], linker)
+                self.outcome(name, [rebound], kind, accepts=accepts, linkers=[linker])
+
+            primary = self.compile(stem + "-primary-reader", "reader.c", "indexed-direct",
+                                   policy=local_policy,
+                                   extra=["-DAUDIT_LOCAL_READER", "-DAUDIT_PAIRED_READER"])
+            auxiliary = self.compile(stem + "-aux-reader", alternate_reader, "indexed-direct",
+                                     policy=local_policy,
+                                     extra=["-DAUDIT_LOCAL_READER", "-DAUDIT_SECOND_READER",
+                                            "-DAUDIT_OTHER_DIRECT"])
+            for plain_primary, plain_aux in ((False, False), (True, False), (False, True)):
+                label = ("primary-plaintext" if plain_primary else
+                         "aux-plaintext" if plain_aux else "numeric-pair")
+                name = stem + "-reader-" + label
+                first_provider = self.compile(name + "-primary-data", "provider.c", "indexed-direct",
+                                              extra=[] if plain_primary else ["-DAUDIT_BINARY"])
+                second_provider = self.compile(
+                    name + "-aux-data", alternate_provider, "indexed-direct",
+                    extra=["-DAUDIT_OTHER_DIRECT"] + ([] if plain_aux else ["-DAUDIT_BINARY"]))
+                inputs = [primary, auxiliary, first_provider, second_provider]
+                if plain_aux:
+                    inputs.reverse()
+                obj = self.partial_link(name, inputs, linker)
+                rebound = self.partial_link(name + "-rebound", [obj], linker,
+                                             action="-Wl,--relocatable")
+                profile = ("local-primary-plaintext" if plain_primary else
+                           "local-aux-plaintext" if plain_aux else "indexed-numeric")
+                self.outcome(name, [rebound], profile, accepts=not (plain_primary or plain_aux),
+                             linkers=[linker])
 
     def bounded_forwarding(self):
         for kind, accepts in (("integer-cell", True), ("integer-chain", False)):
@@ -589,10 +809,11 @@ def main():
     parser.add_argument("--runtime", required=True, help="matching obf runtime archive")
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--format", required=True, choices=("elf", "coff"))
-    parser.add_argument("--phase", required=True, choices=("core", "boundaries"))
+    parser.add_argument("--phase", required=True, choices=("core", "boundaries", "partial"))
     parser.add_argument("--linker", action="append", help="repeat to test each native linker")
     args = parser.parse_args()
     require((os.name == "nt") == (args.format == "coff"), "run COFF natively on Windows and ELF on Linux")
+    require(args.phase != "partial" or args.format == "elf", "partial ownership phase requires ELF")
     args.linker = args.linker or (["link", "lld"] if args.format == "coff" else ["bfd", "lld"])
     require(set(args.linker).issubset({"link", "lld"} if args.format == "coff" else {"bfd", "lld"}),
             "unsupported regression linker selection")
