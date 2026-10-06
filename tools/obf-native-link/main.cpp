@@ -537,6 +537,7 @@ class validator {
   std::map<std::string, unit*> identities;
   std::set<std::string> non_owning_identities;
   std::set<std::string> non_owning_member_labels;
+  std::set<std::string> trace_members;
   std::vector<std::pair<std::string, llvm::json::Value>> manifests;
   std::set<std::tuple<unit*, std::string, bool>> active;
   std::set<std::tuple<unit*, std::string, bool>> accepted;
@@ -655,10 +656,10 @@ class validator {
       }
     }
     if (candidates.empty() && coff) {
-      std::string library;
-      std::string object_name = identity;
+      std::string library = member.empty() ? std::string() : path;
+      std::string object_name = member.empty() ? identity : member;
       const auto colon = identity.rfind(':');
-      if (colon != std::string::npos && !(colon == 1 && identity.size() > 2 &&
+      if (member.empty() && colon != std::string::npos && !(colon == 1 && identity.size() > 2 &&
           (identity[2] == '\\' || identity[2] == '/'))) {
         library = identity.substr(0, colon);
         object_name = identity.substr(colon + 1);
@@ -861,9 +862,22 @@ class validator {
         for (const auto prefix : {StringRef("lld-link: Reading "), StringRef("Reading "),
                                   StringRef("lld-link: Loaded "), StringRef("Loaded ")}) {
           if (!text.starts_with(prefix)) { continue; }
-          auto path = text.drop_front(prefix.size());
-          const auto open = path.rfind('(');
-          if (open != StringRef::npos) { path = path.take_front(open); }
+          auto identity = text.drop_front(prefix.size());
+          if (prefix.contains("Loaded ")) {
+            const auto reason = identity.rfind(") for ");
+            if (reason != StringRef::npos) { identity = identity.take_front(reason + 1); }
+          }
+          auto path = identity;
+          // Parenthesized directories (for example Program Files (x86))
+          // are paths, not archive-member syntax.
+          if (identity.ends_with(")")) {
+            const auto open = identity.rfind('(');
+            if (open != StringRef::npos) {
+              path = identity.take_front(open);
+              trace_members.insert(identity.str());
+              resolution.selected.insert(identity.str());
+            }
+          }
           add_catalog(path.str());
         }
       }
@@ -894,6 +908,7 @@ class validator {
       auto* file = llvm::dyn_cast<object::ObjectFile>(source->binary.getBinary());
       if (file && file->isRelocatableObject()) { (void)load(*source, ""); }
     }
+    for (const auto& identity : trace_members) { (void)resolve(identity, false); }
     for (const auto& [symbol, identity] : resolution.prevailing) {
       (void)symbol;
       (void)resolve(identity, false);

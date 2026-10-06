@@ -270,7 +270,7 @@ class Harness:
         self.prevailing()
         self.partial_links()
         self.bounded_forwarding()
-        self.discarded_readers()
+        self.local_reader_authority()
         self.cleanup_output()
         self.numeric_aggregates()
 
@@ -389,46 +389,52 @@ class Harness:
                     self.outcome("phantom-" + leaf, [reader, raw], kind,
                                  accepts=False, manifest=invalid)
 
-    def discarded_readers(self):
+    def local_reader_authority(self):
         if self.args.format != "coff":
             return
-        reader = self.compile("discarded-static-reader", "discarded-reader.c", "integer",
+        reader = self.compile("local-static-reader", "discarded-reader.c", "integer",
                               policy=self.strong, extra=["-ffunction-sections"])
         owner = self.coff_local_reader(reader)
-        integers = self.compile("discarded-integer-provider", "provider.c", "integer")
-        plaintext = self.compile("discarded-plaintext-provider", "provider.c", "direct",
+        integers = self.compile("local-integer-provider", "provider.c", "integer")
+        plaintext = self.compile("local-plaintext-provider", "provider.c", "direct",
                                  managed=False)
+        manifest = self.manifest("local-plaintext", [
+            self.provider(plaintext, definitions("direct"))])
         for linker in self.args.linker:
-            kept_authority = self.work / f"retained-{linker}-baseline.lldmap"
-            baseline_authority = self.work / f"discarded-{linker}-baseline.lldmap"
-            user_authority = self.work / f"discarded-{linker}-wrapped.lldmap"
-            kept_flags = ["-Wl,/OPT:NOREF"]
-            baseline_flags = ["-Wl,/OPT:REF"]
-            user_flags = ["-Wl,/OPT:REF"]
-            if linker == "lld":
-                kept_flags.append(f"-Wl,/lldmap:{kept_authority}")
-                baseline_flags.append(f"-Wl,/lldmap:{baseline_authority}")
-                user_flags.append(f"-Wl,/lldmap:{user_authority}")
-            kept, kept_map = self.link(f"retained-{linker}-baseline", [reader, integers, plaintext],
-                                       linker, managed=False, extra=kept_flags)
-            self.execute(kept, "integer")
-            require(self.coff_reader_in_map(kept_authority if linker == "lld" else kept_map,
-                                            reader, owner),
-                    "actual linker did not retain the local ownership reader under /OPT:NOREF")
-            self.link(f"retained-{linker}-rejected", [reader, integers, plaintext],
-                      linker, succeeds=False, extra=["-Wl,/OPT:NOREF"])
-            baseline, baseline_map = self.link(f"discarded-{linker}-baseline", [reader, integers, plaintext],
-                                               linker, managed=False, extra=baseline_flags)
-            self.execute(baseline, "integer")
-            image, user_map = self.link(f"discarded-{linker}-wrapped", [reader, integers, plaintext],
-                                       linker, extra=user_flags)
-            self.execute(image, "integer")
-            authority_maps = (baseline_authority, user_authority) if linker == "lld" else (baseline_map, user_map)
-            for map_path in authority_maps:
-                require(not self.coff_reader_in_map(map_path, reader, owner),
-                        "actual linker retained the local ownership reader under /OPT:REF")
-            self.results.append({"case": "discarded-static-reader", "linker": linker,
-                                 "accepted": True, "native_values_and_effects": True})
+            for optimize in ("NOREF", "REF"):
+                name = f"local-{linker}-{optimize.lower()}"
+                authority_map = self.work / (name + ".lldmap")
+                flags = [f"-Wl,/OPT:{optimize}"]
+                if linker == "lld":
+                    flags.append(f"-Wl,/lldmap:{authority_map}")
+                baseline, baseline_map = self.link(name + "-baseline", [reader, integers, plaintext],
+                                                    linker, managed=False, extra=flags)
+                self.execute(baseline, "integer")
+                live = self.coff_reader_in_map(authority_map if linker == "lld" else baseline_map,
+                                               reader, owner)
+                if optimize == "NOREF":
+                    require(live, "actual linker did not retain the local reader under /OPT:NOREF")
+                # Real VM initialization can retain an otherwise unused owner.
+                # Follow actual liveness rather than assuming /OPT:REF drops it.
+                for declared in (None, manifest):
+                    suffix = "-declared" if declared else "-missing"
+                    image, user_map = self.link(name + suffix, [reader, integers, plaintext], linker,
+                                               manifest=declared, succeeds=not live, extra=flags)
+                    if not live:
+                        self.execute(image, "integer")
+                    require(self.coff_reader_in_map(authority_map if linker == "lld" else user_map,
+                                                   reader, owner) == live,
+                            "native local-reader liveness changed between paired linker jobs")
+                self.results.append({"case": "local-static-reader", "linker": linker,
+                                     "optimization": optimize, "owner_live": live,
+                                     "accepted": not live, "baseline_execution": True})
+
+        unselected = self.compile("unselected-owned-reader", "discarded-reader.c", "integer",
+                                  policy=self.strong, extra=["-ffunction-sections", "-DAUDIT_DEAD_ONLY"])
+        archive = self.archive("unselected-owned-reader", [unselected])
+        live_reader = self.compile("archive-live-reader", "reader.c", "integer", policy=self.strong)
+        self.outcome("unselected-owned-reader", [live_reader, integers, plaintext, archive],
+                     "integer", accepts=True, unused=[unselected])
 
     def coff_local_reader(self, obj):
         import struct

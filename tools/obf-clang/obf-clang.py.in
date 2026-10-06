@@ -1299,7 +1299,20 @@ def main() -> int:
             native_result_directory = tempfile.TemporaryDirectory(prefix="obf-native-result-")
             native_result_file = Path(native_result_directory.name) / "output"
             env["OBF_NATIVE_LINK_RESULT"] = str(native_result_file)
-            clang_args.append(f"--ld-path={NATIVE_LINKER}")
+            msvc_link_job = any(arg.lower().startswith(("-out:", "/out:")) for arg in linker_args)
+            if msvc_link_job:
+                # The MSVC toolchain selects a tool name with -fuse-ld; it
+                # ignores --ld-path and does not accept an absolute tool name.
+                proxy = Path(NATIVE_LINKER)
+                clang_args.extend([f"-B{proxy.parent}", f"-fuse-ld={proxy.name}"])
+                # These arguments are conditional on the original linker
+                # spelling in Clang's MSVC driver, not on its argument flavor.
+                for arg in linker_args:
+                    if (arg.lower() == "/inferasanlibs:no" or
+                            arg.lower().startswith(("/vfsoverlay:", "/dwodir:"))):
+                        clang_args.extend(["-Xlinker", arg])
+            else:
+                clang_args.append(f"--ld-path={NATIVE_LINKER}")
             for manifest in provenance_manifests:
                 clang_args.extend(["-Xlinker", f"--obf-native-provenance={Path(manifest).absolute()}"])
             routed_commands, _ = _driver_plan(compiler, clang_args, env)

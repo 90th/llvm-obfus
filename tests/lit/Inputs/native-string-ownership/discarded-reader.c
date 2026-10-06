@@ -12,4 +12,6 @@ __attribute__((noinline, annotate("obf:none")))
 unsigned audit_dead_anchor(uint64_t index, unsigned *effect) {
   return audit_dead_read(index, effect);
 }
+#ifndef AUDIT_DEAD_ONLY
 #include "reader.c"
+#endif
