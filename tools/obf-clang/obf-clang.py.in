@@ -1062,7 +1062,7 @@ def _linker_build_id_modes(linker_args: list[str]) -> list[str]:
             for arg in linker_args if arg == "--build-id" or arg.startswith("--build-id=")]
 
 
-def _link_output_path(linker_args: list[str], clang_args: list[str], require_explicit: bool) -> Path:
+def _validate_driver_bind_output(clang_args: list[str], require_explicit: bool) -> None:
     explicit_output: str | None = None
     index = 0
     while index < len(clang_args):
@@ -1082,6 +1082,10 @@ def _link_output_path(linker_args: list[str], clang_args: list[str], require_exp
         raise _wrapper_error("self_checksum auto-binding requires an explicit '-o <path>' final-link output")
     if explicit_output == "-":
         raise _wrapper_error("self_checksum final links cannot bind an output written to stdout")
+
+
+def _link_output_path(linker_args: list[str], clang_args: list[str], require_explicit: bool) -> Path:
+    _validate_driver_bind_output(clang_args, require_explicit)
 
     # MSVC jobs use -out:, including driver defaults. Later /out: operands
     # can override it. GNU jobs use -o and can add a filename extension.
@@ -1288,6 +1292,8 @@ def main() -> int:
             if self_checksum_requested:
                 raise _wrapper_error("PE self_checksum auto-binding currently requires a native Windows host")
             bound_object_format = None
+        if final_link_action and bound_object_format is not None and (self_checksum_requested or binder_available):
+            _validate_driver_bind_output(effective_args, require_explicit=self_checksum_requested)
         if final_link_action and not needs_backend and not dry_run and object_format in {"elf", "coff"}:
             if not NATIVE_LINKER or not Path(NATIVE_LINKER).is_file():
                 raise _wrapper_error(f"missing native ownership linker proxy: {NATIVE_LINKER or '<not configured>'}")
@@ -1338,7 +1344,7 @@ def main() -> int:
             final_linker = _linker_job(final_commands)
             if final_linker is None:
                 raise _wrapper_error("compiler config removes the expected final linker job")
-            if native_real_linker is None or self_checksum_requested:
+            if native_real_linker is None:
                 predicted_output = _link_output_path(
                     _linker_job_args(final_linker),
                     effective_args,

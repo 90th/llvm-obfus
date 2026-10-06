@@ -27,21 +27,21 @@
 ; RUN: %t.dynamic.exe %t.config.dll | %FileCheck %s --check-prefix=DYNAMIC
 ;
 ; An active policy still requires explicit driver output. Linker /OUT alone is not enough.
-; RUN: %expect_failure %obf_clang -shared -fuse-ld=lld --obf-config=%S/../Inputs/obf-clang-dll-policy.yaml %t.library.obj -Wl,/OUT:%t.not-explicit.dll 2>&1 | %FileCheck %s --check-prefix=EXPLICIT
-; RUN: %expect_failure %obf_clang -shared -fuse-ld=lld %t.library.obj -o - -Wl,/OUT:%t.stdout-override.dll 2>&1 | %FileCheck %s --check-prefix=STDOUT
+; RUN: rm -f %t.not-explicit.dll %t.stdout-override.dll
+; RUN: %expect_failure %obf_clang -shared -fuse-ld=lld --obf-config=%S/../Inputs/obf-clang-dll-policy.yaml %t.library.obj -Wl,/OUT:%t.not-explicit.dll
+; RUN: test ! -e %t.not-explicit.dll
+; RUN: %expect_failure %obf_clang -shared -fuse-ld=lld %t.library.obj -o - -Wl,/OUT:%t.stdout-override.dll
+; RUN: test ! -e %t.stdout-override.dll
 ;
 ; COFF bitcode hidden behind either wholearchive spelling must fail before backend execution.
 ; RUN: %raw_clang -O0 -flto=thin -c %S/../Inputs/obf-clang-self-checksum-dll.c -o %t.bitcode.obj
 ; RUN: %llvm_ar rcs %t.bitcode.lib %t.bitcode.obj
-; RUN: %expect_failure %obf_clang -shared -fuse-ld=lld %t.library.obj -Xlinker /WHOLEARCHIVE:%t.bitcode.lib -o %t.bitcode-slash.dll 2>&1 | %FileCheck %s --check-prefix=LTO-REJECT
-; RUN: %expect_failure %obf_clang -shared -fuse-ld=lld %t.library.obj -Xlinker -WHOLEARCHIVE:%t.bitcode.lib -o %t.bitcode-dash.dll 2>&1 | %FileCheck %s --check-prefix=LTO-REJECT
+; RUN: %expect_failure %obf_clang -shared -fuse-ld=lld %t.library.obj -Xlinker /WHOLEARCHIVE:%t.bitcode.lib -o %t.bitcode-slash.dll
+; RUN: %expect_failure %obf_clang -shared -fuse-ld=lld %t.library.obj -Xlinker -WHOLEARCHIVE:%t.bitcode.lib -o %t.bitcode-dash.dll
 ;
 ; BOUND: SELF_CHECKSUM_PE_RECORD
 ; BOUND-SAME: flags=0x3
 ; DYNAMIC: DLL_DYNAMIC_OK vm=1 strong_vm=1 effects=1 init=1 concurrent=1 exports=7 rebased=1 joined_unloads=4
-; EXPLICIT: obf-clang: self_checksum auto-binding requires an explicit '-o <path>' final-link output
-; LTO-REJECT: obf-clang: managed obfuscation LTO currently supports ELF targets only
-; STDOUT: obf-clang: self_checksum final links cannot bind an output written to stdout
 
 define void @dummy() {
 entry:

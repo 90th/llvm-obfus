@@ -60,6 +60,40 @@ std::string lower(std::string value) {
 
 std::string trim(StringRef text) { return text.trim().str(); }
 
+std::string windows_identity(const std::string& path) {
+  // Archive build paths need not exist on the link host. Normalize their
+  // Windows spelling lexically, never through host filesystem resolution.
+  auto text = lower(path);
+  std::replace(text.begin(), text.end(), '\\', '/');
+  std::string root;
+  std::size_t start = 0;
+  if (text.size() >= 2 && text[1] == ':') { root = text.substr(0, 2); start = 2; }
+  const bool absolute = start < text.size() && text[start] == '/';
+  if (absolute) { root += '/'; }
+  std::vector<std::string> components;
+  while (start < text.size()) {
+    const auto end = text.find('/', start);
+    const auto part = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (!part.empty() && part != ".") {
+      if (part == ".." && !components.empty() && components.back() != "..") { components.pop_back(); }
+      else if (part != ".." || !absolute) { components.push_back(part); }
+    }
+    if (end == std::string::npos) { break; }
+    start = end + 1;
+  }
+  std::string result = root;
+  for (const auto& component : components) {
+    if (!result.empty() && result.back() != '/' && result.back() != ':') { result += '/'; }
+    result += component;
+  }
+  return result;
+}
+
+std::string windows_leaf(const std::string& path) {
+  const auto slash = path.find_last_of("/\\");
+  return lower(slash == std::string::npos ? path : path.substr(slash + 1));
+}
+
 std::string canonical(const std::string& path) {
   std::error_code error;
   auto result = fs::weakly_canonical(fs::absolute(fs::path(path), error), error);
@@ -537,6 +571,7 @@ class validator {
   std::map<std::string, unit*> identities;
   std::set<std::string> non_owning_identities;
   std::set<std::string> non_owning_member_labels;
+  std::set<std::string> non_owning_contributions;
   std::set<std::string> trace_members;
   std::vector<std::pair<std::string, llvm::json::Value>> manifests;
   std::set<std::tuple<unit*, std::string, bool>> active;
@@ -573,6 +608,7 @@ class validator {
       unsigned matches = 0;
       std::string canonical_member;
       bool may_carry_records = false;
+      std::vector<std::string> matching_names;
       for (const auto& child : archive->children(error)) {
         const auto name = take(child.getName(), "cannot read archive member name in " + source.path);
         bool matching = name == member;
@@ -586,6 +622,7 @@ class validator {
         }
         if (!matching) { continue; }
         canonical_member = name.str();
+        matching_names.push_back(name.str());
         ++matches;
         auto binary = take(child.getAsBinary(), "cannot read selected archive member identity " + input->label);
         if (auto* candidate = llvm::dyn_cast<object::ObjectFile>(binary.get())) {
@@ -603,6 +640,13 @@ class validator {
       if (matches > 1) {
         if (may_carry_records) { fail("duplicate selected archive member identity with ownership evidence " + input->label); }
         source.non_owning_members.insert(member);
+        for (const auto& name : matching_names) {
+          // The link reported selection of this ambiguous header identity.
+          // All matching candidates were proven to lack ownership records;
+          // their full contribution paths remain non-owning without choosing
+          // which member was extracted or permitting a required provider.
+          non_owning_contributions.insert(windows_identity(name));
+        }
         return nullptr;
       }
       if (matches == 0) { return nullptr; }
@@ -665,15 +709,19 @@ class validator {
         object_name = identity.substr(colon + 1);
       }
       if (library.empty()) {
-        // LLD contribution maps abbreviate archive members. Bind that
-        // abbreviation to already-authoritative MAP Lib:Object identities.
+        // Bind contribution build paths only to already-authoritative selected
+        // members. Windows case/separator/.. differences need no host files.
+        std::vector<unit*> normalized;
+        std::vector<unit*> abbreviated;
         for (const auto& [known_identity, input] : identities) {
           (void)known_identity;
           if (input->member.empty()) { continue; }
-          const auto slash = input->member.find_last_of("/\\");
-          const auto leaf = slash == std::string::npos ? input->member : input->member.substr(slash + 1);
-          if (input->member == object_name || leaf == object_name) { candidates.push_back(input); }
+          if (input->member == object_name) { candidates.push_back(input); }
+          else if (windows_identity(input->member) == windows_identity(object_name)) { normalized.push_back(input); }
+          else if (windows_leaf(input->member) == windows_leaf(object_name)) { abbreviated.push_back(input); }
         }
+        if (candidates.empty()) { candidates = std::move(normalized); }
+        if (candidates.empty()) { candidates = std::move(abbreviated); }
       }
       if (library.empty() && candidates.empty()) {
         for (auto& [key, source] : catalogs) {
@@ -712,7 +760,8 @@ class validator {
       return nullptr;
     }
     if (candidates.empty()) {
-      if (coff && non_owning_member_labels.contains(lower(identity))) {
+      if (coff && (non_owning_member_labels.contains(lower(identity)) ||
+                   non_owning_contributions.contains(windows_identity(identity)))) {
         non_owning_identities.insert(identity);
         if (required) { fail("unresolved required static provider identity " + identity); }
         return nullptr;
@@ -851,7 +900,13 @@ class validator {
   validator(authority& authoritative, bool is_coff, const std::vector<std::string>& args,
             StringRef trace, const std::vector<std::string>& manifest_paths)
       : resolution(authoritative), coff(is_coff) {
-    for (const auto& arg : args) { add_catalog(arg); }
+    for (const auto& arg : args) {
+      add_catalog(arg);
+      if (coff && (StringRef(arg).starts_with_insensitive("/wholearchive:") ||
+                   StringRef(arg).starts_with_insensitive("-wholearchive:"))) {
+        add_catalog(arg.substr(14));
+      }
+    }
     llvm::SmallVector<StringRef, 128> lines;
     trace.split(lines, '\n');
     for (auto line : lines) {
