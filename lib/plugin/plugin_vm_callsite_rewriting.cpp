@@ -44,7 +44,7 @@ void preserve_ordinary_callsite_semantics(llvm::CallInst* rewritten, llvm::CallB
 bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& binding,
                                            std::uint32_t mba_depth) {
   if (binding.interface_function == nullptr || binding.implementation_function == nullptr ||
-      binding.entry_thunk_function == nullptr) {
+      binding.entry_thunk_function == nullptr || binding.call_sites.empty()) {
     return false;
   }
 
