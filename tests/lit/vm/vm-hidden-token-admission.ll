@@ -15,8 +15,10 @@
 ; The configuration retains strong_vm's required public-symbol isolation gate.
 ; Invalid tokens must terminate via a native trap, not an LLVM parse/load error,
 ; with neither protected side effects nor a normal return.
-; Input targets are not address-taken, which would make policy disallow VM.
-; Public-wrapper pointer calls are added only to the discovery copy after opt.
+; Token discovery requires dso_local targets with multiple legitimate private incoming call tokens.
+; The targets keep public linkage so discovery can call their wrappers by pointer.
+; Input targets are not address-taken because that would make policy disallow VM.
+; The discovery copy adds wrapper pointer calls only after opt.
 
 @fixture_effect = global i32 -1
 @fixture_state = global i32 -1
@@ -33,7 +35,7 @@ entry:
   ret void
 }
 
-define i32 @ordinary_value(i32 %fixture_ordinary_value_input) {
+define dso_local i32 @ordinary_value(i32 %fixture_ordinary_value_input) {
 entry:
   call void @fixture_observe(i32 %fixture_ordinary_value_input)
   %mul = mul i32 %fixture_ordinary_value_input, 3
@@ -41,13 +43,13 @@ entry:
   ret i32 %sum
 }
 
-define void @ordinary_void(i32 %fixture_ordinary_void_input) {
+define dso_local void @ordinary_void(i32 %fixture_ordinary_void_input) {
 entry:
   call void @fixture_observe(i32 %fixture_ordinary_void_input)
   ret void
 }
 
-define i32 @strong_value(i32 %fixture_strong_value_input) {
+define dso_local i32 @strong_value(i32 %fixture_strong_value_input) {
 entry:
   call void @fixture_observe(i32 %fixture_strong_value_input)
   %s1 = add i32 %fixture_strong_value_input, 1
@@ -77,7 +79,7 @@ entry:
   ret i32 %s24
 }
 
-define void @strong_void(i32 %fixture_strong_void_input) {
+define dso_local void @strong_void(i32 %fixture_strong_void_input) {
 entry:
   call void @fixture_observe(i32 %fixture_strong_void_input)
   %s1 = add i32 %fixture_strong_void_input, 1

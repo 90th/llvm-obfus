@@ -194,16 +194,17 @@ class Harness:
             require(member.name.lower() not in text, f"actual linker extracted unused {member}: {map_path}")
 
     def outcome(self, name, inputs, kind, *, accepts, manifest=None, selected=(), unused=(),
-                linkers=None):
+                linkers=None, extra=()):
         for linker in (self.args.linker if linkers is None else linkers):
             stem = f"{name}-{linker}"
             # The same protected reader and provider set must link and run without
             # the ownership validator before a rejection counts as an outcome.
-            baseline, baseline_map = self.link(stem + "-raw-link", inputs, linker, managed=False)
+            baseline, baseline_map = self.link(stem + "-raw-link", inputs, linker, managed=False,
+                                               extra=extra)
             self.execute(baseline, kind)
             self.map_members(baseline_map, selected=selected, unused=unused)
             image, user_map = self.link(stem + "-wrapped", inputs, linker,
-                                        manifest=manifest, succeeds=accepts)
+                                        manifest=manifest, succeeds=accepts, extra=extra)
             if accepts:
                 self.execute(image, kind)
                 self.map_members(user_map, selected=selected, unused=unused)
@@ -285,6 +286,7 @@ class Harness:
             self.outcome(f"ordinary-vm-{kind}", [ordinary, raw], kind, accepts=True)
         self.integer_and_manifests()
         self.prevailing()
+        self.localized_elf_authority()
         self.partial_links()
         self.bounded_forwarding()
         self.local_reader_authority()
@@ -373,6 +375,62 @@ class Harness:
             archive = self.archive(label + "-archive", [weak, unused])
             self.outcome(label + "-archive", [reader, strong, archive], "direct", accepts=binary_strong,
                          selected=[weak], unused=[unused])
+
+    def localized_elf_authority(self):
+        if (self.args.format != "elf" or "lld" not in self.args.linker or
+                self.language != "c" or self.optimization != 0 or self.reports):
+            return
+        # LLD omits localized definitions from cref. A retained losing reader
+        # and a same-named local symbol must not become the prevailing reader.
+        (self.work / "localized-weak-reader.c").write_text(
+            "#pragma weak audit_read\n"
+            "#define audit_runtime audit_weak_runtime\n"
+            '#include "reader.c"\n', encoding="utf-8")
+        (self.work / "localized-decoy.c").write_text(
+            "#include <stdint.h>\n"
+            "static unsigned decoy(uint64_t, uint64_t, unsigned *) "
+            '__asm__("audit_read") __attribute__((used, noinline));\n'
+            "static unsigned decoy(uint64_t slot, uint64_t index, unsigned *effect) {\n"
+            "  *effect = 13; return 13;\n"
+            "}\n", encoding="utf-8")
+        hidden = ["-fvisibility=hidden"]
+        weak_flags = [*hidden, "-fno-pic", "-fno-pie"]
+        weak_plaintext = self.compile("localized-weak-plaintext", "localized-weak-reader.c",
+                                      "indexed-direct", policy=self.strong, extra=weak_flags)
+        strong_numeric = self.compile("localized-strong-numeric", "reader.c", "integer",
+                                      policy=self.strong, extra=hidden)
+        plaintext = self.compile("localized-plaintext", "provider.c", "indexed-direct", extra=hidden)
+        numeric = self.compile("localized-numeric", "provider.c", "integer", extra=hidden)
+        decoy = self.compile("localized-decoy", "localized-decoy.c", "integer", managed=False)
+        providers = [plaintext, numeric, decoy]
+        for reverse in (False, True):
+            name = "localized-" + ("strong-first" if reverse else "weak-first")
+            readers = ([strong_numeric, weak_plaintext] if reverse else
+                       [weak_plaintext, strong_numeric])
+            self.outcome(name, [*readers, *providers], "integer", accepts=True,
+                         linkers=["lld"], extra=["-no-pie"])
+        first = self.partial_link("localized-late-first", [weak_plaintext], "lld")
+        self.outcome("localized-late-strong", [first, strong_numeric, *providers], "integer",
+                     accepts=True, linkers=["lld"], extra=["-no-pie"])
+        second = self.partial_link("localized-repeated-second",
+                                   [first, strong_numeric, *providers], "lld")
+        third = self.partial_link("localized-repeated-third", [second], "lld")
+        self.outcome("localized-repeated", [third], "integer", accepts=True,
+                     linkers=["lld"], extra=["-no-pie"])
+        weak_numeric = self.compile("localized-weak-numeric", "localized-weak-reader.c", "integer",
+                                    policy=self.strong, extra=weak_flags)
+        strong_plaintext = self.compile("localized-strong-plaintext", "reader.c", "indexed-direct",
+                                        policy=self.strong, extra=hidden)
+        inputs = [weak_numeric, strong_plaintext, *providers]
+        baseline, _ = self.link("localized-plaintext-winner-raw", inputs, "lld",
+                                 managed=False, extra=["-no-pie"])
+        self.execute(baseline, "indexed-plaintext")
+        image = self.work / "localized-plaintext-winner-wrapped"
+        self.run([self.wrapper, f"--obf-config={self.none}", "-fuse-ld=lld", "-no-pie",
+                  self.main, *inputs, "-o", image], succeeds=False)
+        require(not image.exists(), f"rejected native image survived: {image}")
+        self.results.append({"case": "localized-plaintext-winner", "linker": "lld",
+                             "accepted": False, "baseline_execution": True})
 
     def partial_links(self):
         if self.args.format != "elf":
