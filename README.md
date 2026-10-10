@@ -4,35 +4,35 @@
 [![LLVM](https://img.shields.io/badge/LLVM-21%2B-262D3A?logo=llvm&logoColor=white)](docs/building.md)
 [![C++23](https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white)](docs/building.md)
 
-`llvm-obfus` is an out-of-tree LLVM pass plugin for function-selective obfuscation and virtualization.
-Configure it with YAML or source annotations. The main entry point is `obf-safe-pipeline`.
+`llvm-obfus` is an out-of-tree LLVM pass plugin that obfuscates and virtualizes selected functions.
+Configure protection with YAML or source annotations. Use `obf-safe-pipeline` to run the combined pipeline.
 
 **[Build](docs/building.md) · [Usage](docs/usage.md) · [Configuration](docs/configuration.md) · [Documentation](docs/README.md) · [Security](SECURITY.md)**
 
 ## Features
 
-- VM bytecode with encoded dispatch, registered caller tokens, and instruction/successor integrity checks.
-- MBA, instruction substitution, CFG flattening, outlining, and seeded indirect dispatch.
-- String and constant encoding, with optional authenticated runtime decoding.
-- Code-as-data self-checksum with post-link binding.
-- Release marker cleanup and configurable symbol-isolation checks.
+- Function virtualization with encoded dispatch and runtime integrity checks.
+- Mixed Boolean arithmetic (MBA), instruction substitution, control-flow flattening, outlining, and indirect dispatch.
+- String and constant encoding, with optional authenticated decoding.
+- Checksums of selected code regions, bound after linking.
 
-Levels control pass eligibility. Input shape and configuration determine which transforms apply.
+Choose a protection level for each function. The function and configuration determine which transforms can apply.
 
-| Level | Purpose |
+| Level | Behavior |
 |---|---|
-| `none` | Requests no transforms, subject to enforced security floors |
-| `light` | Permits string encoding, constant encoding, and block splitting |
-| `strong` | Permits native arithmetic and control-flow transforms |
-| `vm` | Permits VM execution and selected supporting transforms |
-| `strong_vm` | Adds VM implementation hardening and enforces admission for VM-eligible functions |
+| `none` | Requests no transforms |
+| `light` | String and constant encoding, plus block splitting |
+| `strong` | Native arithmetic and control-flow obfuscation |
+| `vm` | Function virtualization |
+| `strong_vm` | Requires virtualization for VM-eligible functions and adds implementation hardening |
 
-Profiles (`fast`, `standard`, `guarded`, `fortress`, `lab`) set budgets and defaults.
-See the [configuration reference](docs/configuration.md) for the full pass matrix and selection rules.
+Profiles (`fast`, `standard`, `guarded`, `fortress`, `lab`) set transform limits and defaults.
+The policy can raise requested levels or select callers automatically.
+See the [configuration reference](docs/configuration.md) for selection rules and the full transform matrix.
 
 ## Supported workflows
 
-Linux and Windows x86-64. LLVM 21 minimum, with matching tools and plugin hosts.
+Linux and Windows x86-64, with LLVM 21 or later. Tools and plugin hosts must use compatible LLVM builds.
 
 | Input | Workflow |
 |---|---|
@@ -42,12 +42,9 @@ Linux and Windows x86-64. LLVM 21 minimum, with matching tools and plugin hosts.
 | Zig | LLVM bitcode workflow with a compatible toolchain |
 | TinyGo | `obf-tinygo` on Linux |
 
-Windows plugins require compatible hosts that export LLVM symbols.
-Clang uses `obf_clang_plugin.dll`. `opt` uses `obf_plugin.dll`.
-
 ## Build on Linux
 
-Requires CMake 3.24+, a C++23 compiler, LLVM development files and tools, Python 3.10+, `lit`, and Ninja.
+You need CMake 3.24+, a C++23 compiler, LLVM development files and tools, Python 3.10+, `lit`, and Ninja.
 
 ```sh
 cmake -S . -B build -G Ninja \
@@ -56,11 +53,11 @@ cmake -S . -B build -G Ninja \
 cmake --build build --parallel 3
 ```
 
-See [Build and toolchains](docs/building.md) for Windows setup and toolchain requirements.
+See [Build and toolchains](docs/building.md) for Windows setup, plugin compatibility, and toolchain requirements.
 
 ## Quick start
 
-From the repository root after building:
+After building, run these commands from the repository root.
 
 1. Create `example.c`:
 
@@ -106,24 +103,25 @@ Expected output:
 
 The wrapper loads the plugin and links `libobf_runtime.a`.
 Self-checksum is disabled in this example, so no binding step is needed.
-Policy floors and caller promotions can select functions beyond the explicit target.
+The policy can also protect functions outside the explicit target list, including callers.
 
 Use `obf-clang++` for C++. Select functions by LLVM symbol name or [source annotation](docs/usage.md).
-VM expansion can increase build time, memory use, binary size, and runtime cost.
+Virtualization can increase compile time, memory use, binary size, and execution time.
 
 ## Security boundaries
 
-Keys are embedded in the binary. Debugging, tracing, and memory inspection can expose live plaintext.
+Obfuscation does not prevent debugging, tracing, or memory inspection.
+Keys remain in the binary, and decoded data can be read at runtime.
 
-- VM header and successor checks run before handler effects. They are not cryptographic authentication.
-- Authenticated runtime decoders check descriptors, ciphertext tags, and completed payloads.
-  A valid-looking abandoned decode owner can leave waiters pending indefinitely.
-- Self-checksum covers selected code samples, not the whole binary. Required records must be bound after the final link.
+- VM bytecode checks run before the affected instruction has side effects. They are not cryptographic authentication.
+- Authenticated string and constant decoders verify data before use.
+  Other threads can wait indefinitely if decoding does not finish.
+- Code checksums cover selected samples, not the whole binary. Required records must be bound after the final link.
 - Ordinary `vm` can leave unsupported functions native.
-  The `strong_vm` admission gate applies only while VM eligibility remains enabled.
+  `strong_vm` requires virtualization only for functions that remain VM-eligible.
 
-Exception edges or inline assembly can disable VM eligibility, even for an exact `strong_vm` override.
-See [feature restrictions](docs/configuration.md#feature-restrictions) and [SECURITY.md](SECURITY.md) for the full limits and private reporting contact.
+Exception edges or inline assembly can disable VM eligibility, even with an exact `strong_vm` selection.
+See [feature restrictions](docs/configuration.md#feature-restrictions) and [SECURITY.md](SECURITY.md) for the limits and private vulnerability reporting.
 
 ## Documentation
 
@@ -136,7 +134,7 @@ See [feature restrictions](docs/configuration.md#feature-restrictions) and [SECU
 | Understand transforms and pipeline order | [Protection reference](docs/protection.md) |
 | Bind self-checksum records | [Self-checksum binding](docs/self-checksum.md) |
 | Run tests, benchmarks, and audits | [Development](docs/development.md) |
-| View existing decompiler and control-flow images | [Visual examples](docs/visual-examples.md) |
+| Inspect generated code and control flow | [Visual examples](docs/visual-examples.md) |
 
 See the [documentation index](docs/README.md) for runtime and contribution references.
 

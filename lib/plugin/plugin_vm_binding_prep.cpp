@@ -549,8 +549,15 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
   binding.wrapper_token =
       derive_vm_wrapper_token(state.report.decision.seed, interface_function->getName());
 
+  // A private thunk cannot stand in for a symbol that the linker can replace.
+  // Keep these incoming calls at the original-signature interface instead.
+  const bool rewrite_direct_calls =
+      interface_function->isDSOLocal() && !interface_function->isInterposable();
+
   std::uint64_t callsite_ordinal = 0;
   for (const vm_boundary_site& boundary_site : boundary.sites) {
+    // Restricted sites also keep their downstream caller-preservation record.
+    if (!rewrite_direct_calls && boundary_site.rewritable) { continue; }
     llvm::CallBase* call = boundary_site.call;
     if (call == nullptr) { continue; }
     llvm::Function* caller = call->getFunction();
@@ -569,7 +576,7 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
   if (reporting) {
     record_coverage_event(*module, "admission", "vm", owner, interface_function->getName(),
                           "admitted", "VM boundary and implementation binding prepared",
-                          binding.call_sites.size(), scope);
+                          boundary.sites.size(), scope);
   }
 
   return binding;

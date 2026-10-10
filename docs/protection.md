@@ -69,6 +69,16 @@ Incoming `invoke`, `callbr`, `musttail`, operand-bundle calls, and ABI mismatche
 For supported targets, ordinary `vm` keeps incompatible incoming calls at the original-signature interface wrapper.
 This preserves the input call. It does not make undefined calls valid.
 
+Incoming calls keep the original-signature wrapper when the target is not DSO-local or has interposable linkage.
+This preserves linker selection for weak definitions and preemptable ELF exports.
+The selected definition can still use VM lowering.
+Hidden or protected visibility does not make a replaceable weak definition safe for private-thunk calls.
+ABI-restricted sites retain their downstream caller exclusions.
+
+Managed ELF links can resolve localized LLD symbols that the cross-reference table omits.
+The resolver requires an exact input-section contribution and symbol address.
+It rejects ambiguous authority.
+
 ### Native C++ exception propagation
 
 A VM-eligible function can call an external function or callback that throws a C++ exception.

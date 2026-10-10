@@ -648,6 +648,11 @@ struct section_placement {
   std::uint64_t input_offset = 0;
 };
 
+struct symbol_placement {
+  std::size_t contribution;
+  std::uint64_t address;
+};
+
 struct authority {
   bool external_available = false;
   bool sections_available = false;
@@ -656,6 +661,7 @@ struct authority {
   std::set<std::pair<std::string, std::string>> contributions;
   std::set<std::pair<std::string, std::string>> local_symbols;
   std::vector<section_placement> placements;
+  std::map<std::string, std::vector<symbol_placement>> placed_symbols;
   void symbol(std::string name, std::string identity) {
     if (identity.empty() || identity.front() == '<') { return; }
     auto [it, inserted] = prevailing.emplace(name, identity);
@@ -755,19 +761,28 @@ void parse_elf_placements(authority& result, StringRef map, bool lld) {
   map.split(lines, '\n');
   std::string output_section;
   std::string pending_input;
+  std::optional<std::size_t> contribution;
+  std::size_t symbol_column = StringRef::npos;
   const std::regex output(R"(^(\S+)\s+0x[0-9a-fA-F]+\s+0x[0-9a-fA-F]+(?:\s.*)?$)");
   const std::regex input(R"(^\s+(\S+)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(.+?)\s*$)");
   const std::regex wrapped(R"(^\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(.+?)\s*$)");
   for (auto raw : lines) {
     const auto line = raw.rtrim().str();
     if (lld) {
+      if (raw.trim().starts_with("VMA") && raw.contains("Symbol")) {
+        symbol_column = raw.find("Symbol");
+        contribution.reset();
+        continue;
+      }
       llvm::SmallVector<StringRef, 8> columns;
       raw.split(columns, ' ', -1, false);
       // Tabs are not used by ELF LLD's fixed-width map.
       if (columns.size() < 5) { continue; }
       const auto tail = after_columns(raw, 4);
+      const auto column = raw.rfind(tail);
       const auto delimiter = tail.rfind(":(");
       if (delimiter != std::string::npos && tail.back() == ')') {
+        contribution.reset();
         const auto identity = tail.substr(0, delimiter);
         if (identity.empty() || identity.front() == '<') { continue; }
         auto section = tail.substr(delimiter + 2, tail.size() - delimiter - 3);
@@ -785,12 +800,17 @@ void parse_elf_placements(authority& result, StringRef map, bool lld) {
                                      hex_number(columns[0], "map address"),
                                      hex_number(columns[2], "map size"),
                                      input_offset});
+        contribution = result.placements.size() - 1;
       } else {
-        const auto column = raw.find(tail);
         // Out starts immediately after Align; In and Symbol are indented.
         if (!tail.empty() && column != StringRef::npos && column > 1 &&
             !std::isspace(static_cast<unsigned char>(raw[column - 2])) && columns.size() == 5) {
           output_section = tail;
+          contribution.reset();
+        } else if (contribution && column == symbol_column && columns.size() == 5 &&
+                   !result.prevailing.contains(tail)) {
+          result.placed_symbols[tail].push_back(
+              {*contribution, hex_number(columns[0], "map symbol address")});
         }
       }
       continue;
@@ -1294,6 +1314,42 @@ class validator {
         }
         provider = input.get();
       }
+    } else if (const auto placed = resolution.placed_symbols.find(symbol);
+               placed != resolution.placed_symbols.end()) {
+      // LLD can localize an ELF definition and omit it from cref. Its named
+      // Symbol row still identifies the winner, but only when the exact
+      // contribution and address bind an actual nonlocal input definition.
+      const std::string* identity = nullptr;
+      for (const auto& entry : placed->second) {
+        const auto& placement = resolution.placements[entry.contribution];
+        auto* candidate = resolve(placement.identity, true);
+        const auto found = candidate->symbols.find(symbol);
+        if (found == candidate->symbols.end()) { continue; }
+        for (const auto& info : found->second) {
+          if (info.local || info.section != placement.input_section ||
+              info.value < placement.input_offset ||
+              info.value - placement.input_offset >= placement.size ||
+              entry.address < placement.address ||
+              entry.address - placement.address != info.value - placement.input_offset) {
+            continue;
+          }
+          unsigned sections = 0;
+          for (const auto& section : candidate->object_file->sections()) {
+            if (take(section.getName(), "invalid source section in " + candidate->label) ==
+                info.section) {
+              ++sections;
+            }
+          }
+          if (sections != 1) {
+            fail("ambiguous source section contribution for " + candidate->label + ":" +
+                 info.section);
+          }
+          if (provider) { fail("ambiguous prevailing ELF symbol placement for " + symbol); }
+          provider = candidate;
+          identity = &placement.identity;
+        }
+      }
+      if (identity) { resolution.symbol(symbol, *identity); }
     }
     if (!provider && required) { fail("missing prevailing provider for " + symbol); }
     return provider;
