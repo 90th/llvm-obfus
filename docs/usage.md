@@ -625,12 +625,13 @@ Concurrent calls after initialization remain subject to the [authenticated decod
 
 ## Self-checksum finalization
 
-The C/C++ wrappers automatically bind records for supported final executable and DLL links.
+The C/C++ wrappers automatically bind records for supported final executable and shared-library links.
 An active `self_checksum` final wrapper link requires an explicit `-o <path>`.
 Objects and static archives can contain `UNBOUND` records.
-Bind those records only after the final executable or DLL link.
+Bind those records only after the final executable or shared-library link.
 
-The supported v1 workflows are Linux x86-64 ELF/PIE and native Windows x86-64 PE32+ EXE or user-mode DLL.
+The supported v1 workflows include Linux x86-64 ELF executables, PIEs, and shared libraries.
+They also include native Windows x86-64 PE32+ executables and user-mode DLLs.
 Other architectures and formats do not provide the supported v1 bound workflow.
 An active Windows self-checksum final wrapper link on a non-Windows host is unsupported.
 The wrapper rejects it and does not auto-finalize inherited PE records there.
@@ -651,5 +652,6 @@ Do not run the binder on an object or static archive.
 
 `--probe` inspects record slots without modifying the file.
 A successful probe does not prove that binding will succeed.
+For ELF stripping, separate debug files, and deployment copies, follow the [release packaging rules](self-checksum.md#elf-release-packaging).
 See [Self-checksum binding](self-checksum.md) for exit codes, binary rules, record layouts, and relocation restrictions.
 See [Security](../SECURITY.md#self-checksum-security-contract) for the security contract.

@@ -216,6 +216,49 @@ def _tool_output(command, *arguments):
     return completed.stdout
 
 
+def _packaging_tool(candidates, version_pattern):
+    for path in dict.fromkeys(candidates):
+        if not path or not os.path.isfile(path):
+            continue
+        version = _tool_output(path, "--version")
+        if version is not None and re.search(version_pattern, version, re.IGNORECASE):
+            return _normalize_path(path)
+    return None
+
+
+for family, strip_candidates, objcopy_candidates, version_pattern in [
+    (
+        "gnu",
+        [shutil.which("gstrip"), shutil.which("strip")],
+        [shutil.which("gobjcopy"), shutil.which("objcopy")],
+        r"(?m)^GNU (?:strip|objcopy)\b",
+    ),
+    (
+        "llvm",
+        [
+            _normalize_path("@OBF_STRIP@"),
+            _normalize_path("@LLVM_TOOLS_BINARY_DIR@/llvm-strip@CMAKE_EXECUTABLE_SUFFIX@"),
+            shutil.which("llvm-strip"),
+        ],
+        [
+            _normalize_path("@LLVM_TOOLS_BINARY_DIR@/llvm-objcopy@CMAKE_EXECUTABLE_SUFFIX@"),
+            shutil.which("llvm-objcopy"),
+        ],
+        r"\bLLVM\b",
+    ),
+]:
+    strip_tool = _packaging_tool(strip_candidates, version_pattern)
+    objcopy_tool = _packaging_tool(objcopy_candidates, version_pattern)
+    config.substitutions.append(
+        (f"%{family}_packaging_strip", _shell_quote(strip_tool or f"{family}-strip"))
+    )
+    config.substitutions.append(
+        (f"%{family}_packaging_objcopy", _shell_quote(objcopy_tool or f"{family}-objcopy"))
+    )
+    if strip_tool and objcopy_tool:
+        config.available_features.add(f"has-{family}-elf-packaging")
+
+
 if sys.platform.startswith("linux"):
     config.available_features.add("system-linux")
     if platform.machine().lower() in ("x86_64", "amd64"):

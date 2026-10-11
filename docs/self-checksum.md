@@ -18,7 +18,7 @@ The self-checksum lifecycle proceeds through four stages:
    The expected checksum field remains zero.
 
 2. **Final Link**
-   The linker combines object files and static archives into a final executable or DLL image.
+   The linker combines object files and static archives into a final executable or shared-library image.
    Section `.obfsc$M` contributions merge into `.obfsc`.
    The linker resolves record-relative relocations to target code.
 
@@ -123,16 +123,57 @@ Normal binding mode returns:
 
 Linux x86-64 ELF binding operates under these rules:
 
-- **Target Scope**: 64-bit little-endian ELF images. The binder accepts `ET_EXEC` and `ET_DYN` final images. The documented v1 workflow supports executables and PIEs.
+- **Target Scope**: Linux x86-64 little-endian ELF executables, PIEs, and shared libraries.
+  The binder accepts `ET_EXEC` and `ET_DYN` final images.
 - **Section Layout**: The compiler pass emits records into `.obfsc.<site_id>`. The ELF binder accepts record sections named `.obfsc` and `.obfsc.*`.
 - **Section Flags**: Each `.obfsc` or `.obfsc.*` record section must have `SHF_ALLOC` set.
   It must not have `SHF_WRITE` or `SHF_EXECINSTR`.
+- **Record Mapping**: Each record section must map to exactly one readable, non-writable, file-backed `PT_LOAD` segment.
+  The section header and the segment must identify the same file bytes.
+  The binder rejects section headers that redirect records to copies outside the loaded record range.
 - **Target Identity**: Target identity uses `RECORD_REL64` (64-bit signed displacement).
 - **Relocation Validation**: The binder checks allocated `SHT_RELA`, `SHT_REL`, and `SHT_RELR` relocation sections.
   It rejects a sampled range that overlaps a supported loader-applied fixup.
   It ignores non-`SHF_ALLOC` static relocation metadata, such as metadata retained by `--emit-relocs`.
 - **GNU Build ID**: Binding mode rejects an ELF image that contains `.note.gnu.build-id`.
   Link a manually bound ELF image with `--build-id=none`.
+
+### ELF release packaging
+
+GNU and LLVM `strip` support `--strip-debug`, `--strip-unneeded`, and `--strip-all` on these final images.
+GNU and LLVM `objcopy` support separate debug files with `--only-keep-debug`, `--strip-debug`, and `--add-gnu-debuglink`.
+These operations must preserve loaded records, sampled code bytes, and their record-relative addresses.
+The binder does not need a symbol table.
+It does need the section table and the `.obfsc` section names.
+
+For a manually linked image, package the final image before initial binding.
+For an image that the C/C++ wrapper already bound, package the image and run the binder again.
+The binder validates existing bound checksums without replacing them.
+It rejects changes to sampled code instead of authorizing those changes.
+
+For example, split debug information from a wrapper-bound image:
+
+```sh
+objcopy --only-keep-debug protected-app protected-app.debug
+objcopy --strip-debug protected-app
+objcopy --add-gnu-debuglink=protected-app.debug protected-app
+build/obf-checksum-bind protected-app
+```
+
+Use `llvm-objcopy` for the equivalent LLVM workflow.
+The separate debug file can only contain debug information that the linked image retained.
+Artifact cleanup removes debug information from protected modules, even when compilation uses `-g`.
+Separate debug files can retain information from raw objects linked into the same final image.
+They do not restore information that cleanup removed.
+Do not bind or execute the separate debug file.
+Copy the debug file with the packaged image when you need debugger access.
+The debuglink CRC identifies the debug file. It does not authenticate the executable.
+
+Byte-preserving deployment copies and directory changes do not invalidate checksum bindings.
+For shared libraries, compile protected objects with `-fPIC` and bind the final `.so` before protected calls.
+The C/C++ wrapper also binds required records after a Linux shared-library final link.
+Do not remove loaded checksum records or change their mapping.
+Section-table removal is outside the binder workflow, even if an already-bound image still loads.
 
 ## Windows PE/COFF Binding
 
@@ -182,7 +223,7 @@ This test does not require a new trap behavior.
 Compiler passes emit `UNBOUND` records into object files (`.o`, `.obj`).
 Static archives (`.a`, `.lib`) can contain those object files and their records.
 Do not run the binder on intermediate object files or static archives.
-Run the binder on the final linked executable or DLL after the linker resolves section layout and relocations.
+Run the binder on the final linked executable or shared library after the linker resolves section layout and relocations.
 On Windows, `obf-clang` and `obf-clang++` bind required records after final user-mode EXE and DLL links.
 The wrappers also find records inherited from object files and static archives.
 
@@ -198,7 +239,8 @@ To protect C++ functions:
 
 ## Unsupported Targets
 
-The v1 post-link bound format supports Linux x86-64 ELF executables and Windows x86-64 user-mode PE32+ executables and DLLs.
+The v1 post-link bound format supports Linux x86-64 ELF executables, PIEs, and shared libraries.
+It also supports Windows x86-64 user-mode PE32+ executables and DLLs.
 Other targets do not support post-link binding in v1:
 
 - 32-bit x86 (Linux, Windows)

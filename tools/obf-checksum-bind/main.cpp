@@ -283,6 +283,13 @@ elf_view parse_elf(const std::vector<std::uint8_t>& data,
       if ((segment.p_flags & PF_R) == 0 || (segment.p_flags & PF_W) != 0) {
         throw bind_error("self-checksum records must load from readable, non-writable memory");
       }
+      std::uint64_t mapped_offset = 0;
+      if (add_overflows(segment.p_offset,
+                        record_section.sh_addr - segment.p_vaddr,
+                        mapped_offset) ||
+          mapped_offset != record_section.sh_offset) {
+        throw bind_error("self-checksum record section disagrees with its PT_LOAD file mapping");
+      }
     }
     if (containing_segments != 1) {
       throw bind_error("self-checksum record section does not map to exactly one file-backed PT_LOAD");
