@@ -1,0 +1,10 @@
+seed: 424242
+default_level: none
+targets:
+  - match: protected_target
+    level: strong
+self_checksum:
+  enabled: true
+  window_size: 16
+  max_sites: 2
+  seed: 991827

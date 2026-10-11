@@ -505,7 +505,8 @@ A bound site injects the XOR of actual and expected checksums into a protected i
 Narrow sites truncate that difference and can lose a mismatch.
 
 The v1 hash is not cryptographic. It does not authenticate the complete binary or stop simultaneous code and record changes.
-The bound path supports Linux x86-64 ELF executables/PIE and native Windows x86-64 PE32+ executables or user-mode DLLs.
+The bound path supports Linux x86-64 ELF executables, PIEs, and shared libraries.
+It also supports native Windows x86-64 PE32+ executables and user-mode DLLs.
 Use the [binding guide](self-checksum.md) for workflows and binary rules.
 Use the [self-checksum security contract](../SECURITY.md#self-checksum-security-contract) for limits.
 
