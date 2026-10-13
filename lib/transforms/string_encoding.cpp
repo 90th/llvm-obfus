@@ -1,4 +1,5 @@
 #include "obf/transforms/string_encoding.h"
+#include "obf/transforms/string_copy.h"
 #include "obf/report/coverage_report.h"
 #include "obf/support/libc_comparison.h"
 
@@ -179,8 +180,14 @@ int merge_group_for_shape(string_helper_shape shape) {
 bool is_string_like_global(const llvm::GlobalVariable& global) {
   if (!global.hasInitializer()) { return false; }
 
-  const auto* data = llvm::dyn_cast<llvm::ConstantDataSequential>(global.getInitializer());
-  return data != nullptr && data->isCString();
+  if (const auto* data =
+          llvm::dyn_cast<llvm::ConstantDataSequential>(global.getInitializer())) {
+    return data->isCString();
+  }
+  const auto* array = llvm::dyn_cast<llvm::ArrayType>(global.getValueType());
+  return is_string_copy_source(global) && global.isConstant() && array != nullptr &&
+         array->getElementType()->isIntegerTy(8) && array->getNumElements() == 1 &&
+         llvm::isa<llvm::ConstantAggregateZero>(global.getInitializer());
 }
 
 bool is_supported_string_global(const llvm::GlobalVariable& global, std::size_t min_string_length) {
@@ -199,6 +206,7 @@ bool is_supported_string_global(const llvm::GlobalVariable& global, std::size_t 
 
   if (global.hasSection() && global.getSection() == "llvm.metadata") { return false; }
 
+  if (is_string_copy_source(global)) { return true; }
   const auto* data = llvm::cast<llvm::ConstantDataSequential>(global.getInitializer());
   return data->getNumElements() >= min_string_length;
 }
@@ -767,11 +775,15 @@ std::string make_string_generated_name(llvm::Module& module,
 }
 
 std::size_t get_string_length(const llvm::GlobalVariable& global) {
-  const auto* data = llvm::cast<llvm::ConstantDataSequential>(global.getInitializer());
-  return data->getNumElements();
+  if (const auto* data =
+          llvm::dyn_cast<llvm::ConstantDataSequential>(global.getInitializer())) {
+    return data->getNumElements();
+  }
+  return llvm::cast<llvm::ArrayType>(global.getValueType())->getNumElements();
 }
 
 bool is_inline_eligible(const llvm::GlobalVariable& global, const string_use_summary& summary) {
+  if (is_string_copy_source(global)) { return false; }
   if (!summary.unprotected_functions.empty() || summary.has_non_function_use ||
       summary.has_lazy_blockers || summary.protected_uses.empty()) {
     return false;
@@ -1050,7 +1062,8 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     return plan;
   }
 
-  if (options.enable_ephemeral_slots && !authenticated_mode && candidate.summary.all_ephemeral &&
+  if (!is_string_copy_source(*candidate.global) && options.enable_ephemeral_slots &&
+      !authenticated_mode && candidate.summary.all_ephemeral &&
       !candidate.summary.protected_uses.empty() &&
       ephemeral_uses_fit_unroll_bound(candidate.summary, options.max_ephemeral_unroll_bytes)) {
     select_ephemeral_micro_slot();
@@ -1115,6 +1128,20 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     plan.result.detail = std::to_string(plan.result.rewritten_use_count) +
                          (plan.isolate_lazy_helper ? " isolated lazy use(s)" : " lazy use(s)");
     plan.lazy_uses = candidate.summary.protected_uses;
+    if (const llvm::MDNode* declaration =
+            candidate.global->getMetadata("obf.string_copy.source")) {
+      const auto* helper_metadata =
+          llvm::cast<llvm::ValueAsMetadata>(declaration->getOperand(0));
+      const auto* helper = llvm::cast<llvm::Function>(helper_metadata->getValue());
+      plan.lazy_uses.erase(
+          std::remove_if(plan.lazy_uses.begin(), plan.lazy_uses.end(),
+                         [&](const classified_string_use& use) {
+                           const auto* call =
+                               llvm::dyn_cast_or_null<llvm::CallBase>(use.instruction);
+                           return call != nullptr && call->getCalledFunction() == helper;
+                         }),
+          plan.lazy_uses.end());
+    }
     return plan;
   }
 
@@ -1404,8 +1431,9 @@ authenticated_string_payload build_authenticated_payload(const llvm::GlobalVaria
                                                          const string_strategy_plan& plan,
                                                          std::uint64_t build_seed) {
   authenticated_string_payload payload;
-  const auto* data = llvm::cast<llvm::ConstantDataSequential>(global.getInitializer());
-  payload.ciphertext.reserve(data->getNumElements());
+  const auto* data = llvm::dyn_cast<llvm::ConstantDataSequential>(global.getInitializer());
+  const std::size_t length = get_string_length(global);
+  payload.ciphertext.reserve(length);
 
   auth::BuildKey build_key = auth::DeriveBuildKey(build_seed);
   const auth::Blake2sDigest function_key =
@@ -1418,13 +1446,13 @@ authenticated_string_payload build_authenticated_payload(const llvm::GlobalVaria
       auth::DeriveStringBindingId(plan.module_id, plan.function_id, plan.site_id);
   payload.metadata.version = auth::kStringDescriptorVersionV3;
   payload.metadata.flags = auth::kStringAuthFlagTrapOnFailure;
-  payload.metadata.length = data->getNumElements();
+  payload.metadata.length = length;
   payload.metadata.module_id = plan.module_id;
   payload.metadata.function_id = plan.function_id;
   payload.metadata.site_id = plan.site_id;
   payload.metadata.binding_id = binding_id;
-  payload.metadata.destination_capacity = data->getNumElements();
-  payload.metadata.ciphertext_capacity = data->getNumElements();
+  payload.metadata.destination_capacity = length;
+  payload.metadata.ciphertext_capacity = length;
   payload.metadata.build_key_capacity = auth::kBuildKeyBytes;
   payload.metadata.destination_cookie =
       auth::DeriveReferenceCookieV3(mac_key,
@@ -1451,9 +1479,11 @@ authenticated_string_payload build_authenticated_payload(const llvm::GlobalVaria
   payload.metadata.nonce = auth::DeriveStringNonce(site_key);
 
   llvm::SmallVector<std::uint8_t, 32> plaintext;
-  plaintext.reserve(data->getNumElements());
-  for (std::size_t index = 0; index < data->getNumElements(); ++index) {
-    plaintext.push_back(static_cast<std::uint8_t>(data->getElementAsInteger(index)));
+  plaintext.reserve(length);
+  for (std::size_t index = 0; index < length; ++index) {
+    const std::uint8_t byte =
+        data == nullptr ? 0 : static_cast<std::uint8_t>(data->getElementAsInteger(index));
+    plaintext.push_back(byte);
   }
 
   payload.ciphertext.resize(plaintext.size());
@@ -2850,6 +2880,25 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
   apply_string_encoding_limit(plans, options);
   assign_lazy_descriptor_indices(plans, module_seed);
   if (apply_changes) { enforce_strong_vm_plaintext_policy(plans, candidates); }
+  if (apply_changes) {
+    for (const string_strategy_plan& plan : plans) {
+      if (plan.global == nullptr || !is_string_copy_source(*plan.global)) { continue; }
+      if (!plan.result.applied || !is_authenticated_plan(plan) ||
+          (plan.result.mode != string_encoding_mode::lazy_decode &&
+           plan.result.mode != string_encoding_mode::global_ctor)) {
+        const auto* declaration = plan.global->getMetadata("obf.string_copy.source");
+        const auto* owner = llvm::cast<llvm::Function>(
+            llvm::cast<llvm::ValueAsMetadata>(declaration->getOperand(1))->getValue());
+        const std::string reason =
+            (llvm::Twine("code=source_strategy, source=") + plan.global->getName() +
+             ", no supported authenticated source strategy: " + plan.result.detail).str();
+        record_coverage_event(module, "finalization", "string_copy_export", owner->getName(),
+                              plan.global->getName(), "rejected", reason, 0, "global");
+        write_coverage_report(module);
+        llvm::report_fatal_error(llvm::Twine("obf-string-copy: ") + reason);
+      }
+    }
+  }
 
   std::vector<string_encoding_result> results;
   results.reserve(plans.size());
@@ -2874,6 +2923,11 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
               module, plan, *authenticated_payloads[index], module_seed, options);
           descriptor_ptrs[index] = bundle.descriptor;
           topology_ptrs[index] = bundle.topology;
+          if (is_string_copy_source(*plan.global)) {
+            bind_string_copy_authentication(*plan.global, bundle.descriptor, bundle.topology,
+                                            authenticated_payloads[index]->metadata.length,
+                                            authenticated_payloads[index]->metadata.binding_id);
+          }
         }
         continue;
       }
@@ -2961,17 +3015,19 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
     if (apply_changes && plan.result.applied) {
       if (is_authenticated_plan(plan)) {
         if (plan.result.mode == string_encoding_mode::lazy_decode) {
-          llvm::Function* family_helper =
-              plan.isolate_lazy_helper
-                  ? create_isolated_lazy_helper(module, plan, options)
-                  : get_or_create_lazy_family_helper(module, plan.result.helper_shape);
-          record_helper(*family_helper);
-          rewrite_lazy_uses(*family_helper,
-                            descriptor_ptrs[plan_index],
-                            plan.lazy_uses,
-                            authenticated_payloads[plan_index]->metadata.length,
-                            authenticated_payloads[plan_index]->metadata.binding_id,
-                            topology_ptrs[plan_index]);
+          if (!plan.lazy_uses.empty()) {
+            llvm::Function* family_helper =
+                plan.isolate_lazy_helper
+                    ? create_isolated_lazy_helper(module, plan, options)
+                    : get_or_create_lazy_family_helper(module, plan.result.helper_shape);
+            record_helper(*family_helper);
+            rewrite_lazy_uses(*family_helper,
+                              descriptor_ptrs[plan_index],
+                              plan.lazy_uses,
+                              authenticated_payloads[plan_index]->metadata.length,
+                              authenticated_payloads[plan_index]->metadata.binding_id,
+                              topology_ptrs[plan_index]);
+          }
         } else if (plan.result.mode == string_encoding_mode::global_ctor) {
           prepare_authenticated_destination_global(*plan.global);
           if (!authenticated_payloads[plan_index].has_value()) {
@@ -2990,6 +3046,11 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
               options);
           llvm::appendToGlobalCtors(module, decoder, options.ctor_priority);
           record_helper(*decoder);
+          if (is_string_copy_source(*plan.global)) {
+            bind_string_copy_authentication(*plan.global, bundle.descriptor, bundle.topology,
+                                            authenticated_payloads[plan_index]->metadata.length,
+                                            authenticated_payloads[plan_index]->metadata.binding_id);
+          }
         } else if (plan.result.mode == string_encoding_mode::inline_stack_decode) {
           if (!authenticated_payloads[plan_index].has_value()) {
             authenticated_payloads[plan_index].emplace(
