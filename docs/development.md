@@ -67,6 +67,14 @@ It follows the replacement entry point and keeps reachable protected bodies inta
 Membership variants exist only for their own case, not across later targets.
 These rules limit full-module copies without reducing token cases or trap-before-effects checks.
 
+On Linux x86-64 glibc, run `obf-clang-cxx-shared-lifecycle-elf` for focused C++ shared-library lifecycle checks.
+It covers O0/O2 with `vm` and `strong_vm`, independent raw controls, authenticated decoding, and bound checksums.
+It checks exact construction, cleanup, retry, TLS destruction, and final destruction events.
+Joined unload, TLS retention, and explicit `RTLD_NODELETE` use separate mapping checks.
+Actual unmapping must precede a fresh initialization check.
+The harness saves compiler ledgers and native execution evidence in isolated `/tmp` directories.
+Other Linux loaders do not run this glibc-specific unload regression.
+
 On Windows, run `obf-clang-dll-lifecycle-pe` and `obf-clang-dll-output-pe` separately with three lit workers for focused native DLL checks.
 They check protected constructors and `DllMain` callbacks, decoded strings, return values, effects, exact exports, rebasing, and joined unload cycles.
 

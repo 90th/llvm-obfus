@@ -472,6 +472,33 @@ The runtime does not guarantee scheduler fairness or recovery after the decoding
 It also does not guarantee key erasure when a thread is canceled.
 See [authenticated decode waiting](../runtime/README.md#authenticated-decode-waiting) for the canonical publication and validation contract.
 
+### Linux ELF C++ shared-library lifecycle
+
+Keep the normal C++ startup and shutdown sequence for Linux x86-64 ELF shared libraries.
+Generated constructors prepare address-dependent VM state before normal user constructors.
+Authenticated keys do not depend on runtime entropy initialization.
+Calls before required generated constructors finish are outside this lifecycle.
+
+Protected helpers can run during global construction, local-static initialization, TLS destruction, and final static destruction.
+Functions with local exception handling retain the documented VM eligibility restrictions.
+A failed local-static initializer must preserve native cleanup and retry behavior.
+Authentication and required checksum binding still apply during constructor and destructor calls.
+
+Stop new calls, join callers, detach callbacks, and release borrowed function and data addresses before final unload.
+Decoded addresses belong to the mapped image. Do not use them after unmapping.
+Do not start workers or wait for another decoder owner during loader-controlled initialization or destruction.
+The authenticated waiting contract does not provide a loader-lock bypass.
+
+Successful `dlclose` does not prove that the loader removed an image.
+On glibc, pending nontrivial TLS destructors can retain a mapping after the last application handle closes.
+Thread exit runs those destructors, but a later loader action can still be necessary for final unmapping.
+`RTLD_NODELETE`, GNU-unique symbols, dependencies, and other open references can also retain an image.
+Do not count a retained-image reopen as fresh initialization or an unload/reload cycle.
+The native glibc regression checks TLS retention separately from explicit `RTLD_NODELETE`.
+It checks actual unmapping before it verifies fresh initialization.
+It does not establish the same unload behavior for other Linux loaders.
+Cross-image string ownership remains outside the [native ownership contract](#native-static-data-ownership).
+
 ### Windows DLL lifecycle
 
 Normal Windows x64 user-mode DLLs use the same VM, authentication, and self-checksum contracts as executables.
