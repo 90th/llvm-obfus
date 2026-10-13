@@ -17,6 +17,7 @@
 #include "obf/transforms/opaque_gep.h"
 #include "obf/transforms/opaque_predicates.h"
 #include "obf/transforms/string_encoding.h"
+#include "obf/transforms/string_copy.h"
 #include "obf/transforms/entropy_initialization.h"
 #include "obf/transforms/indirect_dispatch.h"
 #include "obf/transforms/zero_comparison.h"
@@ -636,6 +637,29 @@ bool promote_target_allocas_for_o0(llvm::Function& function,
 
   return changed;
 }
+
+void require_native_string_copy_route(llvm::Module& module, bool native) {
+  if (native || module.getNamedMetadata("obf.string_copy.exports") == nullptr) { return; }
+  constexpr llvm::StringLiteral reason =
+      "code=native_route, authenticated string copy exports require native compilation without LTO";
+  record_coverage_event(module, "finalization", "string_copy_export", "", module.getName(),
+                        "rejected", reason, 0, "module");
+  write_coverage_report(module);
+  llvm::report_fatal_error(llvm::Twine("obf-string-copy: ") + reason);
+}
+
+class prepare_string_copy_pass : public llvm::PassInfoMixin<prepare_string_copy_pass> {
+ public:
+  static bool isRequired() { return true; }
+
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+    const bool changed = prepare_string_copy_exports(module);
+    require_native_string_copy_route(module, get_active_lto_mode() == obf_lto_mode::none);
+    if (!changed) { return llvm::PreservedAnalyses::all(); }
+    verify_changed_module(module);
+    return llvm::PreservedAnalyses::none();
+  }
+};
 
 class prepare_o0_pass : public llvm::PassInfoMixin<prepare_o0_pass> {
  public:
@@ -1320,6 +1344,9 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
 
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& mam) {
     const obfuscation_config config = load_active_config();
+    bool changed = prepare_string_copy_exports(module);
+    require_native_string_copy_route(
+        module, route_ == pipeline_route::native && get_active_lto_mode() == obf_lto_mode::none);
     require_lto_input_validation(route_, config);
     const bool allow_unresolved = route_ == pipeline_route::prelink ||
                                   (is_postlink(route_) && has_managed_lto_input_validation());
@@ -1328,7 +1355,6 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     native_string_ownership native_ownership(
         module, states,
         route_ == pipeline_route::native && get_active_lto_mode() == obf_lto_mode::none);
-    bool changed = false;
     if (is_postlink(route_)) {
       llvm::FunctionAnalysisManager& fam =
           mam.getResult<llvm::FunctionAnalysisManagerModuleProxy>(module).getManager();
@@ -1448,6 +1474,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
                             "module");
       write_coverage_report(module);
     }
+    validate_string_copy_exports(module);
     changed |= enforce_security_gates(module, states, validation_bindings, config);
     record_coverage_event(module,
                           "finalization",
@@ -1630,6 +1657,11 @@ extern "C" OBF_PLUGIN_EXPORT ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo
                     return true;
                   }
 
+                  if (name == "obf-string-copy-prepare") {
+                    module_pm.addPass(obf::prepare_string_copy_pass());
+                    return true;
+                  }
+
                   if (name == "obf-safe-pipeline") {
                     module_pm.addPass(obf::safe_pipeline_pass());
                     return true;
@@ -1686,6 +1718,7 @@ extern "C" OBF_PLUGIN_EXPORT ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo
             pass_builder.registerPipelineStartEPCallback(
                 [](llvm::ModulePassManager& module_pm, llvm::OptimizationLevel level) {
                   if (!obf::is_obfuscation_enabled()) { return; }
+                  module_pm.addPass(obf::prepare_string_copy_pass());
                   if (level == llvm::OptimizationLevel::O0) {
                     module_pm.addPass(obf::prepare_o0_pass());
                     // LLVM22 does not pass the phase to PipelineStart and only

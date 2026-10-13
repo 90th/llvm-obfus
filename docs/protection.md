@@ -261,6 +261,48 @@ Generated ciphertext, build keys, local encoded strings, and VM bytecode have ex
 Discovery uses these roles instead of treating every C-string-shaped byte array as source text.
 This prevents another string-encoding pass from re-encoding generated binary data.
 
+### Authenticated cross-DSO string copies
+
+The copy-only export contract supports native Linux x86-64 glibc builds.
+Full LTO and ThinLTO reject these export declarations.
+Use the [source declarations and C API](usage.md#authenticated-cross-dso-string-copies) to export immutable, producer-private strings.
+The compiler generates the accessor body. Do not provide a handwritten body.
+
+Each source declaration binds an accessor and ID to its original string and a producer-private payload helper.
+The compiler rejects unsupported sources, source uses, signatures, strategies, limits, or unapplied protection.
+The declaration requires authenticated string encoding. It cannot enable plaintext, ephemeral, or non-authenticated export paths.
+The compiler validates the actual source bindings and decoder calls, not an accessor name or self-reported flag.
+
+Before every successful copy, the helper calls the existing authenticated decoder with producer-private descriptors, keys, and trusted constants.
+This includes constructor-backed sources. Constructor initialization alone does not satisfy the export check.
+The decoder checks descriptor metadata, tag, state, and completed payload before the compiler-generated copy path writes destination bytes.
+Authentication failure traps. It does not return an empty string or select a weaker path.
+Capacity queries and ordinary error returns do not authenticate the payload or certify successful export.
+The existing decoder waiting rules remain unchanged.
+Verification is point-in-time. Do not permit concurrent writes to producer source storage or its decoded cache during a copy.
+
+The caller owns the destination. A successful copy writes the complete string and final NUL without allocation or truncation.
+The copy is ordinary plaintext. It has no producer MAC or continuous integrity monitoring.
+It can survive producer unload while its own buffer owner remains live.
+Consumer-static buffers require the consumer image to remain loaded.
+See the [unload rules](usage.md#copy-lifetime-and-unload).
+
+Select a native `strong` producer accessor explicitly when that boundary is the intended policy.
+Compile independent runtime-input consumers with their own `vm` or `strong_vm` policy.
+This does not authorize a downgrade of an existing requested `strong_vm` target.
+Unsupported VM shapes retain their admission failures and strict gates.
+
+Producer protection and identity remain trusted build and deployment responsibilities.
+Retain the actual producer instance during calls and check that the resolved accessor belongs to it.
+A version, status, symbol name, pointer, checksum, or compiler report alone cannot prove producer protection to the consumer.
+The consumer receives runtime input, not cross-image protection provenance.
+The contract adds no publisher authentication, shared keys, whole-binary authentication, or hostile-process isolation.
+
+Direct imported string globals and supported static pointer cells still create image-local ownership obligations.
+`strong_vm` rejects required foreign static dependencies when the current validator cannot prove their protection.
+The copy API does not create a foreign-static exemption or extend `.obfns` across images.
+Raw manifests still cannot declare `protected`.
+
 ### Native static-data ownership
 
 Native ELF and COFF final links enforce the original `strong_vm` owner's static-string obligation.
@@ -497,7 +539,8 @@ Do not count a retained-image reopen as fresh initialization or an unload/reload
 The native glibc regression checks TLS retention separately from explicit `RTLD_NODELETE`.
 It checks actual unmapping before it verifies fresh initialization.
 It does not establish the same unload behavior for other Linux loaders.
-Cross-image string ownership remains outside the [native ownership contract](#native-static-data-ownership).
+Cross-image static ownership remains outside the [native ownership contract](#native-static-data-ownership).
+The [copy-only string API](#authenticated-cross-dso-string-copies) supplies runtime bytes, not a foreign static ownership proof.
 
 ### Windows DLL lifecycle
 

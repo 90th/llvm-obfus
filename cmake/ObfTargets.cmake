@@ -70,6 +70,7 @@ set(OBF_CORE_SOURCES
   lib/transforms/opaque_gep.cpp
   lib/transforms/opaque_predicates.cpp
   lib/transforms/self_checksum.cpp
+  lib/transforms/string_copy.cpp
   lib/transforms/string_encoding.cpp
   lib/transforms/zero_comparison.cpp
   lib/transforms/self_checksum.cpp

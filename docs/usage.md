@@ -581,6 +581,177 @@ The native regression checks actual mappings, final unload, and fresh initializa
 It preserves native exception cleanup and local-static retry behavior.
 See the [Linux lifecycle contract](protection.md#linux-elf-c-shared-library-lifecycle) for the verified scope and waiting restrictions.
 
+## Authenticated cross-DSO string copies
+
+Use this copy-only API for native Linux x86-64 glibc producers.
+Full LTO and ThinLTO reject its source declarations.
+The public declarations require the managed compiler pipeline. The header has no plaintext implementation fallback.
+Compile and link each producer and consumer separately with the matching wrappers and runtime.
+No cross-image decoder descriptors, keys, or deallocator form part of the API.
+
+### Producer declarations and policy
+
+Create `producer.c` with the public header and private source declarations:
+
+```c
+#include <obf/string_copy.h>
+
+OBF_STRING_COPY_DECLARE_V1(producer_text_copy_v1);
+
+OBF_STRING_COPY_SOURCE_V1(producer_text_copy_v1, 1)
+static const char text[] = "immutable text";
+
+OBF_STRING_COPY_SOURCE_V1(producer_text_copy_v1, 2)
+static const char empty_text[] = "";
+```
+
+The accessor name must be a C identifier ending in `_v1`.
+IDs must be unique within an accessor.
+Each source must be a static, immutable character array with one final NUL and no embedded NUL or trailing padding.
+The maximum source size is 1 MiB, including the NUL.
+Empty text needs one byte.
+Mutable, TLS, external, and unsupported shared sources reject.
+
+The compiler generates the accessor body. Do not define it yourself.
+The declaration has this C ABI, also under C++:
+
+```c
+int producer_text_copy_v1(uint32_t id, char *destination,
+                          size_t capacity, size_t *required);
+```
+
+Use this explicit native `strong` boundary in `producer.yaml`:
+
+```yaml
+frontend: generic
+profile: standard
+seed: 20261013
+default_level: none
+targets:
+  - match: producer_text_copy_v1
+    level: strong
+string_encoding:
+  authenticated_mode: true
+  enable_ephemeral_slots: false
+  prefer_lazy_decode: true
+  allow_ctor_fallback: true
+self_checksum:
+  enabled: false
+```
+
+```sh
+build/obf-clang -O2 -fPIC -shared -Iinclude \
+  --obf-config=producer.yaml producer.c -o producer.so
+```
+
+Use `obf-clang++` for a C++ producer.
+The header supplies `extern "C"` for its accessor declaration.
+The declaration requires a supported authenticated lazy or constructor-backed source plan.
+An export rejects if its final source, authentication, or copy-path obligations remain unfulfilled.
+Unsupported limits and source paths reject instead of exporting plaintext.
+Existing policy floors can promote a requested `none` selection.
+Every successful copy authenticates before destination writes, including copies from a constructor-backed source.
+
+### Independent VM consumer
+
+The consumer processes the copy as runtime input.
+For example, create `consumer.c` with a scalar byte reader:
+
+```c
+#include <stddef.h>
+#include <stdint.h>
+
+uint64_t consumer_measure(const char *text, size_t length) {
+    uint64_t result = 0;
+    for (size_t index = 0; index < length; ++index)
+        result += (unsigned char)text[index];
+    return result;
+}
+```
+
+Select the reader independently in `consumer.yaml`:
+
+```yaml
+frontend: generic
+profile: standard
+seed: 20261014
+default_level: none
+targets:
+  - match: consumer_measure
+    level: strong_vm
+self_checksum:
+  enabled: false
+```
+
+```sh
+build/obf-clang -O2 -fPIC -shared \
+  -fno-vectorize -fno-slp-vectorize -fno-unroll-loops \
+  --obf-config=consumer.yaml consumer.c -o consumer.so
+```
+
+Use `level: vm` when that is the consumer's intended policy.
+Neither consumer policy proves the producer's identity or protection.
+The native `strong` producer example is a separate boundary, not a fallback for a rejected `strong_vm` request.
+Do not change an existing requested VM policy to make an unsupported accessor pass.
+Strict static ownership checks and the raw-manifest `protected` ban remain unchanged.
+
+### Capacity and status rules
+
+Supply valid writable storage for `required`.
+It must not overlap the destination range.
+For a non-null destination, supply a valid writable range of at least `capacity` bytes.
+The accessor checks capacity, not the physical validity of arbitrary addresses.
+
+| Condition | Status | `required` and destination |
+|---|---|---|
+| Null `required` | `OBF_STRING_COPY_INVALID_ARGUMENT` (`3`) | No writes. |
+| Unknown ID, valid `required` | `OBF_STRING_COPY_UNKNOWN_ID` (`2`) | Set `required` to zero. Leave destination unchanged. |
+| Known ID, null destination, zero capacity | `OBF_STRING_COPY_NEED_CAPACITY` (`1`) | Set the full size, including NUL. No destination write. |
+| Known ID, null destination, nonzero capacity | `OBF_STRING_COPY_INVALID_ARGUMENT` (`3`) | Set the full size, including NUL. No destination write. |
+| Known ID, non-null destination, insufficient capacity | `OBF_STRING_COPY_NEED_CAPACITY` (`1`) | Set the full size, including NUL. Leave destination unchanged. |
+| Known ID, valid destination, sufficient capacity | `OBF_STRING_COPY_OK` (`0`) | Set the full size. Authenticate, then copy exactly that size, including NUL. |
+
+Exact capacity succeeds. Larger capacity does not cause writes past the full string size.
+The accessor never allocates a destination or returns truncated success.
+Queries and ordinary rejections do not authenticate the payload.
+Authentication failure traps before destination writes, even after an earlier successful copy.
+
+Load the trusted producer with `dlopen` and retain its handle before lookup.
+Use handle-scoped `dlsym`, not `RTLD_DEFAULT`, and check the accessor's owner against the expected producer instance.
+A symbol name or library filename does not prove that association.
+Treat a missing `_v1` accessor or incompatible ABI as a failed transfer.
+Do not substitute a raw pointer or plaintext export.
+Before publication, check success, the expected size, the final NUL, and application-specific content rules.
+Only then pass the copied bytes to the consumer.
+
+### Copy lifetime and unload
+
+Keep the actual producer loaded through queries and copy calls.
+Keep the consumer loaded through every consumer call.
+Publish a successful copy to workers with normal synchronization.
+The caller must keep the buffer live through every reader and queued use.
+Consumer-static storage ends when its consumer image unloads.
+
+Before final producer unload:
+
+1. Stop new producer calls.
+2. Remove producer callbacks.
+3. Wait for active calls and in-flight callbacks to finish.
+4. Join producer readers and workers.
+5. Clear producer callable pointers and producer-owned data pointers.
+6. Release the producer loader references.
+
+Loader reference counts do not replace call synchronization.
+Do not wait for another decoder owner during loader-controlled construction or destruction.
+A successful `dlclose` does not prove unmapping.
+TLS destructors, other references, dependencies, GNU-unique symbols, or `RTLD_NODELETE` can retain a mapping.
+These conditions do not extend an agreed pointer lifetime.
+The caller-owned copy remains usable after actual producer unmapping if its buffer and reader code remain live.
+It is ordinary plaintext without continuous integrity checks.
+
+Trust the producer's build and deployment. The consumer does not receive a machine-verifiable protection provenance guarantee.
+See the [protection contract](protection.md#authenticated-cross-dso-string-copies) for authentication and static ownership limits.
+
 ## Windows x64 DLLs
 
 Use the native Windows wrappers for normal Windows x64 user-mode DLLs.
