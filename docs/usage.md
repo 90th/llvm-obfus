@@ -561,6 +561,26 @@ Use the wrapper unless your integration implements the same linker, pipeline, po
 The [LTO integration test](../tests/lit/tooling/obf-clang-lto-linker-plugin.ll) shows lower-level plugin commands.
 Those commands are not a replacement for the managed contract.
 
+## Linux x86-64 C++ shared libraries
+
+Use `obf-clang++` with normal C++ startup, `-fPIC`, and `-shared`.
+The wrapper links its matching runtime and binds required records after the final shared-library link.
+Keep compatible compiler and C++ runtime settings in the host and library.
+Load the final library with `dlopen` before you obtain its exported addresses.
+Do not bypass generated initialization constructors.
+
+Before final `dlclose`, stop new calls and join all callers.
+Detach callbacks and clear every borrowed callable or data pointer.
+Do not dereference decoded string addresses after the image unmaps.
+Nontrivial `thread_local` objects register destructor work with the loader.
+On glibc, that work can retain a library after its application handle closes.
+Do not infer unmapping from a successful `dlclose`, or fresh constructors from a later `dlopen`.
+Other references, GNU-unique symbols, and `RTLD_NODELETE` can retain mappings independently of TLS work.
+
+The native regression checks actual mappings, final unload, and fresh initialization after reload.
+It preserves native exception cleanup and local-static retry behavior.
+See the [Linux lifecycle contract](protection.md#linux-elf-c-shared-library-lifecycle) for the verified scope and waiting restrictions.
+
 ## Windows x64 DLLs
 
 Use the native Windows wrappers for normal Windows x64 user-mode DLLs.

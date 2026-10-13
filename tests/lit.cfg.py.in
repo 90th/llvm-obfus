@@ -261,6 +261,8 @@ for family, strip_candidates, objcopy_candidates, version_pattern in [
 
 if sys.platform.startswith("linux"):
     config.available_features.add("system-linux")
+    if platform.libc_ver()[0] == "glibc":
+        config.available_features.add("system-glibc")
     if platform.machine().lower() in ("x86_64", "amd64"):
         config.available_features.add("system-linux-x86-64")
 
