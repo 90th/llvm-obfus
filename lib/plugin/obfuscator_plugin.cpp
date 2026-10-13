@@ -32,9 +32,11 @@
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/EHPersonalities.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -316,6 +318,51 @@ class AuditResolver {
 // - CfgStateCleanupPass: Module-level cleanup; doesn't use function_pipeline_state
 // - safe_pipeline_pass: Complex orchestrator with custom control flow; too specialized
 
+// WinEHPrepare discards calls without their enclosing funclet token. Native
+// protection can insert calls after Clang has assigned the original bundles.
+bool complete_funclet_bundles(llvm::Module& module) {
+  bool changed = false;
+  for (llvm::Function& function : module) {
+    if (function.isDeclaration() || !function.hasPersonalityFn() ||
+        !llvm::isFuncletEHPersonality(
+            llvm::classifyEHPersonality(function.getPersonalityFn()))) {
+      continue;
+    }
+    const auto colors = llvm::colorEHFunclets(function);
+    for (llvm::BasicBlock& block : function) {
+      const auto found = colors.find(&block);
+      if (found == colors.end() || found->second.empty()) { continue; }
+      for (auto it = block.begin(); it != block.end();) {
+        llvm::Instruction& instruction = *it++;
+        auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+        if (call == nullptr || llvm::isa<llvm::IntrinsicInst>(call) ||
+            call->getOperandBundle(llvm::LLVMContext::OB_funclet)) {
+          continue;
+        }
+        if (found->second.size() != 1) {
+          llvm::report_fatal_error("obf: generated call has ambiguous EH funclet ownership");
+        }
+        llvm::BasicBlock* color = found->second.front();
+        if (color == &function.getEntryBlock()) { continue; }
+        auto* pad = llvm::dyn_cast<llvm::FuncletPadInst>(&*color->getFirstNonPHIIt());
+        if (pad == nullptr) {
+          llvm::report_fatal_error("obf: generated call has no enclosing EH funclet pad");
+        }
+        llvm::Value* inputs[] = {pad};
+        llvm::SmallVector<llvm::OperandBundleDef, 2> bundles;
+        call->getOperandBundlesAsDefs(bundles);
+        bundles.emplace_back("funclet", inputs);
+        llvm::CallBase* replacement = llvm::CallBase::Create(call, bundles, call->getIterator());
+        replacement->takeName(call);
+        call->replaceAllUsesWith(replacement);
+        call->eraseFromParent();
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
 template <typename StageFn>
 llvm::PreservedAnalyses run_stateful_stage(llvm::Module& module, StageFn&& stage) {
   const obfuscation_config config = load_active_config();
@@ -329,6 +376,7 @@ llvm::PreservedAnalyses run_stateful_stage(llvm::Module& module, StageFn&& stage
                                               : llvm::PreservedAnalyses::all();
   }
 
+  complete_funclet_bundles(module);
   verify_changed_module(module);
   return llvm::PreservedAnalyses::none();
 }
@@ -339,6 +387,7 @@ llvm::PreservedAnalyses run_config_stage(llvm::Module& module, StageFn&& stage) 
   validate_effective_config(config, module);
   if (!std::forward<StageFn>(stage)(module, config)) { return llvm::PreservedAnalyses::all(); }
 
+  complete_funclet_bundles(module);
   verify_changed_module(module);
   return llvm::PreservedAnalyses::none();
 }
@@ -1458,6 +1507,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     changed |= apply_cfg_state_cleanup_stage(module);
     changed |= apply_indirect_dispatch_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_indirect_dispatch_to_functions(post_vm_virtualized, config);
+    changed |= complete_funclet_bundles(module);
     virtualized_function_map validation_bindings = retained_bindings;
     for (const auto& entry : post_vm_virtualized) {
       validation_bindings[entry.getKey()] = entry.second;
