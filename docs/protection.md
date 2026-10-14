@@ -276,6 +276,12 @@ Windows declarations retain `__declspec(dllexport)` on the public C accessor thr
 Source helpers, descriptors, references, keys, state, and decoded caches remain producer-private.
 The final native PE link rejects exports of private runtime symbols, including `.def` aliases and ordinal-only exports.
 Inspect the final PE export directory, not only the compiler's IR linkage.
+All ELF runtime ABI definitions use hidden visibility, including the entropy anchor and all entropy-pair functions.
+Protected shared libraries and `-rdynamic` executables must not export these symbols in `.dynsym`.
+The final ELF link rejects defined runtime-prefix exports and direct aliases to private runtime function or data addresses.
+It also rejects executable x86 `E9 rel32` and `EB rel8` thunk routes to those addresses within 32 jumps.
+The check uses actual LLD or GNU ld map addresses, including stripped outputs. Rejection removes the primary output image.
+It does not establish equivalence through other instructions or longer jump chains.
 
 Before every successful copy, the helper calls the existing authenticated decoder with producer-private descriptors, keys, and trusted constants.
 This includes constructor-backed sources. Constructor initialization alone does not satisfy the export check.

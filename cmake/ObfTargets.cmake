@@ -73,7 +73,6 @@ set(OBF_CORE_SOURCES
   lib/transforms/string_copy.cpp
   lib/transforms/string_encoding.cpp
   lib/transforms/zero_comparison.cpp
-  lib/transforms/self_checksum.cpp
   lib/vm/candidate_analysis.cpp
   lib/vm/bytecode_decode.cpp
   lib/vm/dispatch_emission.cpp

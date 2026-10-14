@@ -28,13 +28,13 @@
 #include <time.h>
 #endif
 
-uint64_t OBF_RT_ENTROPY_ANCHOR = 0;
-
 #if defined(__clang__) || defined(__GNUC__)
 #define OBF_HIDDEN __attribute__((visibility("hidden")))
 #else
 #define OBF_HIDDEN
 #endif
+
+OBF_HIDDEN uint64_t OBF_RT_ENTROPY_ANCHOR = 0;
 
 OBF_HIDDEN
 void OBF_RT_SELF_CHECKSUM_REQUIRE_BOUND(uint32_t flags) {
@@ -99,7 +99,7 @@ static struct ObfEntropyPair BuildEntropyPair(uint64_t direct, uint64_t indirect
 #define OBF_ENTROPY_ABI
 #endif
 #endif
-OBF_ENTROPY_ABI
+OBF_HIDDEN OBF_ENTROPY_ABI
 struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR(void) {
   const uint64_t direct = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t* const ref_ptr = kEntropyAnchorRef;
@@ -108,7 +108,7 @@ struct ObfEntropyPair OBF_RT_LOAD_ENTROPY_PAIR(void) {
   return BuildEntropyPair(direct, indirect);
 }
 
-OBF_ENTROPY_ABI struct ObfEntropyPair
+OBF_HIDDEN OBF_ENTROPY_ABI struct ObfEntropyPair
 OBF_RT_LOAD_ENTROPY_PAIR_V1(void) {
   const uint64_t direct = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t* const ref_ptr = kEntropyAnchorRef;
@@ -119,7 +119,7 @@ OBF_RT_LOAD_ENTROPY_PAIR_V1(void) {
   return BuildEntropyPair((uint64_t)scratch_direct, (uint64_t)scratch_indirect);
 }
 
-OBF_ENTROPY_ABI struct ObfEntropyPair
+OBF_HIDDEN OBF_ENTROPY_ABI struct ObfEntropyPair
 OBF_RT_LOAD_ENTROPY_PAIR_V2(void) {
   const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t* const ref_ptr = kEntropyAnchorRef;
@@ -134,7 +134,7 @@ OBF_RT_LOAD_ENTROPY_PAIR_V2(void) {
   return BuildEntropyPair(direct, indirect);
 }
 
-OBF_ENTROPY_ABI struct ObfEntropyPair
+OBF_HIDDEN OBF_ENTROPY_ABI struct ObfEntropyPair
 OBF_RT_LOAD_ENTROPY_PAIR_V3(void) {
   const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t* const ref_ptr = kEntropyAnchorRef;
@@ -147,7 +147,7 @@ OBF_RT_LOAD_ENTROPY_PAIR_V3(void) {
   return BuildEntropyPair(direct, indirect);
 }
 
-OBF_ENTROPY_ABI struct ObfEntropyPair
+OBF_HIDDEN OBF_ENTROPY_ABI struct ObfEntropyPair
 OBF_RT_LOAD_ENTROPY_PAIR_V4(void) {
   const uint64_t base = ObfAtomicLoadU64Relaxed(&OBF_RT_ENTROPY_ANCHOR);
   uint64_t* const ref_ptr = kEntropyAnchorRef;

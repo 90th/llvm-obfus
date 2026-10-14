@@ -4,10 +4,10 @@
 
 #if COPY_VARIANT == 1
 static const char raw_primary[] = "amber producer A owns this copy";
-static const char raw_secondary[] = "A: independent data 1847";
+#define COPY_SECONDARY "A: independent data 1847"
 #elif COPY_VARIANT == 2
 static const char raw_primary[] = "violet producer B has another payload";
-static const char raw_secondary[] = "B: distinct data 9263";
+#define COPY_SECONDARY "B: distinct data 9263"
 #else
 #error COPY_VARIANT must be 1 or 2
 #endif
@@ -17,8 +17,10 @@ static const char raw_empty[] = "";
 #define exchange_copy_v1 exchange_copy_v2
 #endif
 
+extern "C" __attribute__((visibility("default")))
 int exchange_copy_v1(uint32_t id, char *destination, size_t capacity,
                      size_t *required) {
+  static const char raw_secondary[] = COPY_SECONDARY;
   const char *text;
   size_t length;
   if (required == NULL)

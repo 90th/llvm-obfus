@@ -769,6 +769,7 @@ void parse_elf_placements(authority& result, StringRef map, bool lld) {
   const std::regex output(R"(^(\S+)\s+0x[0-9a-fA-F]+\s+0x[0-9a-fA-F]+(?:\s.*)?$)");
   const std::regex input(R"(^\s+(\S+)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(.+?)\s*$)");
   const std::regex wrapped(R"(^\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(.+?)\s*$)");
+  const std::regex symbol(R"(^\s+(0x[0-9a-fA-F]+)\s+(\S+)(?:\s+=.*)?\s*$)");
   for (auto raw : lines) {
     const auto line = raw.rtrim().str();
     if (lld) {
@@ -810,10 +811,14 @@ void parse_elf_placements(authority& result, StringRef map, bool lld) {
             !std::isspace(static_cast<unsigned char>(raw[column - 2])) && columns.size() == 5) {
           output_section = tail;
           contribution.reset();
-        } else if (contribution && column == symbol_column && columns.size() == 5 &&
-                   !result.prevailing.contains(tail)) {
-          result.placed_symbols[tail].push_back(
-              {*contribution, hex_number(columns[0], "map symbol address")});
+        } else if (column == symbol_column && columns.size() == 5) {
+          const auto address = hex_number(columns[0], "map symbol address");
+          if (StringRef(tail).starts_with(OBF_RT_ABI_PREFIX_STR)) {
+            result.private_runtime_addresses.try_emplace(address, tail);
+          }
+          if (contribution && !result.prevailing.contains(tail)) {
+            result.placed_symbols[tail].push_back({*contribution, address});
+          }
         }
       }
       continue;
@@ -841,6 +846,13 @@ void parse_elf_placements(authority& result, StringRef map, bool lld) {
                                    output_section,
                                    hex_number(matched[1].str(), "map address"),
                                    hex_number(matched[2].str(), "map size")});
+      pending_input.clear();
+    } else if (std::regex_match(line, matched, symbol)) {
+      const auto name = matched[2].str();
+      if (StringRef(name).starts_with(OBF_RT_ABI_PREFIX_STR)) {
+        result.private_runtime_addresses.try_emplace(
+            hex_number(matched[1].str(), "private runtime MAP address"), name);
+      }
       pending_input.clear();
     } else {
       const auto text = raw.trim();
@@ -1051,6 +1063,119 @@ void validate_coff_runtime_exports(const std::string& output, const authority& r
         fail("actual PE export jump thunk target exceeds RVA bounds");
       }
       rva = static_cast<std::uint32_t>(target);
+    }
+  }
+}
+
+void validate_elf_runtime_exports(const std::string& output, authority& resolution) {
+  auto buffer = llvm::MemoryBuffer::getFile(output, false, false);
+  if (!buffer) { fail("cannot read actual ELF link output: " + buffer.getError().message()); }
+  if (!(*buffer)->getBuffer().starts_with("\x7f" "ELF")) { return; }
+  auto linked =
+      take(object::createBinary((*buffer)->getMemBufferRef()), "cannot read actual ELF link output");
+  const auto* elf = llvm::dyn_cast<object::ELFObjectFileBase>(linked.get());
+  if (elf == nullptr) { fail("invalid actual ELF link output"); }
+  if (elf->getEType() != llvm::ELF::ET_EXEC && elf->getEType() != llvm::ELF::ET_DYN) { return; }
+  const auto exports = elf->getDynamicSymbolIterators();
+  if (exports.empty()) { return; }
+
+  struct allocated_section {
+    std::uint64_t address;
+    std::uint64_t size;
+    StringRef executable;
+  };
+  llvm::SmallVector<allocated_section, 32> sections;
+  for (const auto& section : elf->sections()) {
+    const object::ELFSectionRef header(section);
+    if ((header.getFlags() & llvm::ELF::SHF_ALLOC) == 0) { continue; }
+    StringRef executable;
+    if ((header.getFlags() & llvm::ELF::SHF_EXECINSTR) != 0 &&
+        header.getType() != llvm::ELF::SHT_NOBITS) {
+      executable = take(section.getContents(), "cannot read actual ELF executable bytes");
+    }
+    sections.push_back({section.getAddress(), section.getSize(), executable});
+  }
+  const auto allocated_address = [&](std::uint64_t address) {
+    return std::any_of(sections.begin(), sections.end(), [&](const auto& section) {
+      return address >= section.address && address - section.address < section.size;
+    });
+  };
+  const auto executable_bytes = [&](std::uint64_t address) -> StringRef {
+    for (const auto& section : sections) {
+      if (address < section.address) { continue; }
+      const auto offset = address - section.address;
+      if (offset >= section.size || offset >= section.executable.size()) { continue; }
+      return section.executable.drop_front(offset).take_front(section.size - offset);
+    }
+    return {};
+  };
+  // The actual map retains hidden runtime addresses when -s removes .symtab.
+  for (const auto& symbol : elf->symbols()) {
+    const auto name = take(symbol.getName(), "invalid actual ELF symbol name");
+    if (!name.starts_with(OBF_RT_ABI_PREFIX_STR) || symbol.getELFType() == llvm::ELF::STT_TLS ||
+        (take(symbol.getFlags(), "invalid actual ELF symbol flags") &
+         object::SymbolRef::SF_Undefined) != 0) {
+      continue;
+    }
+    const auto address = take(symbol.getValue(), "invalid actual ELF symbol value");
+    if (allocated_address(address) && !resolution.private_runtime_addresses.contains(address)) {
+      resolution.private_runtime_addresses.emplace(address, name.str());
+    }
+  }
+
+  const bool x86 =
+      elf->getEMachine() == llvm::ELF::EM_X86_64 || elf->getEMachine() == llvm::ELF::EM_386;
+  const auto address_limit = elf->getBytesInAddress() == 4
+                                 ? std::uint64_t{std::numeric_limits<std::uint32_t>::max()}
+                                 : std::numeric_limits<std::uint64_t>::max();
+  for (const auto& symbol : exports) {
+    if ((take(symbol.getFlags(), "invalid actual ELF dynamic symbol flags") &
+         object::SymbolRef::SF_Undefined) != 0) {
+      continue;
+    }
+    const auto name = take(symbol.getName(), "invalid actual ELF dynamic symbol name");
+    if (name.starts_with(OBF_RT_ABI_PREFIX_STR)) {
+      fail("private runtime export name " + name.str());
+    }
+    // TLS symbol values are offsets, not linked virtual addresses.
+    if (symbol.getELFType() == llvm::ELF::STT_TLS) { continue; }
+    auto address = take(symbol.getValue(), "invalid actual ELF dynamic symbol value");
+    std::array<std::uint64_t, 32> jump_addresses;
+    std::size_t depth = 0;
+    for (;;) {
+      // Match data and direct aliases before decoding any executable bytes.
+      const auto runtime = resolution.private_runtime_addresses.find(address);
+      if (runtime != resolution.private_runtime_addresses.end() && allocated_address(address)) {
+        fail("private runtime export address " + runtime->second + " (symbol " + name.str() + ")");
+      }
+      if (!x86 || resolution.private_runtime_addresses.empty()) { break; }
+      const auto bytes = executable_bytes(address);
+      if (bytes.empty()) { break; }
+      const auto opcode = static_cast<unsigned char>(bytes.front());
+      if (opcode != 0xe9 && opcode != 0xeb) { break; }
+      if (depth == jump_addresses.size() ||
+          std::find(jump_addresses.begin(), jump_addresses.begin() + depth, address) !=
+              jump_addresses.begin() + depth) {
+        break;
+      }
+      jump_addresses[depth++] = address;
+      const unsigned width = opcode == 0xe9 ? 4 : 1;
+      const unsigned length = width + 1;
+      if (bytes.size() < length || address > address_limit - length) { break; }
+      const auto next = address + length;
+      const auto encoded = static_cast<std::int64_t>(little_number(bytes, 1, width));
+      const auto sign = width == 4 ? 0x80000000LL : 0x80LL;
+      const auto displacement = encoded >= sign ? encoded - 2 * sign : encoded;
+      // Stop uncertain chains. Ordinary exports can start with jumps or loops.
+      if (displacement < 0) {
+        const auto backward = static_cast<std::uint64_t>(-displacement);
+        if (next < backward) { break; }
+        address = next - backward;
+      } else {
+        const auto forward = static_cast<std::uint64_t>(displacement);
+        if (forward > address_limit - next) { break; }
+        address = next + forward;
+      }
     }
   }
 }
@@ -2245,7 +2370,11 @@ int run(int argc, char** argv) {
     auto authoritative =
         options.coff ? parse_coff_map(map, lldmap)
                      : parse_elf_map(map, options.lld || StringRef(map).ltrim().starts_with("VMA"));
-    if (options.coff) { validate_coff_runtime_exports(options.output, authoritative); }
+    if (options.coff) {
+      validate_coff_runtime_exports(options.output, authoritative);
+    } else if (!options.partial) {
+      validate_elf_runtime_exports(options.output, authoritative);
+    }
     validator enforce(authoritative,
                       options.coff,
                       options.args,

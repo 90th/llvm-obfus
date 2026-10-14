@@ -67,6 +67,16 @@ It rejects private names, aliased addresses, ordinal-only exports, and private r
 It follows bounded executable `E9 rel32` thunk chains to detect MSVC incremental aliases without disabling incremental links.
 The existing rejected-output path removes the primary image.
 
+All runtime ABI definitions in `libobf_runtime.a` use `OBF_HIDDEN` on ELF, including the entropy anchor and five entropy-pair functions.
+The entropy initializer pass changes the anchor value without changing its hidden visibility.
+User-module declarations remain unchanged. The runtime lit suite checks resolution through `lli --extra-object`.
+After a final ELF link, `obf-native-link` checks defined `.dynsym` symbols against private runtime addresses.
+It uses the actual LLD or GNU ld map and available output symbols, including map authority for stripped outputs.
+It rejects runtime-prefix names, direct function or data aliases, and executable x86 `E9 rel32` or `EB rel8` thunk routes.
+The check follows at most 32 jumps with section, file, displacement, and cycle bounds.
+Other instructions and uncertain routes stop traversal. This check is not a general code-equivalence or disassembly proof.
+Partial ELF links retain the existing ownership reconciliation path.
+
 
 Run `validate_string_copy_exports` before security-gate completion.
 Reject missing bindings and inconsistent source, accessor, ID, length, or payload paths.
@@ -146,6 +156,11 @@ Check `vm` and `strong_vm` producer accessors through their actual resolver path
 Check exact bytes, required sizes, NUL, statuses, and unchanged destination sentinels on ordinary rejection.
 Cover empty, lazy, and permitted constructor-backed sources.
 Require actual producer-private authentication before every successful copy, not constructor-only initialization.
+Include a C++ function-local static immutable source alongside file-local and empty sources.
+Check `.dynsym` exports with both `ld.lld` and GNU ld. Legitimate accessors must pass without runtime exports.
+Pair each managed export rejection with a raw link of the same protected object and runtime archive.
+Verify the raw exported name, address, and decoder thunk route before requiring native-link rejection and output removal.
+Forced per-source helper and payload exports must fail in the real linker, not the final export check.
 
 After one valid copy, corrupt the primary, secondary, and empty sources.
 Change only data: decoded cache, tag, ciphertext, or descriptor length/version.

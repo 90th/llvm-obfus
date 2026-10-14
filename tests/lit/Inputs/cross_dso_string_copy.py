@@ -1,4 +1,16 @@
-"""Check native copy-only string exchange, VM consumers, unload, and authentication."""
+"""Check Linux x86-64 authenticated copy-only DSO exchange and real unload.
+
+Source ID 2 uses C++ function-local immutable storage. Cold means the first
+application copy, after constructor decoding for ctor rows. Lazy cache
+corruption is meaningful only after a successful copy. Other lazy fields and
+all ctor fields are tested both cold and warm.
+
+The default run includes both LLD and GNU BFD export profiles.
+--only-export-isolation --linker lld (or bfd) runs one export profile.
+Raw links use the same protected object and matching runtime as managed links.
+ELF symbol tables, native maps, and bounded E9/EB routes establish each control.
+Commands, ledgers, private data, and native observations stay under /tmp.
+"""
 
 import argparse
 import hashlib
@@ -6,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import resource
 import struct
 import tempfile
@@ -18,6 +31,8 @@ FIXTURES = Path(__file__).resolve().parent
 INCLUDE = FIXTURES.parents[2] / "include"
 FLAGS = ("-std=c11", "-fno-inline", "-fno-vectorize", "-fno-slp-vectorize",
          "-fno-unroll-loops")
+CXX_FLAGS = ("-x", "c++", "-std=c++17", *FLAGS[1:])
+CXX_SOURCES = {"cross-dso-string-copy-producer.c", "cross-dso-string-copy-raw.c"}
 TEXTS = ((b"amber producer A owns this copy\0", b"A: independent data 1847\0", b"\0"),
          (b"violet producer B has another payload\0", b"B: distinct data 9263\0", b"\0"))
 MUTATIONS = ("cache", "tag", "ciphertext", "length", "version")
@@ -31,7 +46,7 @@ def require(condition, message):
 class ElfData:
     """Read private data addresses from ELF64 symbols and native relocations."""
 
-    def __init__(self, image):
+    def __init__(self, image, *, require_symbols=True):
         self.image = image
         self.data = image.read_bytes()
         self.named = sections(self.data)
@@ -44,6 +59,7 @@ class ElfData:
                       for index in range(count)]
         self.symbols = []
         self.symbol_tables = {}
+        self.dynamic_symbols = []
         for index, section in enumerate(self.table):
             if section[1] not in (2, 11):  # SHT_SYMTAB, SHT_DYNSYM
                 continue
@@ -63,7 +79,10 @@ class ElfData:
             self.symbol_tables[index] = symbols
             if section[1] == 2:
                 self.symbols.extend(symbols)
-        require(self.symbols, "private ELF .symtab is required for data-only corruption")
+            else:
+                self.dynamic_symbols.extend(symbols)
+        require(not require_symbols or self.symbols,
+                "private ELF .symtab is required for data-only corruption")
         self.relocations = {}
         for section in self.table:
             if section[1] != 4:  # SHT_RELA
@@ -135,10 +154,13 @@ class ElfData:
         address = descriptor["address"]
         destination_ref = self.pointer(address + 136)
         ciphertext_ref = self.pointer(address + 144)
+        key_ref = self.pointer(address + 152)
+        key = self.pointer(key_ref + 8)
+        for reference in (destination_ref, ciphertext_ref, key_ref):
+            self.private_object(reference, 16)
+        key_symbol = self.private_object(key, 32)
         cache = self.pointer(destination_ref + 8)
         ciphertext = self.pointer(ciphertext_ref + 8)
-        self.private_object(destination_ref, 16)
-        self.private_object(ciphertext_ref, 16)
         cache_symbol = self.private_object(cache, length)
         ciphertext_symbol = self.private_object(ciphertext, length)
         require(self.data_section(cache, length)[2] & 1,
@@ -154,9 +176,114 @@ class ElfData:
         return {"descriptor_symbol": descriptor["name"], "descriptor": address,
                 "cache_symbol": cache_symbol["name"], "cache": cache,
                 "ciphertext_symbol": ciphertext_symbol["name"], "ciphertext": ciphertext,
+                "build_key_symbol": key_symbol["name"], "build_key": key,
+                "build_key_sha256": hashlib.sha256(self.read(key, 32)).hexdigest(),
                 "length": length, "module_id": struct.unpack_from("<Q", blob, 16)[0],
                 "ciphertext_sha256": hashlib.sha256(encrypted).hexdigest(),
                 "targets": targets, "originals": originals}
+
+    def symbol(self, name):
+        matches = [symbol for symbol in self.symbols
+                   if symbol["name"] == name and symbol["section"] != 0]
+        require(len(matches) == 1, f"private ELF symbol is not unique: {name}")
+        return matches[0]
+
+    def exports(self, expected):
+        exports = {symbol["name"]: symbol for symbol in self.dynamic_symbols
+                   if symbol["section"] != 0 and symbol["binding"] in (1, 2, 10) and
+                   symbol["visibility"] in (0, 3)}
+        require(set(exports) == set(expected), f"public ELF exports differ: {exports}")
+        return {"machine": "x86-64", "format": "ELF64", "exports": exports}
+
+    def private_runtime(self, names):
+        require(not any(symbol["name"] in names for symbol in self.dynamic_symbols),
+                "private runtime symbol survives in ELF .dynsym")
+        symbols = [self.symbol(name) for name in names] if self.symbols else []
+        require(all(symbol["binding"] == 0 or symbol["visibility"] in (1, 2)
+                    for symbol in symbols), "runtime definition is not ELF-private")
+        # GNU BFD can localize hidden definitions to LOCAL DEFAULT. Record the
+        # actual fields. Do not require HIDDEN on an already-local definition.
+        return {"dynsym_absent": True, "symtab": symbols}
+
+    def object_functions(self, path, obj, linker):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        owner = re.escape(str(obj))
+        if linker == "lld":
+            pattern = (rf"^\s*([0-9a-fA-F]+)\s+[0-9a-fA-F]+\s+"
+                       rf"([0-9a-fA-F]+)\s+\d+\s+{owner}:\(\.text(?:\.[^)]*)?\)")
+        else:
+            pattern = (rf"^\s*\.text(?:\.\S+)?\s+0x([0-9a-fA-F]+)\s+"
+                       rf"0x([0-9a-fA-F]+)\s+{owner}(?:\s|$)")
+        ranges = [(int(match.group(1), 16), int(match.group(2), 16))
+                  for match in re.finditer(pattern, text, re.MULTILINE)]
+        require(ranges, "native map omits producer executable contributions")
+        functions = [symbol for symbol in self.symbols
+                     if symbol["type"] == 2 and symbol["binding"] == 0 and symbol["size"] > 0 and
+                     any(start <= symbol["address"] and
+                         symbol["address"] + symbol["size"] <= start + size
+                         for start, size in ranges)]
+        require(functions, "producer has no mapped private functions")
+        return sorted(functions, key=lambda symbol: symbol["address"])
+
+    def map_symbol_address(self, path, name, linker):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if linker == "lld":
+            pattern = (rf"^\s*([0-9a-fA-F]+)\s+[0-9a-fA-F]+\s+"
+                       rf"[0-9a-fA-F]+\s+\d+\s+{re.escape(name)}(?:\s|$)")
+        else:
+            pattern = rf"^\s*0x([0-9a-fA-F]+)\s+{re.escape(name)}(?:\s|$)"
+        addresses = {int(match.group(1), 16)
+                     for match in re.finditer(pattern, text, re.MULTILINE)}
+        require(len(addresses) == 1 and
+                (not self.symbols or addresses == {self.symbol(name)["address"]}),
+                f"native map and ELF .symtab disagree for {name}: {addresses}")
+        return addresses.pop()
+
+    def thunk_route(self, address, target):
+        path, opcodes, visited = [], [], set()
+        current = address
+        termination = "depth"
+        for _ in range(64):
+            if current in visited:
+                termination = "cycle"
+                break
+            visited.add(current)
+            path.append(current)
+            if current == target:
+                termination = "private-target"
+                break
+            sections_at = [section for section in self.table if section[2] & 2 and
+                           section[3] <= current < section[3] + section[5]]
+            if len(sections_at) != 1:
+                termination = "unmapped"
+                break
+            section = sections_at[0]
+            if not section[2] & 4:
+                termination = "nonexecutable"
+                break
+            offset = section[4] + current - section[3]
+            if section[1] == 8 or offset >= len(self.data):
+                termination = "truncated"
+                break
+            opcode = self.data[offset]
+            if opcode not in (0xE9, 0xEB):
+                termination = "ordinary-body"
+                break
+            size = 5 if opcode == 0xE9 else 2
+            if current + size > section[3] + section[5] or offset + size > len(self.data):
+                termination = "truncated"
+                break
+            opcodes.append(f"{opcode:02x}")
+            displacement = struct.unpack_from("<i" if size == 5 else "<b",
+                                              self.data, offset + 1)[0]
+            current += size + displacement
+        else:
+            if current == target:
+                path.append(current)
+                termination = "private-target"
+        return {"exported_address": address, "endpoint_address": current,
+                "address_path": path, "opcodes": opcodes,
+                "hops": len(opcodes), "termination": termination}
 
 
 def policy(path, owner, level, *, seed=8675309, strategy="lazy", debug=False,
@@ -189,13 +316,36 @@ def check_report(path, owner, level, *, producer=False):
                    if event["owner"] == owner and event["mechanism"] == "string_encoding"
                    and event["status"] == "emitted"]
         require(encoded, "producer did not emit string encoding")
-        decoders = [role for role in report["roles"]
+        decoders = {role["target"] for role in report["roles"]
                     if role["owner"] == owner and role["role"] == "string_decoder"
-                    and "authenticated_string_decode" in role["obligations"]]
-        require(len({role["target"] for role in decoders}) >= 3,
+                    and "authenticated_string_decode" in role["obligations"]}
+        require(len(decoders) >= 3,
                 "producer sources lack independent authenticated decoder obligations")
-        result.update({"authenticated_sources": 3,
-                       "decoder_roles": sorted({role["target"] for role in decoders})})
+        bindings = None
+        for phase, status in (("emission", "generated"), ("emission", "bound"),
+                              ("finalization", "validated")):
+            events = [event for event in report[phase] if event["owner"] == owner
+                      and event["mechanism"] == "string_copy_export" and event["status"] == status]
+            actual = {}
+            for event in events:
+                match = re.search(r"(?:^|, )id=(\d+)(?:,|$)", event["reason"])
+                require(match is not None, "source binding has no exact ID")
+                source_id = int(match.group(1))
+                require(source_id not in actual and event["count"] == 1,
+                        "source binding repeats an ID or changes its count")
+                actual[source_id] = event["target"]
+            require(len(events) == 3 and set(actual) == {1, 2, 3},
+                    f"copy-export ledger lost exact source binding at {phase}/{status}")
+            if bindings is None:
+                bindings = actual
+                require("copy_primary" in bindings[1] and
+                        "retain_local_source" in bindings[2] and "copy_secondary" in bindings[2] and
+                        "copy_empty" in bindings[3],
+                        "producer lost its file-local or C++ function-local source identities")
+            require(actual == bindings, f"source identities changed at {phase}/{status}")
+        result.update(authenticated_sources=3, decoder_roles=sorted(decoders),
+                      source_ids=[1, 2, 3], source_bindings=bindings,
+                      export_finalizer="validated")
     if not producer or level in ("vm", "strong_vm"):
         require(selected[0]["allow_vm"], "selected byte-reader or exporter lost VM eligibility")
         admitted = [event for event in report["admission"]
@@ -233,13 +383,41 @@ class Harness:
                        "matrix": {"optimization": args.optimization, "level": args.level,
                                   "strategy": args.strategy, "tamper": args.tamper,
                                   "cold_authentication": not args.warm_only,
-                                  "rejections": not args.skip_negatives}}
+                                  "rejections": not args.skip_negatives,
+                                  "only_export_isolation": args.only_export_isolation,
+                                  "export_linker_filter": args.linker}}
         self.producers = {}
+        self._runtime_abi = None
         self.save()
         print(f"CROSS_DSO_STRING_COPY_WORK {self.work}", flush=True)
 
     def save(self):
         (self.work / "result.json").write_text(json.dumps(self.result, indent=2) + "\n", encoding="utf-8")
+
+    def runtime_abi(self):
+        if self._runtime_abi is None:
+            headers = ([self.args.runtime_header] if self.args.runtime_header else
+                       [Path(self.args.wrapper).parent /
+                        "include/obf/support/runtime_abi_generated.h",
+                        Path(self.args.wrapper).parent.parent /
+                        "include/obf/support/runtime_abi_generated.h"])
+            header = next((path.resolve() for path in headers if path.is_file()), None)
+            require(header is not None, "runtime ABI header unavailable: pass --runtime-header")
+            names = dict(re.findall(r'^#define\s+(OBF_RT_\w+_STR)\s+"([^"\r\n]+)"',
+                                    header.read_text(encoding="utf-8"), re.MULTILINE))
+            required = ("OBF_RT_ABI_PREFIX_STR", "OBF_RT_STRING_AUTH_DECODE_V3_STR",
+                        "OBF_RT_ENTROPY_ANCHOR_STR", "OBF_RT_LOAD_ENTROPY_PAIR_STR",
+                        "OBF_RT_LOAD_ENTROPY_PAIR_V1_STR", "OBF_RT_LOAD_ENTROPY_PAIR_V2_STR",
+                        "OBF_RT_LOAD_ENTROPY_PAIR_V3_STR", "OBF_RT_LOAD_ENTROPY_PAIR_V4_STR",
+                        "OBF_RT_SELF_CHECKSUM_REQUIRE_BOUND_STR")
+            require(all(name in names for name in required),
+                    "generated header omits a required native runtime symbol")
+            runtime = (self.args.runtime or
+                       Path(self.args.wrapper).parent / "libobf_runtime.a").resolve()
+            require(runtime.is_file(), "matching runtime archive unavailable: pass --runtime")
+            entropy = [names[name] for name in required[3:]]
+            self._runtime_abi = (header, runtime, names, entropy)
+        return self._runtime_abi
 
     def run(self, command, *, report=None, native=False, rejects=False):
         command = [str(value) for value in command]
@@ -273,7 +451,8 @@ class Harness:
         obj = folder / f"{name}.o"
         ledger = folder / f"{name}-coverage.json" if report else None
         driver = [self.args.wrapper, f"--obf-config={config}"] if config else self.raw
-        self.run([*driver, *FLAGS, f"-O{optimization}", "-g", "-fPIC", "-I", INCLUDE,
+        flags = CXX_FLAGS if source in CXX_SOURCES else FLAGS
+        self.run([*driver, *flags, f"-O{optimization}", "-g", "-fPIC", "-I", INCLUDE,
                   *defines, "-c", FIXTURES / source, "-o", obj], report=ledger)
         return obj, ledger
 
@@ -333,13 +512,27 @@ class Harness:
             image = self.shared(obj, config)
             elf = ElfData(image)
             source_bundles = [elf.bundle(text) for text in TEXTS[variant - 1]]
+            require(len({bundle["descriptor"] for bundle in source_bundles}) == 3 and
+                    len({bundle["cache"] for bundle in source_bundles}) == 3 and
+                    len({bundle["ciphertext"] for bundle in source_bundles}) == 3,
+                    "producer source descriptors/cache/ciphertext alias each other")
+            metadata = elf.exports({"exchange_copy_v1"})
+            _, _, _, entropy = self.runtime_abi()
+            metadata["entropy_symbols"] = elf.private_runtime(entropy)
             (folder / f"producer-{variant}-private-data.json").write_text(
                 json.dumps(source_bundles, indent=2) + "\n", encoding="utf-8")
             images.append(image)
-            compilers.append({"report": str(report), "outcome": compiler})
+            compilers.append({"report": str(report), "outcome": compiler,
+                              "elf_metadata": metadata})
             bundles.append(source_bundles)
-        require(bundles[0][0]["ciphertext_sha256"] != bundles[1][0]["ciphertext_sha256"],
-                "independent producer seeds and data produced identical ciphertext")
+        for source in range(3):
+            require(bundles[0][source]["build_key_sha256"] !=
+                    bundles[1][source]["build_key_sha256"],
+                    "independent producer keys are identical")
+            if source != 2:
+                require(bundles[0][source]["ciphertext_sha256"] !=
+                        bundles[1][source]["ciphertext_sha256"],
+                        "independent producer nonempty ciphertext data are identical")
         observed = self.native("semantics", *images, raw_consumer, incompatible)
         require(observed == baseline, "protected producers differ from independent raw semantic oracle")
         self.result["controls"].append({"optimization": optimization, "strategy": strategy,
@@ -354,7 +547,7 @@ class Harness:
             for source_id, bundle in enumerate(sources, 1):
                 for mode in self.args.tamper:
                     phases = [True]
-                    if strategy == "lazy" and mode != "cache" and not self.args.warm_only:
+                    if not self.args.warm_only and (strategy == "ctor" or mode != "cache"):
                         phases.append(False)
                     for warm in phases:
                         observed = self.native("tamper", image, consumer, variant, source_id,
@@ -363,6 +556,8 @@ class Harness:
                         require(observed["kind"] == "tamper" and observed["mode"] == mode and
                                 observed["warm"] is warm and observed["variant"] == variant and
                                 observed["id"] == source_id and observed["ordinary_rejections"] == 5 and
+                                observed["signal"] == 4 and observed["stage"] == 3 and
+                                observed["required"] == bundle["length"] and
                                 observed["destination_unchanged"] and observed["effect_unchanged"],
                                 "missing corruption or non-certification outcome")
                         observations.append(observed)
@@ -435,7 +630,7 @@ class Harness:
                               defines=["-DCOPY_BAD_CASE=0"])
         lto = folder / "lto-export.so"
         lto_ledger = folder / "lto-export-coverage.json"
-        result = self.run([self.args.wrapper, f"--obf-config={base}", *FLAGS, "-O2", "-flto",
+        result = self.run([self.args.wrapper, f"--obf-config={base}", *CXX_FLAGS, "-O2", "-flto",
                            "-fPIC", "-shared", "-fuse-ld=lld", "-I", INCLUDE,
                            "-DCOPY_VARIANT=1", FIXTURES / "cross-dso-string-copy-producer.c",
                            "-o", lto], report=lto_ledger, rejects=True)
@@ -445,6 +640,7 @@ class Harness:
                                            "gate": "native_route", "report": str(lto_ledger),
                                            "output_absent": True})
         self.static_boundaries(folder)
+        self.export_boundaries(folder)
         self.save()
 
     def static_boundaries(self, folder):
@@ -518,7 +714,199 @@ class Harness:
                                            "output_absent": True,
                                            "manifest": str(manifest)})
 
+    def export_fixture(self, folder, name, number, public, target, *, hops=0):
+        output = folder / f"{name}.o"
+        self.run([*self.raw, "-x", "assembler-with-cpp", "-fPIC",
+                  f"-DCOPY_EXPORT_CASE={number}", f"-DEXPORT_NAME={public}",
+                  f"-DEXPORT_TARGET={target}", f"-DCOPY_THUNK_HOPS={hops}",
+                  "-c", FIXTURES / "cross-dso-string-copy-exports.S", "-o", output])
+        return output
+
+    def export_boundaries(self, folder):
+        root = folder / "exports"
+        root.mkdir()
+        config = root / "policy.yaml"
+        policy(config, "exchange_copy_v1", "strong", debug=True)
+        obj, ledger = self.compile(root, "private-producer", "cross-dso-string-copy-producer.c",
+                                   2, config=config, defines=["-DCOPY_VARIANT=1"], report=True)
+        compiler = check_report(ledger, "exchange_copy_v1", "strong", producer=True)
+        header, runtime, names, entropy = self.runtime_abi()
+        decoder = names["OBF_RT_STRING_AUTH_DECODE_V3_STR"]
+        anchor = names["OBF_RT_ENTROPY_ANCHOR_STR"]
+        prefix_export = names["OBF_RT_ABI_PREFIX_STR"] + "fixture_export"
+        profiles = [self.args.linker] if self.args.only_export_isolation else ["lld", "bfd"]
+        self.result["export_profiles"] = profiles
+        self.result["export_runtime"] = {
+            "header": str(header), "archive": str(runtime),
+            "archive_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+            "protected_object": str(obj),
+            "protected_object_sha256": hashlib.sha256(obj.read_bytes()).hexdigest(),
+            "report": str(ledger), "compiler": compiler}
+        self.save()
+        cases = (
+            ("runtime-export", 2, prefix_export, decoder, "private-target", 0, True, False),
+            ("runtime-alias", 2, "decoder_alias", decoder, "private-target", 0, True, False),
+            ("runtime-e9", 3, "decoder_alias", decoder, "private-target", 1, True, False),
+            ("runtime-eb", 4, "decoder_alias", decoder, "private-target", 2, True, False),
+            ("runtime-mixed-chain", 5, "decoder_alias", decoder, "private-target", 3, True, False),
+            ("runtime-eb-backward", 13, "decoder_alias", decoder, "private-target", 3, True, False),
+            ("runtime-32-hop", 14, "decoder_alias", decoder, "private-target", 32, True, False),
+            ("runtime-33-hop-boundary", 14, "decoder_alias", decoder, "private-target", 33, False, False),
+            ("entropy-data-alias", 6, "entropy_data_alias", anchor, "private-target", 0, True, False),
+            ("runtime-alias-stripped", 2, "decoder_alias", decoder, "private-target", 0, True, True),
+            ("runtime-e9-stripped", 3, "decoder_alias", decoder, "private-target", 1, True, True),
+            ("ordinary-cycle", 7, "ordinary_jump", decoder, "cycle", 1, False, False),
+            ("ordinary-out-of-bounds", 8, "ordinary_jump", decoder, "unmapped", 1, False, False),
+            ("ordinary-data-target", 9, "ordinary_jump", decoder, "nonexecutable", 1, False, False),
+            ("ordinary-truncated-jump", 10, "ordinary_jump", decoder, "truncated", 0, False, False),
+        )
+        for linker in profiles:
+            case_folder = root / linker
+            case_folder.mkdir()
+            flags = ["-shared", f"-fuse-ld={linker}", "-Wl,--no-undefined"]
+            legitimate = case_folder / "legitimate.so"
+            legitimate_map = legitimate.with_suffix(".map")
+            self.run([self.args.wrapper, f"--obf-config={config}", *flags, obj,
+                      f"-Wl,-Map,{legitimate_map}", "-o", legitimate])
+            elf = ElfData(legitimate)
+            metadata = elf.exports({"exchange_copy_v1"})
+            metadata["entropy_symbols"] = elf.private_runtime(entropy)
+            bundles = [elf.bundle(text) for text in TEXTS[0]]
+            require(len({bundle["descriptor"] for bundle in bundles}) == 3 and
+                    len({bundle["cache"] for bundle in bundles}) == 3 and
+                    len({bundle["ciphertext"] for bundle in bundles}) == 3,
+                    "export control source bundles alias each other")
+            for name in (decoder, anchor, *entropy):
+                elf.map_symbol_address(legitimate_map, name, linker)
+            self.result["controls"].append({
+                "kind": "native-export-boundary-control", "linker": linker,
+                "image": str(legitimate), "native_map": str(legitimate_map),
+                "elf_metadata": metadata, "private_bundles": bundles})
+            self.save()
+            for name, number, public, target_symbol, termination, hops, rejects, stripped in cases:
+                fixture = self.export_fixture(case_folder, name, number, public, target_symbol,
+                                              hops=hops)
+                options = ["-s"] if stripped else []
+                if number in (2, 6):
+                    # BFD propagates hidden visibility through symbolic aliases.
+                    # Resolve a numeric alias from a raw link with the same inputs.
+                    layout = case_folder / f"{name}-layout.so"
+                    layout_map = layout.with_suffix(".map")
+                    self.run([*self.raw, *flags, obj, fixture, runtime, *options,
+                              f"-Wl,-Map,{layout_map}", "-o", layout])
+                    layout_elf = ElfData(layout, require_symbols=not stripped)
+                    address = layout_elf.map_symbol_address(layout_map, target_symbol, linker)
+                    options += [f"-Wl,--defsym={public}={address:#x}"]
+                control = case_folder / f"{name}-raw-control.so"
+                control_map = control.with_suffix(".map")
+                # The raw link must resolve every dependency before a managed
+                # rejection can establish the native export guard.
+                self.run([*self.raw, *flags, obj, fixture, runtime, *options,
+                          f"-Wl,-Map,{control_map}", "-o", control])
+                raw_elf = ElfData(control, require_symbols=not stripped)
+                table = raw_elf.exports({"exchange_copy_v1", public})
+                target_address = raw_elf.map_symbol_address(control_map, target_symbol, linker)
+                route = raw_elf.thunk_route(table["exports"][public]["address"], target_address)
+                require(route["termination"] == termination and route["hops"] == hops,
+                        f"raw ELF export has an incorrect route: {name}: {route}")
+                require(number not in (4, 5, 13) or "eb" in route["opcodes"],
+                        "short-jump control did not exercise an actual EB opcode")
+                if number == 13:
+                    require(any(right < left for left, right in
+                                zip(route["address_path"], route["address_path"][1:])),
+                            "EB backward control did not exercise a backward edge")
+                if number == 6:
+                    require(table["exports"][public]["type"] != 2 and
+                            raw_elf.data_section(target_address, 1),
+                            "entropy alias is not a non-FUNC export of actual runtime data")
+                raw_elf.private_runtime(entropy)
+                require(not stripped or not raw_elf.symbols,
+                        "stripped control retained a private ELF .symtab")
+                self.result["controls"].append({
+                    "kind": "resolvable-native-export-control", "case": name, "linker": linker,
+                    "stripped": stripped, "image": str(control), "fixture": str(fixture),
+                    "native_map": str(control_map), "runtime_symbol": target_symbol,
+                    "target_address": target_address, "export_endpoint": route,
+                    "elf_metadata": table, "same_protected_object": str(obj),
+                    "same_runtime_archive": str(runtime)})
+                self.save()
+                output = case_folder / f"{name}-managed.so"
+                output_map = output.with_suffix(".map")
+                result = self.run([self.args.wrapper, f"--obf-config={config}", *flags,
+                                   obj, fixture, *options, f"-Wl,-Map,{output_map}", "-o", output],
+                                  rejects=rejects)
+                if rejects:
+                    require_native_rejection(result)
+                    require("private runtime export " in result.stderr,
+                            "managed export did not fail through the private-runtime guard")
+                    require(not output.exists(), "native export rejection left its shared library")
+                    self.result["rejections"].append({
+                        "case": name, "linker": linker, "stripped": stripped,
+                        "exit": result.returncode, "guard": "native-final-link",
+                        "raw_control": str(control), "raw_export_endpoint": route,
+                        "diagnostic": result.stderr, "output_absent": True})
+                else:
+                    accepted = ElfData(output)
+                    accepted_table = accepted.exports({"exchange_copy_v1", public})
+                    accepted_target = accepted.map_symbol_address(output_map, target_symbol, linker)
+                    accepted_route = accepted.thunk_route(
+                        accepted_table["exports"][public]["address"], accepted_target)
+                    require(accepted_route["termination"] == termination and
+                            accepted_route["hops"] == hops,
+                            "accepted ordinary export changed its raw control route")
+                    accepted.private_runtime(entropy)
+                    self.result["controls"].append({
+                        "kind": "bounded-export-traversal-control", "case": name,
+                        "linker": linker, "image": str(output), "native_map": str(output_map),
+                        "guard_hop_limit": 32, "export_endpoint": accepted_route,
+                        "elf_metadata": accepted_table})
+                self.save()
+            # Artifact cleanup can rename ledger helper names. Test every local
+            # function in the producer's actual MAP contribution. This includes
+            # every per-source helper, the keeper, and the entropy thunk.
+            helpers = elf.object_functions(legitimate_map, obj, linker)
+            require(len(helpers) >= len(compiler["decoder_roles"]),
+                    "mapped private functions do not cover authenticated decoder roles")
+            self.result["controls"].append({
+                "kind": "private-helper-symbol-control", "linker": linker,
+                "ledger_decoder_roles": compiler["decoder_roles"],
+                "mapped_producer_local_functions": helpers})
+            private_exports = [(f"helper-{index}", 11, helper["name"])
+                               for index, helper in enumerate(helpers, 1)]
+            private_exports += [(f"payload-{index}", 12, bundle["ciphertext_symbol"])
+                                for index, bundle in enumerate(bundles, 1)]
+            for kind, number, symbol in private_exports:
+                name = f"private-{kind}"
+                fixture = self.export_fixture(case_folder, name, number, "private_alias", symbol)
+                raw_output = case_folder / f"{name}-raw-rejected.so"
+                output = case_folder / f"{name}-managed-rejected.so"
+                raw_result = self.run([*self.raw, *flags, obj, fixture, runtime,
+                                       "-o", raw_output], rejects=True)
+                result = self.run([self.args.wrapper, f"--obf-config={config}", *flags,
+                                   obj, fixture, "-o", output], rejects=True)
+                for rejected, image in ((raw_result, raw_output), (result, output)):
+                    require(not any(line.startswith("obf-native-link:")
+                                    for line in rejected.stderr.splitlines()) and
+                            symbol in rejected.stderr and
+                            re.search(r"undefined (?:reference|symbol)", rejected.stderr,
+                                      re.IGNORECASE),
+                            "private source export did not fail through the actual linker")
+                    require(not image.exists(), "private source linker failure left an image")
+                self.result["rejections"].append({
+                    "case": name, "linker": linker, "symbol": symbol,
+                    "exit": result.returncode, "raw_exit": raw_result.returncode,
+                    "guard": "actual-linker-missing-private-symbol", "fixture": str(fixture),
+                    "raw_diagnostic": raw_result.stderr, "diagnostic": result.stderr,
+                    "output_absent": True})
+                self.save()
+
     def matrix(self):
+        if self.args.only_export_isolation:
+            self.export_boundaries(self.work)
+            self.result["status"] = "passed"
+            self.save()
+            print(f"CROSS_DSO_STRING_COPY_COMPLETE result={self.work / 'result.json'}", flush=True)
+            return
         self.host = self.work / "host"
         self.run([*self.raw, "-std=c11", "-O2", "-g", FIXTURES / "cross-dso-string-copy-host.c",
                   "-fuse-ld=lld", "-ldl", "-o", self.host])
@@ -566,6 +954,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wrapper", required=True)
     parser.add_argument("--clang", required=True)
+    parser.add_argument("--runtime", type=Path, help="matching configured native runtime archive")
+    parser.add_argument("--runtime-header", type=Path, help="configured generated runtime ABI header")
+    parser.add_argument("--linker", choices=("lld", "bfd"), default="lld",
+                        help="export-only filter; the default full run tests both linkers")
+    parser.add_argument("--only-export-isolation", action="store_true")
     parser.add_argument("--work", type=Path, default=Path("/tmp"))
     parser.add_argument("--optimization", type=int, choices=(0, 2), action="append")
     parser.add_argument("--level", choices=("vm", "strong_vm"), action="append")
@@ -574,6 +967,8 @@ def main():
     parser.add_argument("--warm-only", action="store_true")
     parser.add_argument("--skip-negatives", action="store_true")
     args = parser.parse_args()
+    require(not args.only_export_isolation or not args.skip_negatives,
+            "--only-export-isolation cannot combine with --skip-negatives")
     require(platform.system() == "Linux" and platform.machine().lower() in ("x86_64", "amd64")
             and platform.libc_ver()[0] == "glibc", "native Linux x86-64 glibc required")
     args.optimization = list(dict.fromkeys(args.optimization or [0, 2]))
