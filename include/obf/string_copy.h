@@ -4,13 +4,19 @@
 #include <stdint.h>
 
 /* Use this declaration macro. The compiler generates the accessor body. */
+#ifdef _WIN32
+#define OBF_STRING_COPY_EXPORT_V1 __declspec(dllexport)
+#else
+#define OBF_STRING_COPY_EXPORT_V1 __attribute__((visibility("default")))
+#endif
+
 #ifdef __cplusplus
 #define OBF_STRING_COPY_DECLARE_V1(accessor) \
-  extern "C" __attribute__((visibility("default"))) \
+  extern "C" OBF_STRING_COPY_EXPORT_V1 \
   int accessor(uint32_t id, char* destination, size_t capacity, size_t* required)
 #else
 #define OBF_STRING_COPY_DECLARE_V1(accessor) \
-  __attribute__((visibility("default"))) \
+  OBF_STRING_COPY_EXPORT_V1 \
   int accessor(uint32_t id, char* destination, size_t capacity, size_t* required)
 #endif
 
