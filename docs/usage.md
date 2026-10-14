@@ -808,8 +808,29 @@ This constraint does not make every protected `DllMain` function unsupported.
 Its operations must obey both Windows loader-lock rules and the selected protection policy.
 See [Microsoft's DLL guidance](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-best-practices) for loader-lock restrictions.
 
-Before `FreeLibrary`, stop new calls and join every thread that can execute DLL code.
-Remove callbacks and release every borrowed function or data address before unload.
+Before final `FreeLibrary`, complete this shutdown sequence outside the loader lock:
+
+1. Stop new DLL calls.
+2. Retain an ordinary module reference for each worker that can still execute DLL code.
+3. Signal shutdown and join native TLS-owning workers while the DLL remains mapped.
+4. Drain explicit per-thread FLS values and free inactive callback indices.
+5. Clear DLL callbacks and borrowed function or data addresses.
+6. Release the final module reference.
+
+`GetModuleHandleExW` with `GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS` takes an ordinary reference.
+Do not use `GET_MODULE_HANDLE_EX_FLAG_PIN` when unload is required.
+A host thread may remain alive after unload only if it has no pending DLL calls or cleanup callbacks.
+Nontrivial native TLS workers must finish before final release.
+Do not assume glibc-style TLS retention on Windows.
+
+Check `GetModuleHandleW == NULL` after final release before claiming a fresh unload/reload cycle.
+The native regression also checks that `VirtualQuery` no longer reports the old image mapping.
+Successful `FreeLibrary` alone does not prove removal while another ordinary reference remains.
+
+During process-termination detach, do not wait for workers or require their TLS destructors to run.
+The native UCRT regression observes terminating-thread cleanup separately from dynamic unload.
+Keep all drain and shutdown calls outside `DllMain`, `.CRT$XL*` callbacks, and loader-controlled construction or destruction.
+
 Decoded string addresses belong to the loaded DLL.
 Do not retain or dereference them after unload.
 Concurrent calls after initialization remain subject to the [authenticated decoder waiting contract](protection.md#waiting-and-availability).
