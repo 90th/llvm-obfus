@@ -649,6 +649,11 @@ The header supplies `extern "C"` for its accessor declaration.
 On Windows, the same declaration also supplies `__declspec(dllexport)` for the public accessor.
 Do not add exports for generated helpers, descriptors, keys, caches, or runtime decoder functions.
 The native final link checks the PE export directory and rejects private runtime exports, including `.def` aliases and ordinal-only exports.
+On ELF, all runtime ABI definitions use `OBF_HIDDEN`. Keep the matching runtime archive local to each image.
+The final native ELF link checks defined `.dynsym` exports with either `ld.lld` or GNU ld.
+It rejects runtime-prefix names, private runtime address aliases, and executable x86 `E9` or `EB` thunk routes within 32 jumps.
+This includes shared libraries and `-rdynamic` executables. A rejected link removes the primary output.
+Supported sources include C++ function-local static immutable arrays with the same producer-local authentication binding.
 The declaration requires a supported authenticated lazy or constructor-backed source plan.
 An export rejects if its final source, authentication, or copy-path obligations remain unfulfilled.
 Unsupported limits and source paths reject instead of exporting plaintext.
