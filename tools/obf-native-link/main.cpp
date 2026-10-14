@@ -1,3 +1,5 @@
+#include "obf/support/runtime_abi_generated.h"
+
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/BinaryFormat/COFF.h"
@@ -662,6 +664,7 @@ struct authority {
   std::set<std::pair<std::string, std::string>> local_symbols;
   std::vector<section_placement> placements;
   std::map<std::string, std::vector<symbol_placement>> placed_symbols;
+  std::map<std::uint64_t, std::string> private_runtime_addresses;
   void symbol(std::string name, std::string identity) {
     if (identity.empty() || identity.front() == '<') { return; }
     auto [it, inserted] = prevailing.emplace(name, identity);
@@ -895,7 +898,7 @@ authority parse_coff_map(StringRef map, StringRef lldmap) {
   authority result;
   result.external_available = map.contains("Publics by Value") && map.contains("Lib:Object");
   const std::regex entry(
-      R"(^\s*[0-9a-fA-F]{4}:[0-9a-fA-F]+\s+(\S+)\s+[0-9a-fA-F]+\s+(?:[fi]\s+)*(.+?)\s*$)");
+      R"(^\s*[0-9a-fA-F]{4}:[0-9a-fA-F]+\s+(\S+)\s+([0-9a-fA-F]+)\s+(?:[fi]\s+)*(.+?)\s*$)");
   llvm::SmallVector<StringRef, 128> lines;
   map.split(lines, '\n');
   bool public_entries = false;
@@ -910,14 +913,146 @@ authority parse_coff_map(StringRef map, StringRef lldmap) {
     const auto line = raw.str();
     if (!std::regex_match(line, matched, entry)) { continue; }
     if (public_entries) {
-      result.symbol(matched[1].str(), matched[2].str());
-    } else if (static_entries && matched[2].str().front() != '<') {
-      result.selected.insert(matched[2].str());
-      result.local_symbols.emplace(matched[2].str(), matched[1].str());
+      auto symbol = matched[1].str();
+      if (StringRef(symbol).starts_with(OBF_RT_ABI_PREFIX_STR)) {
+        result.private_runtime_addresses.try_emplace(
+            hex_number(matched[2].str(), "private runtime MAP address"), symbol);
+      }
+      result.symbol(std::move(symbol), matched[3].str());
+    } else if (static_entries && matched[3].str().front() != '<') {
+      result.selected.insert(matched[3].str());
+      result.local_symbols.emplace(matched[3].str(), matched[1].str());
     }
   }
   if (!lldmap.empty()) { parse_contributions(result, lldmap, true, true); }
   return result;
+}
+
+void validate_coff_runtime_exports(const std::string& output, const authority& resolution) {
+  auto linked = take(object::createBinary(output), "cannot read actual PE link output");
+  const auto* coff = llvm::dyn_cast<object::COFFObjectFile>(linked.getBinary());
+  if (coff == nullptr || (!coff->getPE32Header() && !coff->getPE32PlusHeader())) {
+    fail("private runtime export validation requires an actual PE output");
+  }
+  const auto* exports = coff->getExportTable();
+  if (exports == nullptr) { return; }
+  if (!resolution.external_available) {
+    fail("unsupported actual COFF export authority");
+  }
+  const auto* directory = coff->getDataDirectory(llvm::COFF::EXPORT_TABLE);
+  if (directory == nullptr) { fail("missing actual PE export directory"); }
+
+  const auto table_bytes = [&](std::uint32_t rva, std::uint32_t count,
+                               unsigned width) -> StringRef {
+    if (count == 0) { return {}; }
+    if (count > std::numeric_limits<std::uint32_t>::max() / width) {
+      fail("actual PE export table exceeds RVA bounds");
+    }
+    llvm::ArrayRef<std::uint8_t> bytes;
+    if (auto error = coff->getRvaAndSizeAsBytes(rva, count * width, bytes)) {
+      fail("invalid actual PE export table: " + llvm::toString(std::move(error)));
+    }
+    return StringRef(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  };
+  const auto rva_string = [&](std::uint32_t rva) -> StringRef {
+    std::uintptr_t pointer;
+    if (auto error = coff->getRvaPtr(rva, pointer)) {
+      fail("invalid actual PE export string: " + llvm::toString(std::move(error)));
+    }
+    const StringRef file = coff->getData();
+    const auto start = reinterpret_cast<std::uintptr_t>(file.data());
+    if (pointer < start || pointer - start >= file.size()) {
+      fail("actual PE export string is outside the output");
+    }
+    const auto remaining = file.drop_front(pointer - start);
+    const auto end = remaining.find('\0');
+    if (end == StringRef::npos) { fail("unterminated actual PE export string"); }
+    return remaining.take_front(end);
+  };
+
+  const auto addresses =
+      table_bytes(exports->ExportAddressTableRVA, exports->AddressTableEntries, 4);
+  const auto names = table_bytes(exports->NamePointerRVA, exports->NumberOfNamePointers, 4);
+  const auto ordinals = table_bytes(exports->OrdinalTableRVA, exports->NumberOfNamePointers, 2);
+  // Inspect every name independently: several names can alias the same EAT entry.
+  for (std::uint32_t i = 0; i < exports->NumberOfNamePointers; ++i) {
+    const auto ordinal = little_number(ordinals, static_cast<std::size_t>(i) * 2, 2);
+    if (ordinal >= exports->AddressTableEntries) {
+      fail("actual PE export name has an invalid EAT ordinal");
+    }
+    const auto name =
+        rva_string(static_cast<std::uint32_t>(little_number(names, static_cast<std::size_t>(i) * 4, 4)));
+    if (name.starts_with(OBF_RT_ABI_PREFIX_STR)) {
+      fail("private runtime export name " + name.str());
+    }
+  }
+
+  const std::uint64_t forwarder_begin = directory->RelativeVirtualAddress;
+  const std::uint64_t forwarder_end = forwarder_begin + directory->Size;
+  const std::uint64_t image_base = coff->getImageBase();
+  const auto executable_bytes = [&](std::uint32_t rva) -> StringRef {
+    for (const auto& section : coff->sections()) {
+      const auto* header = coff->getCOFFSection(section);
+      if ((header->Characteristics & llvm::COFF::IMAGE_SCN_MEM_EXECUTE) == 0 ||
+          rva < header->VirtualAddress) {
+        continue;
+      }
+      const std::uint64_t offset = static_cast<std::uint64_t>(rva) - header->VirtualAddress;
+      const auto bytes = take(section.getContents(), "cannot read actual PE executable bytes");
+      if (offset >= bytes.size()) { continue; }
+      return bytes.drop_front(offset);
+    }
+    return {};
+  };
+  // Address matching also covers neutral aliases and ordinal-only/NONAME exports.
+  for (std::uint32_t i = 0; i < exports->AddressTableEntries; ++i) {
+    auto rva = static_cast<std::uint32_t>(
+        little_number(addresses, static_cast<std::size_t>(i) * 4, 4));
+    if (rva == 0) { continue; }
+    if (rva >= forwarder_begin && rva < forwarder_end) {
+      const auto forwarder = rva_string(rva);
+      if (forwarder.rsplit('.').second.starts_with(OBF_RT_ABI_PREFIX_STR)) {
+        fail("private runtime forwarder target " + forwarder.str());
+      }
+      continue;
+    }
+    std::array<std::uint32_t, 32> jump_rvas;
+    std::size_t depth = 0;
+    for (;;) {
+      // Match before reading code: private data and direct function exports count too.
+      if (image_base > std::numeric_limits<std::uint64_t>::max() - rva) {
+        fail("actual PE export address exceeds image bounds");
+      }
+      const auto runtime = resolution.private_runtime_addresses.find(image_base + rva);
+      if (runtime != resolution.private_runtime_addresses.end()) {
+        fail("private runtime export address " + runtime->second + " (ordinal " +
+             std::to_string(static_cast<std::uint64_t>(exports->OrdinalBase) + i) + ")");
+      }
+      const auto bytes = executable_bytes(rva);
+      if (bytes.empty()) {
+        if (depth != 0) { fail("actual PE export jump thunk targets non-executable raw bytes"); }
+        break;
+      }
+      // Only E9 rel32 is a native linker thunk; ordinary code needs no decoding.
+      if (static_cast<unsigned char>(bytes.front()) != 0xe9) { break; }
+      if (std::find(jump_rvas.begin(), jump_rvas.begin() + depth, rva) !=
+          jump_rvas.begin() + depth) {
+        fail("cycle in actual PE export jump thunk chain");
+      }
+      if (depth == jump_rvas.size()) { fail("actual PE export jump thunk chain exceeds depth bound"); }
+      jump_rvas[depth++] = rva;
+      if (bytes.size() < 5 || rva > std::numeric_limits<std::uint32_t>::max() - 5) {
+        fail("truncated or out-of-bounds actual PE export jump thunk");
+      }
+      const auto encoded = static_cast<std::int64_t>(little_number(bytes, 1, 4));
+      const auto displacement = encoded >= 0x80000000LL ? encoded - 0x100000000LL : encoded;
+      const auto target = static_cast<std::int64_t>(rva) + 5 + displacement;
+      if (target < 0 || target > std::numeric_limits<std::uint32_t>::max()) {
+        fail("actual PE export jump thunk target exceeds RVA bounds");
+      }
+      rva = static_cast<std::uint32_t>(target);
+    }
+  }
 }
 
 void append_number(std::string& bytes, std::uint64_t value, unsigned width) {
@@ -2110,6 +2245,7 @@ int run(int argc, char** argv) {
     auto authoritative =
         options.coff ? parse_coff_map(map, lldmap)
                      : parse_elf_map(map, options.lld || StringRef(map).ltrim().starts_with("VMA"));
+    if (options.coff) { validate_coff_runtime_exports(options.output, authoritative); }
     validator enforce(authoritative,
                       options.coff,
                       options.args,

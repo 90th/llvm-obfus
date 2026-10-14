@@ -563,6 +563,8 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
   const llvm::GlobalValue::LinkageTypes original_linkage = interface_function.getLinkage();
   const bool original_dso_local = interface_function.isDSOLocal();
   const llvm::GlobalValue::VisibilityTypes original_visibility = interface_function.getVisibility();
+  const llvm::GlobalValue::DLLStorageClassTypes original_dll_storage =
+      interface_function.getDLLStorageClass();
 
   interface_function.deleteBody();
   sanitize_vm_wrapper_attributes(interface_function);
@@ -572,6 +574,7 @@ void rewrite_vm_interface_wrapper(llvm::Function& interface_function,
   interface_function.setLinkage(original_linkage);
   interface_function.setDSOLocal(original_dso_local);
   interface_function.setVisibility(original_visibility);
+  interface_function.setDLLStorageClass(original_dll_storage);
   llvm::IRBuilder<> builder(entry);
   const std::string wrapper_prefix = (interface_function.getName() + ".obf.wrapper").str();
   llvm::Value* hidden_token = build_hidden_token_value(

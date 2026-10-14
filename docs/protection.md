@@ -263,7 +263,7 @@ This prevents another string-encoding pass from re-encoding generated binary dat
 
 ### Authenticated cross-DSO string copies
 
-The copy-only export contract supports native Linux x86-64 glibc builds.
+The copy-only export contract supports native Linux x86-64 glibc and Windows x64 MSVC PE/COFF builds.
 Full LTO and ThinLTO reject these export declarations.
 Use the [source declarations and C API](usage.md#authenticated-cross-dso-string-copies) to export immutable, producer-private strings.
 The compiler generates the accessor body. Do not provide a handwritten body.
@@ -272,6 +272,10 @@ Each source declaration binds an accessor and ID to its original string and a pr
 The compiler rejects unsupported sources, source uses, signatures, strategies, limits, or unapplied protection.
 The declaration requires authenticated string encoding. It cannot enable plaintext, ephemeral, or non-authenticated export paths.
 The compiler validates the actual source bindings and decoder calls, not an accessor name or self-reported flag.
+Windows declarations retain `__declspec(dllexport)` on the public C accessor through VM lowering.
+Source helpers, descriptors, references, keys, state, and decoded caches remain producer-private.
+The final native PE link rejects exports of private runtime symbols, including `.def` aliases and ordinal-only exports.
+Inspect the final PE export directory, not only the compiler's IR linkage.
 
 Before every successful copy, the helper calls the existing authenticated decoder with producer-private descriptors, keys, and trusted constants.
 This includes constructor-backed sources. Constructor initialization alone does not satisfy the export check.
@@ -279,6 +283,9 @@ The decoder checks descriptor metadata, tag, state, and completed payload before
 Authentication failure traps. It does not return an empty string or select a weaker path.
 Capacity queries and ordinary error returns do not authenticate the payload or certify successful export.
 The existing decoder waiting rules remain unchanged.
+Windows constructor-backed sources use normal CRT initialization, including `.CRT$XCU`.
+Supported function-local static arrays retain the same source identity and private authentication binding.
+Keep application queries and copy calls outside `DllMain`, `.CRT$XL*` callbacks, and loader-controlled construction or destruction.
 Verification is point-in-time. Do not permit concurrent writes to producer source storage or its decoded cache during a copy.
 
 The caller owns the destination. A successful copy writes the complete string and final NUL without allocation or truncation.

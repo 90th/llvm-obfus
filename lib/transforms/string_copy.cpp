@@ -113,6 +113,23 @@ llvm::FunctionType* runtime_type(llvm::LLVMContext& context) {
   return llvm::FunctionType::get(pointer, {pointer, integer, integer, pointer}, false);
 }
 
+void check_target(llvm::Module& module) {
+  const llvm::Triple triple(module.getTargetTriple());
+  const bool linux = triple.isOSLinux() && triple.isOSBinFormatELF() &&
+                     triple.getEnvironment() == llvm::Triple::GNU;
+  const bool windows = triple.isOSWindows() && triple.isOSBinFormatCOFF() &&
+                       triple.getEnvironment() == llvm::Triple::MSVC;
+  const llvm::DataLayout& layout = module.getDataLayout();
+  if (triple.getArch() != llvm::Triple::x86_64 || (!linux && !windows) ||
+      !layout.isLittleEndian() || layout.getPointerSizeInBits(0) != 64 ||
+      layout.getIndexSizeInBits(0) != 64 || layout.isNonIntegralAddressSpace(0) ||
+      layout.getProgramAddressSpace() != 0 || layout.getDefaultGlobalsAddressSpace() != 0 ||
+      layout.getAllocaAddrSpace() != 0) {
+    fail(module, "string copy exports require native Linux x86-64 GNU ELF with glibc or "
+                 "Windows x86-64 MSVC PE/COFF with 64-bit integral address-space-zero pointers");
+  }
+}
+
 bool is_identifier(llvm::StringRef text) {
   const auto letter = [](char value) {
     return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || value == '_';
@@ -154,9 +171,11 @@ bool is_annotation_or_used_path(const llvm::User& user,
 
 std::uint64_t source_length(llvm::Module& module, llvm::GlobalVariable& source) {
   const auto* array = llvm::dyn_cast<llvm::ArrayType>(source.getValueType());
-  if (!source.hasLocalLinkage() || !source.isConstant() || !source.hasInitializer() ||
-      source.isThreadLocal() || source.isExternallyInitialized() || source.hasComdat() ||
-      source.getAddressSpace() != 0 || array == nullptr || !array->getElementType()->isIntegerTy(8)) {
+  if (source.getParent() != &module || !source.hasLocalLinkage() ||
+      source.getDLLStorageClass() != llvm::GlobalValue::DefaultStorageClass ||
+      !source.isConstant() || !source.hasInitializer() || source.isThreadLocal() ||
+      source.isExternallyInitialized() || source.hasComdat() || source.getAddressSpace() != 0 ||
+      array == nullptr || !array->getElementType()->isIntegerTy(8)) {
     fail(module, llvm::Twine("source '") + source.getName() +
                      "' must be a static const char array without TLS or external storage",
          nullptr, "source_kind");
@@ -185,10 +204,17 @@ std::uint64_t source_length(llvm::Module& module, llvm::GlobalVariable& source) 
   return length;
 }
 
-void check_accessor_signature(llvm::Module& module, const llvm::Function& accessor) {
-  if (accessor.getFunctionType() != accessor_type(module.getContext()) ||
+void check_accessor_signature(llvm::Module& module, const llvm::Function& accessor,
+                              bool require_export = false) {
+  const bool windows = llvm::Triple(module.getTargetTriple()).isOSWindows();
+  if (accessor.getParent() != &module || accessor.getAddressSpace() != 0 ||
+      accessor.getFunctionType() != accessor_type(module.getContext()) ||
       accessor.getCallingConv() != llvm::CallingConv::C || !accessor.hasExternalLinkage() ||
-      accessor.getVisibility() != llvm::GlobalValue::DefaultVisibility) {
+      accessor.getVisibility() != llvm::GlobalValue::DefaultVisibility ||
+      accessor.getDLLStorageClass() == llvm::GlobalValue::DLLImportStorageClass ||
+      (!windows && accessor.getDLLStorageClass() != llvm::GlobalValue::DefaultStorageClass) ||
+      (windows && require_export &&
+       accessor.getDLLStorageClass() != llvm::GlobalValue::DLLExportStorageClass)) {
     fail(module, llvm::Twine("accessor '") + accessor.getName() +
                      "' must use OBF_STRING_COPY_DECLARE_V1 and export the C ABI int(uint32_t, char*, size_t, size_t*)",
          nullptr, "accessor_abi");
@@ -288,8 +314,9 @@ llvm::GlobalVariable* private_global(llvm::Module& module, llvm::Value* value,
                      : nullptr;
   if (global == nullptr || global->getParent() != &module || !global->hasLocalLinkage() ||
       global->getAddressSpace() != 0 || !global->hasInitializer() ||
+      global->getDLLStorageClass() != llvm::GlobalValue::DefaultStorageClass ||
       global->isConstant() != constant || global->isThreadLocal() ||
-      global->isExternallyInitialized()) {
+      global->isExternallyInitialized() || global->hasComdat()) {
     fail(module, "authentication requires producer-private globals in the source module", &record);
   }
   return global;
@@ -514,13 +541,8 @@ bool prepare_string_copy_exports(llvm::Module& module) {
     records.push_back({source, nullptr, nullptr, id, length});
   }
   if (groups.empty()) { return false; }
-  const llvm::Triple triple(module.getTargetTriple());
-  if (triple.getArch() != llvm::Triple::x86_64 || !triple.isOSLinux() ||
-      !triple.isOSBinFormatELF() || triple.getEnvironment() != llvm::Triple::GNU ||
-      module.getDataLayout().getPointerSizeInBits() != 64 ||
-      module.getDataLayout().getProgramAddressSpace() != 0) {
-    fail(module, "string copy exports require native Linux x86-64 ELF with glibc");
-  }
+  check_target(module);
+  const bool windows = llvm::Triple(module.getTargetTriple()).isOSWindows();
   llvm::LLVMContext& context = module.getContext();
   for (auto& [name, records] : groups) {
     llvm::GlobalValue* existing = module.getNamedValue(name);
@@ -539,6 +561,8 @@ bool prepare_string_copy_exports(llvm::Module& module) {
       accessor = llvm::Function::Create(accessor_type(context), llvm::GlobalValue::ExternalLinkage,
                                          name, module);
     }
+    accessor->setDLLStorageClass(windows ? llvm::GlobalValue::DLLExportStorageClass
+                                        : llvm::GlobalValue::DefaultStorageClass);
     for (export_record& record : records) {
       record.accessor = accessor;
       const std::string helper_name = (llvm::Twine("__obf_string_copy_auth_") +
@@ -548,6 +572,7 @@ bool prepare_string_copy_exports(llvm::Module& module) {
       }
       record.helper = llvm::Function::Create(helper_type(context), llvm::GlobalValue::ExternalLinkage,
                                               helper_name, module);
+      record.helper->setDLLStorageClass(llvm::GlobalValue::DefaultStorageClass);
       record.helper->setDSOLocal(true);
       record.helper->addFnAttr(llvm::Attribute::NoUnwind);
       record.helper->addFnAttr(llvm::Attribute::NoInline);
@@ -584,15 +609,20 @@ void bind_string_copy_authentication(llvm::GlobalVariable& source,
                                      std::uint64_t binding) {
   llvm::Module& module = *source.getParent();
   const export_record record = read_record(module, source);
-  if (record.helper->getFunctionType() != helper_type(module.getContext()) ||
-      !record.helper->isDeclaration()) {
+  if (record.helper->getAddressSpace() != 0 ||
+      record.helper->getFunctionType() != helper_type(module.getContext()) ||
+      record.helper->getCallingConv() != llvm::CallingConv::C ||
+      record.helper->getDLLStorageClass() != llvm::GlobalValue::DefaultStorageClass ||
+      record.helper->hasComdat() || !record.helper->isDeclaration()) {
     fail(module, "authentication helper is already bound or has an invalid signature", &record);
   }
   validate_bundle(module, record, descriptor, topology, length, binding);
   llvm::GlobalValue* runtime_symbol = module.getNamedValue(auth::kRuntimeStringDecodeSymbolV3);
   auto* runtime = llvm::dyn_cast_or_null<llvm::Function>(runtime_symbol);
   if (runtime_symbol != nullptr &&
-      (runtime == nullptr || runtime->getFunctionType() != runtime_type(module.getContext()) ||
+      (runtime == nullptr || runtime->getAddressSpace() != 0 ||
+       runtime->getFunctionType() != runtime_type(module.getContext()) ||
+       runtime->getDLLStorageClass() != llvm::GlobalValue::DefaultStorageClass ||
        runtime->getCallingConv() != llvm::CallingConv::C || !runtime->isDeclaration())) {
     fail(module, "V3 runtime decoder has an invalid declaration", &record);
   }
@@ -601,6 +631,7 @@ void bind_string_copy_authentication(llvm::GlobalVariable& source,
   record.helper->setLinkage(llvm::GlobalValue::InternalLinkage);
   record.helper->setDSOLocal(true);
   record.helper->setVisibility(llvm::GlobalValue::DefaultVisibility);
+  record.helper->setDLLStorageClass(llvm::GlobalValue::DefaultStorageClass);
   auto* entry = llvm::BasicBlock::Create(module.getContext(), "entry", record.helper);
   llvm::IRBuilder<> builder(entry);
   auto* decoded = builder.CreateCall(callee,
@@ -622,6 +653,7 @@ void validate_string_copy_exports(llvm::Module& module) {
   const llvm::Function* cached_accessor = nullptr;
   llvm::SmallPtrSet<const llvm::Function*, 32> reachable;
   if (ledger != nullptr) {
+    check_target(module);
     for (const llvm::MDNode* entry : ledger->operands()) {
       auto* source = entry->getNumOperands() == 1
                          ? llvm::dyn_cast_or_null<llvm::GlobalVariable>(metadata_value(*entry, 0))
@@ -630,11 +662,15 @@ void validate_string_copy_exports(llvm::Module& module) {
         fail(module, "export ledger has a missing, foreign, or duplicate source");
       }
       const export_record record = read_record(module, *source);
-      check_accessor_signature(module, *record.accessor);
+      check_accessor_signature(module, *record.accessor, true);
       if (record.accessor->isDeclaration() || record.helper->isDeclaration() ||
           !record.accessor->hasFnAttribute(llvm::Attribute::NoInline) ||
           !record.accessor->hasFnAttribute(llvm::Attribute::NoUnwind) ||
           !record.helper->hasInternalLinkage() || !record.helper->isDSOLocal() ||
+          record.helper->getAddressSpace() != 0 ||
+          record.helper->getDLLStorageClass() != llvm::GlobalValue::DefaultStorageClass ||
+          record.helper->getVisibility() != llvm::GlobalValue::DefaultVisibility ||
+          record.helper->hasComdat() ||
           record.helper->getCallingConv() != llvm::CallingConv::C ||
           record.helper->getFunctionType() != helper_type(module.getContext()) ||
           !record.helper->hasFnAttribute(llvm::Attribute::NoUnwind) ||
@@ -661,6 +697,8 @@ void validate_string_copy_exports(llvm::Module& module) {
       if (call == nullptr || copy == nullptr || status == nullptr || status->getBitWidth() != 32 ||
           status->getZExtValue() != OBF_STRING_COPY_OK ||
           runtime == nullptr || runtime->getName() != runtime_symbol ||
+          runtime->getAddressSpace() != 0 ||
+          runtime->getDLLStorageClass() != llvm::GlobalValue::DefaultStorageClass ||
           runtime->getFunctionType() != runtime_type(module.getContext()) ||
           runtime->getCallingConv() != llvm::CallingConv::C || !runtime->isDeclaration() ||
           call->getCallingConv() != llvm::CallingConv::C || call->arg_size() != 4 ||

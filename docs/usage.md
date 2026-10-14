@@ -583,7 +583,7 @@ See the [Linux lifecycle contract](protection.md#linux-elf-c-shared-library-life
 
 ## Authenticated cross-DSO string copies
 
-Use this copy-only API for native Linux x86-64 glibc producers.
+Use this copy-only API for native Linux x86-64 glibc or Windows x64 MSVC PE/COFF producers.
 Full LTO and ThinLTO reject its source declarations.
 The public declarations require the managed compiler pipeline. The header has no plaintext implementation fallback.
 Compile and link each producer and consumer separately with the matching wrappers and runtime.
@@ -646,6 +646,9 @@ build/obf-clang -O2 -fPIC -shared -Iinclude \
 
 Use `obf-clang++` for a C++ producer.
 The header supplies `extern "C"` for its accessor declaration.
+On Windows, the same declaration also supplies `__declspec(dllexport)` for the public accessor.
+Do not add exports for generated helpers, descriptors, keys, caches, or runtime decoder functions.
+The native final link checks the PE export directory and rejects private runtime exports, including `.def` aliases and ordinal-only exports.
 The declaration requires a supported authenticated lazy or constructor-backed source plan.
 An export rejects if its final source, authentication, or copy-path obligations remain unfulfilled.
 Unsupported limits and source paths reject instead of exporting plaintext.
@@ -661,6 +664,9 @@ For example, create `consumer.c` with a scalar byte reader:
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
 uint64_t consumer_measure(const char *text, size_t length) {
     uint64_t result = 0;
     for (size_t index = 0; index < length; ++index)
@@ -693,6 +699,26 @@ Use `level: vm` when that is the consumer's intended policy.
 Neither consumer policy proves the producer's identity or protection.
 The native `strong` producer example is a separate boundary, not a fallback for a rejected `strong_vm` request.
 Do not change an existing requested VM policy to make an unsupported accessor pass.
+
+### Native Windows builds
+
+Use the matching native Windows wrappers and normal shared CRT startup:
+
+```bat
+build\obf-clang.cmd -O2 -shared -fms-runtime-lib=dll -Iinclude ^
+  --obf-config=producer.yaml producer.c -o producer.dll
+build\obf-clang.cmd -O2 -shared -fms-runtime-lib=dll ^
+  -fno-vectorize -fno-slp-vectorize -fno-unroll-loops ^
+  --obf-config=consumer.yaml consumer.c -o consumer.dll
+```
+
+Use `obf-clang++.cmd` for C++ sources with compatible CRT settings.
+Ordinary function-local static character arrays can use the source annotation if they satisfy the same private, immutable source rules.
+Generated authenticated constructors use normal `.CRT$XCU` initialization.
+Every successful application copy authenticates again. A constructor does not certify later copies.
+Keep application queries and copy calls outside `DllMain`, `.CRT$XL*` callbacks, and loader-controlled construction or destruction.
+Do not bypass CRT startup or wait for another decoder owner under the loader lock.
+
 Strict static ownership checks and the raw-manifest `protected` ban remain unchanged.
 
 ### Capacity and status rules
@@ -716,8 +742,11 @@ The accessor never allocates a destination or returns truncated success.
 Queries and ordinary rejections do not authenticate the payload.
 Authentication failure traps before destination writes, even after an earlier successful copy.
 
-Load the trusted producer with `dlopen` and retain its handle before lookup.
+On Linux, load the trusted producer with `dlopen` and retain its handle before lookup.
 Use handle-scoped `dlsym`, not `RTLD_DEFAULT`, and check the accessor's owner against the expected producer instance.
+On Windows, retain the `LoadLibraryW` reference and resolve the accessor through that handle with `GetProcAddress`.
+Check the resolved address with `VirtualQuery` or `GetModuleHandleExW` using `FROM_ADDRESS | UNCHANGED_REFCOUNT`.
+Its owning image must equal the retained producer instance. The owner check must not pin the DLL or add a leaked reference.
 A symbol name or library filename does not prove that association.
 Treat a missing `_v1` accessor or incompatible ABI as a failed transfer.
 Do not substitute a raw pointer or plaintext export.
@@ -746,6 +775,10 @@ Do not wait for another decoder owner during loader-controlled construction or d
 A successful `dlclose` does not prove unmapping.
 TLS destructors, other references, dependencies, GNU-unique symbols, or `RTLD_NODELETE` can retain a mapping.
 These conditions do not extend an agreed pointer lifetime.
+On Windows, final `FreeLibrary` must remove the producer mapping before claiming unload.
+Check `GetModuleHandleW == NULL`. Other loader references and pending callbacks can prevent safe release.
+Follow the [Windows shutdown sequence](#initialization-and-unload) before releasing the final reference.
+Do not use `GET_MODULE_HANDLE_EX_FLAG_PIN` when unload is required.
 The caller-owned copy remains usable after actual producer unmapping if its buffer and reader code remain live.
 It is ordinary plaintext without continuous integrity checks.
 
