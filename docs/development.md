@@ -64,6 +64,7 @@ VM wrapper replacement preserves this storage class, while internal implementati
 Final validation checks the live accessor export and producer-private V3 bundle globals.
 After the actual COFF link, `obf-native-link` compares the PE export directory with private runtime addresses from the linker MAP.
 It rejects private names, aliased addresses, ordinal-only exports, and private runtime forwarders.
+It follows bounded executable `E9 rel32` thunk chains to detect MSVC incremental aliases without disabling incremental links.
 The existing rejected-output path removes the primary image.
 
 
@@ -164,6 +165,8 @@ The `tests/lit/Inputs/cross_dll_string_copy.py` harness keeps scratch and eviden
 Use the same O0/O2 and `vm`/`strong_vm` matrix with independent producer DLLs, consumer DLLs, and raw controls.
 Include function-local static arrays and normal CRT constructor-backed sources.
 Check exact PE export sets and reject forced private runtime exports through direct, `.def`, and ordinal-only routes.
+Use LLD, MSVC nonincremental, and MSVC incremental links with paired raw export controls.
+The incremental control must keep a legitimate public accessor thunk while rejecting private decoder aliases and ordinal-only exports.
 Data-only corruption must produce the native authentication trap with unchanged caller-owned destination bytes and consumer effects.
 The parent process must observe the child trap and shared destination, not infer success from a generic nonzero exit.
 Keep application queries and copies outside `DllMain`, `.CRT$XL*` callbacks, and loader-controlled construction or destruction.

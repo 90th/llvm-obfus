@@ -280,8 +280,11 @@ def check_report(path, owner, level, *, producer=False):
             f"requested policy changed for {owner}")
     result = {"level": level}
     if producer:
+        # Ctor encoding can rewrite zero ordinary reads. Emitted encoding,
+        # authenticated roles/bindings/finalizers, and private V3 descriptor
+        # inspection establish protection independently of rewritten-use count.
         require(any(event["owner"] == owner and event["mechanism"] == "string_encoding"
-                    and event["status"] == "emitted" and event["count"] > 0
+                    and event["status"] == "emitted"
                     for event in report["emission"]), "producer emitted no string encoding")
         decoders = {role["target"] for role in report["roles"]
                     if role["owner"] == owner and role["role"] == "string_decoder"
@@ -326,7 +329,7 @@ class Harness:
         temp = Path(tempfile.gettempdir()).resolve()
         require(parent.is_relative_to(temp), "scratch/evidence must stay under native TEMP")
         parent.mkdir(parents=True, exist_ok=True)
-        self.work = Path(tempfile.mkdtemp(prefix="cross-dll-string-copy-", dir=parent)).resolve()
+        self.work = Path(tempfile.mkdtemp(prefix="xcdll-", dir=parent)).resolve()
         self.raw = [args.clang, "--driver-mode=g++"]
         self.producers = {}
         self.category = "setup"
@@ -595,41 +598,72 @@ class Harness:
             self.reject_build(folder, name, "cross-dso-string-copy-invalid.c", config,
                               code="strict_vm" if name == "strict-vm-budget" else "source_strategy",
                               defines=["-DCOPY_BAD_CASE=0"])
+        # PE LTO is rejected by wrapper preflight, before compiler invocation;
+        # it therefore has no string-copy finalizer ledger. Prove valid input
+        # syntax with a raw LTO frontend and a protected native-route control,
+        # then vary only the managed LTO route and check wrapper-origin failure.
+        raw_lto, _ = self.compile(folder, "lto-raw", "cross-dll-string-copy-producer.cpp",
+                                  2, defines=["-DCOPY_VARIANT=1"], extra=["-flto"])
+        with raw_lto.open("rb") as stream:
+            magic = stream.read(4)
+        require(magic in (b"BC\xc0\xde", b"\xde\xc0\x17\x0b"),
+                "raw PE LTO frontend control did not emit LLVM bitcode")
+        native_obj, native_ledger = self.compile(
+            folder, "lto-native", "cross-dll-string-copy-producer.cpp", 2,
+            config=base, defines=["-DCOPY_VARIANT=1"], report=True)
+        native_compiler = check_report(native_ledger, "exchange_copy_v1", "strong", producer=True)
+        native_image, native_metadata = self.shared(native_obj, base, exports={"exchange_copy_v1"})
+        pe = PeData(native_image)
+        native_bundles = [pe.bundle(text) for text in TEXTS[0]]
+        self.result["controls"].append({
+            "kind": "pe-lto-input-controls", "raw_lto_object": str(raw_lto),
+            "raw_bitcode_magic": magic.hex(), "native_image": str(native_image),
+            "native_report": str(native_ledger), "native_compiler": native_compiler,
+            "pe_metadata": native_metadata, "private_v3_descriptors": native_bundles})
+        self.save()
         lto = folder / "lto-export.dll"
         ledger = folder / "lto-export-coverage.json"
         result = self.run([self.args.wrapper, f"--obf-config={base}", *FLAGS, "-O2", "-flto",
                            "-shared", "-fuse-ld=lld", "-I", INCLUDE, "-DCOPY_VARIANT=1",
                            FIXTURES / "cross-dll-string-copy-producer.cpp", "-o", lto],
                           report=ledger, rejects=True)
-        require(not lto.exists(), "rejected LTO export DLL survived")
-        self.export_rejection(ledger, "native_route")
-        self.result["rejections"].append({"case": "lto-export", "exit": result.returncode,
-                                          "gate": "native_route", "report": str(ledger),
-                                          "output_absent": True})
-        self.static_boundaries(folder)
+        require(result.returncode == 2 and any(line.startswith("obf-clang:")
+                                               for line in result.stderr.splitlines()),
+                "PE LTO rejection did not originate from wrapper preflight")
+        require(not lto.exists(), "wrapper-rejected PE LTO export left a DLL")
+        require(not ledger.exists(), "PE LTO wrapper preflight unexpectedly produced a compiler ledger")
+        self.result["rejections"].append({
+            "case": "lto-export", "exit": result.returncode, "gate": "pe-lto-wrapper",
+            "raw_frontend_control": str(raw_lto), "native_control": str(native_image),
+            "compiler_report_created": False, "output_absent": True})
+        self.static_boundaries()
         self.export_boundaries(folder)
         self.save()
 
-    def static_boundaries(self, folder):
+    def static_boundaries(self):
         self.category = "native-ownership-rejections"
+        # Keep real linker paths short even when the retained matrix is large.
+        # Descriptive case names remain in result.json and command categories.
+        folder = self.work / "own"
+        folder.mkdir()
         source = "cross-dll-string-copy-static.c"
-        main, _ = self.compile(folder, "static-main", source, 2)
-        provider, _ = self.compile(folder, "static-provider", source, 2,
+        main, _ = self.compile(folder, "main", source, 2)
+        provider, _ = self.compile(folder, "text", source, 2,
                                    defines=["-DCOPY_STATIC_PROVIDER"])
-        raw_reader, _ = self.compile(folder, "static-raw-reader", source, 2,
+        raw_reader, _ = self.compile(folder, "raw", source, 2,
                                      defines=["-DCOPY_STATIC_READER"])
-        raw_image = folder / "static-raw-control.exe"
+        raw_image = folder / "s-raw.exe"
         link_flags = ["-fms-runtime-lib=dll", "-fuse-ld=lld"]
         self.run([*self.raw, *link_flags, main, raw_reader, provider, "-o", raw_image])
         self.run([raw_image], native=True)
-        strict = folder / "static-strict.yaml"
+        strict = folder / "s.yaml"
         policy(strict, "exchange_static_read", "strong_vm")
-        reader, report = self.compile(folder, "static-strict-reader", source, 2,
+        reader, report = self.compile(folder, "vm", source, 2,
                                        config=strict, defines=["-DCOPY_STATIC_READER"], report=True)
         check_report(report, "exchange_static_read", "strong_vm")
-        none = folder / "link-none.yaml"
+        none = folder / "n.yaml"
         policy(none, "absent_owner", "none")
-        strict_image = folder / "static-strict-rejected.exe"
+        strict_image = folder / "s-no.exe"
         result = self.run([self.args.wrapper, f"--obf-config={none}", *link_flags,
                            main, reader, provider, "-o", strict_image], rejects=True)
         require_native_rejection(result)
@@ -637,45 +671,59 @@ class Harness:
         self.result["rejections"].append({"case": "strict-static-import", "exit": result.returncode,
                                           "raw_control_executed": True, "output_absent": True,
                                           "report": str(report)})
-        dll_provider, _ = self.compile(folder, "foreign-dll-provider", source, 2,
+        dll_provider, _ = self.compile(folder, "dll", source, 2,
                                        defines=["-DCOPY_STATIC_PROVIDER", "-DCOPY_DLL_EXPORT"])
         dll, _ = self.shared(dll_provider)
         import_library = dll.with_suffix(".lib")
-        imported_raw, _ = self.compile(folder, "foreign-dll-raw-reader", source, 2,
+        imported_raw, _ = self.compile(folder, "imp", source, 2,
                                        defines=["-DCOPY_STATIC_READER", "-DCOPY_DLL_IMPORT"])
-        dynamic_control = folder / "static-dll-raw-control.exe"
+        dynamic_control = folder / "d-raw.exe"
         self.run([*self.raw, *link_flags, main, imported_raw, import_library,
                   "-o", dynamic_control])
         self.run([dynamic_control], native=True)
         imported, imported_report = self.compile(
-            folder, "foreign-dll-strict-reader", source, 2, config=strict,
+            folder, "ivm", source, 2, config=strict,
             defines=["-DCOPY_STATIC_READER", "-DCOPY_DLL_IMPORT"], report=True)
         check_report(imported_report, "exchange_static_read", "strong_vm")
-        dynamic_rejected = folder / "static-dll-strict-rejected.exe"
+        # Like native_string_ownership.py, the rejection must use exactly the
+        # protected reader/provider set that first links and runs without the
+        # native gate. A separate raw reader alone cannot establish that.
+        runtime = (self.args.runtime or
+                   Path(self.args.wrapper).parent / "libobf_runtime.a").resolve()
+        require(runtime.is_file(), "matching runtime archive unavailable: pass --runtime")
+        dynamic_vm_control = folder / "d-vm.exe"
+        self.run([*self.raw, *link_flags, main, imported, import_library,
+                  runtime, "-o", dynamic_vm_control])
+        self.run([dynamic_vm_control], native=True)
+        dynamic_rejected = folder / "d-no.exe"
         result = self.run([self.args.wrapper, f"--obf-config={none}", *link_flags,
                            main, imported, import_library, "-o", dynamic_rejected], rejects=True)
         require_native_rejection(result)
         require(not dynamic_rejected.exists(), "strict DLL foreign-data import left an EXE")
         self.result["rejections"].append({"case": "strict-static-dll-import",
                                           "exit": result.returncode, "raw_control_executed": True,
+                                          "protected_reader_raw_link_executed": True,
+                                          "protected_reader_raw_image": str(dynamic_vm_control),
+                                          "binding": "COFF-IAT-pointer-cell",
+                                          "static_dependency": "__imp_foreign_copy_text",
                                           "output_absent": True, "report": str(imported_report)})
-        numeric, _ = self.compile(folder, "numeric-provider", source, 2,
+        numeric, _ = self.compile(folder, "num", source, 2,
                                   defines=["-DCOPY_STATIC_NUMERIC_PROVIDER"])
         declaration = {"version": 1, "providers": [{"path": numeric.name,
                        "sha256": hashlib.sha256(numeric.read_bytes()).hexdigest(),
                        "definitions": [{"symbol": "foreign_copy_text", "local": False,
                                         "kind": "non_string", "targets": []}]}]}
-        valid = folder / "numeric-manifest.json"
+        valid = folder / "n.json"
         valid.write_text(json.dumps(declaration, sort_keys=True) + "\n", encoding="utf-8")
-        managed_control = folder / "manifest-managed-control.exe"
+        managed_control = folder / "m-ok.exe"
         self.run([self.args.wrapper, f"--obf-config={none}",
                   f"--obf-native-provenance={valid}", *link_flags, main, reader,
                   numeric, "-o", managed_control])
         self.run([managed_control], native=True)
         declaration["providers"][0]["definitions"][0]["kind"] = "protected"
-        forbidden = folder / "forbidden-protected-manifest.json"
+        forbidden = folder / "p.json"
         forbidden.write_text(json.dumps(declaration, sort_keys=True) + "\n", encoding="utf-8")
-        rejected = folder / "manifest-rejected.exe"
+        rejected = folder / "m-no.exe"
         result = self.run([self.args.wrapper, f"--obf-config={none}",
                            f"--obf-native-provenance={forbidden}", *link_flags,
                            main, reader, numeric, "-o", rejected], rejects=True)

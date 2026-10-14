@@ -21,6 +21,8 @@
 ; include LLD, nonincremental MSVC, and /DEBUG /INCREMENTAL /OPT:NOREF /OPT:NOICF
 ; MSVC. Raw alias/NONAME EAT RVAs follow actual bounded executable E9 chains to
 ; the V3 MAP body; legitimate public accessor ILT thunks must stay accepted.
+; Raw PE LTO frontend and protected native controls isolate the existing wrapper
+; PE LTO ban: rejection must leave neither a primary DLL nor a compiler ledger.
 ; No app copy executes in DllMain or CRT$XL callbacks. TEMP retains all evidence.
 ; RUN: %python %S/../Inputs/cross_dll_string_copy.py --wrapper %obf_clangxx --clang %raw_clang
 ;
