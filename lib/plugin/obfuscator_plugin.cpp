@@ -353,6 +353,7 @@ bool complete_funclet_bundles(llvm::Module& module) {
         call->getOperandBundlesAsDefs(bundles);
         bundles.emplace_back("funclet", inputs);
         llvm::CallBase* replacement = llvm::CallBase::Create(call, bundles, call->getIterator());
+        replacement->copyMetadata(*call);
         replacement->takeName(call);
         call->replaceAllUsesWith(replacement);
         call->eraseFromParent();
