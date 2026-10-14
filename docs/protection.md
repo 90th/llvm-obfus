@@ -551,10 +551,33 @@ Runtime entropy initialization does not bind authentication keys.
 Custom entry points must not omit the required CRT initialization sequence.
 Calls from pre-CRT TLS callbacks, before required constructors complete, are outside the supported lifecycle.
 
+C++ globals keep the normal `.CRT$XCU` initialization and CRT on-exit cleanup.
+Completed objects are destroyed in reverse construction order.
+Failed DLL attachment cleans up completed globals before the loader removes the image.
+Failed local-static initialization rolls back completed members and resets the native guard for retry.
+The compiler retains `_Init_thread_header`, `_Init_thread_abort`, and native x64 unwind handling.
+Local EH and SEH bodies keep the existing native protection fallback.
+Generated calls in these bodies retain their enclosing funclet tokens.
+PE `.pdata` entries reference unwind information in `.xdata` or linker-merged `.rdata`.
+
+Hold ordinary module references while workers can execute DLL code or own nontrivial native TLS.
+TLS destructor registration is not a substitute for a module reference.
+Join TLS-owning workers before releasing the final reference.
+A host thread can outlive unload after explicit FLS cleanup removes its DLL callbacks and values.
+Free the inactive FLS index before final unload.
+Do not leave native TLS destructors or unwind callbacks pointing into an unmapped DLL.
+
+Dynamic detach has `lpvReserved == NULL`.
+Process-termination detach has `lpvReserved != NULL` and must not drain or join workers.
+Native termination checks observe FLS and TLS cleanup on the terminating thread, but skip dormant-worker TLS destruction.
+Do not require other threads to finish cleanup during process termination.
+
 Windows holds the loader lock during DLL initialization and `DllMain`.
 Protected calls there must not contend with another thread that owns an authenticated decoder.
 Decoder waiters can block indefinitely. They do not bypass authentication under the loader lock.
 Do not start workers or wait for other threads there.
+These restrictions also apply to `.CRT$XL*` callbacks and global construction or destruction.
+Do not invoke cross-DLL application callbacks or contend on decoder, VM, or initialization guards there.
 Protection of a `DllMain` function is not categorically unsupported.
 Its code must satisfy Windows loader-lock restrictions and the selected protection policy.
 

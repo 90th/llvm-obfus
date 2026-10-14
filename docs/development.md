@@ -153,6 +153,20 @@ Compiler ledgers establish emission and bindings. Native observations establish 
 On Windows, run `obf-clang-dll-lifecycle-pe` and `obf-clang-dll-output-pe` separately with three lit workers for focused native DLL checks.
 They check protected constructors and `DllMain` callbacks, decoded strings, return values, effects, exact exports, rebasing, and joined unload cycles.
 
+Run `obf-clang-cxx-shared-lifecycle-pe` for native Windows x64 C++ lifetime and unload checks.
+It covers O0/O2 with `vm` and `strong_vm`, plus independent raw DLL controls.
+Each of six modes runs three cycles: runtime, TLS, FLS, in-flight work, process termination, and failed attachment.
+The host checks exact events, returns, effects, thread ownership, retry, member rollback, and LIFO destruction.
+Compiler ledgers require whole-function VM emission and protected native EH/SEH fallbacks.
+PE checks cover exact exports, bound checksum records, `.pdata`, and referenced unwind data.
+Live `RtlLookupFunctionEntry` checks cover the EH/SEH exports.
+Ordinary module references retain in-flight work and native TLS workers without pinning.
+Explicit FLS drain lets a host thread outlive verified image removal without a DLL callback.
+Process termination checks terminating-thread cleanup and skipped dormant-worker TLS destruction separately.
+`GetModuleHandleW` and `VirtualQuery` must prove removal before the next fresh load.
+The harness saves `result.json`, command logs, and compiler ledgers under the Windows temporary directory.
+These checks serialize protected event calls. They do not establish decoder-contention behavior under the loader lock.
+
 Individual runtime and unit executables are also available:
 
 ```sh
