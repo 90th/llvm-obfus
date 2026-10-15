@@ -18,6 +18,15 @@ alias/NONAME controls must exercise real bounded E9 chains to the V3 MAP body;
 legitimate public accessor ILT thunks must remain accepted by managed linking.
 All commands, compiler ledgers, private PE-data offsets, and native witnesses
 remain in a fresh TEMP child; result.json records the exact requested scope.
+--only-concurrency retains raw controls and compiler ledgers, then runs fresh
+processes for same-1/same-2/same-3, independent-sources and independent-producers.
+It skips corruption and compiler/export rejection probes. Default runs include
+these concurrent exchanges across independent producer and consumer VM policies.
+The start barrier does not prove decoder overlap. Shutdown closes host admission
+with reserved calls parked outside producers, drains and joins, clears callable
+pointers, proves mapping removal, and consumes saved worker-owned copies.
+--source-id, --variant and --warm-only continue to filter corruption probes;
+concurrent scenarios always include all source IDs and fresh cold barriers.
 """
 
 import argparse
@@ -43,6 +52,14 @@ TEXTS = ((b"amber producer A owns this copy\0", b"A: independent data 1847\0", b
          (b"violet producer B has another payload\0", b"B: distinct data 9263\0", b"\0"))
 MUTATIONS = ("cache", "tag", "ciphertext", "length", "version")
 TRAP_CODE = 0xC000001D
+CONCURRENT_SCENARIOS = ("same-1", "same-2", "same-3",
+                        "independent-sources", "independent-producers")
+CONCURRENT_ORACLE_FIELDS = (
+    "workers", "warm_rounds", "statuses", "reads", "admitted", "completed",
+    "module_calls", "post_close_rejected", "outstanding_at_close", "close_phase",
+    "host_parked_at_close", "drained", "barrier_started", "decoder_overlap_proven",
+    "loader_lock_contention_claimed", "callables_cleared", "unmapped",
+    "virtual_query_removed", "copies_after_unload", "no_owner_reference", "digest")
 
 
 def require(condition, message):
@@ -335,9 +352,10 @@ class Harness:
         self.work = Path(tempfile.mkdtemp(prefix="xcdll-", dir=parent)).resolve()
         self.raw = [args.clang, "--driver-mode=g++"]
         self.producers = {}
+        self.consumers = {}
         self.category = "setup"
         self.result = {"status": "running", "work": str(self.work), "rows": [],
-                       "controls": [], "exporters": [], "rejections": [],
+                       "controls": [], "exporters": [], "rejections": [], "concurrency": [],
                        "scope": "native Windows x64 MSVC PE/COFF copy-only DLL exchange",
                        "sources": {"1": "file-local primary", "2": "C++ local-static secondary",
                                    "3": "file-local empty"},
@@ -345,13 +363,17 @@ class Harness:
                                   "strategy": args.strategy, "tamper": args.tamper,
                                   "source_id": args.source_id, "variant": args.variant,
                                   "cold_authentication": not args.warm_only,
-                                  "freshness": not args.skip_freshness,
+                                  "freshness": not (args.skip_freshness or args.only_concurrency),
                                   "exporters": not args.skip_exporters,
                                   "exporter_level": args.exporter_level,
-                                  "rejections": not args.skip_negatives,
+                                  "rejections": not (args.skip_negatives or args.only_concurrency),
                                   "only_export_isolation": args.only_export_isolation,
                                   "export_linker_filter": args.linker if args.only_export_isolation else None,
-                                  "only_negatives": args.only_negatives},
+                                  "only_negatives": args.only_negatives,
+                                  "only_concurrency": args.only_concurrency,
+                                  "concurrent_scenarios": list(CONCURRENT_SCENARIOS),
+                                  "concurrency_source_ids": [1, 2, 3],
+                                  "concurrency_variants": [1, 2]},
                        "unsupported_phases": [{"strategy": "lazy", "mode": "cache",
                                                "warm": False,
                                                "reason": "uncertified zero cache is overwritten by first decode"}]}
@@ -438,6 +460,9 @@ class Harness:
         return producers, consumer, incompatible, observed
 
     def build_consumer(self, optimization, level):
+        key = (optimization, level)
+        if key in self.consumers:
+            return self.consumers[key]
         self.category = f"O{optimization}/{level}/consumer"
         folder = self.work / f"o{optimization}-{level}-consumer"
         folder.mkdir()
@@ -447,7 +472,9 @@ class Harness:
                                    optimization, config=config, report=True)
         compiler = check_report(report, "exchange_read_bytes", level)
         image, metadata = self.shared(obj, config, exports={"exchange_read_bytes"})
-        return image, {"report": str(report), "outcome": compiler, "pe_metadata": metadata}
+        self.consumers[key] = (
+            image, {"report": str(report), "outcome": compiler, "pe_metadata": metadata})
+        return self.consumers[key]
 
     def build_producers(self, optimization, strategy, raw_consumer, incompatible,
                         baseline, *, level="strong"):
@@ -496,6 +523,61 @@ class Harness:
         self.producers[key] = (images, compilers, bundles, observed)
         self.save()
         return self.producers[key]
+
+    def concurrent_exchange(self, images, consumer, strategy, *, bundles=None,
+                            baseline=None):
+        arguments = []
+        if strategy != "raw":
+            require(bundles is not None and len(bundles) == 2 and
+                    all(len(sources) == 3 for sources in bundles),
+                    "concurrent protected exchange lacks all six source bundles")
+            arguments = [str(bundle[field]) for sources in bundles for bundle in sources
+                         for field in ("cache", "state", "cold_status")]
+        outcomes = []
+        for index, scenario in enumerate(CONCURRENT_SCENARIOS):
+            # native() starts a separate host process: no same-source scenario
+            # inherits decoded caches or module references from an earlier one.
+            observed = self.native("concurrent", *images, consumer, strategy,
+                                   scenario, *arguments)
+            require(observed["kind"] == "concurrency" and
+                    observed["scenario"] == scenario and observed["strategy"] == strategy,
+                    "native concurrent scenario identity changed")
+            workers, rounds = observed["workers"], observed["warm_rounds"]
+            require(workers == 24 and rounds == 12,
+                    "native concurrency worker count or warm rounds changed")
+            suites = workers * rounds + workers // 2
+            successful = workers * (rounds + 2)
+            calls = successful + suites * 5
+            require(observed["admitted"] == observed["completed"] ==
+                    observed["module_calls"] == calls and
+                    observed["outstanding_at_close"] == workers and
+                    observed["post_close_rejected"] == workers + 1 and
+                    sum(observed["statuses"]) == calls and
+                    all(count > 0 for count in observed["statuses"]),
+                    "native concurrent application-call accounting differs")
+            require(observed["reads"] == successful + workers * 2 and
+                    observed["copies_after_unload"] == workers * 2,
+                    "every saved worker copy was not consumed after real unload")
+            require(observed["barrier_started"] and observed["host_parked_at_close"] and
+                    observed["drained"] and observed["callables_cleared"] and
+                    observed["unmapped"] == [True, True] and
+                    observed["virtual_query_removed"] == [True, True] and
+                    observed["no_owner_reference"] and
+                    observed["close_phase"] == "host-reserved-not-inside-producer" and
+                    observed["decoder_overlap_proven"] is False and
+                    observed["loader_lock_contention_claimed"] is False,
+                    "native concurrent barrier/ownership/shutdown evidence incomplete")
+            require(observed["cold_state_checked"] == (strategy == "lazy") and
+                    observed["cold_bundles_checked"] == (6 if strategy == "lazy" else 0) and
+                    observed["post_join_bundles_checked"] == (0 if strategy == "raw" else 6),
+                    "native concurrent private bundle observations incomplete")
+            if baseline is not None:
+                require(baseline[index]["scenario"] == scenario and
+                        all(observed[field] == baseline[index][field]
+                            for field in CONCURRENT_ORACLE_FIELDS),
+                        f"concurrent protected exchange differs from raw oracle: {scenario}")
+            outcomes.append(observed)
+        return outcomes
 
     def freshness(self, images, bundles, consumer, strategy, observations):
         if self.args.skip_freshness:
@@ -911,12 +993,23 @@ class Harness:
                       FIXTURES / "cross-dll-string-copy-host.cpp", "-o", self.host])
             for optimization in self.args.optimization:
                 raw_producers, raw_consumer, incompatible, baseline = self.build_raw(optimization)
+                self.category = f"O{optimization}/raw/concurrency"
+                concurrent_baseline = self.concurrent_exchange(
+                    raw_producers, raw_consumer, "raw")
+                self.result["concurrency"].append({
+                    "kind": "independent_raw", "optimization": optimization,
+                    "producers": list(map(str, raw_producers)),
+                    "consumer": str(raw_consumer), "native": concurrent_baseline})
+                self.save()
                 for level in self.args.level:
                     consumer, consumer_compiler = self.build_consumer(optimization, level)
                     hybrid = self.native("semantics", *raw_producers, consumer, incompatible)
                     require(hybrid == baseline, "VM consumer differs with independent raw producers")
                     self.result["controls"].append({"optimization": optimization, "level": level,
                                                     "kind": "raw_producers_vm_consumer", "native": hybrid})
+                    self.save()
+                    if self.args.only_concurrency:
+                        continue
                     for strategy in self.args.strategy:
                         images, compilers, bundles, _ = self.build_producers(
                             optimization, strategy, raw_consumer, incompatible, baseline)
@@ -944,10 +1037,29 @@ class Harness:
                                    "native": observed, "freshness": []}
                             self.result["exporters"].append(row)
                             self.save()
-                            self.freshness(images, bundles, raw_consumer, strategy, row["freshness"])
+                            if not self.args.only_concurrency:
+                                self.freshness(images, bundles, raw_consumer, strategy,
+                                               row["freshness"])
+                            for consumer_level in self.args.level:
+                                consumer, consumer_compiler = self.build_consumer(
+                                    optimization, consumer_level)
+                                self.category = (
+                                    f"O{optimization}/{level}/{strategy}/concurrent/{consumer_level}")
+                                outcomes = self.concurrent_exchange(
+                                    images, consumer, strategy, bundles=bundles,
+                                    baseline=concurrent_baseline)
+                                self.result["concurrency"].append({
+                                    "kind": "protected_producers_protected_consumer",
+                                    "optimization": optimization, "exporter_level": level,
+                                    "consumer_level": consumer_level, "strategy": strategy,
+                                    "producers": list(map(str, images)), "consumer": str(consumer),
+                                    "producer_compilers": compilers,
+                                    "consumer_compiler": consumer_compiler,
+                                    "independent_keys_and_data": True, "native": outcomes})
+                                self.save()
                             print(f"CROSS_DLL_STRING_COPY_EXPORTER_PASS O{optimization} "
                                   f"{level} {strategy}", flush=True)
-        if not self.args.skip_negatives:
+        if not self.args.skip_negatives and not self.args.only_concurrency:
             self.negative_builds()
         self.result["status"] = "passed"
         self.save()
@@ -977,12 +1089,18 @@ def main():
     parser.add_argument("--only-negatives", action="store_true")
     parser.add_argument("--only-export-isolation", action="store_true",
                         help="run only native private-export raw controls and managed rejection probes")
+    parser.add_argument("--only-concurrency", action="store_true",
+                        help="run fresh-process concurrent exchanges, raw controls and required ledgers; "
+                             "skip corruption/export/compiler negatives")
     args = parser.parse_args()
     require(os.name == "nt" and platform.machine().lower() in ("x86_64", "amd64"),
             "native Windows x64 required")
     require(not (args.only_negatives and args.skip_negatives), "negative-only and skip-negatives conflict")
     require(not (args.only_export_isolation and (args.only_negatives or args.skip_negatives)),
             "export-isolation-only conflicts with negative-only/skip-negatives")
+    require(not (args.only_concurrency and
+                 (args.only_negatives or args.only_export_isolation or args.skip_exporters)),
+            "concurrency-only conflicts with negative/export-isolation-only or skip-exporters")
     for name, default in (("optimization", [0, 2]), ("level", ["vm", "strong_vm"]),
                           ("strategy", ["lazy", "ctor"]), ("tamper", MUTATIONS),
                           ("source_id", [1, 2, 3]), ("variant", [1, 2]),

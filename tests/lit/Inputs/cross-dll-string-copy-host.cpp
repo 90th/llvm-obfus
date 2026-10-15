@@ -14,7 +14,7 @@
 static const char *const expected[2][3] = {
     {"amber producer A owns this copy", "A: independent data 1847", ""},
     {"violet producer B has another payload", "B: distinct data 9263", ""}};
-static unsigned checks, statuses[4], reads;
+static thread_local unsigned checks, statuses[4], reads;
 
 static void require(bool condition, const char *message) {
   if (!condition) {
@@ -78,6 +78,10 @@ static void unload_image(Image &image) {
   require(FreeLibrary(handle) != 0, "FreeLibrary failed");
   require(GetModuleHandleW(image.path.c_str()) == nullptr,
           "DLL mapping survived actual FreeLibrary");
+  MEMORY_BASIC_INFORMATION memory{};
+  require(VirtualQuery(handle, &memory, sizeof(memory)) == sizeof(memory) &&
+              memory.State == MEM_FREE,
+          "image allocation survived FreeLibrary address-space inspection");
 }
 
 static void status_is(int actual, int status) {
@@ -91,16 +95,21 @@ static void unchanged(const unsigned char *bytes, size_t count) {
 }
 
 static uint64_t consume(byte_reader reader, const unsigned char *bytes,
-                        size_t count, uint64_t salt) {
+                        size_t count, uint64_t salt,
+                        uint64_t *effect_buffer = nullptr) {
   uint64_t weighted = 0;
   for (size_t index = 0; index < count; ++index)
     weighted += static_cast<uint64_t>(bytes[index]) * (index + 1);
   uint64_t oracle = (UINT64_C(0x13579bdf) ^ salt) + weighted +
                     salt * count * (static_cast<uint64_t>(count) + 1) / 2;
   uint64_t effect = UINT64_C(0xdecafbad);
-  uint64_t actual = reader(bytes, count, salt, &effect);
+  if (effect_buffer == nullptr)
+    effect_buffer = &effect;
+  *effect_buffer = UINT64_C(0xdecafbad);
+  uint64_t actual = reader(bytes, count, salt, effect_buffer);
   require(actual == oracle, "consumer returned incorrect byte arithmetic");
-  require(effect == (oracle ^ (salt << 1)), "consumer wrote incorrect effect");
+  require(*effect_buffer == (oracle ^ (salt << 1)),
+          "consumer wrote incorrect effect");
   ++reads;
   return actual;
 }
@@ -261,6 +270,362 @@ static uint64_t number(const wchar_t *text) {
   unsigned long long value = std::wcstoull(text, &end, 0);
   require(errno == 0 && end != text && *end == 0, "invalid numeric argument");
   return value;
+}
+
+static constexpr unsigned concurrent_workers = 24;
+static constexpr unsigned warm_copies = 12;
+static constexpr DWORD concurrent_timeout = 10000;
+
+struct CopyBundle {
+  const unsigned char *cache;
+  const volatile uint64_t *state;
+  uint64_t cold_status;
+};
+
+struct Admission {
+  CRITICAL_SECTION mutex;
+  bool open = true;
+  unsigned admitted = 0, completed = 0, outstanding = 0, rejected = 0;
+
+  bool enter() {
+    EnterCriticalSection(&mutex);
+    bool accepted = open;
+    if (accepted) {
+      ++admitted;
+      ++outstanding;
+    } else
+      ++rejected;
+    LeaveCriticalSection(&mutex);
+    return accepted;
+  }
+
+  void complete() {
+    EnterCriticalSection(&mutex);
+    ++completed;
+    --outstanding;
+    LeaveCriticalSection(&mutex);
+  }
+};
+
+struct ConcurrentGroup {
+  Admission admission;
+  HANDLE start, ready, parked, drain;
+  volatile LONG ready_count = 0, parked_count = 0;
+};
+
+struct CopyWorker {
+  ConcurrentGroup *group;
+  copy_accessor accessor;
+  byte_reader reader;
+  unsigned variant, id, index;
+  unsigned char saved[2][COPY_BUFFER_SIZE];
+  uint64_t effect = UINT64_C(0xdecafbad);
+  unsigned checks = 0, statuses[4]{}, reads = 0;
+  unsigned module_calls = 0, completed_calls = 0;
+  bool pointers_cleared = false, post_close_rejected = false;
+};
+
+static void wait_event(HANDLE event, const char *message) {
+  require(WaitForSingleObject(event, concurrent_timeout) == WAIT_OBJECT_0,
+          message);
+}
+
+static int admitted_copy(CopyWorker &worker, uint32_t id, char *destination,
+                         size_t capacity, size_t *required) {
+  require(worker.group->admission.enter(), "open host rejected worker admission");
+  ++worker.module_calls;
+  int status = worker.accessor(id, destination, capacity, required);
+  ++worker.completed_calls;
+  worker.group->admission.complete();
+  return status;
+}
+
+static void concurrent_success(CopyWorker &worker, unsigned slot,
+                               bool already_admitted = false) {
+  const char *text = expected[worker.variant][worker.id - 1];
+  const size_t length = std::strlen(text) + 1;
+  unsigned char destination[COPY_BUFFER_SIZE];
+  std::memset(destination, 0xa6, sizeof(destination));
+  size_t required = SIZE_MAX;
+  int status;
+  if (already_admitted) {
+    ++worker.module_calls;
+    status = worker.accessor(worker.id,
+                             reinterpret_cast<char *>(destination) + 7,
+                             length, &required);
+    ++worker.completed_calls;
+    worker.group->admission.complete();
+  } else
+    status = admitted_copy(worker, worker.id,
+                           reinterpret_cast<char *>(destination) + 7,
+                           length, &required);
+  status_is(status, COPY_OK);
+  require(required == length && std::memcmp(destination + 7, text, length) == 0,
+          "concurrent copy changed exact string, NUL, or required size");
+  unchanged(destination, 7);
+  unchanged(destination + 7 + length, sizeof(destination) - 7 - length);
+  if (slot < 2)
+    std::memcpy(worker.saved[slot], destination + 7, length);
+  consume(worker.reader, destination + 7, length,
+          211 + worker.index * 17 + slot, &worker.effect);
+}
+
+static void concurrent_rejections(CopyWorker &worker) {
+  unsigned char destination[COPY_BUFFER_SIZE];
+  std::memset(destination, 0xa6, sizeof(destination));
+  worker.effect = UINT64_C(0xdecafbad);
+  const size_t length =
+      std::strlen(expected[worker.variant][worker.id - 1]) + 1;
+  size_t required = SIZE_MAX;
+  status_is(admitted_copy(worker, worker.id, nullptr, 0, &required),
+            COPY_NEED_CAPACITY);
+  require(required == length, "concurrent query lost NUL-inclusive size");
+  unchanged(destination, sizeof(destination));
+  require(worker.effect == UINT64_C(0xdecafbad),
+          "concurrent query changed worker effect sentinel");
+  required = SIZE_MAX;
+  status_is(admitted_copy(worker, worker.id,
+                          reinterpret_cast<char *>(destination) + 7,
+                          length - 1, &required), COPY_NEED_CAPACITY);
+  require(required == length, "concurrent short capacity lost required size");
+  unchanged(destination, sizeof(destination));
+  require(worker.effect == UINT64_C(0xdecafbad),
+          "concurrent short capacity changed worker effect sentinel");
+  required = SIZE_MAX;
+  status_is(admitted_copy(worker, UINT32_MAX,
+                          reinterpret_cast<char *>(destination) + 7,
+                          length, &required), COPY_UNKNOWN_ID);
+  require(required == 0, "concurrent unknown ID did not clear required size");
+  unchanged(destination, sizeof(destination));
+  require(worker.effect == UINT64_C(0xdecafbad),
+          "concurrent unknown ID changed worker effect sentinel");
+  required = SIZE_MAX;
+  status_is(admitted_copy(worker, worker.id, nullptr, length, &required),
+            COPY_INVALID_ARGUMENT);
+  require(required == length, "concurrent null destination lost known size");
+  unchanged(destination, sizeof(destination));
+  require(worker.effect == UINT64_C(0xdecafbad),
+          "concurrent null destination changed worker effect sentinel");
+  status_is(admitted_copy(worker, worker.id,
+                          reinterpret_cast<char *>(destination) + 7, length,
+                          nullptr), COPY_INVALID_ARGUMENT);
+  unchanged(destination, sizeof(destination));
+  require(worker.effect == UINT64_C(0xdecafbad),
+          "concurrent null required pointer changed worker effect sentinel");
+}
+
+static DWORD WINAPI copy_worker(void *argument) {
+  auto &worker = *static_cast<CopyWorker *>(argument);
+  if (InterlockedIncrement(&worker.group->ready_count) == concurrent_workers)
+    require(SetEvent(worker.group->ready) != 0, "signaling ready worker barrier");
+  wait_event(worker.group->start, "timed out at cold worker barrier");
+  // Half the workers start with an eligible copy; the others mix all ordinary
+  // errors into the cold burst. A barrier does not prove decoder overlap.
+  if (worker.index & 1)
+    concurrent_rejections(worker);
+  concurrent_success(worker, 0);
+  for (unsigned repeat = 0; repeat < warm_copies; ++repeat) {
+    concurrent_rejections(worker);
+    concurrent_success(worker, 2 + repeat);
+  }
+  // Reserve one final application call while admission is open. This worker
+  // parks in the host, not inside the producer or a loader-controlled callback.
+  require(worker.group->admission.enter(), "reserving final drain copy");
+  if (InterlockedIncrement(&worker.group->parked_count) == concurrent_workers)
+    require(SetEvent(worker.group->parked) != 0, "signaling reserved drain work");
+  wait_event(worker.group->drain, "timed out waiting for host admission close");
+  require(!worker.group->admission.enter(),
+          "closed host admitted a worker without producer lifetime ownership");
+  worker.post_close_rejected = true;
+  concurrent_success(worker, 1, true);
+  worker.accessor = nullptr;
+  worker.reader = nullptr;
+  worker.pointers_cleared = true;
+  worker.checks = checks;
+  worker.reads = reads;
+  for (unsigned status = 0; status < 4; ++status)
+    worker.statuses[status] = statuses[status];
+  return 0;
+}
+
+static void inspect_bundle(const CopyBundle &bundle, unsigned variant,
+                           unsigned id, bool lazy, bool touched) {
+  size_t length = std::strlen(expected[variant][id - 1]) + 1;
+  if (lazy && !touched) {
+    require(bundle.state[1] == bundle.cold_status &&
+                bundle.state[2] == bundle.cold_status,
+            "untouched lazy source lost its cold authentication state");
+    for (size_t offset = 0; offset < length; ++offset)
+      require(bundle.cache[offset] == 0, "cold lazy cache contains plaintext");
+  } else {
+    require(std::memcmp(bundle.cache, expected[variant][id - 1], length) == 0,
+            "authenticated cache differs after constructor or joined copies");
+    if (lazy && touched)
+      require(bundle.state[1] != bundle.cold_status && bundle.state[2] != 0,
+              "joined copies did not complete lazy source authentication");
+  }
+}
+
+static void concurrency(wchar_t **argv) {
+  // host concurrent A B consumer strategy scenario [cache state cold] x 6.
+  Image consumer = load_image(argv[4]);
+  byte_reader reader = reinterpret_cast<byte_reader>(
+      owned_symbol(consumer, "exchange_read_bytes"));
+  Image producers[2] = {load_image(argv[2]), load_image(argv[3])};
+  copy_accessor accessors[2];
+  for (unsigned variant = 0; variant < 2; ++variant)
+    accessors[variant] = reinterpret_cast<copy_accessor>(
+        owned_symbol(producers[variant], "exchange_copy_v1"));
+  require(producers[0].handle != producers[1].handle &&
+              accessors[0] != accessors[1],
+          "concurrent independent producers alias their mapping or accessor");
+  const bool raw = std::wcscmp(argv[5], L"raw") == 0;
+  const bool lazy = std::wcscmp(argv[5], L"lazy") == 0;
+  require(raw || lazy || std::wcscmp(argv[5], L"ctor") == 0,
+          "invalid concurrent producer strategy");
+  CopyBundle bundles[2][3]{};
+  if (!raw)
+    for (unsigned variant = 0; variant < 2; ++variant)
+      for (unsigned source = 0; source < 3; ++source) {
+        unsigned offset = 7 + (variant * 3 + source) * 3;
+        auto base = reinterpret_cast<const unsigned char *>(producers[variant].handle);
+        bundles[variant][source] = {
+            base + static_cast<uintptr_t>(number(argv[offset])),
+            reinterpret_cast<const volatile uint64_t *>(
+                base + static_cast<uintptr_t>(number(argv[offset + 1]))),
+            number(argv[offset + 2])};
+        inspect_bundle(bundles[variant][source], variant, source + 1, lazy, false);
+      }
+  unsigned same_id = 0;
+  for (unsigned id = 1; id <= 3; ++id) {
+    wchar_t name[] = L"same-1";
+    name[5] = static_cast<wchar_t>(L'0' + id);
+    if (std::wcscmp(argv[6], name) == 0)
+      same_id = id;
+  }
+  bool independent_sources = std::wcscmp(argv[6], L"independent-sources") == 0;
+  bool independent_producers =
+      std::wcscmp(argv[6], L"independent-producers") == 0;
+  require(same_id || independent_sources || independent_producers,
+          "invalid concurrent scenario");
+  ConcurrentGroup group{};
+  InitializeCriticalSection(&group.admission.mutex);
+  group.start = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  group.ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  group.parked = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  group.drain = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  require(group.start && group.ready && group.parked && group.drain,
+          "creating bounded host thread barriers");
+  CopyWorker workers[concurrent_workers]{};
+  HANDLE threads[concurrent_workers]{};
+  bool touched[2][3]{};
+  for (unsigned index = 0; index < concurrent_workers; ++index) {
+    auto &worker = workers[index];
+    worker.group = &group;
+    worker.index = index;
+    // Adjacent success-first/error-first workers target the same cold source.
+    worker.variant = (same_id || independent_producers) ? (index / 2) % 2 : 0;
+    worker.id = same_id ? same_id :
+                (independent_producers ? (index / 4) % 3 : (index / 2) % 3) + 1;
+    worker.accessor = accessors[worker.variant];
+    worker.reader = reader;
+    std::memset(worker.saved, 0xa6, sizeof(worker.saved));
+    touched[worker.variant][worker.id - 1] = true;
+    threads[index] = CreateThread(nullptr, 0, copy_worker, &worker, 0, nullptr);
+    require(threads[index] != nullptr, "creating native copy worker");
+  }
+  wait_event(group.ready, "timed out assembling simultaneous cold callers");
+  require(SetEvent(group.start) != 0, "releasing simultaneous cold callers");
+  wait_event(group.parked, "timed out reserving host-owned drain work");
+  EnterCriticalSection(&group.admission.mutex);
+  require(group.admission.open &&
+              group.admission.outstanding == concurrent_workers,
+          "admission close did not own outstanding reserved work");
+  group.admission.open = false;
+  unsigned outstanding_at_close = group.admission.outstanding;
+  LeaveCriticalSection(&group.admission.mutex);
+  require(!group.admission.enter(), "closed host admitted an owner module call");
+  require(SetEvent(group.drain) != 0, "releasing reserved calls for drain");
+  require(WaitForMultipleObjects(concurrent_workers, threads, TRUE,
+                                 concurrent_timeout) == WAIT_OBJECT_0,
+          "timed out draining and joining native workers");
+  unsigned module_calls = 0, completed_calls = 0;
+  for (unsigned index = 0; index < concurrent_workers; ++index) {
+    auto &worker = workers[index];
+    DWORD code = 1;
+    require(GetExitCodeThread(threads[index], &code) != 0 && code == 0,
+            "native copy worker failed");
+    require(CloseHandle(threads[index]) != 0, "closing joined worker handle");
+    require(worker.pointers_cleared && worker.accessor == nullptr &&
+                worker.reader == nullptr && worker.post_close_rejected,
+            "worker retained callable pointers or admitted work after close");
+    checks += worker.checks;
+    reads += worker.reads;
+    for (unsigned status = 0; status < 4; ++status)
+      statuses[status] += worker.statuses[status];
+    module_calls += worker.module_calls;
+    completed_calls += worker.completed_calls;
+  }
+  require(group.admission.outstanding == 0 &&
+              group.admission.admitted == group.admission.completed &&
+              group.admission.admitted == module_calls &&
+              completed_calls == module_calls &&
+              group.admission.rejected == concurrent_workers + 1,
+          "host admission/drain module-call accounting differs");
+  if (!raw)
+    for (unsigned variant = 0; variant < 2; ++variant)
+      for (unsigned source = 0; source < 3; ++source)
+        inspect_bundle(bundles[variant][source], variant, source + 1, lazy,
+                       touched[variant][source]);
+  accessors[0] = accessors[1] = nullptr;
+  require(accessors[0] == nullptr && accessors[1] == nullptr,
+          "owner retained producer callable pointers");
+  // No producer callable survives join. Clear private producer observations
+  // before unload as well; only caller-owned bytes and the consumer stay live.
+  std::memset(bundles, 0, sizeof(bundles));
+  unload_image(producers[0]);
+  unload_image(producers[1]);
+  require(GetModuleHandleW(consumer.path.c_str()) == consumer.handle,
+          "consumer mapping did not outlive producer drain/unload");
+  uint64_t digest = 0;
+  for (unsigned index = 0; index < concurrent_workers; ++index) {
+    auto &worker = workers[index];
+    size_t length = std::strlen(expected[worker.variant][worker.id - 1]) + 1;
+    for (unsigned slot = 0; slot < 2; ++slot) {
+      require(std::memcmp(worker.saved[slot],
+                          expected[worker.variant][worker.id - 1], length) == 0,
+              "worker-owned copy changed after actual producer unmapping");
+      unchanged(worker.saved[slot] + length, COPY_BUFFER_SIZE - length);
+      digest += consume(reader, worker.saved[slot], length,
+                        701 + index * 13 + slot, &worker.effect);
+    }
+  }
+  HANDLE events[] = {group.start, group.ready, group.parked, group.drain};
+  for (HANDLE event : events)
+    require(CloseHandle(event) != 0, "closing host barrier event handle");
+  DeleteCriticalSection(&group.admission.mutex);
+  reader = nullptr;
+  unload_image(consumer);
+  std::printf("{\"ok\":true,\"kind\":\"concurrency\",\"scenario\":\"%ls\","
+              "\"strategy\":\"%ls\",\"workers\":%u,\"warm_rounds\":%u,"
+              "\"checks\":%u,\"statuses\":[%u,%u,%u,%u],\"reads\":%u,"
+              "\"admitted\":%u,\"completed\":%u,\"module_calls\":%u,"
+              "\"post_close_rejected\":%u,\"outstanding_at_close\":%u,"
+              "\"close_phase\":\"host-reserved-not-inside-producer\","
+              "\"host_parked_at_close\":true,\"drained\":true,"
+              "\"barrier_started\":true,\"decoder_overlap_proven\":false,"
+              "\"loader_lock_contention_claimed\":false,"
+              "\"cold_state_checked\":%s,\"cold_bundles_checked\":%u,"
+              "\"post_join_bundles_checked\":%u,\"callables_cleared\":true,"
+              "\"unmapped\":[true,true],\"virtual_query_removed\":[true,true],"
+              "\"copies_after_unload\":%u,"
+              "\"no_owner_reference\":true,\"digest\":%llu}\n",
+              argv[6], argv[5], concurrent_workers, warm_copies, checks,
+              statuses[0], statuses[1], statuses[2], statuses[3], reads,
+              group.admission.admitted, group.admission.completed, module_calls,
+              group.admission.rejected, outstanding_at_close,
+              lazy ? "true" : "false", lazy ? 6 : 0, raw ? 0 : 6,
+              concurrent_workers * 2, static_cast<unsigned long long>(digest));
 }
 
 static void mutate_data(const Image &image, uintptr_t rva, unsigned original) {
@@ -436,13 +801,20 @@ int wmain(int argc, wchar_t **argv) {
                SEM_NOOPENFILEERRORBOX);
   if (argc == 6 && std::wcscmp(argv[1], L"semantics") == 0)
     semantics(argv[2], argv[3], argv[4], argv[5]);
+  else if ((argc == 7 || argc == 25) &&
+           std::wcscmp(argv[1], L"concurrent") == 0 &&
+           ((argc == 7 && std::wcscmp(argv[5], L"raw") == 0) ||
+            (argc == 25 && std::wcscmp(argv[5], L"raw") != 0)))
+    concurrency(argv);
   else if (argc == 14 && std::wcscmp(argv[1], L"tamper") == 0)
     tamper(argv);
   else if (argc == 15 && std::wcscmp(argv[1], L"tamper-child") == 0)
     tamper_child(argv);
   else {
     std::fprintf(stderr, "usage: host semantics A.dll B.dll consumer.dll v2.dll\n"
-                        "       host tamper producer consumer variant id mode warm rva byte strategy cache-rva state-rva cold-status\n");
+                        "       host tamper producer consumer variant id mode warm rva byte strategy cache-rva state-rva cold-status\n"
+                        "       host concurrent A B consumer raw scenario\n"
+                        "       host concurrent A B consumer lazy|ctor scenario [cache-rva state-rva cold-status]x6\n");
     return 2;
   }
   return 0;

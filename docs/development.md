@@ -169,6 +169,19 @@ Pair each managed export rejection with a raw link of the same protected object 
 Verify the raw exported name, address, and decoder thunk route before requiring native-link rejection and output removal.
 Forced per-source helper and payload exports must fail in the real linker, not the final export check.
 
+The Linux harness also runs concurrent copy cases in fresh processes.
+A host barrier releases callers for the same source, independent sources, and independent producers.
+Each worker owns its destination buffer and required-size storage.
+The host checks lazy state before release and after joins, including empty sources.
+Successful copies mix with capacity queries and ordinary errors, followed by repeated warm copies.
+
+The host closes admission with reserved work parked outside producer code.
+It rejects new admissions, drains work, joins workers, and clears callable pointers before actual producer unmapping.
+The consumer then reads every retained caller-owned copy.
+Do not modify producer source or cache storage during calls.
+These checks do not prove deterministic decoder overlap or loader-lock contention.
+Use `--only-concurrency` to run this matrix without corruption or export-rejection cases.
+
 After one valid copy, corrupt the primary, secondary, and empty sources.
 Change only data: decoded cache, tag, ciphertext, or descriptor length/version.
 The next payload copy must trap before shared destination or consumer effects change.
@@ -179,7 +192,8 @@ Loader-owned BSS tails can use anonymous mappings. A pathname alone does not est
 
 Check handle-scoped accessor ownership and incompatible or missing API versions.
 Reject a deliberately mismatched accessor and retained producer before any transfer effects.
-Clear callable pointers, drain calls, and verify actual producer unmapping before the consumer reads the caller-owned copy again.
+Stop new calls, drain workers, and clear callable pointers before producer unload.
+Verify actual producer unmapping before the consumer reads the caller-owned copy again.
 Keep the copy buffer and consumer code live.
 Negative builds must retain strict VM failures, required imported-static rejection, and the raw-manifest `protected` ban.
 Compiler ledgers establish emission and bindings. Native observations establish only the exercised returns, bytes, effects, traps, and lifetimes.
@@ -195,6 +209,12 @@ Data-only corruption must produce the native authentication trap with unchanged 
 The parent process must observe the child trap and shared destination, not infer success from a generic nonzero exit.
 Keep application queries and copies outside `DllMain`, `.CRT$XL*` callbacks, and loader-controlled construction or destruction.
 After final `FreeLibrary`, require `GetModuleHandleW == NULL` and actual mapping removal before reading surviving copies.
+
+The Windows harness also runs the concurrent cases described above, with independent producer and consumer policies.
+Native event barriers and bounded joins keep private-state inspection outside active calls.
+After drain, require both `GetModuleHandleW == NULL` and `VirtualQuery(...).State == MEM_FREE` for each producer.
+Read every retained worker copy while the consumer remains loaded.
+Use `--only-concurrency` to skip corruption and compiler/export negatives while retaining raw controls and required VM ledgers.
 
 
 On Windows, run `obf-clang-dll-lifecycle-pe` and `obf-clang-dll-output-pe` separately with three lit workers for focused native DLL checks.
