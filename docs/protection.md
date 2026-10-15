@@ -346,6 +346,8 @@ The actual native linker determines the prevailing definitions and extracted arc
 Discarded weak definitions, discarded local readers, and unextracted string members do not add obligations.
 The proxy uses GNU ld or ld.lld map/cross-reference evidence for ELF.
 For native COFF, it uses MSVC link or lld-link map and library-search evidence.
+Unresolved COFF resource-only contributions do not supply static provenance.
+They can retain embedded manifests, but required static-provider lookups still reject unresolved resource identities.
 
 Required dependencies reject when the validator cannot identify their actual provider without ambiguity.
 The proxy preserves a requested user map.

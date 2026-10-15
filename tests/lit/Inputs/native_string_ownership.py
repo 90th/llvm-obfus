@@ -148,7 +148,8 @@ class Harness:
             result["member"] = obj.name
         return result
 
-    def link(self, name, inputs, linker, *, managed=True, manifest=None, succeeds=True, extra=()):
+    def link(self, name, inputs, linker, *, managed=True, manifest=None, succeeds=True,
+             extra=(), reject_reason=None):
         image = self.work / (name + (".exe" if self.args.format == "coff" else ""))
         map_path = self.work / f"{name}.map"
         flags = [f"-fuse-ld={linker}"]
@@ -164,9 +165,12 @@ class Harness:
         else:
             driver = self.raw
             runtime = [self.args.runtime]
-        self.run([*driver, *flags, self.main, *inputs, *runtime, "-o", image, *extra], succeeds=succeeds)
+        result = self.run([*driver, *flags, self.main, *inputs, *runtime, "-o", image, *extra],
+                          succeeds=succeeds)
         if not succeeds:
             require(not image.exists(), f"rejected native image survived: {image}")
+            if reject_reason:
+                require(reject_reason in result.stderr, f"wrong native rejection: {result.stderr}")
         return image, map_path
 
     def partial_link(self, name, inputs, linker, *, managed=True, action="-r",
@@ -194,7 +198,7 @@ class Harness:
             require(member.name.lower() not in text, f"actual linker extracted unused {member}: {map_path}")
 
     def outcome(self, name, inputs, kind, *, accepts, manifest=None, selected=(), unused=(),
-                linkers=None, extra=()):
+                linkers=None, extra=(), reject_reason=None):
         for linker in (self.args.linker if linkers is None else linkers):
             stem = f"{name}-{linker}"
             # The same protected reader and provider set must link and run without
@@ -204,7 +208,8 @@ class Harness:
             self.execute(baseline, kind)
             self.map_members(baseline_map, selected=selected, unused=unused)
             image, user_map = self.link(stem + "-wrapped", inputs, linker,
-                                        manifest=manifest, succeeds=accepts, extra=extra)
+                                        manifest=manifest, succeeds=accepts, extra=extra,
+                                        reject_reason=reject_reason)
             if accepts:
                 self.execute(image, kind)
                 self.map_members(user_map, selected=selected, unused=unused)
@@ -242,6 +247,21 @@ class Harness:
         reader = self.compile("split-direct-strong", "reader.c", "direct", policy=self.strong)
         provider = self.compile("split-direct-provider", "provider.c", "direct")
         self.outcome("managed-direct-plaintext", [reader, provider], "direct", accepts=False)
+        if self.args.format == "coff":
+            manifest_flags = ["-Xlinker", "/manifest:embed", "-Xlinker",
+                              "/manifestuac:level='asInvoker' uiAccess='false'"]
+            for linker in self.args.linker:
+                self.outcome("embedded-manifest", [direct], "direct", accepts=True,
+                             linkers=[linker], extra=manifest_flags)
+                self.embedded_manifest(self.work / f"embedded-manifest-{linker}-wrapped.exe")
+            resource = self.compile("resource-named-plaintext", "provider.c", "direct", managed=False)
+            resource_named = self.work / "internal .obj file created from .res files"
+            resource.rename(resource_named)
+            manifest = self.manifest("resource-plaintext", [
+                self.provider(resource_named, definitions("direct"))])
+            self.outcome("resource-plaintext", [reader, resource_named], "direct", accepts=False,
+                         manifest=manifest, extra=manifest_flags,
+                         reject_reason="requires plaintext static string")
         for linker in self.args.linker:
             image = self.work / (f"combined-split-direct-{linker}" +
                                  (".exe" if self.args.format == "coff" else ""))
@@ -250,6 +270,37 @@ class Harness:
                       self.main, provider, f"-fuse-ld={linker}", "-o", image],
                      succeeds=False, compile_report=True)
             require(not image.exists(), f"rejected combined native image survived: {image}")
+
+    def embedded_manifest(self, image):
+        import ctypes
+        import xml.etree.ElementTree as xml
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        pointer = ctypes.c_void_p
+        for name, arguments, result in (
+                ("LoadLibraryExW", [wintypes.LPCWSTR, pointer, wintypes.DWORD], pointer),
+                ("FindResourceW", [pointer, pointer, pointer], pointer),
+                ("LoadResource", [pointer, pointer], pointer),
+                ("LockResource", [pointer], pointer),
+                ("SizeofResource", [pointer, pointer], wintypes.DWORD),
+                ("FreeLibrary", [pointer], wintypes.BOOL)):
+            function = getattr(kernel, name)
+            function.argtypes, function.restype = arguments, result
+        module = kernel.LoadLibraryExW(str(image), None, 0x22)
+        require(module, f"cannot load native manifest resource: {ctypes.get_last_error()}")
+        try:
+            resource = kernel.FindResourceW(module, pointer(1), pointer(24))
+            require(resource, "linked image has no application manifest")
+            size = kernel.SizeofResource(module, resource)
+            address = kernel.LockResource(kernel.LoadResource(module, resource))
+            require(address, "cannot read the application manifest")
+            document = xml.fromstring(ctypes.string_at(address, size).rstrip(b"\0"))
+            level = document.find(".//{urn:schemas-microsoft-com:asm.v3}requestedExecutionLevel")
+            require(level is not None and level.attrib == {"level": "asInvoker", "uiAccess": "false"},
+                    "native linker changed the requested application execution policy")
+        finally:
+            require(kernel.FreeLibrary(module), "cannot release manifest resource mapping")
 
     def boundaries(self):
         direct_reader = self.compile("direct-raw-reader", "reader.c", "direct", policy=self.strong)
