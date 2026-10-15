@@ -133,6 +133,10 @@ Run a focused lit selection with the `lit` executable from your build configurat
 lit -j 3 -sv build/tests --filter='vm-extrema'
 ```
 
+The `vm-expanded` and `vm-opcode-scramble` regressions run the original and virtualized modules.
+Coverage reports must confirm whole-function VM admission and emission for every selected target.
+Do not pin generated pointer slots or basic-block order.
+
 The hidden-token admission probe prunes unreachable definitions before it assembles each scenario.
 It follows the replacement entry point and keeps reachable protected bodies intact.
 Membership variants exist only for their own case, not across later targets.
@@ -147,12 +151,15 @@ The harness saves compiler ledgers and native execution evidence in isolated `/t
 Other Linux loaders do not run this glibc-specific unload regression.
 
 On native Linux x86-64 glibc, run `obf-clang-cross-dso-string-copy-elf` for the copy-only export contract.
-The `tests/lit/Inputs/cross_dso_string_copy.py` harness uses isolated `/tmp` directories and bounded native processes.
+The `tests/lit/Inputs/cross_dso_string_copy.py` harness uses isolated `/var/tmp` directories and bounded native processes.
 Use O0/O2, independent `vm`/`strong_vm` consumers, distinct producer build material, and raw semantic controls.
 Raw controls handwrite the same C ABI independently. They are not a plaintext fallback in the public header.
 The fixture disables inlining, vectorization, and loop unrolling to keep scalar byte-reader admission explicit.
 It still compiles both O0 and O2 and requires whole-function VM emission.
-Check `vm` and `strong_vm` producer accessors through their actual resolver paths.
+Check lazy and constructor-backed `vm` and `strong_vm` producer accessors through their actual resolver paths.
+Disable constructor fallback for lazy producer rows.
+Check initial private status and completion before any application copy, including empty sources.
+Queries and ordinary errors must leave that cold state unchanged.
 Check exact bytes, required sizes, NUL, statuses, and unchanged destination sentinels on ordinary rejection.
 Cover empty, lazy, and permitted constructor-backed sources.
 Require actual producer-private authentication before every successful copy, not constructor-only initialization.
@@ -167,6 +174,8 @@ Change only data: decoded cache, tag, ciphertext, or descriptor length/version.
 The next payload copy must trap before shared destination or consumer effects change.
 Queries, short-capacity calls, and unknown IDs must retain their ordinary status behavior without certifying authentication.
 Do not patch code, expose production test callbacks, or export keys and descriptors.
+For ELF mutation, verify the exact producer's readable, non-executable `PT_LOAD` bounds and actual mapping permissions.
+Loader-owned BSS tails can use anonymous mappings. A pathname alone does not establish those bounds.
 
 Check handle-scoped accessor ownership and incompatible or missing API versions.
 Reject a deliberately mismatched accessor and retained producer before any transfer effects.

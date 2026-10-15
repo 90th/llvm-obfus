@@ -304,8 +304,8 @@ static std::wstring quote(const wchar_t *text) {
 
 static void tamper_child(wchar_t **argv) {
   // argv: host tamper-child producer consumer variant id mode warm rva byte
-  //       strategy cache-rva shared-map. No application copy runs in DllMain.
-  HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, argv[12]);
+  //       strategy cache-rva state-rva cold-status shared-map.
+  HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, argv[14]);
   require(mapping != nullptr, "opening parent shared observation");
   auto shared = static_cast<SharedObservation *>(MapViewOfFile(
       mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedObservation)));
@@ -325,11 +325,18 @@ static void tamper_child(wchar_t **argv) {
   size_t length = std::strlen(expected[variant][id - 1]) + 1;
   const auto cache = reinterpret_cast<const unsigned char *>(source.handle) +
                      static_cast<uintptr_t>(number(argv[11]));
+  const auto state = reinterpret_cast<const volatile uint64_t *>(
+      reinterpret_cast<const unsigned char *>(source.handle) +
+      static_cast<uintptr_t>(number(argv[12])));
+  const uint64_t cold_status = static_cast<uint64_t>(number(argv[13]));
+  const bool lazy = std::wcscmp(argv[10], L"lazy") == 0;
   if (std::wcscmp(argv[10], L"ctor") == 0)
     require(std::memcmp(cache, expected[variant][id - 1], length) == 0,
             "CRT constructor did not authenticate and decode before first copy");
   else {
     require(std::wcscmp(argv[10], L"lazy") == 0, "invalid decode strategy");
+    require(state[1] == cold_status && state[2] == cold_status,
+            "lazy source state completed before first copy");
     for (size_t index = 0; index < length; ++index)
       require(cache[index] == 0, "lazy source decoded before first copy");
   }
@@ -348,6 +355,9 @@ static void tamper_child(wchar_t **argv) {
   InterlockedExchange(&shared->stage, 2);
   rejected_calls(accessor, variant, id, shared->destination, &shared->required);
   shared->errors = 5;
+  if (lazy && !warm)
+    require(state[1] == cold_status && state[2] == cold_status,
+            "ordinary rejection changed cold authentication state");
   InterlockedExchange(&shared->stage, 3);
   int status = accessor(id, reinterpret_cast<char *>(shared->destination) + 7,
                         length, &shared->required);
@@ -378,7 +388,7 @@ static void tamper(wchar_t **argv) {
   DWORD size = GetModuleFileNameW(nullptr, executable, 32768);
   require(size > 0 && size < 32768, "resolving host executable");
   std::wstring command = quote(executable) + L" tamper-child";
-  for (unsigned index = 2; index < 12; ++index)
+  for (unsigned index = 2; index < 14; ++index)
     command += L" " + quote(argv[index]);
   command += L" " + quote(name);
   STARTUPINFOW startup{};
@@ -410,9 +420,11 @@ static void tamper(wchar_t **argv) {
               "\"warm\":%s,\"variant\":%u,\"id\":%u,\"exception_code\":%lu,"
               "\"stage\":%ld,\"ordinary_rejections\":%u,"
               "\"destination_unchanged\":true,\"effect_unchanged\":true,"
-              "\"required\":%zu}\n", argv[6], number(argv[7]) ? "true" : "false",
+              "\"required\":%zu,\"lazy_state_checked\":%s}\n",
+              argv[6], number(argv[7]) ? "true" : "false",
               variant, id, static_cast<unsigned long>(code), shared->stage,
-              shared->errors, shared->required);
+              shared->errors, shared->required,
+              std::wcscmp(argv[10], L"lazy") == 0 ? "true" : "false");
   require(CloseHandle(process.hThread) != 0 && CloseHandle(process.hProcess) != 0,
           "closing child process handles");
   require(UnmapViewOfFile(shared) != 0 && CloseHandle(mapping) != 0,
@@ -424,13 +436,13 @@ int wmain(int argc, wchar_t **argv) {
                SEM_NOOPENFILEERRORBOX);
   if (argc == 6 && std::wcscmp(argv[1], L"semantics") == 0)
     semantics(argv[2], argv[3], argv[4], argv[5]);
-  else if (argc == 12 && std::wcscmp(argv[1], L"tamper") == 0)
+  else if (argc == 14 && std::wcscmp(argv[1], L"tamper") == 0)
     tamper(argv);
-  else if (argc == 13 && std::wcscmp(argv[1], L"tamper-child") == 0)
+  else if (argc == 15 && std::wcscmp(argv[1], L"tamper-child") == 0)
     tamper_child(argv);
   else {
     std::fprintf(stderr, "usage: host semantics A.dll B.dll consumer.dll v2.dll\n"
-                        "       host tamper producer consumer variant id mode warm rva byte strategy cache-rva\n");
+                        "       host tamper producer consumer variant id mode warm rva byte strategy cache-rva state-rva cold-status\n");
     return 2;
   }
   return 0;

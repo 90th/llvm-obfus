@@ -270,7 +270,8 @@ The compiler generates the accessor body. Do not provide a handwritten body.
 
 Each source declaration binds an accessor and ID to its original string and a producer-private payload helper.
 The compiler rejects unsupported sources, source uses, signatures, strategies, limits, or unapplied protection.
-The declaration requires authenticated string encoding. It cannot enable plaintext, ephemeral, or non-authenticated export paths.
+The declaration requires `authenticated_mode: true`, including generated VM forwarding paths.
+It cannot enable plaintext, ephemeral, or non-authenticated export paths.
 The compiler validates the actual source bindings and decoder calls, not an accessor name or self-reported flag.
 Windows declarations retain `__declspec(dllexport)` on the public C accessor through VM lowering.
 Source helpers, descriptors, references, keys, state, and decoded caches remain producer-private.
@@ -282,6 +283,11 @@ The final ELF link rejects defined runtime-prefix exports and direct aliases to 
 It also rejects executable x86 `E9 rel32` and `EB rel8` thunk routes to those addresses within 32 jumps.
 The check uses actual LLD or GNU ld map addresses, including stripped outputs. Rejection removes the primary output image.
 It does not establish equivalence through other instructions or longer jump chains.
+
+Supported `vm` and `strong_vm` producer accessors can use authenticated lazy or constructor-backed source plans.
+Lazy copy exports retain their original source references through VM lowering.
+The private copy helper starts decoding only on a payload-copy path.
+Queries and ordinary errors leave cold authentication state unchanged, including for empty sources.
 
 Before every successful copy, the helper calls the existing authenticated decoder with producer-private descriptors, keys, and trusted constants.
 This includes constructor-backed sources. Constructor initialization alone does not satisfy the export check.
@@ -300,7 +306,7 @@ It can survive producer unload while its own buffer owner remains live.
 Consumer-static buffers require the consumer image to remain loaded.
 See the [unload rules](usage.md#copy-lifetime-and-unload).
 
-Select a native `strong` producer accessor explicitly when that boundary is the intended policy.
+Select `strong`, `vm`, or `strong_vm` for the producer accessor according to its intended policy.
 Compile independent runtime-input consumers with their own `vm` or `strong_vm` policy.
 This does not authorize a downgrade of an existing requested `strong_vm` target.
 Unsupported VM shapes retain their admission failures and strict gates.

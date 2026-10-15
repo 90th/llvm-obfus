@@ -639,6 +639,11 @@ self_checksum:
   enabled: false
 ```
 
+Use `level: vm` or `level: strong_vm` when the producer accessor must retain that policy.
+Supported VM accessors can use authenticated lazy sources with `allow_ctor_fallback: false`.
+Keep `prefer_lazy_decode: true` and `authenticated_mode: true` for this plan.
+An unsupported source plan rejects instead of changing the requested VM policy.
+
 ```sh
 build/obf-clang -O2 -fPIC -shared -Iinclude \
   --obf-config=producer.yaml producer.c -o producer.so

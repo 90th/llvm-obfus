@@ -1,5 +1,6 @@
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-expanded.yaml -passes=obf-vm -S %s -o - | %FileCheck %s
-; RUN: %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-expanded.yaml -passes=obf-vm -S %s -o %t
+; RUN: %lli %s
+; RUN: env OBF_COVERAGE_REPORT=%t.coverage.json %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/vm-expanded.yaml -passes=obf-vm -S %s -o %t
+; RUN: %python %S/../Inputs/report_contract.py whole-vm %t.coverage.json --owner branch_phi --owner select_cmp --owner call_memory --owner gep_load --owner switch_score --owner mixed_width --owner float_mix --owner vector_mix
 ; RUN: %lli %t
 
 @src.slot = global i32 37
@@ -143,74 +144,3 @@ entry:
   %ret = select i1 %ok, i32 0, i32 1
   ret i32 %ret
 }
-
-; CHECK-DAG: @__obf_vm_bc_i_{{[A-Za-z0-9_]+}} = private unnamed_addr constant [{{[0-9]+}} x i8] c"
-; Retkey globals only for integer-returning functions (interleaved with bytecode globals).
-; CHECK-DAG: @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}} = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}} = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}} = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}} = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}} = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}} = private global i64 {{-?[0-9]+}}
-; CHECK-DAG: @__obf_vm_s_{{[A-Za-z0-9_]+}} = private global i{{[0-9]+}} 0
-; CHECK-DAG: @__obf_vm_s_{{[A-Za-z0-9_]+}} = private global i{{[0-9]+}} 0
-; CHECK-DAG: @rt_core_ea = external externally_initialized global i64, align 8
-; CHECK-NOT: @__obf_vm_retkey_float_mix
-; CHECK-NOT: @__obf_vm_retkey_vector_mix
-; CHECK-LABEL: define i32 @branch_phi(i32 %x)
-; CHECK: entry.obf.vm.wrapper:
-; CHECK: %branch_phi.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}} monotonic, align {{[0-9]+}}
-; CHECK: %branch_phi.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
-; CHECK: %branch_phi.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; CHECK: %branch_phi.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %branch_phi.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
-; CHECK: %branch_phi.obf.wrapper.real.int = sub i{{[0-9]+}}
-; CHECK: %branch_phi.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
-; CHECK: %branch_phi.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %branch_phi.obf.wrapper.decoded{{(\.poison[0-9]*)?}} to ptr
-; CHECK: %branch_phi.obf.wrapper.call{{[0-9]*}} = call i32 %branch_phi.obf.wrapper.indirect(i32 %x, i64 %branch_phi.obf.wrapper.token)
-; CHECK: %branch_phi.obf.retkey = load i64, ptr @__obf_vm_retkey_i_{{[A-Za-z0-9_]+}}
-; CHECK-LABEL: define <2 x i32> @vector_mix(<2 x i32> %a, <2 x i32> %b)
-; CHECK: entry.obf.vm.wrapper:
-; CHECK: %vector_mix.obf.wrapper.check = load atomic i{{[0-9]+}}, ptr @__obf_vm_t_{{[A-Za-z0-9_]+}} monotonic, align {{[0-9]+}}
-; CHECK: %vector_mix.obf.wrapper.target.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
-; CHECK: %vector_mix.obf.wrapper.target.seed.base = load i{{[0-9]+}}, ptr @__obf_vm_s_{{[A-Za-z0-9_]+}}
-; CHECK: %vector_mix.obf.wrapper.target.seed.value = call i{{[0-9]+}} @__obf_vm_seed_resolve(i{{[0-9]+}} %vector_mix.obf.wrapper.target.key, i{{[0-9]+}} {{%[^)]+}})
-; CHECK: %vector_mix.obf.wrapper.real.int = sub i{{[0-9]+}}
-; CHECK: %vector_mix.obf.wrapper.key = load i{{[0-9]+}}, ptr @__obf_vm_k_{{[A-Za-z0-9_]+}}
-; CHECK: %vector_mix.obf.wrapper.indirect = inttoptr i{{[0-9]+}} %vector_mix.obf.wrapper.decoded{{(\.poison[0-9]*)?}} to ptr
-; CHECK: %vector_mix.obf.wrapper.call{{[0-9]*}} = call <2 x i32> %vector_mix.obf.wrapper.indirect(<2 x i32> %a, <2 x i32> %b, i64 %vector_mix.obf.wrapper.token)
-; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %x, i64 %obf.hidden_token)
-; CHECK: entry.obf.vm:
-; CHECK: %obf.vm.state = alloca {
-; CHECK: %obf.vm.dispatch.table = alloca [{{[0-9]+}} x i64]
-; CHECK: %obf.entropy.cache = alloca { i64, i64 }, align 8
-; CHECK: call {{(void|\{ i64, i64 \})}} @__obf_entropy_thunk_
-; CHECK: %obf.entropy.pair{{[0-9]*}} = load {{.*}} %obf.entropy.cache
-; CHECK: %obf.entropy.direct{{[0-9]*}} = {{.*}}
-; CHECK: indirectbr ptr
-; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(ptr %src, ptr %dst, i64 %obf.hidden_token)
-; CHECK: %obf.vm.ptr.const = load ptr, ptr @__obf_vm_ptrconst_
-; CHECK: %obf.vm.ptr.carrier{{[0-9]*}} =
-; CHECK: %obf.vm.call = call i32 %obf.vm.ptr{{[0-9]*}}(i32
-; CHECK: load i32, ptr
-; CHECK: store i32
-; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(ptr %base, i32 %index, i64 %obf.hidden_token)
-; CHECK: store i64 %obf.vm.ptr.carrier{{[0-9]*}}, ptr %obf.vm.state.slot.{{[0-9]+}}.{{[0-9]+}}
-; CHECK: %obf.vm.slot.ptr.raw{{[0-9]*}} = load i64, ptr %obf.vm.state.slot.{{[0-9]+}}.{{[0-9]+}}
-; CHECK: [[BASE_PTR:%[A-Za-z0-9_.]+]] = inttoptr i64 %obf.vm.slot.ptr.raw{{[0-9]*}} to ptr
-; CHECK: store ptr [[BASE_PTR]], ptr %{{[A-Za-z0-9_.]+slot}}
-; CHECK: %obf.vm.ptr.carrier{{[0-9]*}} =
-; CHECK-LABEL: define internal i32 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i32 %tag, i32 %base, i64 %obf.hidden_token)
-; CHECK: vm.switch.default.
-; CHECK-LABEL: define internal i16 @__obf_vm_i_{{[A-Za-z0-9_]+}}(i8 %x, i32 %y, i64 %obf.hidden_token)
-; CHECK-DAG: %obf.vm.zext.bias =
-; CHECK-DAG: %obf.vm.zext.wide = zext i8 %obf.vm.zext.bias{{(\.poison[0-9]*)?}} to i32
-; CHECK-DAG: %obf.vm.zext.signed.shl = shl i32 %{{[^,]+}}, 24
-; CHECK-DAG: %obf.vm.zext.signed = ashr i32 %obf.vm.zext.signed.shl, 24
-; CHECK-DAG: %obf.vm.zext = {{(add|or) i32}}
-; CHECK-DAG: vm.cast.exec.{{[0-9]+}}:
-; CHECK-DAG: %obf.vm.trunc.mask = and i32 %{{[^,]+}}, 65535
-; CHECK-DAG: %obf.vm.trunc = trunc i32 %obf.vm.trunc.mask{{(\.poison[0-9]*)?}} to i16
-; CHECK-LABEL: define internal float @__obf_vm_i_{{[A-Za-z0-9_]+}}(float %x, float %y, i64 %obf.hidden_token)
-; CHECK: fcmp {{[a-z]+}} float
-; CHECK-LABEL: define internal <2 x i32> @__obf_vm_i_{{[A-Za-z0-9_]+}}(<2 x i32> %a, <2 x i32> %b, i64 %obf.hidden_token)
-; CHECK: add <2 x i32>

@@ -4,7 +4,9 @@
 ; Windows x64 DLL producers. IDs 1..3 cover file-local, C++ local-static, and
 ; empty arrays. Lazy and normal shared-CRT constructor strategies authenticate
 ; before every successful copy, including first application copies after CRT
-; decoding and repeated/warm calls. Selected vm/strong_vm exporters use ctor.
+; decoding and repeated/warm calls. Selected vm/strong_vm exporters use both
+; strategies. Lazy rows disable constructor fallback and retain cold state,
+; including empty sources, through queries and ordinary errors.
 ; Independent raw controls check exact bytes, NUL-inclusive capacities, all
 ; statuses, consumer effects, wrong-owner rejection, and a V2-only DLL.
 ; PE section/export parsing finds private V3 descriptors without exported hooks
