@@ -80,6 +80,23 @@ def coverage_contract(report):
     return report
 
 
+def whole_vm_contract(args):
+    report = coverage_contract(load(args.report))
+    require(report["capture"] == "enabled" and args.owner,
+            "whole-function VM checks require captured outcomes and selected owners")
+    selected = {event["owner"]: event["policy"] for event in report["requested_policy"]
+                if event["phase"] == "selected"}
+    for owner in args.owner:
+        require(owner in selected and selected[owner]["allow_vm"] and
+                selected[owner]["level"] == "vm", f"{owner} lost its requested VM policy")
+        for phase, status in (("admission", "admitted"), ("emission", "emitted")):
+            events = [event for event in report[phase] if event["mechanism"] == "vm" and
+                      event["owner"] == owner and event["scope"] == "whole_function" and
+                      event["status"] == status]
+            require(events and (phase != "emission" or all(event["count"] > 0 for event in events)),
+                    f"missing {status} whole-function VM for {owner}")
+
+
 def no_emission(report, capture="enabled"):
     coverage_contract(report)
     require(report["capture"] == capture, "ledger capture availability does not match the executed passes")
@@ -294,18 +311,19 @@ def promotion_contract(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("case", choices=("predictions", "abi", "incoming", "region", "selection", "promotion", "shards", "prepare-shards"))
+    parser.add_argument("case", choices=("predictions", "abi", "incoming", "region", "selection", "promotion", "shards", "prepare-shards", "whole-vm"))
     parser.add_argument("report")
     parser.add_argument("--coverage")
     parser.add_argument("--uncaptured")
     parser.add_argument("--predictions")
     parser.add_argument("--ir")
     parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--owner", action="append")
     args = parser.parse_args()
     {"predictions": prediction_contract, "abi": abi_contract, "incoming": incoming_contract,
      "region": region_contract, "selection": selection_contract,
      "promotion": promotion_contract, "shards": shard_contract,
-     "prepare-shards": prepare_shards}[args.case](args)
+     "prepare-shards": prepare_shards, "whole-vm": whole_vm_contract}[args.case](args)
 
 
 if __name__ == "__main__":
