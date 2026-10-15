@@ -108,6 +108,26 @@ CTest runs the LLVM lit suite, transform and policy unit tests, runtime atomic t
 It also checks six malformed pending-decode cases through a trap observer.
 The configured lit test uses three workers.
 Keep outer CTest serial so native runtime tests do not overlap the lit workload.
+
+Run the native installation and archive gates after you build `obf-clang-wrappers`:
+
+```sh
+ctest --test-dir build -R '^obf-(install|package)-consumer$' --output-on-failure -j 1
+```
+
+These gates install or extract a complete prefix and create independent C and C++ projects outside the repository.
+They check protected compilation, authenticated string exports, generated headers, explicit overrides, and fresh builds after relocation.
+Linux uses `DESTDIR` and checks loaded LLVM library paths.
+When `bwrap` works, it masks the source and build trees during consumer configuration, compilation, and execution.
+Windows uses a normal installation prefix and native `.cmd` launchers.
+
+The gates write their manifests, commands, compiler ledgers, archives, and results under the system temporary directory.
+Set `TMPDIR` on Linux, or `TEMP` and `TMP` on Windows, to choose the evidence root.
+Use `tests/lit/Inputs/install_consumer.py --prefix <prefix> --work <directory>` to check an existing installation or extracted archive.
+This mode copies the supplied prefix before testing and does not move the supplied installation.
+Pass `--forbid-root` for each source or build directory to scan installed files for retained paths.
+This scan includes binary and UTF-16 paths, not only wrapper text.
+
 Windows VM tests can produce large IR modules and use several GiB of committed memory.
 Keep free disk space available for managed pagefile growth.
 Record the system commit limit and process allocations when an allocation fails.

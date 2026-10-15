@@ -23,7 +23,7 @@ if(OBF_PLUGIN_IS_LOADABLE)
   endif()
   add_custom_command(
     OUTPUT "${OBF_ENTROPY_ANCHOR_LL}"
-    COMMAND "${OBF_CLANG}" -S -emit-llvm -std=c17 -O2 -I${CMAKE_CURRENT_BINARY_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_LL}"
+    COMMAND "${OBF_CLANG}" ${OBF_CLANG_RELOCATABLE_COMPILE_OPTIONS} -S -emit-llvm -std=c17 -O2 -I${CMAKE_CURRENT_BINARY_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" -o "${OBF_ENTROPY_ANCHOR_LL}"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/entropy_anchor.c" "${CMAKE_CURRENT_SOURCE_DIR}/include/obf/support/blake2s_internal.h" "${CMAKE_CURRENT_BINARY_DIR}/include/obf/support/runtime_abi_generated.h"
     VERBATIM)
   add_custom_command(
@@ -40,7 +40,7 @@ if(OBF_PLUGIN_IS_LOADABLE)
 endif()
 add_custom_command(
   OUTPUT "${OBF_STRING_AUTH_RUNTIME_OBJ}"
-  COMMAND "${OBF_CLANG}" -std=c17 -O2 -I${CMAKE_CURRENT_BINARY_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include -c ${OBF_FPIC_FLAG} "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c" -o "${OBF_STRING_AUTH_RUNTIME_OBJ}"
+  COMMAND "${OBF_CLANG}" ${OBF_CLANG_RELOCATABLE_COMPILE_OPTIONS} -std=c17 -O2 -I${CMAKE_CURRENT_BINARY_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/include -c ${OBF_FPIC_FLAG} "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c" -o "${OBF_STRING_AUTH_RUNTIME_OBJ}"
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/string_auth_runtime.c" "${CMAKE_CURRENT_SOURCE_DIR}/include/obf/support/blake2s_internal.h" "${CMAKE_CURRENT_BINARY_DIR}/include/obf/support/runtime_abi_generated.h"
   VERBATIM)
 add_custom_target(obf-string-auth-runtime ALL DEPENDS "${OBF_STRING_AUTH_RUNTIME_OBJ}")
@@ -54,6 +54,40 @@ if(OBF_PLUGIN_IS_LOADABLE)
     VERBATIM)
   add_custom_target(obf-runtime ALL DEPENDS "${OBF_RUNTIME_ARCHIVE}")
 endif()
+
+# Quote configured paths as ordinary Python strings, including Windows paths.
+function(obf_python_string output value)
+  string(REPLACE "\\" "\\\\" value "${value}")
+  string(REPLACE "\"" "\\\"" value "${value}")
+  string(REPLACE "\n" "\\n" value "${value}")
+  string(REPLACE "\r" "\\r" value "${value}")
+  string(REPLACE "\t" "\\t" value "${value}")
+  set(${output} "\"${value}\"" PARENT_SCOPE)
+endfunction()
+
+set(OBF_WRAPPER_SHEBANG "${Python3_EXECUTABLE}")
+obf_python_string(_obf_wrapper_clang "${OBF_CLANG}")
+obf_python_string(_obf_wrapper_clangxx "${OBF_CLANGXX}")
+obf_python_string(_obf_wrapper_opt "${OBF_OPT}")
+obf_python_string(_obf_wrapper_plugin "${OBF_CLANG_PLUGIN_PATH}")
+obf_python_string(_obf_wrapper_runtime "${OBF_RUNTIME_ARCHIVE}")
+obf_python_string(_obf_wrapper_driver "${CMAKE_CURRENT_BINARY_DIR}/obf-driver${CMAKE_EXECUTABLE_SUFFIX}")
+obf_python_string(_obf_wrapper_binder "${OBF_CHECKSUM_BIND}")
+obf_python_string(_obf_wrapper_linker "${OBF_NATIVE_LINK}")
+set(OBF_WRAPPER_PATHS
+  "CLANG = ${_obf_wrapper_clang}
+CLANGXX = ${_obf_wrapper_clangxx}
+OPT = ${_obf_wrapper_opt}
+PLUGIN = ${_obf_wrapper_plugin}
+RUNTIME_ARCHIVE = ${_obf_wrapper_runtime}
+DRIVER = ${_obf_wrapper_driver}
+CHECKSUM_BINDER = ${_obf_wrapper_binder}
+NATIVE_LINKER = ${_obf_wrapper_linker}
+MANAGED_LLD = None
+PUBLIC_INCLUDE_DIR = \"\"
+CLANG_RESOURCE_DIR = \"\"
+LIBRARY_DIRS = ()
+")
 configure_file(
   tools/obf-opt/obf-opt.py.in
   "${CMAKE_CURRENT_BINARY_DIR}/obf-opt"

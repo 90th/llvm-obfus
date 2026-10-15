@@ -1,0 +1,64 @@
+# This script runs from the build tree and is deliberately not installed.
+set(CMAKE_GET_RUNTIME_DEPENDENCIES_TOOL "objdump")
+set(CMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND "@OBF_OBJDUMP@")
+if(WIN32)
+  set(CMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM "windows+pe")
+else()
+  set(CMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM "linux+elf")
+endif()
+set(_obf_executables [==[@OBF_INSTALL_RUNTIME_EXECUTABLES@]==])
+set(_obf_modules [==[@OBF_INSTALL_RUNTIME_MODULES@]==])
+set(_obf_search_dirs [==[@OBF_INSTALL_DEPENDENCY_DIRS@]==])
+set(_obf_system_runtime_libs [==[@OBF_INSTALL_SYSTEM_RUNTIME_LIBS@]==])
+set(_obf_pre_excludes "")
+if(WIN32)
+  # API sets are provided by Windows; canonical executable hosts are copied above.
+  list(APPEND _obf_pre_excludes "^api-ms-win-" "^ext-ms-win-" "^(clang|opt)\\.exe$")
+else()
+  # Keep the platform C library and dynamic loader as operating-system prerequisites.
+  list(APPEND _obf_pre_excludes
+    "^linux-vdso\\.so" "^ld-linux[^/]*\\.so"
+    "^lib(c|m|pthread|dl|rt|util|resolv)\\.so(\\..*)?$")
+endif()
+file(GET_RUNTIME_DEPENDENCIES
+  EXECUTABLES ${_obf_executables}
+  MODULES ${_obf_modules}
+  LIBRARIES ${_obf_system_runtime_libs}
+  DIRECTORIES ${_obf_search_dirs}
+  PRE_EXCLUDE_REGEXES ${_obf_pre_excludes}
+  RESOLVED_DEPENDENCIES_VAR _obf_resolved
+  UNRESOLVED_DEPENDENCIES_VAR _obf_unresolved
+  CONFLICTING_DEPENDENCIES_PREFIX _obf_conflicts)
+if(_obf_unresolved)
+  message(FATAL_ERROR "Cannot package unresolved runtime dependencies: ${_obf_unresolved}")
+endif()
+if(_obf_conflicts_FILENAMES)
+  message(FATAL_ERROR "Conflicting packaged runtime dependencies: ${_obf_conflicts_FILENAMES}")
+endif()
+
+set(_obf_dependencies "")
+if(WIN32)
+  file(TO_CMAKE_PATH "$ENV{SystemRoot}" _obf_system_root)
+  string(TOLOWER "${_obf_system_root}" _obf_system_root)
+endif()
+foreach(_obf_dependency IN LISTS _obf_resolved)
+  if(WIN32 AND NOT _obf_system_root STREQUAL "")
+    string(TOLOWER "${_obf_dependency}" _obf_lower_dependency)
+    cmake_path(IS_PREFIX _obf_system_root "${_obf_lower_dependency}" NORMALIZE _obf_is_os_library)
+    if(_obf_is_os_library)
+      continue()
+    endif()
+  endif()
+  list(APPEND _obf_dependencies "${_obf_dependency}")
+endforeach()
+list(APPEND _obf_dependencies ${_obf_system_runtime_libs})
+list(REMOVE_DUPLICATES _obf_dependencies)
+if(WIN32)
+  set(_obf_library_destination "@CMAKE_INSTALL_BINDIR@")
+else()
+  set(_obf_library_destination "@CMAKE_INSTALL_LIBDIR@")
+endif()
+if(_obf_dependencies)
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/${_obf_library_destination}"
+    TYPE SHARED_LIBRARY FOLLOW_SYMLINK_CHAIN FILES ${_obf_dependencies})
+endif()

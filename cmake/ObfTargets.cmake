@@ -36,7 +36,7 @@ if(WIN32)
   endfunction()
 
   function(obf_add_windows_plugin_module target host_target)
-    add_llvm_library(${target} MODULE NO_EXPORT PLUGIN_TOOL ${host_target}
+    add_llvm_library(${target} MODULE NO_EXPORT BUILDTREE_ONLY PLUGIN_TOOL ${host_target}
       OBJLIBS
         $<TARGET_OBJECTS:obf_plugin_core_objects>
         $<TARGET_OBJECTS:obf_plugin_frontend_objects>)
@@ -142,7 +142,7 @@ if(WIN32)
   set(OBF_CLANG_PLUGIN_PATH
     "${CMAKE_CURRENT_BINARY_DIR}/obf_clang_plugin${LLVM_PLUGIN_EXT}")
 else()
-  add_llvm_pass_plugin(obf_plugin ${OBF_PLUGIN_SOURCES})
+  add_llvm_pass_plugin(obf_plugin BUILDTREE_ONLY ${OBF_PLUGIN_SOURCES})
 
   get_target_property(OBF_PLUGIN_TARGET_TYPE obf_plugin TYPE)
   if(NOT OBF_PLUGIN_TARGET_TYPE STREQUAL "UTILITY")
