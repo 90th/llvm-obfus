@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <link.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,12 +14,13 @@
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static const char *const expected[2][3] = {
     {"amber producer A owns this copy", "A: independent data 1847", ""},
     {"violet producer B has another payload", "B: distinct data 9263", ""}};
-static unsigned checks, statuses[4], reads;
+static _Thread_local unsigned checks, statuses[4], reads;
 
 static void require(int condition, const char *message) {
   if (!condition) {
@@ -261,6 +263,351 @@ static void semantics(const char *first, const char *second, const char *consume
          strlen(expected[1][1]) + 1);
 }
 
+enum { CONCURRENT_WORKERS = 36, WARM_ROUNDS = 4 };
+
+struct source_state {
+  uintptr_t cache, state;
+  uint64_t cold_status;
+};
+
+struct admission {
+  pthread_mutex_t mutex;
+  pthread_cond_t condition;
+  pthread_barrier_t start;
+  unsigned admitted, completed, outstanding, rejected, parked;
+  int accepting, release;
+};
+
+struct concurrent_worker {
+  struct admission *gate;
+  struct image *owner;
+  copy_accessor accessor;
+  byte_reader reader;
+  unsigned variant, id, operation;
+  unsigned char saved[COPY_BUFFER_SIZE];
+  unsigned checks, statuses[4], reads;
+};
+
+static _Thread_local struct concurrent_worker *current_worker;
+
+static struct timespec phase_deadline(void) {
+  struct timespec deadline;
+  require(clock_gettime(CLOCK_REALTIME, &deadline) == 0, "cannot time host phase");
+  deadline.tv_sec += 10;
+  return deadline;
+}
+
+static void lock_admission(struct admission *gate) {
+  require(pthread_mutex_lock(&gate->mutex) == 0, "cannot lock host admission");
+}
+
+static void unlock_admission(struct admission *gate) {
+  require(pthread_mutex_unlock(&gate->mutex) == 0, "cannot unlock host admission");
+}
+
+static int admit_call(struct admission *gate) {
+  lock_admission(gate);
+  int admitted = gate->accepting;
+  if (admitted) {
+    ++gate->admitted;
+    ++gate->outstanding;
+  } else
+    ++gate->rejected;
+  unlock_admission(gate);
+  return admitted;
+}
+
+static void complete_call(struct admission *gate) {
+  lock_admission(gate);
+  require(gate->outstanding > 0, "completed call was not admitted");
+  --gate->outstanding;
+  ++gate->completed;
+  unlock_admission(gate);
+}
+
+static int concurrent_copy(uint32_t id, char *destination, size_t capacity,
+                           size_t *required) {
+  struct concurrent_worker *worker = current_worker;
+  require(worker != NULL, "copy has no host worker");
+  if (!admit_call(worker->gate))
+    return -1;
+  int result = checked_copy(worker->owner, worker->accessor, id, destination,
+                            capacity, required);
+  require(result >= 0, "concurrent accessor has the wrong owner");
+  complete_call(worker->gate);
+  return result;
+}
+
+static void copied_bytes(struct concurrent_worker *worker,
+                         const unsigned char *buffer, size_t required) {
+  size_t length = strlen(expected[worker->variant][worker->id - 1]) + 1;
+  require(required == length &&
+              memcmp(buffer + 7, expected[worker->variant][worker->id - 1], length) == 0,
+          "concurrent copy changed bytes, NUL, or required size");
+  unchanged(buffer, 7);
+  unchanged(buffer + 7 + length, COPY_BUFFER_SIZE - 7 - length);
+  memcpy(worker->saved, buffer + 7, length);
+}
+
+static void cold_application_call(struct concurrent_worker *worker) {
+  unsigned char buffer[COPY_BUFFER_SIZE];
+  memset(buffer, 0xa6, sizeof(buffer));
+  size_t required = SIZE_MAX;
+  size_t length = strlen(expected[worker->variant][worker->id - 1]) + 1;
+  switch (worker->operation) {
+  case 0:
+    status_is(concurrent_copy(worker->id, (char *)buffer + 7, length, &required), COPY_OK);
+    copied_bytes(worker, buffer, required);
+    consume(worker->reader, worker->saved, length, 131 + worker->variant + worker->id);
+    return;
+  case 1:
+    status_is(concurrent_copy(worker->id, NULL, 0, &required), COPY_NEED_CAPACITY);
+    break;
+  case 2:
+    status_is(concurrent_copy(worker->id, (char *)buffer + 7, length - 1, &required),
+              COPY_NEED_CAPACITY);
+    break;
+  case 3:
+    status_is(concurrent_copy(UINT32_MAX, (char *)buffer + 7, length, &required),
+              COPY_UNKNOWN_ID);
+    require(required == 0, "concurrent unknown ID did not clear required size");
+    unchanged(buffer, sizeof(buffer));
+    return;
+  case 4:
+    status_is(concurrent_copy(worker->id, NULL, length, &required), COPY_INVALID_ARGUMENT);
+    break;
+  default:
+    status_is(concurrent_copy(worker->id, (char *)buffer + 7, length, NULL),
+              COPY_INVALID_ARGUMENT);
+    require(required == SIZE_MAX, "null-required call changed worker required storage");
+    unchanged(buffer, sizeof(buffer));
+    return;
+  }
+  require(required == length, "concurrent rejection lost the exact required size");
+  unchanged(buffer, sizeof(buffer));
+}
+
+static void *concurrent_worker_main(void *opaque) {
+  struct concurrent_worker *worker = opaque;
+  struct admission *gate = worker->gate;
+  current_worker = worker;
+  int barrier = pthread_barrier_wait(&gate->start);
+  require(barrier == 0 || barrier == PTHREAD_BARRIER_SERIAL_THREAD,
+          "cannot release application start barrier");
+  cold_application_call(worker);
+  for (unsigned round = 0; round < WARM_ROUNDS; ++round)
+    semantic_case(concurrent_copy, worker->variant, worker->id, worker->saved,
+                  worker->reader);
+
+  require(admit_call(gate), "shutdown work was rejected before admission close");
+  lock_admission(gate);
+  ++gate->parked;
+  require(pthread_cond_broadcast(&gate->condition) == 0, "cannot announce parked work");
+  struct timespec deadline = phase_deadline();
+  while (!gate->release)
+    require(pthread_cond_timedwait(&gate->condition, &gate->mutex, &deadline) == 0,
+            "host did not release admitted shutdown work in time");
+  unlock_admission(gate);
+  // This ticket is outstanding in the host, not executing producer code.
+  unsigned char final[COPY_BUFFER_SIZE];
+  memset(final, 0xa6, sizeof(final));
+  size_t required = SIZE_MAX;
+  size_t length = strlen(expected[worker->variant][worker->id - 1]) + 1;
+  status_is(checked_copy(worker->owner, worker->accessor, worker->id,
+                         (char *)final + 7, length, &required), COPY_OK);
+  complete_call(gate);
+  copied_bytes(worker, final, required);
+  consume(worker->reader, worker->saved, length, 173 + worker->variant + worker->id);
+  worker->accessor = NULL;
+  worker->reader = NULL;
+  current_worker = NULL;
+  worker->checks = checks;
+  worker->reads = reads;
+  memcpy(worker->statuses, statuses, sizeof(statuses));
+  return NULL;
+}
+
+static void inspect_sources(struct image producers[2],
+                            const struct source_state sources[2][3],
+                            const char *strategy, unsigned used, int before) {
+  if (strcmp(strategy, "raw") == 0)
+    return;
+  int lazy = strcmp(strategy, "lazy") == 0;
+  for (unsigned variant = 0; variant < 2; ++variant)
+    for (unsigned source = 0; source < 3; ++source) {
+      const struct source_state *metadata = &sources[variant][source];
+      require(metadata->cache != 0 && metadata->state != 0 &&
+                  metadata->cache <= UINTPTR_MAX - producers[variant].base &&
+                  metadata->state <= UINTPTR_MAX - producers[variant].base,
+              "invalid private source offsets");
+      const unsigned char *cache =
+          (const unsigned char *)(producers[variant].base + metadata->cache);
+      const volatile uint64_t *state =
+          (const volatile uint64_t *)(producers[variant].base + metadata->state);
+      size_t length = strlen(expected[variant][source]) + 1;
+      int cold = lazy && (before || !(used & (1u << (variant * 3 + source))));
+      if (cold) {
+        require(state[1] == metadata->cold_status && state[2] == metadata->cold_status,
+                "lazy source completed before its first application copy");
+        for (size_t index = 0; index < length; ++index)
+          require(cache[index] == 0, "lazy source cache was not truly cold");
+      } else {
+        require(memcmp(cache, expected[variant][source], length) == 0,
+                "decoded source cache differs after constructor or joined copies");
+        if (lazy)
+          require(state[1] != metadata->cold_status && state[2] != 0,
+                  "joined copies did not complete authenticated lazy decoding");
+      }
+    }
+}
+
+static void concurrency(const char *first, const char *second, const char *consumer,
+                        const char *strategy, const char *scenario,
+                        const struct source_state sources[2][3]) {
+  require(strcmp(strategy, "raw") == 0 || strcmp(strategy, "lazy") == 0 ||
+              strcmp(strategy, "ctor") == 0, "invalid concurrency strategy");
+  unsigned same_id = 0;
+  if (strcmp(scenario, "same-1") == 0)
+    same_id = 1;
+  else if (strcmp(scenario, "same-2") == 0)
+    same_id = 2;
+  else if (strcmp(scenario, "same-3") == 0)
+    same_id = 3;
+  else
+    require(strcmp(scenario, "independent-sources") == 0 ||
+                strcmp(scenario, "independent-producers") == 0,
+            "invalid concurrency scenario");
+  struct image readers = load_image(consumer);
+  byte_reader reader = (byte_reader)owned_symbol(&readers, "exchange_read_bytes");
+  struct image producers[2] = {load_image(first), load_image(second)};
+  copy_accessor accessors[2];
+  for (unsigned variant = 0; variant < 2; ++variant)
+    accessors[variant] = (copy_accessor)owned_symbol(&producers[variant],
+                                                  "exchange_copy_v1");
+  require(producers[0].base != producers[1].base &&
+              (void *)accessors[0] != (void *)accessors[1],
+          "concurrent producers are not independent instances");
+  struct admission gate = {0};
+  gate.accepting = 1;
+  require(pthread_mutex_init(&gate.mutex, NULL) == 0 &&
+              pthread_cond_init(&gate.condition, NULL) == 0 &&
+              pthread_barrier_init(&gate.start, NULL, CONCURRENT_WORKERS + 1) == 0,
+          "cannot initialize host concurrency phases");
+  struct concurrent_worker workers[CONCURRENT_WORKERS] = {{0}};
+  pthread_t threads[CONCURRENT_WORKERS];
+  unsigned used = 0;
+  for (unsigned index = 0; index < CONCURRENT_WORKERS; ++index) {
+    unsigned group = index / 6;
+    struct concurrent_worker *worker = &workers[index];
+    worker->variant = same_id ? group % 2 :
+        (strcmp(scenario, "independent-producers") == 0 ? group / 3 : 0);
+    worker->id = same_id ? same_id : group % 3 + 1;
+    worker->operation = index % 6;
+    worker->gate = &gate;
+    worker->owner = &producers[worker->variant];
+    worker->accessor = accessors[worker->variant];
+    worker->reader = reader;
+    used |= 1u << (worker->variant * 3 + worker->id - 1);
+    require(pthread_create(&threads[index], NULL, concurrent_worker_main, worker) == 0,
+            "cannot start application worker");
+  }
+  // Workers cannot call either module until this host enters the barrier.
+  inspect_sources(producers, sources, strategy, used, 1);
+  int barrier = pthread_barrier_wait(&gate.start);
+  require(barrier == 0 || barrier == PTHREAD_BARRIER_SERIAL_THREAD,
+          "cannot start simultaneous application calls");
+  lock_admission(&gate);
+  struct timespec deadline = phase_deadline();
+  while (gate.parked != CONCURRENT_WORKERS)
+    require(pthread_cond_timedwait(&gate.condition, &gate.mutex, &deadline) == 0,
+            "application workers did not reach host shutdown phase in time");
+  gate.accepting = 0;
+  unsigned outstanding_at_close = gate.outstanding;
+  require(outstanding_at_close == CONCURRENT_WORKERS &&
+              gate.admitted == gate.completed + outstanding_at_close,
+          "admission did not close with exactly the parked host work outstanding");
+  unlock_admission(&gate);
+  unsigned char rejected[COPY_BUFFER_SIZE];
+  memset(rejected, 0xa6, sizeof(rejected));
+  size_t rejected_required = SIZE_MAX;
+  current_worker = &workers[0];
+  for (unsigned attempt = 0; attempt < 3; ++attempt)
+    require(concurrent_copy(1, (char *)rejected, sizeof(rejected), &rejected_required) == -1,
+            "post-close admission reached a module");
+  current_worker = NULL;
+  require(rejected_required == SIZE_MAX, "post-close rejection changed required size");
+  unchanged(rejected, sizeof(rejected));
+  lock_admission(&gate);
+  require(gate.outstanding == outstanding_at_close && gate.rejected == 3,
+          "post-close admission changed producer call accounting");
+  gate.release = 1;
+  require(pthread_cond_broadcast(&gate.condition) == 0, "cannot drain admitted work");
+  unlock_admission(&gate);
+  unsigned char owner_copies[2][3][COPY_BUFFER_SIZE] = {{{0}}};
+  for (unsigned index = 0; index < CONCURRENT_WORKERS; ++index) {
+    struct concurrent_worker *worker = &workers[index];
+    require(pthread_join(threads[index], NULL) == 0, "cannot join application worker");
+    require(worker->accessor == NULL && worker->reader == NULL,
+            "worker retained a callable after drain");
+    checks += worker->checks;
+    reads += worker->reads;
+    for (unsigned status = 0; status < 4; ++status)
+      statuses[status] += worker->statuses[status];
+    memcpy(owner_copies[worker->variant][worker->id - 1], worker->saved,
+           strlen(expected[worker->variant][worker->id - 1]) + 1);
+    worker->owner = NULL;
+  }
+  require(gate.outstanding == 0 && gate.admitted == gate.completed &&
+              gate.completed == CONCURRENT_WORKERS * (2 + 7 * WARM_ROUNDS),
+          "drained producer call accounting differs from completed work");
+  inspect_sources(producers, sources, strategy, used, 0);
+  for (unsigned variant = 0; variant < 2; ++variant) {
+    accessors[variant] = NULL;
+    require(accessors[variant] == NULL, "owner retained a producer callable");
+  }
+  for (unsigned variant = 0; variant < 2; ++variant)
+    unload_image(&producers[variant]);
+  uint64_t digest = 0;
+  for (unsigned index = 0; index < CONCURRENT_WORKERS; ++index) {
+    struct concurrent_worker *worker = &workers[index];
+    size_t length = strlen(expected[worker->variant][worker->id - 1]) + 1;
+    require(memcmp(worker->saved, expected[worker->variant][worker->id - 1], length) == 0,
+            "saved worker bytes changed after producer mapping removal");
+    digest += consume(reader, worker->saved, length, 211 + index);
+  }
+  unsigned owner_reads = 0;
+  for (unsigned variant = 0; variant < 2; ++variant)
+    for (unsigned source = 0; source < 3; ++source)
+      if (used & (1u << (variant * 3 + source))) {
+        size_t length = strlen(expected[variant][source]) + 1;
+        require(memcmp(owner_copies[variant][source], expected[variant][source], length) == 0,
+                "saved owner bytes changed after producer mapping removal");
+        digest += consume(reader, owner_copies[variant][source], length,
+                          271 + variant * 3 + source);
+        ++owner_reads;
+      }
+  reader = NULL;
+  unload_image(&readers);
+  require(pthread_barrier_destroy(&gate.start) == 0 &&
+              pthread_cond_destroy(&gate.condition) == 0 &&
+              pthread_mutex_destroy(&gate.mutex) == 0,
+          "cannot release host concurrency phases");
+  printf("{\"ok\":true,\"kind\":\"concurrency\",\"scenario\":\"%s\","
+         "\"strategy\":\"%s\",\"workers\":%u,\"warm_rounds\":%u,"
+         "\"barrier_started\":true,\"cold_state_checked\":%s,"
+         "\"admitted\":%u,\"completed\":%u,\"host_parked_at_close\":%u,"
+         "\"post_close_rejected\":%u,\"drained\":true,\"callables_cleared\":true,"
+         "\"unmapped\":[true,true],\"copies_after_unload\":%u,\"owner_copies_after_unload\":%u,"
+         "\"decoder_overlap_proven\":false,\"checks\":%u,\"statuses\":[%u,%u,%u,%u],"
+         "\"reads\":%u,\"digest\":%llu}\n",
+         scenario, strategy, CONCURRENT_WORKERS, WARM_ROUNDS,
+         strcmp(strategy, "lazy") == 0 ? "true" : "false",
+         gate.admitted, gate.completed, outstanding_at_close, gate.rejected,
+         CONCURRENT_WORKERS, owner_reads, checks,
+         statuses[0], statuses[1], statuses[2], statuses[3], reads,
+         (unsigned long long)digest);
+}
+
 struct shared_observation {
   unsigned char destination[COPY_BUFFER_SIZE];
   uint64_t effect;
@@ -435,9 +782,24 @@ int main(int argc, char **argv) {
            (unsigned)number(argv[5]), argv[6], (int)number(argv[7]),
            (uintptr_t)number(argv[8]), (unsigned)number(argv[9]), argv[10],
            (uintptr_t)number(argv[11]), (uintptr_t)number(argv[12]), (uint64_t)number(argv[13]));
+  else if ((argc == 7 || argc == 25) && strcmp(argv[1], "concurrent") == 0) {
+    int raw = strcmp(argv[5], "raw") == 0;
+    require(argc == (raw ? 7 : 25), "concurrency metadata does not match strategy");
+    struct source_state sources[2][3] = {{{0}}};
+    if (!raw)
+      for (unsigned variant = 0; variant < 2; ++variant)
+        for (unsigned source = 0; source < 3; ++source) {
+          unsigned argument = 7 + (variant * 3 + source) * 3;
+          sources[variant][source].cache = (uintptr_t)number(argv[argument]);
+          sources[variant][source].state = (uintptr_t)number(argv[argument + 1]);
+          sources[variant][source].cold_status = (uint64_t)number(argv[argument + 2]);
+        }
+    concurrency(argv[2], argv[3], argv[4], argv[5], argv[6], sources);
+  }
   else {
     fprintf(stderr, "usage: host semantics A.so B.so consumer.so v2.so\n"
-                    "       host tamper producer.so consumer.so variant id mode warm rva byte strategy cache_rva state_rva cold_status\n");
+                    "       host tamper producer.so consumer.so variant id mode warm rva byte strategy cache_rva state_rva cold_status\n"
+                    "       host concurrent A.so B.so consumer.so raw|lazy|ctor scenario [cache_rva state_rva cold_status x6]\n");
     return 2;
   }
   return 0;

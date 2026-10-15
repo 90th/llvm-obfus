@@ -5,6 +5,14 @@ application copy, after constructor decoding for ctor rows. Lazy cache
 corruption is meaningful only after a successful copy. Other lazy fields and
 all ctor fields are tested both cold and warm.
 
+Each concurrent scenario starts a fresh host process and fresh producer loads.
+The start barrier does not prove deterministic decoder overlap. Shutdown closes
+host admission with reserved calls parked outside producer code, drains and
+joins workers, clears callables, and proves mapping removal before consumption.
+--only-concurrency runs the native concurrent matrix without corruption or
+export-negative checks; compiler policy, source bindings, and VM ledgers remain
+required. Exporter and protected consumer policies vary independently.
+
 The default run includes both LLD and GNU BFD export profiles.
 --only-export-isolation --linker lld (or bfd) runs one export profile.
 Raw links use the same protected object and matching runtime as managed links.
@@ -36,6 +44,8 @@ CXX_SOURCES = {"cross-dso-string-copy-producer.c", "cross-dso-string-copy-raw.c"
 TEXTS = ((b"amber producer A owns this copy\0", b"A: independent data 1847\0", b"\0"),
          (b"violet producer B has another payload\0", b"B: distinct data 9263\0", b"\0"))
 MUTATIONS = ("cache", "tag", "ciphertext", "length", "version")
+CONCURRENT_SCENARIOS = ("same-1", "same-2", "same-3",
+                         "independent-sources", "independent-producers")
 
 
 def require(condition, message):
@@ -384,15 +394,17 @@ class Harness:
         tempfile.tempdir = str(self.work)
         self.raw = [args.clang]
         self.result = {"status": "running", "work": str(self.work), "rows": [],
-                       "controls": [], "exporters": [], "rejections": [],
+                       "controls": [], "exporters": [], "concurrency": [], "rejections": [],
                        "scope": "native Linux x86-64 glibc copy-only DSO exchange",
                        "matrix": {"optimization": args.optimization, "level": args.level,
                                   "strategy": args.strategy, "tamper": args.tamper,
                                   "cold_authentication": not args.warm_only,
-                                  "rejections": not args.skip_negatives,
+                                  "rejections": not args.skip_negatives and not args.only_concurrency,
                                   "only_export_isolation": args.only_export_isolation,
+                                  "only_concurrency": args.only_concurrency,
                                   "export_linker_filter": args.linker}}
         self.producers = {}
+        self.consumers = {}
         self._runtime_abi = None
         self.save()
         print(f"CROSS_DSO_STRING_COPY_WORK {self.work}", flush=True)
@@ -490,6 +502,9 @@ class Harness:
         return producers, consumer, incompatible, observed
 
     def build_consumer(self, optimization, level):
+        key = (optimization, level)
+        if key in self.consumers:
+            return self.consumers[key]
         folder = self.work / f"o{optimization}-{level}-consumer"
         folder.mkdir()
         config = folder / "policy.yaml"
@@ -497,7 +512,9 @@ class Harness:
         obj, report = self.compile(folder, "consumer", "cross-dso-string-copy-consumer.c",
                                    optimization, config=config, report=True)
         compiler = check_report(report, "exchange_read_bytes", level)
-        return self.shared(obj, config), {"report": str(report), "outcome": compiler}
+        self.consumers[key] = (self.shared(obj, config),
+                                {"report": str(report), "outcome": compiler})
+        return self.consumers[key]
 
     def build_producers(self, optimization, strategy, raw_consumer, incompatible, baseline,
                         *, level="strong"):
@@ -547,6 +564,52 @@ class Harness:
         self.producers[key] = (images, compilers, bundles, observed)
         self.save()
         return self.producers[key]
+
+    def concurrency(self, optimization, images, consumer, *, strategy="raw",
+                    exporter_level="raw", consumer_level="raw", bundles=None,
+                    producer_compilers=None, consumer_compiler=None):
+        metadata = []
+        if strategy != "raw":
+            require(bundles is not None and len(bundles) == 2 and
+                    all(len(sources) == 3 for sources in bundles),
+                    "concurrent protected row lacks all six private source bundles")
+            for sources in bundles:
+                for bundle in sources:
+                    metadata.extend(hex(bundle[name]) for name in ("cache", "state", "cold_status"))
+        row = {"optimization": optimization, "exporter_level": exporter_level,
+               "consumer_level": consumer_level, "strategy": strategy,
+               "producers": list(map(str, images)), "consumer": str(consumer),
+               "producer_compilers": producer_compilers,
+               "consumer_compiler": consumer_compiler, "outcomes": []}
+        self.result["concurrency"].append(row)
+        self.save()
+        for scenario in CONCURRENT_SCENARIOS:
+            # A separate host invocation prevents a prior case warming this one.
+            observed = self.native("concurrent", *images, consumer, strategy, scenario, *metadata)
+            workers, rounds = observed.get("workers"), observed.get("warm_rounds")
+            owner_copies = (2 if scenario.startswith("same-") else
+                            3 if scenario == "independent-sources" else 6)
+            require(observed["kind"] == "concurrency" and
+                    observed["scenario"] == scenario and observed["strategy"] == strategy and
+                    workers == 36 and rounds == 4 and
+                    observed["barrier_started"] is True and
+                    observed["cold_state_checked"] is (strategy == "lazy") and
+                    observed["admitted"] == observed["completed"] == workers * (2 + 7 * rounds) and
+                    observed["host_parked_at_close"] == workers and
+                    observed["post_close_rejected"] == 3 and
+                    observed["drained"] is True and observed["callables_cleared"] is True and
+                    observed["unmapped"] == [True, True] and
+                    observed["copies_after_unload"] == workers and
+                    observed["owner_copies_after_unload"] == owner_copies and
+                    observed["decoder_overlap_proven"] is False and
+                    len(observed["statuses"]) == 4 and
+                    all(count > 0 for count in observed["statuses"]) and
+                    sum(observed["statuses"]) == observed["completed"],
+                    f"missing concurrent admission, copy, or unload evidence: {observed}")
+            row["outcomes"].append(observed)
+            self.save()
+        print(f"CROSS_DSO_STRING_COPY_CONCURRENCY_PASS O{optimization} "
+              f"{exporter_level} {consumer_level} {strategy}", flush=True)
 
     def freshness(self, images, bundles, consumer, strategy, observations):
         for variant, (image, sources) in enumerate(zip(images, bundles), 1):
@@ -919,15 +982,20 @@ class Harness:
             return
         self.host = self.work / "host"
         self.run([*self.raw, "-std=c11", "-O2", "-g", FIXTURES / "cross-dso-string-copy-host.c",
-                  "-fuse-ld=lld", "-ldl", "-o", self.host])
+                  "-fuse-ld=lld", "-pthread", "-ldl", "-o", self.host])
         for optimization in self.args.optimization:
             raw_producers, raw_consumer, incompatible, baseline = self.build_raw(optimization)
+            self.concurrency(optimization, raw_producers, raw_consumer)
             for level in self.args.level:
                 consumer, consumer_compiler = self.build_consumer(optimization, level)
                 hybrid = self.native("semantics", *raw_producers, consumer, incompatible)
                 require(hybrid == baseline, "VM consumer differs with independent raw producers")
                 self.result["controls"].append({"optimization": optimization, "level": level,
                                                 "kind": "raw_producers_vm_consumer", "native": hybrid})
+                self.concurrency(optimization, raw_producers, consumer,
+                                 consumer_level=level, consumer_compiler=consumer_compiler)
+                if self.args.only_concurrency:
+                    continue
                 for strategy in self.args.strategy:
                     images, compilers, bundles, _ = self.build_producers(
                         optimization, strategy, raw_consumer, incompatible, baseline)
@@ -952,11 +1020,18 @@ class Harness:
                            "strategy": strategy, "producers": list(map(str, images)),
                            "compiler": compilers, "native": observed, "freshness": []}
                     self.result["exporters"].append(row)
-                    self.freshness(images, bundles, raw_consumer, strategy, row["freshness"])
+                    if not self.args.only_concurrency:
+                        self.freshness(images, bundles, raw_consumer, strategy, row["freshness"])
+                    for consumer_level in self.args.level:
+                        consumer, consumer_compiler = self.build_consumer(optimization, consumer_level)
+                        self.concurrency(optimization, images, consumer, strategy=strategy,
+                                         exporter_level=exporter_level, consumer_level=consumer_level,
+                                         bundles=bundles, producer_compilers=compilers,
+                                         consumer_compiler=consumer_compiler)
                     self.save()
                     print(f"CROSS_DSO_STRING_COPY_EXPORTER_PASS O{optimization} "
                           f"{exporter_level} {strategy}", flush=True)
-        if not self.args.skip_negatives:
+        if not self.args.skip_negatives and not self.args.only_concurrency:
             self.negative_builds()
         self.result["status"] = "passed"
         self.save()
@@ -972,6 +1047,8 @@ def main():
     parser.add_argument("--linker", choices=("lld", "bfd"), default="lld",
                         help="export-only filter; the default full run tests both linkers")
     parser.add_argument("--only-export-isolation", action="store_true")
+    parser.add_argument("--only-concurrency", action="store_true",
+                        help="run fresh concurrent native cases without corruption/export negatives")
     parser.add_argument("--work", type=Path, default=Path("/var/tmp"))
     parser.add_argument("--optimization", type=int, choices=(0, 2), action="append")
     parser.add_argument("--level", choices=("vm", "strong_vm"), action="append")
@@ -982,6 +1059,8 @@ def main():
     args = parser.parse_args()
     require(not args.only_export_isolation or not args.skip_negatives,
             "--only-export-isolation cannot combine with --skip-negatives")
+    require(not args.only_export_isolation or not args.only_concurrency,
+            "--only-export-isolation cannot combine with --only-concurrency")
     require(platform.system() == "Linux" and platform.machine().lower() in ("x86_64", "amd64")
             and platform.libc_ver()[0] == "glibc", "native Linux x86-64 glibc required")
     args.optimization = list(dict.fromkeys(args.optimization or [0, 2]))

@@ -17,6 +17,17 @@
 ; data aliases, stripped aliases, and bounded E9/EB routes. Private helper and
 ; payload exports must fail in the real linker before native validation.
 ; Legitimate producers export exchange_copy_v1 and no rt_core_* symbols.
+; Fresh-process pthread barriers start same-source calls for IDs 1..3, independent
+; sources, and two independent producers. Private bundle offsets prove lazy cold
+; states and zero caches before release, including the empty source. Concurrent
+; copies mix exact successes, queries, short capacities, and invalid arguments;
+; TLS counters avoid shared observation races. Warm copies use independently
+; selected vm/strong_vm producer and consumer policies at O0/O2 and lazy/ctor.
+; Host admission closes with admitted work parked in host code, rejects new
+; admissions without module calls, drains and joins, and clears producer callables
+; before actual unload. Every saved worker and owner copy is consumed afterward.
+; A start barrier does not prove deterministic decoder overlap or loader-lock
+; contention. --only-concurrency runs these cases without unrelated negatives.
 ; All compiler ledgers, commands, native outcomes, and scratch stay under /var/tmp.
 ; RUN: %python %S/../Inputs/cross_dso_string_copy.py --wrapper %obf_clang --clang %raw_clang --runtime %obf_runtime
 ;
