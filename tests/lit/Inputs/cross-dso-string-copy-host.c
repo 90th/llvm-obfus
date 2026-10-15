@@ -269,9 +269,36 @@ struct shared_observation {
   unsigned errors;
 };
 
+struct mutation_segment {
+  uintptr_t base;
+  uintptr_t offset;
+  int found;
+};
+
+static int find_mutation_segment(struct dl_phdr_info *info, size_t size, void *opaque) {
+  (void)size;
+  struct mutation_segment *target = opaque;
+  if ((uintptr_t)info->dlpi_addr != target->base)
+    return 0;
+  for (ElfW(Half) index = 0; index < info->dlpi_phnum; ++index) {
+    const ElfW(Phdr) *segment = &info->dlpi_phdr[index];
+    if (segment->p_type == PT_LOAD && (segment->p_flags & PF_R) &&
+        !(segment->p_flags & PF_X) && target->offset >= segment->p_vaddr &&
+        target->offset - segment->p_vaddr < segment->p_memsz) {
+      target->found = 1;
+      return 1;
+    }
+  }
+  return 1;
+}
+
 static void mutate_data(struct image *image, uintptr_t offset, unsigned original) {
   uintptr_t address = image->base + offset;
   require(address >= image->base, "mutation address overflow");
+  // A producer's BSS tail can occupy an anonymous loader mapping.
+  struct mutation_segment target_segment = {image->base, offset, 0};
+  dl_iterate_phdr(find_mutation_segment, &target_segment);
+  require(target_segment.found, "mutation target is outside producer data segments");
   FILE *stream = fopen("/proc/self/maps", "r");
   require(stream != NULL, "cannot inspect mutation mapping");
   char *line = NULL;
@@ -283,8 +310,7 @@ static void mutate_data(struct image *image, uintptr_t offset, unsigned original
     if (sscanf(line, "%lx-%lx %4s", &start, &end, permissions) != 3 ||
         address < start || address >= end)
       continue;
-    require(permissions[0] == 'r' && permissions[2] != 'x' &&
-                strstr(line, image->path) != NULL,
+    require(permissions[0] == 'r' && permissions[2] != 'x',
             "mutation target is not producer data");
     protection = PROT_READ | (permissions[1] == 'w' ? PROT_WRITE : 0);
     break;
@@ -308,7 +334,8 @@ static void mutate_data(struct image *image, uintptr_t offset, unsigned original
 
 static void tamper(const char *producer, const char *consumer, unsigned variant,
                    unsigned id, const char *mode, int warm, uintptr_t offset,
-                   unsigned original, const char *strategy, uintptr_t cache_offset) {
+                   unsigned original, const char *strategy, uintptr_t cache_offset,
+                   uintptr_t state_offset, uint64_t cold_status) {
   require(variant < 2 && id >= 1 && id <= 3 && original <= 255, "invalid tamper arguments");
   struct shared_observation *shared = mmap(NULL, sizeof(*shared),
       PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -327,11 +354,15 @@ static void tamper(const char *producer, const char *consumer, unsigned variant,
     copy_accessor accessor = (copy_accessor)owned_symbol(&source, "exchange_copy_v1");
     size_t length = strlen(expected[variant][id - 1]) + 1;
     const unsigned char *cache = (const unsigned char *)(source.base + cache_offset);
+    const volatile uint64_t *state = (const volatile uint64_t *)(source.base + state_offset);
+    int lazy = strcmp(strategy, "lazy") == 0;
     if (strcmp(strategy, "ctor") == 0)
       require(memcmp(cache, expected[variant][id - 1], length) == 0,
               "constructor did not authenticate and decode before the first copy");
     else {
       require(strcmp(strategy, "lazy") == 0, "invalid decoder strategy");
+      require(state[1] == cold_status && state[2] == cold_status,
+              "lazy source state completed before the first copy");
       for (size_t index = 0; index < length; ++index)
         require(cache[index] == 0, "lazy source decoded before the first copy");
     }
@@ -348,6 +379,9 @@ static void tamper(const char *producer, const char *consumer, unsigned variant,
     shared->stage = 2;
     rejected_calls(accessor, variant, id, shared->destination, &shared->required);
     shared->errors = 5;
+    if (lazy && !warm)
+      require(state[1] == cold_status && state[2] == cold_status,
+              "ordinary rejection changed the cold authentication state");
     shared->stage = 3;
     int status = accessor(id, (char *)shared->destination + 7, length,
                           &shared->required);
@@ -376,9 +410,9 @@ static void tamper(const char *producer, const char *consumer, unsigned variant,
   printf("{\"ok\":true,\"kind\":\"tamper\",\"mode\":\"%s\","
          "\"warm\":%s,\"variant\":%u,\"id\":%u,\"signal\":%d,\"stage\":%u,"
          "\"ordinary_rejections\":%u,\"destination_unchanged\":true,"
-         "\"effect_unchanged\":true,\"required\":%zu}\n",
+         "\"effect_unchanged\":true,\"required\":%zu,\"lazy_state_checked\":%s}\n",
          mode, warm ? "true" : "false", variant + 1, id, signal, shared->stage,
-         shared->errors, shared->required);
+         shared->errors, shared->required, strcmp(strategy, "lazy") == 0 ? "true" : "false");
   require(munmap(shared, sizeof(*shared)) == 0, "cannot release shared observation");
 }
 
@@ -396,14 +430,14 @@ int main(int argc, char **argv) {
   alarm(25);
   if (argc == 6 && strcmp(argv[1], "semantics") == 0)
     semantics(argv[2], argv[3], argv[4], argv[5]);
-  else if (argc == 12 && strcmp(argv[1], "tamper") == 0)
+  else if (argc == 14 && strcmp(argv[1], "tamper") == 0)
     tamper(argv[2], argv[3], (unsigned)number(argv[4]) - 1,
            (unsigned)number(argv[5]), argv[6], (int)number(argv[7]),
            (uintptr_t)number(argv[8]), (unsigned)number(argv[9]), argv[10],
-           (uintptr_t)number(argv[11]));
+           (uintptr_t)number(argv[11]), (uintptr_t)number(argv[12]), (uint64_t)number(argv[13]));
   else {
     fprintf(stderr, "usage: host semantics A.so B.so consumer.so v2.so\n"
-                    "       host tamper producer.so consumer.so variant id mode warm rva byte strategy cache_rva\n");
+                    "       host tamper producer.so consumer.so variant id mode warm rva byte strategy cache_rva state_rva cold_status\n");
     return 2;
   }
   return 0;

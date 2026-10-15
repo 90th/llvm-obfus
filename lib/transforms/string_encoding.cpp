@@ -805,8 +805,8 @@ bool is_high_security_level(protection_level level) {
   return level == protection_level::strong || level == protection_level::strong_vm;
 }
 
-bool has_generated_vm_owner(const classified_string_candidate& candidate) {
-  return llvm::any_of(candidate.strong_vm_functions, [](const llvm::Function* function) {
+bool has_generated_vm_owner(llvm::ArrayRef<const llvm::Function*> functions) {
+  return llvm::any_of(functions, [](const llvm::Function* function) {
     return function != nullptr && function->hasFnAttribute("vm.string.owner") &&
            function->hasFnAttribute("obf.string.owner.seed") &&
            function->hasFnAttribute("obf.string.owner.level");
@@ -1035,7 +1035,7 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
   const bool is_strong_vm_candidate = candidate.has_strong_vm_use;
   const bool use_authenticated_vm_forwarded_pointer_fallback =
       is_strong_vm_candidate && candidate.summary.has_forwarded_pointer_load &&
-      has_generated_vm_owner(candidate);
+      has_generated_vm_owner(candidate.strong_vm_functions);
 
   if (!candidate.summary.unprotected_functions.empty()) {
     if (is_strong_vm_candidate &&
@@ -1059,6 +1059,20 @@ string_strategy_plan select_strategy(const classified_string_candidate& candidat
     plan.result.key_schedule = select_key_schedule(plan.result.helper_shape);
     plan.result.detail = "ctor fallback due to unprotected use";
     plan.result.fallback_reason = "shared_with_unprotected_function";
+    return plan;
+  }
+
+  if (authenticated_mode && options.prefer_lazy_decode &&
+      is_string_copy_source(*candidate.global) && candidate.summary.has_forwarded_pointer_load &&
+      has_generated_vm_owner(candidate.summary.protected_functions)) {
+    // VM source references carry ownership, not plaintext reads. Keep them
+    // unchanged; the private copy helper authenticates before each payload copy.
+    plan.result.applied = true;
+    plan.result.mode = string_encoding_mode::lazy_decode;
+    plan.result.strategy_kind = string_strategy_kind::helper_lazy_decode;
+    plan.result.helper_shape = string_helper_shape::lazy_auth_runtime_v3;
+    plan.result.key_schedule = select_key_schedule(plan.result.helper_shape);
+    plan.result.detail = "authenticated lazy copy export through VM source references";
     return plan;
   }
 
@@ -2883,7 +2897,7 @@ std::vector<string_encoding_result> build_string_results(llvm::Module& module,
   if (apply_changes) {
     for (const string_strategy_plan& plan : plans) {
       if (plan.global == nullptr || !is_string_copy_source(*plan.global)) { continue; }
-      if (!plan.result.applied || !is_authenticated_plan(plan) ||
+      if (!options.authenticated_mode || !plan.result.applied || !is_authenticated_plan(plan) ||
           (plan.result.mode != string_encoding_mode::lazy_decode &&
            plan.result.mode != string_encoding_mode::global_ctor)) {
         const auto* declaration = plan.global->getMetadata("obf.string_copy.source");

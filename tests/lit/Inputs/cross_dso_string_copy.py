@@ -9,7 +9,7 @@ The default run includes both LLD and GNU BFD export profiles.
 --only-export-isolation --linker lld (or bfd) runs one export profile.
 Raw links use the same protected object and matching runtime as managed links.
 ELF symbol tables, native maps, and bounded E9/EB routes establish each control.
-Commands, ledgers, private data, and native observations stay under /tmp.
+Commands, ledgers, private data, and native observations stay under /var/tmp.
 """
 
 import argparse
@@ -163,6 +163,11 @@ class ElfData:
         ciphertext = self.pointer(ciphertext_ref + 8)
         cache_symbol = self.private_object(cache, length)
         ciphertext_symbol = self.private_object(ciphertext, length)
+        state = self.pointer(address + 160)
+        self.private_object(state, 24)
+        state_cookie, cold_status, completion = struct.unpack("<QQQ", self.read(state, 24))
+        require(state_cookie == struct.unpack_from("<Q", blob, 72)[0] and cold_status == completion,
+                "private V3 state cookie or initial completion differs")
         require(self.data_section(cache, length)[2] & 1,
                 "decoded cache is not writable producer data")
         require(self.read(cache, length) == bytes(length),
@@ -177,6 +182,7 @@ class ElfData:
                 "cache_symbol": cache_symbol["name"], "cache": cache,
                 "ciphertext_symbol": ciphertext_symbol["name"], "ciphertext": ciphertext,
                 "build_key_symbol": key_symbol["name"], "build_key": key,
+                "state": state, "cold_status": cold_status,
                 "build_key_sha256": hashlib.sha256(self.read(key, 32)).hexdigest(),
                 "length": length, "module_id": struct.unpack_from("<Q", blob, 16)[0],
                 "ciphertext_sha256": hashlib.sha256(encrypted).hexdigest(),
@@ -371,8 +377,8 @@ def require_native_rejection(result):
 class Harness:
     def __init__(self, args):
         self.args = args
-        require(args.work.resolve().is_relative_to(Path("/tmp")),
-                "scratch and evidence must stay under /tmp")
+        require(args.work.resolve().is_relative_to(Path("/var/tmp")),
+                "scratch and evidence must stay under /var/tmp")
         args.work.mkdir(parents=True, exist_ok=True)
         self.work = Path(tempfile.mkdtemp(prefix="cross-dso-string-copy-", dir=args.work)).resolve()
         tempfile.tempdir = str(self.work)
@@ -504,7 +510,7 @@ class Harness:
         for variant in (1, 2):
             config = folder / f"producer-{variant}.yaml"
             policy(config, "exchange_copy_v1", level, seed=8675309 + variant * 104729,
-                   strategy=strategy, debug=level == "strong")
+                   strategy=strategy, debug=level == "strong", ctor=strategy != "lazy")
             obj, report = self.compile(folder, f"producer-{variant}",
                                        "cross-dso-string-copy-producer.c", optimization,
                                        config=config, defines=[f"-DCOPY_VARIANT={variant}"], report=True)
@@ -552,13 +558,15 @@ class Harness:
                     for warm in phases:
                         observed = self.native("tamper", image, consumer, variant, source_id,
                                                mode, int(warm), hex(bundle["targets"][mode]),
-                                               bundle["originals"][mode], strategy, hex(bundle["cache"]))
+                                               bundle["originals"][mode], strategy, hex(bundle["cache"]),
+                                               hex(bundle["state"]), hex(bundle["cold_status"]))
                         require(observed["kind"] == "tamper" and observed["mode"] == mode and
                                 observed["warm"] is warm and observed["variant"] == variant and
                                 observed["id"] == source_id and observed["ordinary_rejections"] == 5 and
                                 observed["signal"] == 4 and observed["stage"] == 3 and
                                 observed["required"] == bundle["length"] and
-                                observed["destination_unchanged"] and observed["effect_unchanged"],
+                                observed["destination_unchanged"] and observed["effect_unchanged"] and
+                                observed["lazy_state_checked"] is (strategy == "lazy"),
                                 "missing corruption or non-certification outcome")
                         observations.append(observed)
                         self.save()
@@ -612,6 +620,8 @@ class Harness:
                               code=code, defines=[f"-DCOPY_BAD_CASE={number}"])
         variants = (
             ("disabled-auth", {"authenticated": False}),
+            ("disabled-auth-vm", {"level": "vm", "authenticated": False}),
+            ("disabled-auth-strong-vm", {"level": "strong_vm", "authenticated": False}),
             ("encoding-limit", {"limit": 0}),
             ("unsupported-strategy", {"strategy": "ctor", "ctor": False}),
             ("inline-only-strategy", {"strategy": "ctor", "ctor": False, "ephemeral": True}),
@@ -934,15 +944,18 @@ class Harness:
                     self.save()
                     print(f"CROSS_DSO_STRING_COPY_PASS O{optimization} {level} {strategy}", flush=True)
             for exporter_level in ("vm", "strong_vm"):
-                images, compilers, bundles, observed = self.build_producers(
-                    optimization, "ctor", raw_consumer, incompatible, baseline, level=exporter_level)
-                row = {"optimization": optimization, "level": exporter_level,
-                       "strategy": "ctor", "producers": list(map(str, images)),
-                       "compiler": compilers, "native": observed, "freshness": []}
-                self.result["exporters"].append(row)
-                self.freshness(images, bundles, raw_consumer, "ctor", row["freshness"])
-                self.save()
-                print(f"CROSS_DSO_STRING_COPY_EXPORTER_PASS O{optimization} {exporter_level}", flush=True)
+                for strategy in self.args.strategy:
+                    images, compilers, bundles, observed = self.build_producers(
+                        optimization, strategy, raw_consumer, incompatible, baseline,
+                        level=exporter_level)
+                    row = {"optimization": optimization, "level": exporter_level,
+                           "strategy": strategy, "producers": list(map(str, images)),
+                           "compiler": compilers, "native": observed, "freshness": []}
+                    self.result["exporters"].append(row)
+                    self.freshness(images, bundles, raw_consumer, strategy, row["freshness"])
+                    self.save()
+                    print(f"CROSS_DSO_STRING_COPY_EXPORTER_PASS O{optimization} "
+                          f"{exporter_level} {strategy}", flush=True)
         if not self.args.skip_negatives:
             self.negative_builds()
         self.result["status"] = "passed"
@@ -959,7 +972,7 @@ def main():
     parser.add_argument("--linker", choices=("lld", "bfd"), default="lld",
                         help="export-only filter; the default full run tests both linkers")
     parser.add_argument("--only-export-isolation", action="store_true")
-    parser.add_argument("--work", type=Path, default=Path("/tmp"))
+    parser.add_argument("--work", type=Path, default=Path("/var/tmp"))
     parser.add_argument("--optimization", type=int, choices=(0, 2), action="append")
     parser.add_argument("--level", choices=("vm", "strong_vm"), action="append")
     parser.add_argument("--strategy", choices=("lazy", "ctor"), action="append")

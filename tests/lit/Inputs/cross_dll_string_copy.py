@@ -229,6 +229,8 @@ class PeData:
         state = self.pointer(descriptor + 160)
         require(self.read(state, 8) == blob[72:80], "private V3 state cookie differs")
         self.section(state, 24)
+        cold_status, completion = struct.unpack("<QQ", self.read(state + 8, 16))
+        require(cold_status == completion, "private V3 initial completion differs")
         require(self.section(cache, length)["flags"] & 0x80000000,
                 "decoded cache is not writable producer data")
         require(self.read(cache, length) == bytes(length), "on-disk cache contains plaintext")
@@ -242,6 +244,7 @@ class PeData:
                      for mode, target in mutations.items()}
         return {"descriptor": descriptor, "cache": cache, "ciphertext": ciphertext,
                 "build_key": key, "state": state, "length": length,
+                "cold_status": cold_status,
                 "module_id": struct.unpack_from("<Q", blob, 16)[0],
                 "ciphertext_sha256": hashlib.sha256(encrypted).hexdigest(),
                 "build_key_sha256": hashlib.sha256(build_key).hexdigest(),
@@ -458,7 +461,7 @@ class Harness:
         for variant in (1, 2):
             config = folder / f"producer-{variant}.yaml"
             policy(config, "exchange_copy_v1", level, seed=8675309 + variant * 104729,
-                   strategy=strategy, debug=level == "strong")
+                   strategy=strategy, debug=level == "strong", ctor=strategy != "lazy")
             obj, report = self.compile(folder, f"producer-{variant}",
                                        "cross-dll-string-copy-producer.cpp", optimization,
                                        config=config, defines=[f"-DCOPY_VARIANT={variant}"], report=True)
@@ -511,13 +514,15 @@ class Harness:
                         observed = self.native("tamper", image, consumer, variant, source_id,
                                                mode, int(warm), hex(bundle["targets"][mode]),
                                                bundle["originals"][mode], strategy,
-                                               hex(bundle["cache"]))
+                                               hex(bundle["cache"]), hex(bundle["state"]),
+                                               hex(bundle["cold_status"]))
                         require(observed["kind"] == "tamper" and observed["mode"] == mode and
                                 observed["warm"] is warm and observed["variant"] == variant and
                                 observed["id"] == source_id and observed["ordinary_rejections"] == 5 and
                                 observed["exception_code"] == TRAP_CODE and observed["stage"] == 3 and
                                 observed["destination_unchanged"] and observed["effect_unchanged"] and
-                                observed["required"] == bundle["length"],
+                                observed["required"] == bundle["length"] and
+                                observed["lazy_state_checked"] is (strategy == "lazy"),
                                 "missing exact native trap or metadata non-certification evidence")
                         observations.append(observed)
                         self.save()
@@ -583,6 +588,8 @@ class Harness:
             self.reject_build(folder, name, "cross-dll-string-copy-invalid.c", base,
                               code="binding", defines=["-DCOPY_PE_BAD_CASE=0"], extra=extra)
         variants = (("disabled-auth", {"authenticated": False}),
+                    ("disabled-auth-vm", {"level": "vm", "authenticated": False}),
+                    ("disabled-auth-strong-vm", {"level": "strong_vm", "authenticated": False}),
                     ("encoding-limit", {"limit": 0}),
                     ("unsupported-strategy", {"strategy": "ctor", "ctor": False}),
                     ("inline-only-strategy", {"strategy": "ctor", "ctor": False, "ephemeral": True}),
@@ -927,16 +934,19 @@ class Harness:
                         print(f"CROSS_DLL_STRING_COPY_PASS O{optimization} {level} {strategy}", flush=True)
                 if not self.args.skip_exporters:
                     for level in self.args.exporter_level:
-                        images, compilers, bundles, observed = self.build_producers(
-                            optimization, "ctor", raw_consumer, incompatible, baseline, level=level)
-                        self.category = f"O{optimization}/{level}/ctor/exporter"
-                        row = {"optimization": optimization, "level": level, "strategy": "ctor",
-                               "producers": list(map(str, images)), "compiler": compilers,
-                               "native": observed, "freshness": []}
-                        self.result["exporters"].append(row)
-                        self.save()
-                        self.freshness(images, bundles, raw_consumer, "ctor", row["freshness"])
-                        print(f"CROSS_DLL_STRING_COPY_EXPORTER_PASS O{optimization} {level}", flush=True)
+                        for strategy in self.args.strategy:
+                            images, compilers, bundles, observed = self.build_producers(
+                                optimization, strategy, raw_consumer, incompatible, baseline,
+                                level=level)
+                            self.category = f"O{optimization}/{level}/{strategy}/exporter"
+                            row = {"optimization": optimization, "level": level, "strategy": strategy,
+                                   "producers": list(map(str, images)), "compiler": compilers,
+                                   "native": observed, "freshness": []}
+                            self.result["exporters"].append(row)
+                            self.save()
+                            self.freshness(images, bundles, raw_consumer, strategy, row["freshness"])
+                            print(f"CROSS_DLL_STRING_COPY_EXPORTER_PASS O{optimization} "
+                                  f"{level} {strategy}", flush=True)
         if not self.args.skip_negatives:
             self.negative_builds()
         self.result["status"] = "passed"

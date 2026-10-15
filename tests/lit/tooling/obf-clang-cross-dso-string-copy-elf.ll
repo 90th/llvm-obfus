@@ -5,9 +5,10 @@
 ; effects. The host unloads each producer and proves actual mapping removal
 ; before it consumes saved copies. A v2-only producer must not resolve v1.
 ; IDs 1..3 cover file-local, C++ function-local static, and empty arrays.
-; Lazy and constructor-backed producers authenticate each successful copy.
-; Native data-only corruption checks cold and warm ctor copies. Lazy fields
-; check cold and warm copies, except the cache needs a successful first copy.
+; Lazy and constructor-backed vm/strong_vm producers authenticate each copy.
+; Lazy rows disable constructor fallback and retain cold state, including empty
+; sources, through queries and errors. Data-only corruption checks cold and warm
+; copies, except lazy cache corruption needs a successful first copy.
 ; Queries and errors return ordinary statuses without certifying corrupt data.
 ; The next successful copy must trap without changing destinations or effects.
 ; Narrow rejection cases keep strict static ownership and raw-manifest rules.
@@ -16,7 +17,7 @@
 ; data aliases, stripped aliases, and bounded E9/EB routes. Private helper and
 ; payload exports must fail in the real linker before native validation.
 ; Legitimate producers export exchange_copy_v1 and no rt_core_* symbols.
-; All compiler ledgers, commands, native outcomes, and scratch stay under /tmp.
+; All compiler ledgers, commands, native outcomes, and scratch stay under /var/tmp.
 ; RUN: %python %S/../Inputs/cross_dso_string_copy.py --wrapper %obf_clang --clang %raw_clang --runtime %obf_runtime
 ;
 define void @dummy() {
