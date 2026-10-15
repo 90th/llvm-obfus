@@ -210,6 +210,12 @@ The parent process must observe the child trap and shared destination, not infer
 Keep application queries and copies outside `DllMain`, `.CRT$XL*` callbacks, and loader-controlled construction or destruction.
 After final `FreeLibrary`, require `GetModuleHandleW == NULL` and actual mapping removal before reading surviving copies.
 
+The Windows harness also runs the concurrent cases described above, with independent producer and consumer policies.
+Native event barriers and bounded joins keep private-state inspection outside active calls.
+After drain, require both `GetModuleHandleW == NULL` and `VirtualQuery(...).State == MEM_FREE` for each producer.
+Read every retained worker copy while the consumer remains loaded.
+Use `--only-concurrency` to skip corruption and compiler/export negatives while retaining raw controls and required VM ledgers.
+
 
 On Windows, run `obf-clang-dll-lifecycle-pe` and `obf-clang-dll-output-pe` separately with three lit workers for focused native DLL checks.
 They check protected constructors and `DllMain` callbacks, decoded strings, return values, effects, exact exports, rebasing, and joined unload cycles.
