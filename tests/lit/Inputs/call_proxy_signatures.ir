@@ -1,0 +1,127 @@
+%Pair = type { i64, i64 }
+%Big = type { i64, i64, i64 }
+
+define <4 x float> @vector_callee(<4 x float> %value) noinline optnone {
+  %result = fadd <4 x float> %value, <float 4.0, float 3.0, float 2.0, float 1.0>
+  ret <4 x float> %result
+}
+define float @proxy_vector(<4 x float> %value) noinline {
+  %v = call <4 x float> @vector_callee(<4 x float> %value)
+  %a = extractelement <4 x float> %v, i32 0
+  %b = extractelement <4 x float> %v, i32 3
+  %result = fadd float %a, %b
+  ret float %result
+}
+define fastcc <4 x i32> @fast_callee(<4 x i32> %value) noinline optnone {
+  %result = add <4 x i32> %value, <i32 1, i32 1, i32 1, i32 1>
+  ret <4 x i32> %result
+}
+define i32 @proxy_fast(<4 x i32> %value) noinline {
+  %v = call fastcc <4 x i32> @fast_callee(<4 x i32> %value)
+  %a = extractelement <4 x i32> %v, i32 0
+  %b = extractelement <4 x i32> %v, i32 3
+  %result = add i32 %a, %b
+  ret i32 %result
+}
+define fastcc i64 @fast_scalar_callee(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h) noinline optnone {
+  %b3 = mul i64 %b, 3
+  %c5 = mul i64 %c, 5
+  %d7 = mul i64 %d, 7
+  %e11 = mul i64 %e, 11
+  %f13 = mul i64 %f, 13
+  %g17 = mul i64 %g, 17
+  %h19 = mul i64 %h, 19
+  %s1 = add i64 %a, %b3
+  %s2 = add i64 %s1, %c5
+  %s3 = add i64 %s2, %d7
+  %s4 = add i64 %s3, %e11
+  %s5 = add i64 %s4, %f13
+  %s6 = add i64 %s5, %g17
+  %s7 = add i64 %s6, %h19
+  ret i64 %s7
+}
+define i64 @proxy_fast_scalar(i64 %value) noinline {
+  %b = add i64 %value, 1
+  %c = add i64 %value, 2
+  %d = add i64 %value, 3
+  %e = add i64 %value, 4
+  %f = add i64 %value, 5
+  %g = add i64 %value, 6
+  %h = add i64 %value, 7
+  %result = call fastcc i64 @fast_scalar_callee(i64 %value, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h)
+  ret i64 %result
+}
+define %Pair @pair_callee(%Pair %value) noinline optnone {
+  %a = extractvalue %Pair %value, 0
+  %b = extractvalue %Pair %value, 1
+  %sum = add i64 %a, %b
+  %v = insertvalue %Pair poison, i64 %sum, 0
+  %r = insertvalue %Pair %v, i64 %b, 1
+  ret %Pair %r
+}
+define %Pair @proxy_pair(%Pair %value) noinline {
+  %result = call %Pair @pair_callee(%Pair %value)
+  ret %Pair %result
+}
+define void @sret_callee(i64 %tag, ptr sret(%Big) align 8 %out, ptr byval(%Big) align 8 %in) noinline optnone {
+  %p1 = getelementptr %Big, ptr %in, i32 0, i32 1
+  %p2 = getelementptr %Big, ptr %in, i32 0, i32 2
+  %a = load i64, ptr %in, align 8
+  %b = load i64, ptr %p1, align 8
+  %c = load i64, ptr %p2, align 8
+  %a1 = add i64 %a, %tag
+  %b1 = xor i64 %b, %tag
+  %c1 = mul i64 %c, %tag
+  %o1 = getelementptr %Big, ptr %out, i32 0, i32 1
+  %o2 = getelementptr %Big, ptr %out, i32 0, i32 2
+  store i64 %a1, ptr %out, align 8
+  store i64 %b1, ptr %o1, align 8
+  store i64 %c1, ptr %o2, align 8
+  ret void
+}
+define void @proxy_nonzero_sret(ptr %out, ptr %in) noinline {
+  call void @sret_callee(i64 7, ptr sret(%Big) align 8 %out, ptr byval(%Big) align 8 %in)
+  ret void
+}
+define i32 @main() {
+  %f = call float @proxy_vector(<4 x float> <float 1.0, float 2.0, float 3.0, float 4.0>)
+  %okf = fcmp oeq float %f, 10.0
+  %v = call i32 @proxy_fast(<4 x i32> <i32 1, i32 2, i32 3, i32 4>)
+  %okv = icmp eq i32 %v, 7
+  %scalar_fast = call i64 @proxy_fast_scalar(i64 1)
+  %scalar_fast_ok = icmp eq i64 %scalar_fast, 454
+  %pair = call %Pair @proxy_pair(%Pair { i64 10, i64 20 })
+  %pa = extractvalue %Pair %pair, 0
+  %pb = extractvalue %Pair %pair, 1
+  %oka = icmp eq i64 %pa, 30
+  %okb = icmp eq i64 %pb, 20
+  %input = alloca %Big, align 8
+  %output = alloca %Big, align 8
+  %i1 = getelementptr %Big, ptr %input, i32 0, i32 1
+  %i2 = getelementptr %Big, ptr %input, i32 0, i32 2
+  store i64 11, ptr %input, align 8
+  store i64 13, ptr %i1, align 8
+  store i64 17, ptr %i2, align 8
+  call void @proxy_nonzero_sret(ptr %output, ptr %input)
+  %o1 = getelementptr %Big, ptr %output, i32 0, i32 1
+  %o2 = getelementptr %Big, ptr %output, i32 0, i32 2
+  %a = load i64, ptr %output, align 8
+  %b = load i64, ptr %o1, align 8
+  %c = load i64, ptr %o2, align 8
+  %ok1 = icmp eq i64 %a, 18
+  %ok2 = icmp eq i64 %b, 10
+  %ok3 = icmp eq i64 %c, 119
+  %pair_ok = and i1 %oka, %okb
+  %sret_12 = and i1 %ok1, %ok2
+  %sret_ok = and i1 %sret_12, %ok3
+  %f_bad = select i1 %okf, i32 0, i32 1
+  %v_bad = select i1 %okv, i32 0, i32 2
+  %pair_bad = select i1 %pair_ok, i32 0, i32 4
+  %sret_bad = select i1 %sret_ok, i32 0, i32 8
+  %first = or i32 %f_bad, %v_bad
+  %second = or i32 %pair_bad, %sret_bad
+  %old_exit = or i32 %first, %second
+  %scalar_fast_bad = select i1 %scalar_fast_ok, i32 0, i32 16
+  %exit = or i32 %old_exit, %scalar_fast_bad
+  ret i32 %exit
+}

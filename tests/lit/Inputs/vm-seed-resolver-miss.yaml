@@ -1,0 +1,9 @@
+seed: 424242
+default_level: none
+targets:
+  - match: resolver_target
+    level: vm
+mba:
+  depth: 0
+vm:
+  max_mba_depth: 0

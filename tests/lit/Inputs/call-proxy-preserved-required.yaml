@@ -1,0 +1,14 @@
+seed: 424242
+default_level: none
+targets:
+  - match: vm_callee
+    level: vm
+mba:
+  depth: 0
+vm:
+  max_mba_depth: 0
+call_proxy:
+  enabled: true
+  min_hops: 2
+  max_hops: 2
+  coverage_policy: required
