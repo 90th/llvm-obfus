@@ -1,0 +1,8 @@
+frontend: rust
+default_level: none
+overrides:
+  - name: local_eh_export
+    level: strong_vm
+security:
+  strip_release_markers: true
+  fail_on_public_obf_symbol: true

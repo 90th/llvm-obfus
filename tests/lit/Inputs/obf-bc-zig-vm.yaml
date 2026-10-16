@@ -1,0 +1,14 @@
+frontend: zig
+seed: 31337
+default_level: none
+targets:
+  - match: zig_protected_component
+    level: strong
+  - match: zig_vm_target
+    level: vm
+overrides:
+  - name: zig_vm_override
+    level: vm
+security:
+  strip_release_markers: true
+  fail_on_public_obf_symbol: true

@@ -5,6 +5,7 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -507,8 +508,12 @@ void validate_non_generic_config(const obfuscation_config& config) {
     if (!is_exact_function_name(name)) {
       report_non_generic_named_config_error("target", name, "must use an exact function name");
     }
-    if (!is_light_or_strong(rule.level)) {
-      report_non_generic_config_error("entries must use light or strong");
+    if (!is_light_or_strong(rule.level) &&
+        !(config.frontend != frontend_kind::tinygo && is_vm_level(rule.level))) {
+      report_non_generic_config_error(
+          config.frontend == frontend_kind::tinygo
+              ? "entries must use light or strong"
+              : "entries must use light, strong, vm, or strong_vm");
     }
     if (!target_names.insert(name).second) {
       report_non_generic_named_config_error(
@@ -522,8 +527,12 @@ void validate_non_generic_config(const obfuscation_config& config) {
     if (!is_exact_function_name(name)) {
       report_non_generic_named_config_error("override", name, "must use an exact function name");
     }
-    if (!is_light_or_strong(override.level)) {
-      report_non_generic_config_error("entries must use light or strong");
+    if (!is_light_or_strong(override.level) &&
+        !(config.frontend != frontend_kind::tinygo && is_vm_level(override.level))) {
+      report_non_generic_config_error(
+          config.frontend == frontend_kind::tinygo
+              ? "entries must use light or strong"
+              : "entries must use light, strong, vm, or strong_vm");
     }
     if (!override_names.insert(name).second) {
       report_non_generic_named_config_error(
@@ -578,7 +587,7 @@ void validate_effective_config(const obfuscation_config& config, const llvm::Mod
   if (config.frontend == frontend_kind::generic) { return; }
 
   llvm::SmallPtrSet<const llvm::Function*, 8> configured_functions;
-  const auto validate_configured_function = [&](llvm::StringRef name) {
+  const auto validate_configured_function = [&](llvm::StringRef name, protection_level level) {
     const llvm::Function* function = resolve_configured_function(module, name);
     if (function == nullptr) {
       report_non_generic_named_config_error(
@@ -594,11 +603,31 @@ void validate_effective_config(const obfuscation_config& config, const llvm::Mod
           name,
           "resolves to a function already selected by another target or override");
     }
+    if (is_vm_level(level)) {
+      if (function->getCallingConv() != llvm::CallingConv::C) {
+        report_non_generic_named_config_error(
+            "configured VM function", name, "must use the C calling convention");
+      }
+      for (const llvm::BasicBlock& block : *function) {
+        if (block.isEHPad()) {
+          report_non_generic_named_config_error(
+              "configured VM function", name, "must not contain local exception handling");
+        }
+        for (const llvm::Instruction& instruction : block) {
+          if (llvm::isa<llvm::InvokeInst>(instruction)) {
+            report_non_generic_named_config_error(
+                "configured VM function", name, "must not contain local exception handling");
+          }
+        }
+      }
+    }
   };
 
-  for (const target_rule& rule : config.targets) { validate_configured_function(rule.match); }
+  for (const target_rule& rule : config.targets) {
+    validate_configured_function(rule.match, rule.level);
+  }
   for (const function_override& override : config.overrides) {
-    validate_configured_function(override.name);
+    validate_configured_function(override.name, override.level);
   }
 }
 

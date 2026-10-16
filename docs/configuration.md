@@ -96,7 +96,8 @@ Their effective configuration must meet all these requirements:
 - Keep `security.allow_unsafe_config: false`.
 - Provide at least one target or override.
 - Use non-empty exact names without `*` or `?`.
-- Use only `light` or `strong` for every entry.
+- For Rust and Zig, use `light`, `strong`, `vm`, or `strong_vm`.
+- For TinyGo, use only `light` or `strong`.
 - Do not repeat a name or select it in both lists.
 - For TinyGo, set `string_encoding.max_strings_per_module: 0`.
 
@@ -104,6 +105,9 @@ Every selected name must resolve to a defined function in the input module.
 A name can select an alias that resolves to a defined function.
 Two selectors cannot resolve to the same function.
 The resolved function name must also exclude `*` and `?`.
+
+Rust and Zig `vm` and `strong_vm` selections must use the C calling convention and contain no local exception handling.
+The validator checks the resolved definition before policy selection. It rejects invalid boundaries instead of downgrading them to native protection.
 
 Unmatched functions stay at `none`. Security floors apply only to explicitly selected functions.
 Thus, a selected `light` function can rise to `strong` when its control flow meets the floor.
@@ -114,7 +118,9 @@ Selection does not guarantee that every eligible pass changes a function.
 
 - Declarations and recognized runtime-internal names receive `none`.
 - Address-taken functions cannot use VM lowering. Their `vm` or `strong_vm` policy becomes `strong`.
+- Transparent aliases alone are not address escapes. Storage, argument passing, and integer conversion through an alias still prevent VM lowering.
 - Exception edges or inline assembly usually reduce `strong`, `vm`, or `strong_vm` to restricted `light`.
+  Rust and Zig VM selections with local exception handling reject configuration before this downgrade.
 - An exact generic override keeps its selected level despite these risky features, but disables VM lowering.
 - Individual transforms also reject unsupported instructions, address spaces, or control-flow shapes.
 

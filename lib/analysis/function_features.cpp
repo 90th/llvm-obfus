@@ -3,10 +3,12 @@
 #include "obf/analysis/annotation_utils.h"
 
 #include "llvm/Analysis/CFG.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Instructions.h"
 
@@ -17,12 +19,23 @@ namespace obf {
 namespace {
 
 bool has_non_annotation_address_taken(const llvm::Function& function) {
-  for (const llvm::Use& use : function.uses()) {
-    if (const auto* call = llvm::dyn_cast<llvm::CallBase>(use.getUser())) {
-      if (call->isCallee(&use)) { continue; }
+  llvm::SmallVector<const llvm::Value*, 8> pending{&function};
+  llvm::SmallPtrSet<const llvm::Value*, 8> visited;
+  while (!pending.empty()) {
+    const llvm::Value* value = pending.pop_back_val();
+    if (!visited.insert(value).second) { continue; }
+    for (const llvm::Use& use : value->uses()) {
+      if (const auto* call = llvm::dyn_cast<llvm::CallBase>(use.getUser())) {
+        if (call->isCallee(&use)) { continue; }
+      }
+      if (const auto* alias = llvm::dyn_cast<llvm::GlobalAlias>(use.getUser())) {
+        if (alias->getAliasee() == value) {
+          pending.push_back(alias);
+          continue;
+        }
+      }
+      if (!is_annotation_user(use.getUser())) { return true; }
     }
-
-    if (!is_annotation_user(use.getUser())) { return true; }
   }
 
   return false;
