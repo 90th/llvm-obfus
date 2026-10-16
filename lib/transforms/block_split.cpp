@@ -28,11 +28,17 @@ llvm::Instruction* select_split_point(llvm::BasicBlock& block,
   llvm::SmallVector<llvm::Instruction*, 8> candidates;
   std::size_t instruction_count = 0;
   bool retained_prefix_instruction = false;
+  bool after_musttail = false;
 
   for (llvm::Instruction& instruction : block) {
     if (llvm::isa<llvm::PHINode>(instruction)) { continue; }
 
     ++instruction_count;
+    if (after_musttail) { continue; }
+    if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&instruction);
+        call != nullptr && call->isMustTailCall()) {
+      after_musttail = true;
+    }
 
     if (!retained_prefix_instruction) {
       retained_prefix_instruction = true;
@@ -146,21 +152,23 @@ run_block_split(llvm::Function& function, const block_split_options& options, st
       llvm::BasicBlock* bridge =
           llvm::BasicBlock::Create(ctx, block->getName() + ".obf.bridge", &function, tail);
       block->getTerminator()->setSuccessor(0, bridge);
-      auto mctx = obf::support::make_mba_context(
-          function,
-          "obf.split",
-          block_seed,
-          {options.mba_depth,
-           options.mba_max_ir_instructions,
-           options.mba_enable_polynomial,
-           options.mba_enable_multiplication});
+      auto mctx = obf::support::make_mba_context(function,
+                                                 "obf.split",
+                                                 block_seed,
+                                                 {options.mba_depth,
+                                                  options.mba_max_ir_instructions,
+                                                  options.mba_enable_polynomial,
+                                                  options.mba_enable_multiplication});
       llvm::IRBuilder<> builder(bridge);
       std::uint64_t site_salt = block_seed;
       for (llvm::Instruction* live_out : live_outs) {
         auto* int_type = llvm::cast<llvm::IntegerType>(live_out->getType());
-        llvm::Value* zero = mba::create_opaque_integer(
-            builder, int_type, mctx, llvm::APInt(int_type->getBitWidth(), 0), site_salt,
-            "obf.split.zero");
+        llvm::Value* zero = mba::create_opaque_integer(builder,
+                                                       int_type,
+                                                       mctx,
+                                                       llvm::APInt(int_type->getBitWidth(), 0),
+                                                       site_salt,
+                                                       "obf.split.zero");
         llvm::Value* ident =
             ((site_salt >> 1) & 1ULL) != 0ULL
                 ? mba::create_add(builder, live_out, zero, mctx, site_salt, "obf.split.id")
