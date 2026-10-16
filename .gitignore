@@ -2,6 +2,7 @@ build/
 build*/
 cmake-build-*/
 out/
+scratch/
 compile_commands.json
 .cache/
 .idea/

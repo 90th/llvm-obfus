@@ -6,6 +6,7 @@
 #include "obf/support/stable_hash.h"
 #include "obf/support/self_checksum_record.h"
 
+#include "obf/transforms/call_proxy_chains.h"
 #include "obf/transforms/zero_comparison.h"
 #include "obf/transforms/control_flattening.h"
 #include "obf/transforms/indirect_dispatch.h"
@@ -655,6 +656,139 @@ void TestIndirectDispatchConfig() {
 
   std::error_code ec;
   std::filesystem::remove(path, ec);
+}
+
+void TestCallProxyConfig() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "obf_call_proxy_config.yaml";
+  const auto load = [&](llvm::StringRef text) {
+    {
+      std::ofstream out(path);
+      out << text.str();
+    }
+    return obf::load_config_from_file(path.string());
+  };
+  for (llvm::StringRef profile : {"fast", "standard", "guarded", "fortress", "lab"}) {
+    auto defaults = load("profile: " + profile.str() + "\n");
+    ExpectTrue(static_cast<bool>(defaults), "proxy defaults should parse with every profile");
+    if (!defaults) {
+      llvm::consumeError(defaults.takeError());
+      continue;
+    }
+    const auto& proxy = defaults->call_proxy;
+    ExpectTrue(
+        !proxy.enabled && proxy.min_hops == 2 && proxy.max_hops == 4 &&
+            proxy.mode_policy == obf::proxy_mode_policy::mixed &&
+            proxy.coverage_policy == obf::proxy_coverage_policy::required && proxy.share_nodes &&
+            proxy.decoy_budget == 1 && proxy.max_sites_per_owner == 16 &&
+            proxy.max_nodes_per_module == 4096 && proxy.max_context_bytes_per_owner == 4096 &&
+            proxy.max_routes_per_shared_node == 16 && proxy.max_added_ir_instructions == 65536,
+        "proxy defaults must match the finite RFC policy");
+  }
+  auto configured = load(
+      "profile: guarded\n"
+      "'call_proxy':\n"
+      "  enabled: true\n"
+      "  min_hops: 3\n"
+      "  max_hops: 8\n"
+      "  mode_policy: stateful_only\n"
+      "  coverage_policy: best_effort\n"
+      "  share_nodes: false\n"
+      "  decoy_budget: 0\n"
+      "  max_sites_per_owner: 7\n"
+      "  max_nodes_per_module: 100\n"
+      "  max_context_bytes_per_owner: 512\n"
+      "  max_routes_per_shared_node: 3\n"
+      "  max_added_ir_instructions: 8192\n");
+  ExpectTrue(static_cast<bool>(configured), "complete proxy configuration should parse");
+  if (configured) {
+    const auto& proxy = configured->call_proxy;
+    ExpectTrue(proxy.enabled && proxy.min_hops == 3 && proxy.max_hops == 8 &&
+                   proxy.mode_policy == obf::proxy_mode_policy::stateful_only &&
+                   proxy.coverage_policy == obf::proxy_coverage_policy::best_effort &&
+                   !proxy.share_nodes && proxy.decoy_budget == 0 &&
+                   proxy.max_sites_per_owner == 7 && proxy.max_nodes_per_module == 100 &&
+                   proxy.max_context_bytes_per_owner == 512 &&
+                   proxy.max_routes_per_shared_node == 3 && proxy.max_added_ir_instructions == 8192,
+               "quoted proxy mapping must override profile defaults without dropping fields");
+    const std::string summary = obf::summarize_config(*configured);
+    ExpectTrue(summary.find("call_proxy.mode_policy: stateful_only") != std::string::npos &&
+                   summary.find("call_proxy.coverage_policy: best_effort") != std::string::npos &&
+                   summary.find("call_proxy.max_added_ir_instructions: 8192") != std::string::npos,
+               "summary must include proxy policy and resource identities");
+  }
+  constexpr llvm::StringLiteral invalid[] = {"min_hops: 1",
+                                             "min_hops: 5\n  max_hops: 4",
+                                             "max_hops: 9",
+                                             "decoy_budget: 3",
+                                             "max_sites_per_owner: 0",
+                                             "max_nodes_per_module: 0",
+                                             "max_context_bytes_per_owner: 0",
+                                             "max_routes_per_shared_node: 0",
+                                             "max_added_ir_instructions: 0",
+                                             "max_nodes_per_module: -1",
+                                             "max_nodes_per_module: 4294967296",
+                                             "max_added_ir_instructions: .inf",
+                                             "mode_policy: imaginary",
+                                             "coverage_policy: partial",
+                                             "unknown_option: true"};
+  for (llvm::StringRef field : invalid) {
+    auto rejected = load("call_proxy:\n  " + field.str() + "\n");
+    ExpectTrue(!rejected, "invalid proxy config must fail: " + field.str());
+    if (!rejected) { llvm::consumeError(rejected.takeError()); }
+  }
+  for (llvm::StringRef field : {"min_hops: 2\n  max_hops: 2",
+                                "min_hops: 8\n  max_hops: 8",
+                                "decoy_budget: 2",
+                                "max_sites_per_owner: 1",
+                                "max_nodes_per_module: 4294967295"}) {
+    auto accepted = load("call_proxy:\n  " + field.str() + "\n");
+    ExpectTrue(static_cast<bool>(accepted), "valid proxy boundary must parse: " + field.str());
+    if (!accepted) { llvm::consumeError(accepted.takeError()); }
+  }
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+void TestCallProxyConfigIdentity() {
+  const obf::call_proxy_options baseline;
+  const std::string identity = obf::call_proxy_configuration_identity(baseline);
+  ExpectTrue(identity == obf::call_proxy_configuration_identity(baseline),
+             "proxy configuration identity must be deterministic");
+  const auto differs = [&](obf::call_proxy_options changed) {
+    ExpectTrue(identity != obf::call_proxy_configuration_identity(changed),
+               "each proxy field must change the retained configuration identity");
+  };
+  auto changed = baseline;
+  changed.enabled = true;
+  differs(changed);
+  changed = baseline;
+  changed.min_hops = 3;
+  differs(changed);
+  changed = baseline;
+  changed.max_hops = 5;
+  differs(changed);
+  changed = baseline;
+  changed.mode_policy = obf::proxy_mode_policy::stateful_only;
+  differs(changed);
+  changed = baseline;
+  changed.coverage_policy = obf::proxy_coverage_policy::best_effort;
+  differs(changed);
+  changed = baseline;
+  changed.share_nodes = false;
+  differs(changed);
+  changed = baseline;
+  changed.decoy_budget = 2;
+  differs(changed);
+  for (auto member : {&obf::call_proxy_options::max_sites_per_owner,
+                      &obf::call_proxy_options::max_nodes_per_module,
+                      &obf::call_proxy_options::max_context_bytes_per_owner,
+                      &obf::call_proxy_options::max_routes_per_shared_node,
+                      &obf::call_proxy_options::max_added_ir_instructions}) {
+    changed = baseline;
+    ++(changed.*member);
+    differs(changed);
+  }
 }
 
 void TestIndirectDispatchEntryTargetAnalysis() {
@@ -2391,6 +2525,8 @@ int main() {
   TestReleaseMarkerConfig();
   TestConstantProtectionModeConfig();
   TestIndirectDispatchConfig();
+  TestCallProxyConfig();
+  TestCallProxyConfigIdentity();
   TestIndirectDispatchEntryTargetAnalysis();
   TestPolicyPrecedenceAndFloors();
   TestConfigEdgeCases();

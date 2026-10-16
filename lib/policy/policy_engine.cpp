@@ -1,6 +1,8 @@
 #include "obf/policy/policy_engine.h"
 
 #include "obf/support/stable_hash.h"
+#include "obf/transforms/call_proxy_chains.h"
+#include "llvm/IR/Function.h"
 #include "llvm/ADT/SmallString.h"
 
 #include "llvm/IR/Module.h"
@@ -253,7 +255,9 @@ policy_decision select_policy(const llvm::Module& module,
                               llvm::StringRef annotation_text) {
   policy_decision decision;
   decision.seed = derive_seed(module, features.name, config.seed);
-  if (is_runtime_internal_name(features.name)) {
+  const llvm::Function* function = module.getFunction(features.name);
+  if (is_runtime_internal_name(features.name) ||
+      (function != nullptr && is_call_proxy_helper(*function))) {
     decision.source = policy_source::default_policy;
     decision.detail = "runtime internal forced none";
     decision.policy = make_function_policy(protection_level::none);

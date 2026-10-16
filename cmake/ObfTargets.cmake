@@ -59,6 +59,8 @@ set(OBF_CORE_SOURCES
   lib/report/coverage_report.cpp
   lib/transforms/block_split.cpp
   lib/transforms/bogus_control_flow.cpp
+  lib/transforms/call_proxy_chains.cpp
+  lib/transforms/call_proxy_sites.cpp
   lib/transforms/constant_encoding.cpp
   lib/transforms/control_flattening.cpp
   lib/transforms/artifact_cleanup.cpp
@@ -205,6 +207,18 @@ llvm_update_compile_flags(obf-unit-tests)
 target_include_directories(obf-unit-tests PRIVATE ${PROJECT_SOURCE_DIR}/include
                                                   ${CMAKE_CURRENT_BINARY_DIR}/include)
 target_link_libraries(obf-unit-tests PRIVATE obf_core ${OBF_LLVM_LIBS})
+
+add_executable(obf-call-proxy-sites-tests
+  tests/unit/call_proxy_sites_tests.cpp)
+obf_apply_static_llvm_target_settings(obf-call-proxy-sites-tests)
+llvm_update_compile_flags(obf-call-proxy-sites-tests)
+target_link_libraries(obf-call-proxy-sites-tests PRIVATE obf_core ${OBF_LLVM_LIBS})
+
+add_executable(obf-call-proxy-chains-tests
+  tests/unit/call_proxy_chains_tests.cpp)
+obf_apply_static_llvm_target_settings(obf-call-proxy-chains-tests)
+llvm_update_compile_flags(obf-call-proxy-chains-tests)
+target_link_libraries(obf-call-proxy-chains-tests PRIVATE obf_core ${OBF_LLVM_LIBS})
 
 add_executable(obf-runtime-atomic-tests
   tests/unit/runtime_atomic_tests.c

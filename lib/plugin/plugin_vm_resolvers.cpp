@@ -394,6 +394,7 @@ llvm::Function* get_or_create_vm_target_seed_resolver(llvm::Module& module,
   entry_builder.CreateSwitch(key_arg, miss);
 
   llvm::IRBuilder<> miss_builder(miss);
+  miss_builder.CreateCall(llvm::Intrinsic::getOrInsertDeclaration(&module, llvm::Intrinsic::trap));
   miss_builder.CreateUnreachable();
   return resolver;
 }

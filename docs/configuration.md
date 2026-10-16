@@ -10,6 +10,7 @@ Use one top-level mapping. The parser rejects multiple non-empty YAML documents.
 - [Pass eligibility](#pass-eligibility)
 - [Profiles and inherited values](#profiles-and-inherited-values)
 - [Extended example](#extended-example)
+- [Call proxy chains](#call-proxy-chains)
 - [Security gates](#security-gates)
 
 ## Minimal selection
@@ -34,7 +35,7 @@ Automatic analysis, policy floors, and caller promotions can still select other 
 Feature restrictions can disable transforms, and individual passes can skip unsupported sites.
 See [selection and precedence](#selection-and-precedence) and [feature restrictions](#feature-restrictions) for the details.
 
-Self-checksum and indirect dispatch stay disabled unless you enable them.
+Self-checksum, indirect dispatch, and call proxy chains stay disabled unless you enable them.
 String authentication also stays disabled in this minimal example.
 
 Use [the usage guide](usage.md) to pass the file to a wrapper or plugin.
@@ -213,6 +214,15 @@ Profiles retain these values unless your YAML replaces their containing sections
 | `indirect_dispatch.enabled` | `false` |
 | `indirect_dispatch.max_sites_per_function` / `max_switch_targets` | `4` / `8` |
 | Both indirect-dispatch target switches | `true` |
+| `call_proxy.enabled` | `false` |
+| `call_proxy.min_hops` / `max_hops` | `2` / `4` |
+| `call_proxy.mode_policy` / `coverage_policy` | `mixed` / `required` |
+| `call_proxy.share_nodes` / `decoy_budget` | `true` / `1` |
+| `call_proxy.max_sites_per_owner` | `16` |
+| `call_proxy.max_nodes_per_module` | `4096` |
+| `call_proxy.max_context_bytes_per_owner` | `4096` |
+| `call_proxy.max_routes_per_shared_node` | `16` |
+| `call_proxy.max_added_ir_instructions` | `65536` |
 | `self_checksum.enabled` / `window_size` / `max_sites` / `seed` | `false` / `64` / `4` / `0` |
 | `security.strip_release_markers` / `allow_unsafe_config` | `false` / `false` |
 | `debug_preserve_generated_names` / `emit_progress_warnings` | `false` / `false` |
@@ -325,6 +335,84 @@ emit_progress_warnings: false
 `constant_encoding.mode` accepts `off`, `mba_inline`, `keyed_pool`, `auto`, or `all`.
 `vm.max_mba_depth` caps VM arithmetic depth at the smaller of that value and `mba.depth`.
 A zero self-checksum seed uses the top-level seed.
+
+## Call proxy chains
+
+Call proxy chains are an opt-in feature under release qualification.
+No profile enables them.
+Use the existing configuration file with the safe pipeline or managed compiler wrapper.
+The standalone `obf-vm` pass rejects enabled proxy chains because it cannot supply the required stage order.
+
+```yaml
+call_proxy:
+  enabled: true
+  min_hops: 2
+  max_hops: 4
+  mode_policy: mixed
+  coverage_policy: required
+  share_nodes: true
+  decoy_budget: 1
+  max_sites_per_owner: 16
+  max_nodes_per_module: 4096
+  max_context_bytes_per_owner: 4096
+  max_routes_per_shared_node: 16
+  max_added_ir_instructions: 65536
+```
+
+The existing target policy selects source owners.
+The late proxy stage protects their live native call sites and explicitly registered VM boundaries.
+It does not restore calls that optimization removed.
+Runtime, checksum, entropy, and authentication paths remain excluded.
+String-copy accessors and their private authentication paths also remain excluded.
+
+`mode_policy` accepts only `mixed` and `stateful_only`.
+`mixed` permits stateful ordinary calls and exact-signature ABI-only chains for original `musttail` calls.
+`stateful_only` rejects original `musttail` calls.
+ABI-only coverage does not establish stateful provenance.
+
+`coverage_policy` accepts only `required` and `best_effort`.
+`required` fails compilation when a selected live site cannot receive its complete chain.
+`best_effort` records each unsupported site and leaves its call unchanged.
+The existing strict `fortress`, `lab`, and `strong_vm` policies override best-effort coverage.
+`security.allow_unsafe_config` does not bypass this coverage requirement.
+Unsupported sites do not count as protected sites.
+
+The parser requires `2 <= min_hops <= max_hops <= 8`.
+The hop count excludes the stateful terminal bridge.
+`decoy_budget` accepts zero through two branches per hop.
+All five resource budgets require positive unsigned 32-bit integers.
+Unknown keys, unknown policy values, negative budgets, and out-of-range values fail parsing.
+These checks apply even when `enabled` is false.
+
+Planning reserves the complete route before emission.
+The module-node budget includes generated hops, bridges, target-check helpers, and other out-of-line helpers.
+It also bounds preserved resolver-dependency obligations and counts each distinct function once.
+
+The context budget includes aligned fixed slots in each live caller.
+The instruction budget counts gross added instructions, not the net change after source-call removal.
+An unchanged resolver-dependency body does not add instructions to this count.
+Its new or pending finalization guard does count.
+
+The shared-node budget limits route memberships and causes deterministic splitting.
+The proxy budget is separate from the MBA expansion-unit budget.
+
+All proxy options, schema, and platform qualification identity participate in LTO configuration identity.
+FullLTO and ThinLTO reject incompatible prelink and postlink configurations.
+Postlink recovers retained proxy contracts before discovery.
+It validates the graph and operand roles before releasing LTO obligations or private markers.
+The coverage ledger records route mode, source and instance identity, hop count, effective strictness, and rejection reasons.
+
+A VM boundary can add a proxy entry to an otherwise unselected caller.
+Prelink retains that live caller and its operand associations until backend validation.
+Its original source policy stays unchanged and does not enable native transforms.
+
+Released native output retains a module-level completion fact and configuration identity, not private proxy graph roles.
+A repeated native pipeline with the same configuration verifies LLVM IR and skips protection emission.
+An incompatible configuration fails and requires the original input.
+This completion fact does not prove that arbitrary later passes preserved the released proxy graph.
+Prelink and postlink runs never use it to skip retained-contract recovery or validation.
+
+See [call proxy limits](protection.md#call-proxy-chains) before enabling this feature.
 
 ## Security gates
 

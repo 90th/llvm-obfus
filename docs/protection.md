@@ -15,6 +15,7 @@ Use this guide for transform behavior and limits:
 - [Constants](#constants)
 - [Seeds, keys, and runtime checks](#seeds-keys-and-runtime-checks)
 - [Self-checksum](#self-checksum)
+- [Call proxy chains](#call-proxy-chains)
 - [Safe pipeline](#safe-pipeline)
 
 The project combines obfuscation with selected runtime integrity checks.
@@ -637,6 +638,103 @@ It also supports native Windows x86-64 PE32+ executables and user-mode DLLs.
 Use the [binding guide](self-checksum.md) for workflows and binary rules.
 Use the [self-checksum security contract](../SECURITY.md#self-checksum-security-contract) for limits.
 
+## Call proxy chains
+
+Call proxy chains add private call routes to selected live call edges.
+They remain disabled by default while release qualification is incomplete.
+An enabled configuration does not establish production readiness or a measured increase in target-recovery cost.
+See [proxy configuration](configuration.md#call-proxy-chains) for options and finite resource caps.
+
+The stateful route uses a fixed caller-owned context and a `notail` entry.
+Private hops use direct `musttail` transfers with one identical extended signature.
+The terminal bridge validates the state, decodes the target, and makes an ordinary indirect call.
+
+Each stateful route also has one private `noinline` and `optnone` target-check helper.
+The bridge calls it before it consumes the context and transfers to the indirect target.
+The helper checks the decoded, admitted, and permitted target words, then returns or traps.
+The transfer uses the same decoded SSA value after the check.
+This design avoids branch-based substitution of a constant target.
+
+The finalizer checks the helper and the decoded target dependency after LTO.
+The helper adds one bounded call and possible frame and unwind-table costs.
+The node and instruction budgets include this helper.
+
+Prelink also reserves one temporary self-address guard call in each hop, bridge, and target-check helper.
+This guard pins the helper ABI and argument forwarding for LTO.
+It remains internal to compiler finalization.
+It is not runtime authentication or a cross-image key.
+The backend removes the guard only after validation.
+Its instruction and call costs count while it remains in prelink IR.
+The helper and guard do not establish zero overhead or completed LTO qualification.
+
+The original caller stays live through normal return or outward unwinding.
+Each static site has an entry-block context slot, not an allocation on each loop iteration.
+
+Original `musttail` calls use a separate ABI-only route in `mixed` mode.
+Every edge keeps the original signature and remains `musttail`.
+This route has no context, predecessor-state check, or carried target encoding.
+It preserves bounded hop stack growth, including original tail recursion.
+It does not promise zero frames, zero spills, or unchanged branch-prediction cost.
+
+The initial target boundary is integral address-space-zero 64-bit function pointers on Linux x86-64 ELF and native Windows x86-64 PE32+.
+Admission checks the actual signature, calling convention, typed ABI payloads, subtarget, resolution class, unwind mode, and hardening requirements.
+Only qualified C and Fast calling-convention rows can enter a chain.
+Frontend names do not prove an ABI row.
+Object, runtime, LTO, and enabled-hardening qualification remain release gates.
+Strong external and preemptible function symbols can use standard ELF GOT/PLT or Windows IAT pointer semantics.
+The admitted operand and expected pointer must identify the same runtime callable target.
+This admission does not hide imports or establish cross-platform qualification.
+Windows CFG can remain enabled through backend instrumentation.
+CFI, KCFI, and MemorySanitizer routes currently receive explicit unsupported-hardening results.
+
+Windows x64 rejects explicit LLVM `byval` proxy signatures because the LLVM 22 tail-forwarding backend row is unqualified.
+The negative admission path must reject this row before code generation.
+Linux x86-64 `byval` support remains separate.
+This restriction does not reject all aggregates, ordinary `sret`, or nonzero-position `sret` parameters.
+
+Windows x64 also rejects explicit vector proxy signatures for both C and Fast calling conventions.
+The LLVM 22 backend can compile these routes, but native forwarding checks failed.
+Both stateful and ABI-only modes require rejection until this row qualifies.
+Linux C and Fast vector checks remain separate and passed their native runtime fixtures.
+This restriction does not reject scalar floating-point signatures, direct aggregates, or ordinary `sret` results.
+
+The native Windows runtime fixture passed with the MSVC ABI for a 24-byte aggregate input.
+That ABI passes the input by reference and returns through an ordinary `sret` pointer.
+This result does not qualify explicit LLVM `byval` tail forwarding on Windows.
+
+Unsupported shapes include variadic calls, `invoke`, `callbr`, inline assembly, operand bundles, funclets, coroutine boundaries, and unproved indirect targets.
+Unproved aliases, IFUNCs, weak or nullable targets, and unsupported interposition also receive explicit rejection reasons.
+Unsupported special calling semantics and ABI attributes do not become safe when an attribute is removed.
+The compiler rejects unsupported hardened routes instead of disabling hardening.
+
+VM routes keep the original live resolver-derived target, hidden token, and encoded result associations.
+They do not add a persistent plaintext thunk-pointer table or a decoded-target cache.
+The existing caller return decode remains outside the chain.
+Strong-VM no-cache and source-binding requirements still apply.
+Runtime and complete string-copy authentication paths remain outside proxy selection.
+Their validators keep their original contracts.
+
+Proxy preservation can make existing non-atomic global loads volatile within registered VM target, token, and return-decode ancestry.
+Atomic loads keep their existing ordering.
+This change adds no loads, globals, target caches, keys, or decode operations.
+It can prevent load elimination and increase runtime cost.
+
+Exact local resolver callees in that ancestry retain explicit dependency identities and temporary prelink self-address guards.
+The compiler counts each distinct guard once, including overlapping helper or caller obligations.
+The backend validates these dependencies before removing the guards and private markers.
+FullLTO and ThinLTO VM qualification remain pending until the applicable runtime checks pass.
+
+The state checks reject selected inconsistent fields inside a valid allocated context.
+They do not make arbitrary attacker-selected context pointers safe to dereference.
+Return-continuation observations and prefix checks are path diffusion, not cryptographic caller authentication or execution-history proof.
+An attacker who changes a complete context or patches checks can bypass them.
+Inert decoys can simplify under LLVM or binary analysis.
+
+Normal relocations, imports, and symbolic pointer references remain visible.
+A global analysis or dynamic trace can recover a route.
+Do not treat a missing direct cross-reference or local thunk label as resistance evidence.
+Performance and recovery claims require direct, indirect, trivial-chain, ABI-only, and stateful controls with reproducible measurements.
+
 ## Safe pipeline
 
 `obf-safe-pipeline` runs these stages in order, subject to policy, eligibility, and quotas:
@@ -659,8 +757,9 @@ Use the [self-checksum security contract](../SECURITY.md#self-checksum-security-
 16. Harden `strong_vm` implementations with opaque offsets, flattening, outlining, substitution, and bogus control flow.
 17. Remove CFG-state placeholders.
 18. Apply late indirect dispatch to eligible native functions and VM implementations.
-19. Enforce protection and symbol-isolation gates.
-20. Clean artifacts.
+19. Apply enabled call proxy chains from the live native and VM registry.
+20. Complete funclet bundles and enforce protection, proxy-contract, and symbol-isolation gates.
+21. Clean artifacts.
 
 The implementation also handles retained LTO obligations before and after these stages.
 Use [usage](usage.md) for the managed native, bitcode, and LTO workflows.
