@@ -10,6 +10,7 @@
 #include "obf/transforms/artifact_cleanup.h"
 #include "obf/transforms/block_split.h"
 #include "obf/transforms/bogus_control_flow.h"
+#include "obf/transforms/call_proxy_chains.h"
 #include "obf/transforms/constant_encoding.h"
 #include "obf/transforms/control_flattening.h"
 #include "obf/transforms/function_outlining.h"
@@ -37,6 +38,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -542,10 +544,14 @@ class vm_pass : public llvm::PassInfoMixin<vm_pass> {
         [](llvm::Module& current_module,
            const llvm::SmallVectorImpl<function_pipeline_state>& states,
            const obfuscation_config& config) {
+          if (config.call_proxy.enabled) {
+            llvm::report_fatal_error(
+                "call_proxy requires obf-safe-pipeline, not the standalone obf-vm pass");
+          }
           const virtualized_function_map virtualized_functions = apply_vm_stage(states, config);
           bool changed = !virtualized_functions.empty();
           changed |= rewrite_calls_to_virtualized_functions(
-              current_module, virtualized_functions, effective_vm_mba_depth(config));
+              current_module, virtualized_functions, effective_vm_mba_depth(config), nullptr);
           return changed;
         });
   }
@@ -1015,20 +1021,44 @@ capture_lto_contracts(llvm::Module& module,
   for (const function_pipeline_state& state : states) {
     if (state.function == nullptr || state.function->isDeclaration()) { continue; }
     original_functions.insert(state.function);
-    if (state.lto.present) { continue; }
+    const bool proxy_internal = is_call_proxy_helper(*state.function) ||
+                                state.function->hasFnAttribute("obf.lto.proxy.dependency");
+    const bool proxy_owner =
+        !proxy_internal && state.function->hasFnAttribute("obf.lto.proxy.contract");
+    if (state.lto.present) {
+      if (proxy_internal || proxy_owner) {
+        if (proxy_internal && state.lto.role != lto_obligation_role::generated_internal) {
+          report_coverage_finalization_failure(
+              module, "proxy helper or dependency lost its generated-internal LTO role");
+        }
+        lto_obligation_record record = state.lto;
+        if (proxy_owner && (record.role == lto_obligation_role::explicit_none ||
+                            record.role == lto_obligation_role::raw_none ||
+                            record.role == lto_obligation_role::raw_entry)) {
+          record.role = lto_obligation_role::protected_covered;
+        }
+        record.requires_finalization = true;
+        contract_indices[state.function] = contracts.size();
+        contracts.push_back({state.function, std::move(record), false});
+      }
+      continue;
+    }
     const bool excluded = state.report.decision.policy.level == protection_level::none &&
                           (state.report.decision.source == policy_source::source_annotation ||
                            state.report.decision.source == policy_source::explicit_override ||
                            state.report.decision.source == policy_source::config_rule);
     const bool internal = state.report.decision.detail == "runtime internal forced none";
-    if (state.report.decision.policy.level == protection_level::none && !excluded && !internal) {
+    if (state.report.decision.policy.level == protection_level::none && !excluded && !internal &&
+        !proxy_internal && !proxy_owner) {
       continue;
     }
     lto_obligation_record record;
     record.present = true;
-    record.role = excluded   ? lto_obligation_role::explicit_none
-                  : internal ? lto_obligation_role::generated_internal
-                             : lto_obligation_role::protected_entry;
+    record.role = proxy_internal ? lto_obligation_role::generated_internal
+                  : proxy_owner  ? lto_obligation_role::protected_covered
+                  : excluded     ? lto_obligation_role::explicit_none
+                  : internal     ? lto_obligation_role::generated_internal
+                                 : lto_obligation_role::protected_entry;
     record.selector_name = state.report.features.name;
     record.selection_detail = state.report.decision.detail;
     record.annotation = state.report.annotation;
@@ -1037,7 +1067,7 @@ capture_lto_contracts(llvm::Module& module,
     record.config_identity = config_identity;
     record.decision_seed = state.report.decision.seed;
     record.entry_identity = stable_hash_string(record.selector_name, record.decision_seed);
-    record.requires_finalization = !excluded && !internal;
+    record.requires_finalization = (!excluded && !internal) || proxy_internal || proxy_owner;
     contract_indices[state.function] = contracts.size();
     contracts.push_back({state.function, std::move(record), false});
   }
@@ -1083,13 +1113,22 @@ capture_lto_contracts(llvm::Module& module,
       continue;
     }
     if (contract_indices.contains(&function)) { continue; }
+    const bool proxy_internal =
+        is_call_proxy_helper(function) || function.hasFnAttribute("obf.lto.proxy.dependency");
+    const bool proxy_owner = !proxy_internal && function.hasFnAttribute("obf.lto.proxy.contract");
     lto_obligation_record record;
     record.present = true;
-    record.role = lto_obligation_role::generated_internal;
+    record.role = proxy_owner ? lto_obligation_role::protected_covered
+                              : lto_obligation_role::generated_internal;
     record.config_identity = config_identity;
+    record.requires_finalization = proxy_internal || proxy_owner;
     if (const auto owner = read_string_protection_owner(function)) {
       record.policy = make_function_policy(owner->level);
       record.decision_seed = owner->seed;
+    }
+    if (proxy_owner) {
+      record.selector_name = function.getName().str();
+      record.entry_identity = stable_hash_string(record.selector_name, record.decision_seed);
     }
     contracts.push_back({&function, std::move(record), false});
   }
@@ -1102,6 +1141,9 @@ void retain_lto_contracts(llvm::Module& module,
   for (retained_function_contract& contract : contracts) {
     llvm::Function* function = contract.function;
     if (function == nullptr || function->isDeclaration()) { continue; }
+    if (function->hasFnAttribute("obf.lto.proxy.dependency")) {
+      pin_lto_protected_boundary(*function);
+    }
     if (contract.record.role == lto_obligation_role::generated_internal) {
       contract.record.pinned_noinline = function->hasFnAttribute(llvm::Attribute::NoInline) &&
                                         function->hasFnAttribute(llvm::Attribute::OptimizeNone);
@@ -1114,6 +1156,11 @@ void retain_lto_contracts(llvm::Module& module,
     apply_lto_obligation(*function, contract.record);
     if (!contract.record.requires_finalization) { continue; }
     if (guard == nullptr) { guard = &get_lto_finalize_guard(module); }
+    if ((is_call_proxy_helper(*function) || function->hasFnAttribute("obf.lto.proxy.contract") ||
+         function->hasFnAttribute("obf.lto.proxy.dependency")) &&
+        function_has_pending_lto_finalize_guard(*function, *guard)) {
+      continue;
+    }
     llvm::IRBuilder<> builder(&*function->getEntryBlock().getFirstInsertionPt());
     // An unknown address use pins the ABI during interprocedural LTO passes.
     // Keep it in the body so dead boundaries can still be discarded.
@@ -1394,6 +1441,45 @@ class capture_lto_selection_pass : public llvm::PassInfoMixin<capture_lto_select
   pipeline_route route_;
 };
 
+constexpr llvm::StringLiteral kCompletedNativePipeline = "obf.pipeline.completed";
+
+bool completed_native_pipeline_matches(llvm::Module& module, const obfuscation_config& config) {
+  const llvm::NamedMDNode* completed = module.getNamedMetadata(kCompletedNativePipeline);
+  if (completed == nullptr) { return false; }
+  const llvm::MDNode* fact = completed->getNumOperands() == 1 ? completed->getOperand(0) : nullptr;
+  const auto* schema = fact != nullptr && fact->getNumOperands() == 2
+                           ? llvm::dyn_cast<llvm::MDString>(fact->getOperand(0))
+                           : nullptr;
+  const auto* identity = fact != nullptr && fact->getNumOperands() == 2
+                             ? llvm::dyn_cast<llvm::MDString>(fact->getOperand(1))
+                             : nullptr;
+  std::uint64_t retained_identity = 0;
+  if (schema == nullptr || schema->getString() != "1" || identity == nullptr ||
+      identity->getString().getAsInteger(10, retained_identity)) {
+    report_coverage_finalization_failure(module, "invalid completed native pipeline fact");
+  }
+  if (retained_identity != compute_lto_config_identity(config)) {
+    report_coverage_finalization_failure(
+        module, "incompatible config/seed for completed native pipeline; use the original input");
+  }
+  for (const llvm::Function& function : module) {
+    if (function_has_lto_obligation(function) || function.hasFnAttribute("obf.lto.proxy.schema")) {
+      report_coverage_finalization_failure(
+          module, "completed native pipeline fact conflicts with retained LTO obligations");
+    }
+  }
+  return true;
+}
+
+void mark_completed_native_pipeline(llvm::Module& module, const obfuscation_config& config) {
+  llvm::Metadata* operands[] = {
+      llvm::MDString::get(module.getContext(), "1"),
+      llvm::MDString::get(module.getContext(),
+                          std::to_string(compute_lto_config_identity(config)))};
+  module.getOrInsertNamedMetadata(kCompletedNativePipeline)
+      ->addOperand(llvm::MDNode::get(module.getContext(), operands));
+}
+
 class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
  public:
   explicit safe_pipeline_pass(pipeline_route route = pipeline_route::native) : route_(route) {}
@@ -1402,7 +1488,40 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
 
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& mam) {
     const obfuscation_config config = load_active_config();
-    bool changed = prepare_string_copy_exports(module);
+    validate_effective_config(config);
+    if (route_ == pipeline_route::native && get_active_lto_mode() == obf_lto_mode::none &&
+        completed_native_pipeline_matches(module, config)) {
+      verify_changed_module(module);
+      record_coverage_event(
+          module,
+          "finalization",
+          "compiler_pipeline",
+          "",
+          module.getName(),
+          "completed",
+          "same-config native output already released; LLVM IR verified without graph recovery",
+          0,
+          "module");
+      write_coverage_report(module);
+      return coverage_reporting_enabled(module) ? llvm::PreservedAnalyses::none()
+                                                : llvm::PreservedAnalyses::all();
+    }
+    call_proxy_options proxy_options = config.call_proxy;
+    if (config.profile == config_profile::fortress || config.profile == config_profile::lab) {
+      proxy_options.coverage_policy = proxy_coverage_policy::required;
+    }
+    live_proxy_site_registry proxy_sites;
+    proxy_contract_registry proxy_contracts;
+    proxy_contracts.reserve_lto_guards = route_ == pipeline_route::prelink;
+    recover_call_proxy_contracts(module, proxy_contracts, proxy_options);
+    bool changed = false;
+    if (route_ != pipeline_route::native) {
+      if (llvm::NamedMDNode* completed = module.getNamedMetadata(kCompletedNativePipeline)) {
+        module.eraseNamedMetadata(completed);
+        changed = true;
+      }
+    }
+    changed |= prepare_string_copy_exports(module);
     require_native_string_copy_route(
         module, route_ == pipeline_route::native && get_active_lto_mode() == obf_lto_mode::none);
     require_lto_input_validation(route_, config);
@@ -1428,6 +1547,20 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
         }
       }
     }
+    if (config.call_proxy.enabled) {
+      for (const function_pipeline_state& state : states) {
+        if (state.function == nullptr || state.function->isDeclaration() ||
+            state.skip_transform_stages ||
+            state.report.decision.policy.level == protection_level::none ||
+            is_call_proxy_infrastructure(*state.function) ||
+            is_call_proxy_helper(*state.function)) {
+          continue;
+        }
+        const bool required = proxy_options.coverage_policy == proxy_coverage_policy::required ||
+                              state.report.decision.policy.level == protection_level::strong_vm;
+        proxy_sites.register_selected_owner(*state.function, state.report.decision.seed, required);
+      }
+    }
     virtualized_function_map retained_bindings;
     if (is_postlink(route_)) { retained_bindings = recover_lto_bindings(states); }
     const bool has_fresh_target = std::any_of(states.begin(), states.end(), [](const auto& state) {
@@ -1443,7 +1576,10 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     const virtualized_function_map vm_only = apply_vm_stage(states, config, &vm_level);
     changed |= !vm_only.empty();
     changed |=
-        rewrite_calls_to_virtualized_functions(module, vm_only, effective_vm_mba_depth(config));
+        rewrite_calls_to_virtualized_functions(module,
+                                               vm_only,
+                                               effective_vm_mba_depth(config),
+                                               config.call_proxy.enabled ? &proxy_sites : nullptr);
 
     constexpr protection_level strong_vm_level = protection_level::strong_vm;
     const std::size_t selected_strong_vm_count =
@@ -1453,8 +1589,11 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     const virtualized_function_map strong_vm_virtualized =
         apply_vm_stage(states, config, &strong_vm_level);
     changed |= !strong_vm_virtualized.empty();
-    changed |= rewrite_calls_to_virtualized_functions(
-        module, strong_vm_virtualized, effective_vm_mba_depth(config));
+    changed |=
+        rewrite_calls_to_virtualized_functions(module,
+                                               strong_vm_virtualized,
+                                               effective_vm_mba_depth(config),
+                                               config.call_proxy.enabled ? &proxy_sites : nullptr);
 
     virtualized_function_map post_vm_virtualized = vm_only;
     for (const auto& entry : strong_vm_virtualized) {
@@ -1492,6 +1631,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
         post_vm_states, config, substitution_candidates, &all_vm_virtualized);
     changed |= apply_opaque_gep_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_opaque_predicate_stage(post_vm_states, config, &all_vm_virtualized);
+    if (config.call_proxy.enabled) { proxy_sites.discover_native_sites(module); }
     changed |= apply_function_outlining_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_bogus_control_flow_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_self_checksum_stage(module, post_vm_states, config);
@@ -1516,6 +1656,59 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     changed |= apply_cfg_state_cleanup_stage(module);
     changed |= apply_indirect_dispatch_stage(post_vm_states, config, &all_vm_virtualized);
     changed |= apply_indirect_dispatch_to_functions(post_vm_virtualized, config);
+    const proxy_stage_result proxy_result =
+        apply_call_proxy_chain_stage(module, proxy_options, proxy_sites, proxy_contracts);
+    changed |= proxy_result.changed;
+    if (coverage_reporting_enabled(module)) {
+      for (const proxy_coverage_event& event : proxy_result.events) {
+        std::string owner_name = std::to_string(event.identity.owner_id);
+        const live_proxy_site* source = nullptr;
+        for (const live_proxy_site& site : proxy_sites.sites()) {
+          if (site.identity == event.identity) {
+            source = &site;
+            break;
+          }
+        }
+        if (source == nullptr) {
+          for (const proxy_live_contract& contract : proxy_contracts.contracts) {
+            if (contract.route.source.site.identity == event.identity) {
+              source = &contract.route.source.site;
+              break;
+            }
+          }
+        }
+        if (source != nullptr) {
+          if (const auto* owner = llvm::dyn_cast_or_null<llvm::Function>(
+                  static_cast<llvm::Value*>(source->source_owner_function))) {
+            owner_name = owner->getName().str();
+          }
+        }
+        const std::string detail =
+            "code=" + event.code + ", module=" + std::to_string(event.identity.module_id) +
+            ", owner=" + std::to_string(event.identity.owner_id) +
+            ", site=" + std::to_string(event.identity.site_id) +
+            ", instance=" + std::to_string(event.identity.instance_id) +
+            ", binding=" + std::to_string(event.binding_id) +
+            ", route=" + std::to_string(event.route_id) +
+            ", mode=" + (event.mode == proxy_route_mode::stateful ? "stateful" : "abi_only") +
+            ", hops=" + std::to_string(event.hops) + ", abi=" + event.abi_identity +
+            ", terminal=" + std::to_string(event.terminal_id) +
+            ", requested_coverage=" + to_string(config.call_proxy.coverage_policy).str() +
+            ", effective_coverage=" + (event.required ? "required" : "best_effort") + ", " +
+            event.diagnostic;
+        record_coverage_event(module,
+                              "emission",
+                              "call_proxy",
+                              owner_name,
+                              std::to_string(event.identity.site_id),
+                              event.protected_site   ? "emitted"
+                              : event.code == "dead" ? "dead"
+                                                     : "unsupported",
+                              detail,
+                              1,
+                              "call_site");
+      }
+    }
     changed |= complete_funclet_bundles(module);
     virtualized_function_map validation_bindings = retained_bindings;
     for (const auto& entry : post_vm_virtualized) {
@@ -1535,6 +1728,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     }
     validate_string_copy_exports(module);
     changed |= enforce_security_gates(module, states, validation_bindings, config);
+    validate_live_proxy_contracts(module, proxy_contracts, proxy_platform_contract_for(module));
     record_coverage_event(module,
                           "finalization",
                           "security_gates",
@@ -1546,6 +1740,7 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
                           "module");
     std::vector<retained_function_contract> contracts;
     if (route_ == pipeline_route::prelink) {
+      retain_call_proxy_contracts(module, proxy_contracts, proxy_options);
       contracts = capture_lto_contracts(module, states, post_vm_virtualized, config);
     }
     // Validate live retained protections and LLVM IR before releasing the
@@ -1562,6 +1757,10 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
                             "retained obligations validated and guards released",
                             0,
                             "module");
+    }
+    if (route_ != pipeline_route::prelink) {
+      release_call_proxy_metadata(module);
+      changed |= config.call_proxy.enabled || !proxy_contracts.contracts.empty();
     }
     if (!is_postlink(route_) || has_fresh_target) {
       changed |= apply_artifact_cleanup_stage(module, config);
@@ -1584,6 +1783,10 @@ class safe_pipeline_pass : public llvm::PassInfoMixin<safe_pipeline_pass> {
     if (!changed && !coverage_reporting_enabled(module)) { return llvm::PreservedAnalyses::all(); }
 
     verify_changed_module(module);
+    if (route_ == pipeline_route::native && get_active_lto_mode() == obf_lto_mode::none &&
+        config.call_proxy.enabled) {
+      mark_completed_native_pipeline(module, config);
+    }
     record_coverage_event(module,
                           "finalization",
                           "compiler_pipeline",

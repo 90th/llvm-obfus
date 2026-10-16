@@ -16,6 +16,41 @@ add_test(
 )
 
 add_test(
+  NAME obf-call-proxy-sites-tests
+  COMMAND obf-call-proxy-sites-tests
+)
+
+add_test(
+  NAME obf-call-proxy-chains-tests
+  COMMAND obf-call-proxy-chains-tests
+)
+
+add_test(
+  NAME obf-call-proxy-nonidentity-mask-rejected
+  COMMAND "${Python3_EXECUTABLE}" -c [=[
+import subprocess
+import sys
+
+if sys.platform == "win32":
+    import ctypes
+    ctypes.windll.kernel32.SetErrorMode(0x0002)
+else:
+    import resource
+    _, hard_limit = resource.getrlimit(resource.RLIMIT_CORE)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, hard_limit))
+
+result = subprocess.run(sys.argv[1:], capture_output=True, text=True, timeout=20)
+sys.stdout.write(result.stdout)
+sys.stderr.write(result.stderr)
+expected = "VM hidden token lost its registered operand provenance"
+if result.returncode == 0 or expected not in result.stderr:
+    raise SystemExit("expected the nonidentity token mask to fail provenance validation")
+]=]
+          $<TARGET_FILE:obf-call-proxy-chains-tests> --reject-nonidentity-mask
+)
+set_tests_properties(obf-call-proxy-nonidentity-mask-rejected PROPERTIES TIMEOUT 30)
+
+add_test(
   NAME obf-runtime-atomic-tests
   COMMAND obf-runtime-atomic-tests
 )

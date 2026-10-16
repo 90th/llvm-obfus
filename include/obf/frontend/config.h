@@ -97,6 +97,31 @@ struct indirect_dispatch_config {
   bool target_flattened_headers = true;
 };
 
+enum class proxy_mode_policy {
+  mixed,
+  stateful_only,
+};
+
+enum class proxy_coverage_policy {
+  required,
+  best_effort,
+};
+
+struct call_proxy_options {
+  bool enabled = false;
+  std::uint32_t min_hops = 2;
+  std::uint32_t max_hops = 4;
+  proxy_mode_policy mode_policy = proxy_mode_policy::mixed;
+  proxy_coverage_policy coverage_policy = proxy_coverage_policy::required;
+  bool share_nodes = true;
+  std::uint32_t decoy_budget = 1;
+  std::uint32_t max_sites_per_owner = 16;
+  std::uint32_t max_nodes_per_module = 4096;
+  std::uint32_t max_context_bytes_per_owner = 4096;
+  std::uint32_t max_routes_per_shared_node = 16;
+  std::uint32_t max_added_ir_instructions = 65536;
+};
+
 struct self_checksum_config {
   bool enabled = false;
   std::uint32_t window_size = 64;
@@ -125,6 +150,7 @@ struct obfuscation_config {
   mba_config mba;
   vm_config vm;
   indirect_dispatch_config indirect_dispatch;
+  call_proxy_options call_proxy;
   self_checksum_config self_checksum;
   security_gate_config security;
   bool debug_preserve_generated_names = false;
@@ -136,6 +162,8 @@ llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path);
 std::string summarize_config(const obfuscation_config& config);
 llvm::StringRef to_string(config_profile profile);
 llvm::StringRef to_string(constant_protection_mode mode);
+llvm::StringRef to_string(proxy_mode_policy mode);
+llvm::StringRef to_string(proxy_coverage_policy coverage);
 
 void validate_effective_config(const obfuscation_config& config, const llvm::Module& module);
 

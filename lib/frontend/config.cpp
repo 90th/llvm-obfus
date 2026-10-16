@@ -68,6 +68,22 @@ struct ScalarEnumerationTraits<obf::constant_protection_mode> {
 };
 
 template <>
+struct ScalarEnumerationTraits<obf::proxy_mode_policy> {
+  static void enumeration(IO& io, obf::proxy_mode_policy& mode) {
+    io.enumCase(mode, "mixed", obf::proxy_mode_policy::mixed);
+    io.enumCase(mode, "stateful_only", obf::proxy_mode_policy::stateful_only);
+  }
+};
+
+template <>
+struct ScalarEnumerationTraits<obf::proxy_coverage_policy> {
+  static void enumeration(IO& io, obf::proxy_coverage_policy& coverage) {
+    io.enumCase(coverage, "required", obf::proxy_coverage_policy::required);
+    io.enumCase(coverage, "best_effort", obf::proxy_coverage_policy::best_effort);
+  }
+};
+
+template <>
 struct MappingTraits<obf::target_rule> {
   static void mapping(IO& io, obf::target_rule& rule) {
     io.mapRequired("match", rule.match);
@@ -155,6 +171,40 @@ struct MappingTraits<obf::indirect_dispatch_config> {
 };
 
 template <>
+struct MappingTraits<obf::call_proxy_options> {
+  static void mapping(IO& io, obf::call_proxy_options& config) {
+    io.mapOptional("enabled", config.enabled, false);
+    io.mapOptional("min_hops", config.min_hops, std::uint32_t{2});
+    io.mapOptional("max_hops", config.max_hops, std::uint32_t{4});
+    io.mapOptional("mode_policy", config.mode_policy, obf::proxy_mode_policy::mixed);
+    io.mapOptional("coverage_policy", config.coverage_policy, obf::proxy_coverage_policy::required);
+    io.mapOptional("share_nodes", config.share_nodes, true);
+    io.mapOptional("decoy_budget", config.decoy_budget, std::uint32_t{1});
+    io.mapOptional("max_sites_per_owner", config.max_sites_per_owner, std::uint32_t{16});
+    io.mapOptional("max_nodes_per_module", config.max_nodes_per_module, std::uint32_t{4096});
+    io.mapOptional(
+        "max_context_bytes_per_owner", config.max_context_bytes_per_owner, std::uint32_t{4096});
+    io.mapOptional(
+        "max_routes_per_shared_node", config.max_routes_per_shared_node, std::uint32_t{16});
+    io.mapOptional(
+        "max_added_ir_instructions", config.max_added_ir_instructions, std::uint32_t{65536});
+  }
+
+  static std::string validate(IO&, obf::call_proxy_options& config) {
+    if (config.min_hops < 2 || config.min_hops > config.max_hops || config.max_hops > 8) {
+      return "call_proxy requires 2 <= min_hops <= max_hops <= 8";
+    }
+    if (config.decoy_budget > 2) { return "call_proxy.decoy_budget must be between 0 and 2"; }
+    if (config.max_sites_per_owner == 0 || config.max_nodes_per_module == 0 ||
+        config.max_context_bytes_per_owner == 0 || config.max_routes_per_shared_node == 0 ||
+        config.max_added_ir_instructions == 0) {
+      return "call_proxy resource budgets must be positive finite integers";
+    }
+    return {};
+  }
+};
+
+template <>
 struct MappingTraits<obf::self_checksum_config> {
   static void mapping(IO& io, obf::self_checksum_config& config) {
     io.mapOptional("enabled", config.enabled, false);
@@ -190,6 +240,7 @@ struct MappingTraits<obf::obfuscation_config> {
     io.mapOptional("mba", config.mba);
     io.mapOptional("vm", config.vm);
     io.mapOptional("indirect_dispatch", config.indirect_dispatch);
+    io.mapOptional("call_proxy", config.call_proxy);
     io.mapOptional("self_checksum", config.self_checksum);
     io.mapOptional("security", config.security);
     io.mapOptional("debug_preserve_generated_names", config.debug_preserve_generated_names, false);
@@ -219,6 +270,7 @@ struct config_parse_presence {
   bool zero_comparison = false;
   bool vm = false;
   bool indirect_dispatch = false;
+  bool call_proxy = false;
   bool self_checksum = false;
   bool security = false;
   bool debug_preserve_generated_names = false;
@@ -250,6 +302,8 @@ void mark_config_presence(config_parse_presence& presence, llvm::StringRef key) 
     presence.vm = true;
   } else if (key == "indirect_dispatch") {
     presence.indirect_dispatch = true;
+  } else if (key == "call_proxy") {
+    presence.call_proxy = true;
   } else if (key == "self_checksum") {
     presence.self_checksum = true;
   } else if (key == "security") {
@@ -383,6 +437,7 @@ obfuscation_config apply_profile_defaults(const obfuscation_config& raw_config,
   if (presence.mba) { config.mba = raw_config.mba; }
   if (presence.vm) { config.vm = raw_config.vm; }
   if (presence.indirect_dispatch) { config.indirect_dispatch = raw_config.indirect_dispatch; }
+  if (presence.call_proxy) { config.call_proxy = raw_config.call_proxy; }
   if (presence.self_checksum) { config.self_checksum = raw_config.self_checksum; }
   if (presence.security) { config.security = raw_config.security; }
   if (presence.debug_preserve_generated_names) {
@@ -567,6 +622,19 @@ void validate_effective_config(const obfuscation_config& config) {
   if (config.vm.max_virtual_instructions == 0) {
     llvm::report_fatal_error("config error: vm.max_virtual_instructions must be >= 1");
   }
+  const call_proxy_options& proxy = config.call_proxy;
+  if (proxy.min_hops < 2 || proxy.min_hops > proxy.max_hops || proxy.max_hops > 8) {
+    llvm::report_fatal_error("config error: call_proxy requires 2 <= min_hops <= max_hops <= 8");
+  }
+  if (proxy.decoy_budget > 2) {
+    llvm::report_fatal_error("config error: call_proxy.decoy_budget must be between 0 and 2");
+  }
+  if (proxy.max_sites_per_owner == 0 || proxy.max_nodes_per_module == 0 ||
+      proxy.max_context_bytes_per_owner == 0 || proxy.max_routes_per_shared_node == 0 ||
+      proxy.max_added_ir_instructions == 0) {
+    llvm::report_fatal_error(
+        "config error: call_proxy resource budgets must be positive finite integers");
+  }
   if (config.security.allow_unsafe_config) { return; }
 
   if (config.debug_preserve_generated_names && config_selects_vm(config)) {
@@ -675,6 +743,26 @@ llvm::StringRef to_string(constant_protection_mode mode) {
       return "all";
   }
   llvm_unreachable("unknown constant protection mode");
+}
+
+llvm::StringRef to_string(proxy_mode_policy mode) {
+  switch (mode) {
+    case proxy_mode_policy::mixed:
+      return "mixed";
+    case proxy_mode_policy::stateful_only:
+      return "stateful_only";
+  }
+  llvm_unreachable("unknown proxy mode policy");
+}
+
+llvm::StringRef to_string(proxy_coverage_policy coverage) {
+  switch (coverage) {
+    case proxy_coverage_policy::required:
+      return "required";
+    case proxy_coverage_policy::best_effort:
+      return "best_effort";
+  }
+  llvm_unreachable("unknown proxy coverage policy");
 }
 
 llvm::Expected<obfuscation_config> load_config_from_file(llvm::StringRef path) {
@@ -796,6 +884,22 @@ std::string summarize_config(const obfuscation_config& config) {
          << (config.indirect_dispatch.target_vm_dispatchers ? "true" : "false") << '\n';
   stream << "indirect_dispatch.target_flattened_headers: "
          << (config.indirect_dispatch.target_flattened_headers ? "true" : "false") << '\n';
+  stream << "call_proxy.enabled: " << (config.call_proxy.enabled ? "true" : "false") << '\n';
+  stream << "call_proxy.min_hops: " << config.call_proxy.min_hops << '\n';
+  stream << "call_proxy.max_hops: " << config.call_proxy.max_hops << '\n';
+  stream << "call_proxy.mode_policy: " << to_string(config.call_proxy.mode_policy) << '\n';
+  stream << "call_proxy.coverage_policy: " << to_string(config.call_proxy.coverage_policy) << '\n';
+  stream << "call_proxy.share_nodes: " << (config.call_proxy.share_nodes ? "true" : "false")
+         << '\n';
+  stream << "call_proxy.decoy_budget: " << config.call_proxy.decoy_budget << '\n';
+  stream << "call_proxy.max_sites_per_owner: " << config.call_proxy.max_sites_per_owner << '\n';
+  stream << "call_proxy.max_nodes_per_module: " << config.call_proxy.max_nodes_per_module << '\n';
+  stream << "call_proxy.max_context_bytes_per_owner: "
+         << config.call_proxy.max_context_bytes_per_owner << '\n';
+  stream << "call_proxy.max_routes_per_shared_node: "
+         << config.call_proxy.max_routes_per_shared_node << '\n';
+  stream << "call_proxy.max_added_ir_instructions: " << config.call_proxy.max_added_ir_instructions
+         << '\n';
   stream << "security.strong_vm_invariants: always_enforced\n";
   stream << "security.fail_on_public_obf_symbol: "
          << (config.security.fail_on_public_obf_symbol ? "true" : "false") << '\n';

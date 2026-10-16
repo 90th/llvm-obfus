@@ -5,6 +5,7 @@
 #include "obf/policy/policy_engine.h"
 #include "obf/report/coverage_report.h"
 #include "obf/support/stable_hash.h"
+#include "obf/transforms/call_proxy_chains.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -122,9 +123,9 @@ bool can_revisit_orchestrator_promotion(const function_pipeline_state& state) {
 
 bool is_user_pipeline_function(const llvm::Function& function) {
   const llvm::StringRef name = function.getName();
-  return !name.starts_with("__obf_") && !name.starts_with("llvm.") &&
-         !name.starts_with("rt_core_") && !name.starts_with("_obf_") &&
-         !name.contains("ObfEntropy");
+  return !is_call_proxy_helper(function) && !name.starts_with("__obf_") &&
+         !name.starts_with("llvm.") && !name.starts_with("rt_core_") &&
+         !name.starts_with("_obf_") && !name.contains("ObfEntropy");
 }
 
 void resolve_non_generic_configured_names(const llvm::Module& module,
@@ -403,6 +404,8 @@ std::uint64_t compute_lto_config_identity(const obfuscation_config& config) {
   identity = mix_seed(identity, config.self_checksum.window_size);
   identity = mix_seed(identity, config.self_checksum.max_sites);
   identity = mix_seed(identity, config.self_checksum.seed);
+  identity = mix_seed(identity, call_proxy_schema);
+  identity = stable_hash_string(proxy_qualification_identity, identity);
   return mix_seed(identity, get_obf_seed_override());
 }
 
@@ -603,6 +606,12 @@ build_lto_pipeline_state(llvm::Module& module, const obfuscation_config& config,
       }
       state.report.decision = select_policy(
           module, state.report.features, policy_config, state.report.annotation);
+      if (is_call_proxy_helper(function)) {
+        state.report.decision.source = policy_source::default_policy;
+        state.report.decision.detail = "runtime internal forced none";
+        state.report.decision.policy = make_function_policy(protection_level::none);
+        state.skip_transform_stages = true;
+      }
     }
     states.push_back(std::move(state));
     if (coverage_reporting_enabled(module) &&

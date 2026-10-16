@@ -21,6 +21,7 @@ struct function_pipeline_state;
 struct obfuscation_config;
 struct function_report_entry;
 class native_string_ownership;
+class live_proxy_site_registry;
 // Note: protection_level is defined in config.h (included above), no forward needed
 
 using instruction_substitution_stage_candidates =
@@ -131,7 +132,8 @@ bool apply_indirect_dispatch_to_functions(const virtualized_function_map& virtua
 // VM rewriting and utilities
 bool rewrite_calls_to_virtualized_functions(llvm::Module& module,
                                             const virtualized_function_map& virtualized_functions,
-                                            std::uint32_t mba_depth);
+                                            std::uint32_t mba_depth,
+                                            live_proxy_site_registry* registry);
 
 llvm::StringSet<>
 collect_virtualized_function_names(const virtualized_function_map& virtualized_functions);

@@ -7,6 +7,7 @@
 #include "obf/plugin/obfuscator_plugin_internal.h"
 
 #include "obf/support/stable_hash.h"
+#include "obf/transforms/call_proxy_sites.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
@@ -41,8 +42,63 @@ void preserve_ordinary_callsite_semantics(llvm::CallInst* rewritten, llvm::CallB
   }
 }
 
+live_proxy_site make_proxy_vm_site(live_proxy_site_registry& registry,
+                                   const virtualized_function_binding& binding,
+                                   llvm::CallBase& original,
+                                   llvm::CallBase& replacement,
+                                   llvm::Value* target_pointer,
+                                   llvm::Value* hidden_token,
+                                   llvm::Value* return_decode,
+                                   std::uint64_t decision_seed,
+                                   bool no_cache,
+                                   bool preserved_musttail = false,
+                                   bool preserved_unsupported = false) {
+  live_proxy_site result;
+  const auto source = registry.source_identity(original);
+  result.identity = source;
+  result.owner_function = replacement.getFunction();
+  result.source_owner_function = original.getFunction();
+  result.replacement_call = &replacement;
+  result.decoded_target = target_pointer;
+  result.hidden_token_operand = hidden_token;
+  result.encoded_result = &replacement;
+  result.return_decode_root = return_decode;
+  result.expected_target = preserved_musttail || preserved_unsupported
+                               ? binding.interface_function
+                               : binding.entry_thunk_function;
+  result.binding.module_id = source.module_id;
+  result.binding.owner_id =
+      stable_hash_string(binding.interface_function->getName(), source.module_id);
+  result.binding.binding_id = stable_hash_string(binding.vm_symbol_tag, result.binding.owner_id);
+  if (result.binding.owner_id == 0) { result.binding.owner_id = 1; }
+  if (result.binding.binding_id == 0) { result.binding.binding_id = 1; }
+  result.binding.symbol_tag = binding.vm_symbol_tag;
+  result.binding.no_cache = no_cache;
+  result.decision_seed = decision_seed;
+  result.required = registry.owner_required(*binding.interface_function) ||
+                    (binding.state != nullptr &&
+                     binding.state->report.decision.policy.level == protection_level::strong_vm);
+  result.is_vm = true;
+  result.preserved_musttail = preserved_musttail;
+  result.preserved_unsupported = preserved_unsupported;
+  result.effective_abi = make_proxy_abi_descriptor(replacement);
+  result.return_contract.binding_id = result.binding.binding_id;
+  result.return_contract.key_global_name = make_vm_retkey_global_name(binding.vm_symbol_tag);
+  result.return_contract.role =
+      replacement.getType()->isVoidTy()
+          ? vm_result_role::void_result
+          : (replacement.getType()->isIntegerTy() && !preserved_musttail && !preserved_unsupported
+                 ? vm_result_role::encoded_integer
+                 : vm_result_role::unchanged_result);
+  if (replacement.getType()->isIntegerTy()) {
+    result.return_contract.integer_width = replacement.getType()->getIntegerBitWidth();
+  }
+  return result;
+}
+
 bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& binding,
-                                           std::uint32_t mba_depth) {
+                                           std::uint32_t mba_depth,
+                                           live_proxy_site_registry* registry) {
   if (binding.interface_function == nullptr || binding.implementation_function == nullptr ||
       binding.entry_thunk_function == nullptr || binding.call_sites.empty()) {
     return false;
@@ -99,7 +155,48 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
   for (const virtualized_call_site& site : binding.call_sites) {
     llvm::CallBase* call = llvm::dyn_cast_or_null<llvm::CallBase>(site.call);
     if (call == nullptr) { continue; }
-    if (!site.rewritable) { continue; }
+    if (!site.rewritable) {
+      if (registry != nullptr) {
+        const bool is_musttail = site.kind == vm_incoming_site_kind::musttail;
+        auto record = make_proxy_vm_site(*registry,
+                                         binding,
+                                         *call,
+                                         *call,
+                                         call->getCalledOperand(),
+                                         nullptr,
+                                         nullptr,
+                                         decision_seed,
+                                         resolver_shape == vm_resolver_shape::local_always_decode,
+                                         is_musttail,
+                                         !is_musttail);
+        if (is_musttail) {
+          registry->register_preserved_musttail(*call, std::move(record));
+        } else {
+          switch (site.kind) {
+            case vm_incoming_site_kind::invoke:
+              record.preservation_reason = "preserved_vm_invoke";
+              break;
+            case vm_incoming_site_kind::callbr:
+              record.preservation_reason = "preserved_vm_callbr";
+              break;
+            case vm_incoming_site_kind::operand_bundles:
+              record.preservation_reason = "preserved_vm_operand_bundles";
+              break;
+            case vm_incoming_site_kind::abi_mismatch:
+              record.preservation_reason = "preserved_vm_abi_mismatch";
+              break;
+            case vm_incoming_site_kind::ordinary_call:
+              record.preservation_reason = "preserved_vm_target_resolution";
+              break;
+            case vm_incoming_site_kind::musttail:
+              llvm::report_fatal_error(
+                  "VM preserved call has no supported boundary classification");
+          }
+          registry->register_preserved_site(*call, std::move(record));
+        }
+      }
+      continue;
+    }
     llvm::BasicBlock* call_block = call->getParent();
     if (call_block == nullptr || call->getCalledOperand()->stripPointerCasts() != &function) {
       continue;
@@ -176,6 +273,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
       preserve_ordinary_callsite_semantics(rewritten_call, call);
 
       llvm::Type* call_ret_type = rewritten_call->getType();
+      llvm::Value* return_decode = nullptr;
       if (call_ret_type->isIntegerTy()) {
         llvm::Value* decoded_ret =
             decode_virtualized_integer_return(builder,
@@ -187,9 +285,25 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
                                               site.hidden_token,
                                               mba_depth);
 
+        return_decode = decoded_ret;
         for (llvm::Use* use : original_uses) { use->set(decoded_ret); }
       } else {
         for (llvm::Use* use : original_uses) { use->set(rewritten_call); }
+      }
+
+      if (registry != nullptr) {
+        auto record = make_proxy_vm_site(*registry,
+                                         binding,
+                                         *call,
+                                         *rewritten_call,
+                                         indirect_target,
+                                         hidden_token,
+                                         return_decode,
+                                         decision_seed,
+                                         true);
+        record.original_site_token = site.hidden_token;
+        record.return_contract.token = site.hidden_token;
+        registry->register_rewrite(*call, std::move(record));
       }
 
       call->eraseFromParent();
@@ -289,6 +403,7 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
     preserve_ordinary_callsite_semantics(rewritten_call, call);
 
     llvm::Type* call_ret_type = rewritten_call->getType();
+    llvm::Value* return_decode = nullptr;
     if (call_ret_type->isIntegerTy()) {
       llvm::IRBuilder<> decode_builder(call);
       llvm::Value* decoded_ret =
@@ -301,9 +416,25 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
                                             site.hidden_token,
                                             mba_depth);
 
+      return_decode = decoded_ret;
       for (llvm::Use* use : original_uses) { use->set(decoded_ret); }
     } else {
       for (llvm::Use* use : original_uses) { use->set(rewritten_call); }
+    }
+
+    if (registry != nullptr) {
+      auto record = make_proxy_vm_site(*registry,
+                                       binding,
+                                       *call,
+                                       *rewritten_call,
+                                       indirect_target,
+                                       hidden_token,
+                                       return_decode,
+                                       decision_seed,
+                                       false);
+      record.original_site_token = site.hidden_token;
+      record.return_contract.token = site.hidden_token;
+      registry->register_rewrite(*call, std::move(record));
     }
 
     call->eraseFromParent();
@@ -316,12 +447,14 @@ bool rewrite_calls_to_virtualized_function(const virtualized_function_binding& b
 
 }  // namespace
 
-bool rewrite_calls_to_virtualized_functions(llvm::Module&,
+bool rewrite_calls_to_virtualized_functions(llvm::Module& module,
                                             const virtualized_function_map& virtualized_functions,
-                                            std::uint32_t mba_depth) {
+                                            std::uint32_t mba_depth,
+                                            live_proxy_site_registry* registry) {
+  if (registry != nullptr) { registry->snapshot_source_sites(module); }
   bool changed = false;
   for (const auto& entry : virtualized_functions) {
-    changed |= rewrite_calls_to_virtualized_function(entry.second, mba_depth);
+    changed |= rewrite_calls_to_virtualized_function(entry.second, mba_depth, registry);
   }
 
   return changed;

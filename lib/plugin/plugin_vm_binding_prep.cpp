@@ -556,8 +556,8 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
 
   std::uint64_t callsite_ordinal = 0;
   for (const vm_boundary_site& boundary_site : boundary.sites) {
-    // Restricted sites also keep their downstream caller-preservation record.
-    if (!rewrite_direct_calls && boundary_site.rewritable) { continue; }
+    // Resolution-preserved sites remain explicit obligations even when their
+    // ordinary ABI would otherwise allow a private-thunk rewrite.
     llvm::CallBase* call = boundary_site.call;
     if (call == nullptr) { continue; }
     llvm::Function* caller = call->getFunction();
@@ -570,7 +570,7 @@ prepare_virtualized_function_binding(const function_pipeline_state& state,
                                                 caller->getName(),
                                                 callsite_ordinal++),
          .kind = boundary_site.kind,
-         .rewritable = boundary_site.rewritable});
+         .rewritable = boundary_site.rewritable && rewrite_direct_calls});
   }
 
   if (reporting) {

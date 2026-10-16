@@ -7,9 +7,12 @@
 
 namespace obf {
 
+class live_proxy_site_registry;
+
 bool rewrite_calls_to_virtualized_functions(llvm::Module& module,
                                             const virtualized_function_map& virtualized_functions,
-                                            std::uint32_t mba_depth);
+                                            std::uint32_t mba_depth,
+                                            live_proxy_site_registry* registry);
 }
 
 #endif
