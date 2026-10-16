@@ -66,6 +66,16 @@ std::uint64_t hash(StringRef text) { return stable_hash_string(text); }
 std::uint64_t combine(std::uint64_t a, std::uint64_t b) { return mix_seed(a, b); }
 std::uint64_t nonzero(std::uint64_t value) { return value ? value : 1; }
 std::string number(std::uint64_t n) { return std::to_string(n); }
+std::uint64_t hash_route_identity(std::uint64_t decision_seed,
+                                  const source_site_identity& identity) {
+  // Fixed-width little-endian fields keep the tuple ordered and unambiguous.
+  std::array<char, 16> bytes;
+  for (unsigned i = 0; i < 8; ++i) {
+    bytes[i] = static_cast<char>(identity.site_id >> (i * 8));
+    bytes[i + 8] = static_cast<char>(identity.instance_id >> (i * 8));
+  }
+  return stable_hash_string(StringRef(bytes.data(), bytes.size()), decision_seed);
+}
 std::uint64_t checked_add(Module& m, std::uint64_t a, std::uint64_t b) {
   if (b > std::numeric_limits<std::uint64_t>::max() - a) fail(m, "resource count overflow");
   return a + b;
@@ -737,7 +747,7 @@ plan_call_proxy_chains_impl(Module& m,
     proxy_route_descriptor r;
     r.source = source;
     const auto& id = source.site.identity;
-    r.route_seed = combine(source.site.decision_seed, combine(id.site_id, id.instance_id));
+    r.route_seed = hash_route_identity(source.site.decision_seed, id);
     r.route_id = nonzero(combine(combine(id.module_id, id.owner_id), r.route_seed));
     if (!route_ids.insert(r.route_id).second) fail(m, "deterministic route identity collision");
     r.terminal_id = nonzero(combine(r.route_id, 0x7465726d696e616cULL));

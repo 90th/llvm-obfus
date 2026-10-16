@@ -8,5 +8,6 @@
 - Keep runtime, checksum, entropy, and complete string-copy authentication paths outside proxy selection.
 - Require platform, ABI, unwind, hardening, runtime, LTO, and performance qualification before release enablement.
 - Keep each original `musttail` call and return in one block when block splitting selects a boundary.
+- Fix call-proxy route identity collisions between distinct call sites in one owner.
 
 This change does not establish production readiness or measured resistance to target recovery.
