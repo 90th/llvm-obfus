@@ -89,6 +89,68 @@ void test_stateful_and_effects() {
          "stateful route must satisfy LLVM verification");
 }
 
+void test_multiple_calls_in_one_owner() {
+  llvm::LLVMContext context;
+  llvm::Module module("proxy.multicall", context);
+  module.setTargetTriple(llvm::Triple("x86_64-unknown-linux-gnu"));
+  module.setDataLayout("e-p:64:64-i64:64-n8:16:32:64-S128");
+  auto* type = llvm::FunctionType::get(
+      llvm::Type::getInt64Ty(context), {llvm::Type::getInt64Ty(context)}, false);
+  auto* target =
+      llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage, "target", module);
+  auto* owner =
+      llvm::Function::Create(type, llvm::GlobalValue::InternalLinkage, "owner", module);
+  llvm::IRBuilder<> b(llvm::BasicBlock::Create(context, "entry", owner));
+  auto* first = b.CreateCall(target, {owner->getArg(0)});
+  auto* second = b.CreateCall(target, {first});
+  b.CreateRet(b.CreateCall(target, {second}));
+  obf::live_proxy_site_registry sites;
+  sites.register_selected_owner(*owner, 0x123456789, true);
+  sites.discover_native_sites(module);
+  obf::call_proxy_options options;
+  options.enabled = true;
+  options.min_hops = options.max_hops = 2;
+  options.coverage_policy = obf::proxy_coverage_policy::required;
+  obf::proxy_contract_registry contracts;
+  const auto result = obf::apply_call_proxy_chain_stage(module, options, sites, contracts);
+  expect(result.exact.sites == 3 && contracts.contracts.size() == 3,
+         "all three calls in one owner receive proxy routes");
+  for (std::size_t i = 0; i < contracts.contracts.size(); ++i)
+    for (std::size_t j = i + 1; j < contracts.contracts.size(); ++j) {
+      const auto& left = contracts.contracts[i].route;
+      const auto& right = contracts.contracts[j].route;
+      expect(left.route_seed != right.route_seed && left.route_id != right.route_id,
+             "distinct calls in one owner have distinct route seeds and route IDs");
+    }
+  expect(!llvm::verifyModule(module, &llvm::errs()),
+         "three-call owner compiles to valid LLVM IR");
+}
+
+void test_route_seed_tuple_inputs() {
+  fixture f;
+  auto site = f.sites.sites().front();
+  const auto admission = obf::analyze_proxy_site(
+      site, obf::proxy_platform_contract_for(f.module), f.options);
+  const auto seed_for = [&](std::uint64_t site_id,
+                            std::uint64_t instance_id,
+                            std::uint64_t decision_seed) {
+    auto input = site;
+    input.identity.site_id = site_id;
+    input.identity.instance_id = instance_id;
+    input.decision_seed = decision_seed;
+    const obf::admitted_proxy_site admitted{input, admission};
+    const auto plan = obf::plan_call_proxy_chains(f.module, {admitted}, f.options);
+    expect(plan.routes.size() == 1, "tuple input has one admitted route");
+    return plan.routes.empty() ? 0 : plan.routes.front().route_seed;
+  };
+  const auto seed = seed_for(17, 29, 53);
+  expect(seed == seed_for(17, 29, 53), "route seed is deterministic");
+  expect(seed != seed_for(29, 17, 53), "route seed preserves tuple order");
+  expect(seed != seed_for(17, 31, 53), "cloned site instances have distinct route seeds");
+  expect(seed != seed_for(19, 29, 53), "route seed includes the source site");
+  expect(seed != seed_for(17, 29, 59), "route seed includes the decision seed");
+}
+
 void test_equivalent_single_route_dispatch() {
   fixture f;
   f.emit();
@@ -384,6 +446,8 @@ int main(int argc, char** argv) {
     return 2;
   }
   test_stateful_and_effects();
+  test_multiple_calls_in_one_owner();
+  test_route_seed_tuple_inputs();
   test_equivalent_single_route_dispatch();
   test_target_checker_lto_guard_transport();
   test_abi_only_and_admission();
