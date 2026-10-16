@@ -8,7 +8,6 @@
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-unsafe.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=UNSAFE
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-wildcard-vm.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=WILDCARD
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-duplicate-overlap.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=DUPLICATE
-; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-vm.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=VM
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-overlap.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=OVERLAP
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-alias-duplicate.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=ALIAS-DUPLICATE
 ; RUN: not --crash %opt -load-pass-plugin %obf_plugin --obf-config=%S/../Inputs/frontend-policy-alias-wildcard.yaml -passes=obf-safe-pipeline -disable-output %s 2>&1 | %FileCheck %s --check-prefix=ALIAS-WILDCARD
@@ -96,7 +95,6 @@ entry:
 ; UNSAFE: LLVM ERROR: config error: non-generic frontend forbids security.allow_unsafe_config
 ; WILDCARD: LLVM ERROR: config error: non-generic frontend target 'selected_*' must use an exact function name
 ; DUPLICATE: LLVM ERROR: config error: non-generic frontend has duplicate configured function 'duplicate_target'
-; VM: LLVM ERROR: config error: non-generic frontend entries must use light or strong
 ; OVERLAP: LLVM ERROR: config error: non-generic frontend target/override overlap 'overlap_target'
 ; ALIAS-DUPLICATE: LLVM ERROR: config error: non-generic frontend configured function 'duplicate_alias_two' resolves to a function already selected by another target or override
 ; ALIAS-WILDCARD: LLVM ERROR: config error: non-generic frontend configured alias 'wildcard_aliasee_alias' resolves to function 'selected*' whose name is not exact; aliases must resolve to names without '*' or '?'

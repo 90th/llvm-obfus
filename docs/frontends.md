@@ -37,7 +37,7 @@ For `frontend: rust`, `zig`, or `tinygo`:
 
 1. Set `default_level: none`.
 2. Select defined functions with exact `targets[].match` or `overrides[].name` entries.
-3. Use only `light` or `strong` for those entries.
+3. For Rust and Zig, use `light`, `strong`, `vm`, or `strong_vm`. For TinyGo, use only `light` or `strong`.
 4. Set `security.strip_release_markers: true`.
 5. Keep `security.allow_unsafe_config: false`.
 
@@ -45,6 +45,15 @@ Do not use wildcards, duplicate selections, or target/override overlaps.
 An exact alias can select its defined implementation.
 Two aliases cannot select the same implementation twice.
 Missing definitions cause an error instead of a silent skip.
+
+Rust and Zig VM selections must use the C calling convention and contain no local exception handling.
+These restrictions apply to the resolved definition, including definitions selected through aliases.
+An alias alone does not prevent VM admission. Stored or otherwise escaped function addresses still prevent VM admission.
+Use the coverage ledger to check whole-function admission and emission. Policy selection alone does not prove VM execution.
+
+Rust O0 can leave local EH pads after inlining.
+The O0 VM fixtures use `-Cpanic=abort` to produce boundaries without local EH.
+The compiler still rejects VM selections that contain local EH.
 
 These frontends ignore source annotations and leave unmatched functions at `none`.
 A security floor can raise a selected `light` function to `strong`.
@@ -232,6 +241,14 @@ Zig can represent the export as an alias to an internal definition.
 The non-generic selector resolver follows that alias.
 Use C-compatible exported argument and result types.
 The repository fixture also covers an `extern struct` argument.
+
+The native component fixture checks `vm` and `strong_vm` through exported aliases with exact targets and overrides.
+It checks whole-function VM ledgers and native output under ReleaseFast and Debug.
+Debug bitcode needs the existing `obf-prepare-o0` pass before `obf-bc` to promote supported non-escaping locals.
+This preparation does not permit escaping allocas or unsupported VM boundaries.
+The Debug fixture uses the configured LLVM `llc` to compile protected bitcode before Zig links the object.
+This avoids passing newer LLVM intrinsic signatures to an older LLVM embedded in Zig.
+ReleaseFast retains the direct protected-bitcode link check.
 
 This command sequence requires a component source and a separate Zig application source that calls its export.
 The application must not compile the component source again.

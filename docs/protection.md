@@ -142,6 +142,19 @@ Counts use unsigned modulo-width semantics, including zero, non-power-of-two wid
 The lowering freezes repeated inputs and keeps both shift counts below the operand width.
 Vector funnel shifts remain unsupported.
 
+Scalar `llvm.abs`, `llvm.scmp`, and `llvm.ucmp` use existing VM operations.
+Comparison result widths can differ from operand widths.
+The VM also synthesizes signed and unsigned saturating add/subtract and overflow-reporting add/subtract/multiply.
+Overflow results contain the wrapped arithmetic value and the overflow flag.
+Repeated inputs use one frozen choice per operand.
+For `llvm.abs`, the signed-minimum result is poison only when `is_int_min_poison` is true.
+Ordered comparisons need one extra integer bit. Full products need twice the operand width.
+VM admission rejects operations that exceed LLVM's integer-width limit.
+Vector forms remain unsupported.
+
+Lifetime, assume, and noalias-scope declarations emit no VM operation.
+Scalar expect intrinsics forward their value operand, including values on PHI edges.
+
 Vector select conditions remain lane-wise LLVM selects.
 When a scalar select handler introduces a branch, it freezes the condition first.
 Do not extend this rule to all VM branches or all poison behavior.

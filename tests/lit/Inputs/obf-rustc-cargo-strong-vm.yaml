@@ -1,0 +1,18 @@
+frontend: rust
+seed: 31337
+default_level: none
+targets:
+  - match: cargo_selected_target
+    level: strong
+  - match: cargo_vm_target
+    level: strong_vm
+overrides:
+  - name: cargo_vm_override
+    level: strong_vm
+string_encoding:
+  authenticated_mode: true
+  prefer_lazy_decode: true
+  allow_ctor_fallback: false
+security:
+  strip_release_markers: true
+  fail_on_public_obf_symbol: true

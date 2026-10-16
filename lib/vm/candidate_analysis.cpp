@@ -13,6 +13,7 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/Type.h"
 
+#include <initializer_list>
 #include <optional>
 #include <string>
 
@@ -186,6 +187,48 @@ bool is_scalar_funnel_shift_intrinsic(const llvm::IntrinsicInst& instruction) {
     case llvm::Intrinsic::fshl:
     case llvm::Intrinsic::fshr:
       return instruction.getType()->isIntegerTy() && instruction.arg_size() == 3;
+    default:
+      return false;
+  }
+}
+
+bool is_ignored_intrinsic(const llvm::IntrinsicInst& instruction) {
+  switch (instruction.getIntrinsicID()) {
+    case llvm::Intrinsic::lifetime_start:
+    case llvm::Intrinsic::lifetime_end:
+    case llvm::Intrinsic::assume:
+    case llvm::Intrinsic::experimental_noalias_scope_decl:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool is_scalar_expect_intrinsic(const llvm::IntrinsicInst& instruction) {
+  return instruction.getType()->isIntegerTy() &&
+         (instruction.getIntrinsicID() == llvm::Intrinsic::expect ||
+          instruction.getIntrinsicID() == llvm::Intrinsic::expect_with_probability);
+}
+
+bool is_synthesized_scalar_intrinsic(const llvm::IntrinsicInst& instruction) {
+  if (instruction.arg_empty() || !instruction.getArgOperand(0)->getType()->isIntegerTy()) {
+    return false;
+  }
+  switch (instruction.getIntrinsicID()) {
+    case llvm::Intrinsic::abs:
+    case llvm::Intrinsic::scmp:
+    case llvm::Intrinsic::ucmp:
+    case llvm::Intrinsic::uadd_sat:
+    case llvm::Intrinsic::usub_sat:
+    case llvm::Intrinsic::sadd_sat:
+    case llvm::Intrinsic::ssub_sat:
+    case llvm::Intrinsic::uadd_with_overflow:
+    case llvm::Intrinsic::sadd_with_overflow:
+    case llvm::Intrinsic::usub_with_overflow:
+    case llvm::Intrinsic::ssub_with_overflow:
+    case llvm::Intrinsic::umul_with_overflow:
+    case llvm::Intrinsic::smul_with_overflow:
+      return true;
     default:
       return false;
   }
@@ -373,14 +416,10 @@ candidate_result build_program(const llvm::Function& function,
     for (const llvm::Instruction& instruction : block) {
       if (llvm::isa<llvm::DbgInfoIntrinsic>(&instruction)) { continue; }
 
-      if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction)) {
-        switch (intrinsic->getIntrinsicID()) {
-          case llvm::Intrinsic::lifetime_start:
-          case llvm::Intrinsic::lifetime_end:
-            continue;
-          default:
-            break;
-        }
+      if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction);
+          intrinsic != nullptr &&
+          (is_ignored_intrinsic(*intrinsic) || is_scalar_expect_intrinsic(*intrinsic))) {
+        continue;
       }
 
       if (!is_supported_type(instruction.getType())) {
@@ -399,11 +438,17 @@ candidate_result build_program(const llvm::Function& function,
 
   const auto lower_value = [&](const llvm::Value& value,
                                std::string& detail) -> std::optional<value_ref> {
-    if (const auto iterator = slots.find(&value); iterator != slots.end()) {
+    const llvm::Value* operand = &value;
+    while (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(operand)) {
+      if (!is_scalar_expect_intrinsic(*intrinsic)) { break; }
+      operand = intrinsic->getArgOperand(0);
+    }
+
+    if (const auto iterator = slots.find(operand); iterator != slots.end()) {
       return value_ref{.kind = value_ref_kind::slot, .slot = iterator->second};
     }
 
-    const auto* constant = llvm::dyn_cast<llvm::Constant>(&value);
+    const auto* constant = llvm::dyn_cast<llvm::Constant>(operand);
     if (constant == nullptr || !is_supported_type(constant->getType())) {
       detail = "unsupported SSA operand";
       return std::nullopt;
@@ -477,6 +522,20 @@ candidate_result build_program(const llvm::Function& function,
   };
 
   std::string detail;
+  const auto emit_synthesized = [&](opcode operation,
+                                    const llvm::Type* result_type,
+                                    std::initializer_list<value_ref> operands,
+                                    std::uint32_t flags = 0) {
+    const std::uint32_t slot = add_slot(program, result_type);
+    micro_instruction expanded;
+    expanded.op = operation;
+    expanded.result_slot = slot;
+    expanded.flags = flags;
+    expanded.operands = operands;
+    program.instructions.push_back(std::move(expanded));
+    return value_ref{.kind = value_ref_kind::slot, .slot = slot};
+  };
+
   for (const llvm::BasicBlock& block : function) {
     program.blocks[block_ids.lookup(&block)].first_instruction =
         static_cast<std::uint32_t>(program.instructions.size());
@@ -487,14 +546,10 @@ candidate_result build_program(const llvm::Function& function,
         continue;
       }
 
-      if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction)) {
-        switch (intrinsic->getIntrinsicID()) {
-          case llvm::Intrinsic::lifetime_start:
-          case llvm::Intrinsic::lifetime_end:
-            continue;
-          default:
-            break;
-        }
+      if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction);
+          intrinsic != nullptr &&
+          (is_ignored_intrinsic(*intrinsic) || is_scalar_expect_intrinsic(*intrinsic))) {
+        continue;
       }
 
       if (&instruction == block.getTerminator()) { break; }
@@ -514,31 +569,17 @@ candidate_result build_program(const llvm::Function& function,
         if (!lhs || !rhs) { return reject(detail); }
         // One frozen choice per operand keeps undef consistent across VM instructions
         // and prevents a poison comparison from reaching the select handler's branch.
-        const auto freeze_operand = [&](const value_ref& operand) {
-          const std::uint32_t slot = add_slot(program, intrinsic->getType());
-          micro_instruction frozen;
-          frozen.op = opcode::freeze;
-          frozen.result_slot = slot;
-          frozen.operands.push_back(operand);
-          program.instructions.push_back(std::move(frozen));
-          return value_ref{.kind = value_ref_kind::slot, .slot = slot};
-        };
-        const value_ref stable_lhs = freeze_operand(*lhs);
-        const value_ref stable_rhs = freeze_operand(*rhs);
-
-        const std::uint32_t compare_slot =
-            add_slot(program, llvm::Type::getInt1Ty(function.getContext()));
-
-        micro_instruction compare_instruction;
-        compare_instruction.result_slot = compare_slot;
-        compare_instruction.op = extremum_compare_opcode(*intrinsic);
-        compare_instruction.operands.push_back(stable_lhs);
-        compare_instruction.operands.push_back(stable_rhs);
-        program.instructions.push_back(std::move(compare_instruction));
+        const value_ref stable_lhs =
+            emit_synthesized(opcode::freeze, intrinsic->getType(), {*lhs});
+        const value_ref stable_rhs =
+            emit_synthesized(opcode::freeze, intrinsic->getType(), {*rhs});
+        const value_ref compare =
+            emit_synthesized(extremum_compare_opcode(*intrinsic),
+                             llvm::Type::getInt1Ty(function.getContext()),
+                             {stable_lhs, stable_rhs});
 
         vm_instruction.op = opcode::select;
-        vm_instruction.operands.push_back(
-            value_ref{.kind = value_ref_kind::slot, .slot = compare_slot});
+        vm_instruction.operands.push_back(compare);
         vm_instruction.operands.push_back(stable_lhs);
         vm_instruction.operands.push_back(stable_rhs);
         program.instructions.push_back(std::move(vm_instruction));
@@ -566,45 +607,178 @@ candidate_result build_program(const llvm::Function& function,
 
         // Freeze once per argument: repeated count uses must agree for undef,
         // and a poison count must not reach the select handler's branch.
-        const auto freeze_operand = [&](const value_ref& operand) {
-          const std::uint32_t slot = add_slot(program, type);
-          micro_instruction frozen;
-          frozen.op = opcode::freeze;
-          frozen.result_slot = slot;
-          frozen.operands.push_back(operand);
-          program.instructions.push_back(std::move(frozen));
-          return value_ref{.kind = value_ref_kind::slot, .slot = slot};
-        };
-        const auto emit_binary = [&](opcode operation,
-                                     const value_ref& left,
-                                     const value_ref& right,
-                                     const llvm::Type* result_type) {
-          const std::uint32_t slot = add_slot(program, result_type);
-          micro_instruction expanded;
-          expanded.op = operation;
-          expanded.result_slot = slot;
-          expanded.operands = {left, right};
-          program.instructions.push_back(std::move(expanded));
-          return value_ref{.kind = value_ref_kind::slot, .slot = slot};
-        };
-        const value_ref stable_lhs = freeze_operand(*lhs);
-        const value_ref stable_rhs = freeze_operand(*rhs);
-        const value_ref stable_shift = freeze_operand(*shift);
-        const value_ref count = emit_binary(normalize_opcode, stable_shift, modulus, type);
-        const value_ref complement = emit_binary(opcode::sub, width_value, count, type);
-        // Normalize the complementary count as well, so even count == 0 and
-        // i1 use in-range shifts instead of eagerly evaluating a shift by width.
-        const value_ref reverse_count = emit_binary(normalize_opcode, complement, modulus, type);
+        const value_ref stable_lhs = emit_synthesized(opcode::freeze, type, {*lhs});
+        const value_ref stable_rhs = emit_synthesized(opcode::freeze, type, {*rhs});
+        const value_ref stable_shift = emit_synthesized(opcode::freeze, type, {*shift});
+        const value_ref count =
+            emit_synthesized(normalize_opcode, type, {stable_shift, modulus});
+        const value_ref complement = emit_synthesized(opcode::sub, type, {width_value, count});
+        // Normalize both counts so zero and i1 never produce a shift by width.
+        const value_ref reverse_count =
+            emit_synthesized(normalize_opcode, type, {complement, modulus});
         const bool left = intrinsic->getIntrinsicID() == llvm::Intrinsic::fshl;
         const value_ref high =
-            emit_binary(opcode::shl, stable_lhs, left ? count : reverse_count, type);
+            emit_synthesized(opcode::shl, type, {stable_lhs, left ? count : reverse_count});
         const value_ref low =
-            emit_binary(opcode::lshr, stable_rhs, left ? reverse_count : count, type);
-        const value_ref combined = emit_binary(opcode::or_op, high, low, type);
+            emit_synthesized(opcode::lshr, type, {stable_rhs, left ? reverse_count : count});
+        const value_ref combined = emit_synthesized(opcode::or_op, type, {high, low});
         const value_ref is_zero =
-            emit_binary(opcode::icmp_eq, count, zero, llvm::Type::getInt1Ty(function.getContext()));
+            emit_synthesized(opcode::icmp_eq,
+                             llvm::Type::getInt1Ty(function.getContext()),
+                             {count, zero});
         vm_instruction.op = opcode::select;
         vm_instruction.operands = {is_zero, left ? stable_lhs : stable_rhs, combined};
+        program.instructions.push_back(std::move(vm_instruction));
+        continue;
+      }
+
+      if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction);
+          intrinsic != nullptr && is_synthesized_scalar_intrinsic(*intrinsic)) {
+        const llvm::Intrinsic::ID id = intrinsic->getIntrinsicID();
+        llvm::Type* type = intrinsic->getArgOperand(0)->getType();
+        llvm::Type* bool_type = llvm::Type::getInt1Ty(function.getContext());
+        const unsigned width = type->getIntegerBitWidth();
+        const bool multiply = id == llvm::Intrinsic::umul_with_overflow ||
+                              id == llvm::Intrinsic::smul_with_overflow;
+        if (multiply && width > llvm::IntegerType::MAX_INT_BITS / 2) {
+          return reject("integer product width exceeds VM widening limit");
+        }
+        if (!multiply && width == llvm::IntegerType::MAX_INT_BITS) {
+          return reject("integer comparison width exceeds VM widening limit");
+        }
+
+        const std::optional<value_ref> lhs = lower_value(*intrinsic->getArgOperand(0), detail);
+        if (!lhs) { return reject(detail); }
+        // Repeated uses share one choice. Poison must not reach a select branch.
+        const value_ref stable_lhs = emit_synthesized(opcode::freeze, type, {*lhs});
+        const value_ref zero{.kind = value_ref_kind::constant,
+                             .constant = llvm::ConstantInt::get(type, 0)};
+        if (id == llvm::Intrinsic::abs) {
+          const value_ref negative =
+              emit_synthesized(opcode::icmp_slt, bool_type, {stable_lhs, zero});
+          const bool minimum_is_poison =
+              llvm::cast<llvm::ConstantInt>(intrinsic->getArgOperand(1))->isOne();
+          const value_ref negated =
+              emit_synthesized(opcode::sub,
+                               type,
+                               {zero, stable_lhs},
+                               minimum_is_poison ? instruction_flag_nsw : 0);
+          vm_instruction.op = opcode::select;
+          vm_instruction.operands = {negative, negated, stable_lhs};
+          program.instructions.push_back(std::move(vm_instruction));
+          continue;
+        }
+
+        const std::optional<value_ref> rhs = lower_value(*intrinsic->getArgOperand(1), detail);
+        if (!rhs) { return reject(detail); }
+        const value_ref stable_rhs = emit_synthesized(opcode::freeze, type, {*rhs});
+        if (id == llvm::Intrinsic::scmp || id == llvm::Intrinsic::ucmp) {
+          const bool is_signed = id == llvm::Intrinsic::scmp;
+          const value_ref less = emit_synthesized(
+              is_signed ? opcode::icmp_slt : opcode::icmp_ult, bool_type, {stable_lhs, stable_rhs});
+          const value_ref greater = emit_synthesized(
+              is_signed ? opcode::icmp_sgt : opcode::icmp_ugt, bool_type, {stable_lhs, stable_rhs});
+          llvm::Type* result_type = intrinsic->getType();
+          const value_ref minus_one{.kind = value_ref_kind::constant,
+                                    .constant = llvm::ConstantInt::get(result_type, -1, true)};
+          const value_ref result_zero{.kind = value_ref_kind::constant,
+                                      .constant = llvm::ConstantInt::get(result_type, 0)};
+          const value_ref one{.kind = value_ref_kind::constant,
+                              .constant = llvm::ConstantInt::get(result_type, 1)};
+          const value_ref nonnegative =
+              emit_synthesized(opcode::select, result_type, {greater, one, result_zero});
+          vm_instruction.op = opcode::select;
+          vm_instruction.operands = {less, minus_one, nonnegative};
+          program.instructions.push_back(std::move(vm_instruction));
+          continue;
+        }
+
+        const bool subtract = id == llvm::Intrinsic::usub_sat ||
+                              id == llvm::Intrinsic::ssub_sat ||
+                              id == llvm::Intrinsic::usub_with_overflow ||
+                              id == llvm::Intrinsic::ssub_with_overflow;
+        const bool is_signed = id == llvm::Intrinsic::sadd_sat ||
+                               id == llvm::Intrinsic::ssub_sat ||
+                               id == llvm::Intrinsic::sadd_with_overflow ||
+                               id == llvm::Intrinsic::ssub_with_overflow ||
+                               id == llvm::Intrinsic::smul_with_overflow;
+        const bool saturating = id == llvm::Intrinsic::uadd_sat ||
+                                id == llvm::Intrinsic::usub_sat ||
+                                id == llvm::Intrinsic::sadd_sat ||
+                                id == llvm::Intrinsic::ssub_sat;
+        value_ref arithmetic;
+        value_ref overflow;
+        if (multiply) {
+          llvm::Type* wide_type = llvm::IntegerType::get(function.getContext(), width * 2);
+          const opcode extend = is_signed ? opcode::sext : opcode::zext;
+          const value_ref wide_lhs = emit_synthesized(extend, wide_type, {stable_lhs});
+          const value_ref wide_rhs = emit_synthesized(extend, wide_type, {stable_rhs});
+          const value_ref product =
+              emit_synthesized(opcode::mul, wide_type, {wide_lhs, wide_rhs});
+          arithmetic = emit_synthesized(opcode::trunc, type, {product});
+          const value_ref restored = emit_synthesized(extend, wide_type, {arithmetic});
+          // Equality needs no extra bit, even at the maximum product width.
+          overflow = emit_synthesized(opcode::icmp_ne, bool_type, {product, restored});
+        } else {
+          arithmetic = emit_synthesized(
+              subtract ? opcode::sub : opcode::add, type, {stable_lhs, stable_rhs});
+          if (is_signed) {
+            const value_ref lhs_sign_change =
+                emit_synthesized(opcode::xor_op, type, {stable_lhs, arithmetic});
+            const value_ref rhs_sign_change =
+                emit_synthesized(opcode::xor_op,
+                                 type,
+                                 {subtract ? stable_lhs : stable_rhs,
+                                  subtract ? stable_rhs : arithmetic});
+            const value_ref overflow_bits =
+                emit_synthesized(opcode::and_op, type, {lhs_sign_change, rhs_sign_change});
+            overflow = emit_synthesized(opcode::icmp_slt, bool_type, {overflow_bits, zero});
+          } else {
+            overflow = emit_synthesized(opcode::icmp_ult,
+                                        bool_type,
+                                        {subtract ? stable_lhs : arithmetic,
+                                         subtract ? stable_rhs : stable_lhs});
+          }
+        }
+
+        if (saturating) {
+          value_ref limit = zero;
+          if (is_signed) {
+            const value_ref minimum{
+                .kind = value_ref_kind::constant,
+                .constant = llvm::ConstantInt::get(type, llvm::APInt::getSignedMinValue(width))};
+            const value_ref maximum{
+                .kind = value_ref_kind::constant,
+                .constant = llvm::ConstantInt::get(type, llvm::APInt::getSignedMaxValue(width))};
+            const value_ref negative =
+                emit_synthesized(opcode::icmp_slt, bool_type, {stable_lhs, zero});
+            limit = emit_synthesized(opcode::select, type, {negative, minimum, maximum});
+          } else if (!subtract) {
+            limit = {.kind = value_ref_kind::constant,
+                     .constant = llvm::ConstantInt::get(type, llvm::APInt::getAllOnes(width))};
+          }
+          vm_instruction.op = opcode::select;
+          vm_instruction.operands = {overflow, limit, arithmetic};
+        } else {
+          const std::uint32_t aggregate_slot = add_slot(program, intrinsic->getType());
+          micro_instruction insert_arithmetic;
+          insert_arithmetic.op = opcode::insert_value;
+          insert_arithmetic.result_slot = aggregate_slot;
+          insert_arithmetic.type = intrinsic->getType();
+          insert_arithmetic.operands = {
+              value_ref{.kind = value_ref_kind::constant,
+                        .constant = llvm::PoisonValue::get(intrinsic->getType())},
+              arithmetic};
+          insert_arithmetic.case_values.push_back(
+              llvm::ConstantInt::get(llvm::Type::getInt32Ty(function.getContext()), 0));
+          program.instructions.push_back(std::move(insert_arithmetic));
+          vm_instruction.op = opcode::insert_value;
+          vm_instruction.type = intrinsic->getType();
+          vm_instruction.operands = {
+              value_ref{.kind = value_ref_kind::slot, .slot = aggregate_slot}, overflow};
+          vm_instruction.case_values.push_back(
+              llvm::ConstantInt::get(llvm::Type::getInt32Ty(function.getContext()), 1));
+        }
         program.instructions.push_back(std::move(vm_instruction));
         continue;
       }

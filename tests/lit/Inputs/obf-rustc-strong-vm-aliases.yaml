@@ -1,0 +1,18 @@
+frontend: zig
+seed: 31337
+default_level: none
+targets:
+  - match: alias_chain
+    level: strong_vm
+  - match: escaped_storage_alias
+    level: strong_vm
+  - match: escaped_argument_alias
+    level: strong_vm
+  - match: escaped_integer_alias
+    level: strong_vm
+overrides:
+  - name: alias_direct
+    level: strong_vm
+security:
+  strip_release_markers: true
+  fail_on_public_obf_symbol: true
