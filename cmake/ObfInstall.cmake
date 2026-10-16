@@ -165,6 +165,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
       endif()
     endif()
   endif()
+  if(WIN32 AND NOT _obf_lld_candidate STREQUAL ""
+      AND NOT EXISTS "${_obf_lld_candidate}")
+    string(APPEND _obf_lld_candidate ".exe")
+  endif()
   if(EXISTS "${_obf_lld_candidate}" AND NOT IS_DIRECTORY "${_obf_lld_candidate}")
     execute_process(COMMAND "${OBF_CLANG}" --version
       OUTPUT_VARIABLE _obf_clang_version_stdout ERROR_VARIABLE _obf_clang_version_stderr

@@ -206,6 +206,7 @@ The installed wrappers use the configured destinations, including nested directo
 
 The package includes the exact configured Clang/opt hosts and their non-system dependency closure.
 Windows keeps the canonical `clang.exe` and `opt.exe` names because the plugin DLLs import those images.
+Windows linker discovery accepts reported paths with or without the `.exe` suffix.
 The wrappers set child-process loader paths before compiler, optimizer, and helper calls.
 They find headers and libraries relative to the resolved script location, not the current directory or Python installation.
 Linux host launchers also set loader paths for direct CMake tool probes outside the obfuscator wrapper.
