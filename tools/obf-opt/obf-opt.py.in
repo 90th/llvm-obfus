@@ -1,9 +1,10 @@
-#!@Python3_EXECUTABLE@
+#!@OBF_WRAPPER_SHEBANG@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
-OPT = r"@OBF_OPT@"
+@OBF_WRAPPER_PATHS@
 
 WINDOWS_OPTION_ENVIRONMENT = {
     "--obf-config": "OBF_CONFIG",
@@ -12,9 +13,20 @@ WINDOWS_OPTION_ENVIRONMENT = {
 }
 
 
+def _child_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    if LIBRARY_DIRS:
+        variable = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
+        paths = [*LIBRARY_DIRS]
+        if environment.get(variable):
+            paths.append(environment[variable])
+        environment[variable] = os.pathsep.join(paths)
+    return environment
+
+
 def main() -> int:
     command = [OPT]
-    environment = os.environ.copy()
+    environment = _child_environment()
 
     if os.name == "nt":
         arguments = iter(sys.argv[1:])

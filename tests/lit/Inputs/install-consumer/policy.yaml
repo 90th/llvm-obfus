@@ -1,0 +1,20 @@
+frontend: generic
+seed: 8675309
+default_level: none
+targets:
+  - match: package_copy_v1
+    level: strong_vm
+  - match: package_mix
+    level: vm
+vm:
+  max_virtual_instructions: 512
+  max_mba_depth: 0
+string_encoding:
+  authenticated_mode: true
+  prefer_lazy_decode: true
+  allow_ctor_fallback: true
+  enable_ephemeral_slots: false
+self_checksum:
+  enabled: false
+security:
+  fail_on_public_obf_symbol: true

@@ -67,8 +67,9 @@ If your distribution supplies a versioned executable, use its name instead of `l
 Use a new build directory when you change the compiler or LLVM SDK.
 
 The build directory contains the plugin, wrappers, runtime archive, and supporting tools.
-The generated wrappers retain the configured tool and artifact paths.
-Do not copy a wrapper alone to another directory or machine.
+The build-tree wrappers retain the configured tool and artifact paths.
+Do not copy a build-tree wrapper alone.
+Use the installed prefix below for relocation or standalone consumers.
 
 ## Windows build
 
@@ -141,6 +142,127 @@ Do not substitute a separate `clang-cl.exe` or `clang++.exe` as the plugin owner
 
 Use the generated `.cmd` launchers from PowerShell or Command Prompt.
 Windows Lit tests also require Git for Windows Bash at the location checked by the test configuration.
+
+## Install and package
+
+The standalone C/C++ package supports native Linux x86-64 glibc and Windows x64 MSVC targets.
+Build the complete wrapper dependency set before installation:
+
+```sh
+cmake --build build --target obf-clang-wrappers --parallel 3
+```
+
+### Install on Linux
+
+Set `CMAKE_INSTALL_PREFIX` during configuration, or override it during installation:
+
+```sh
+cmake --install build --config Release --prefix "$HOME/opt/llvm-obfus"
+```
+
+For distribution staging, use `DESTDIR`:
+
+```sh
+DESTDIR="$PWD/stage" cmake --install build --config Release --prefix /opt/llvm-obfus
+```
+
+The staged prefix is `stage/opt/llvm-obfus`.
+The wrappers do not retain either the staging directory or `/opt/llvm-obfus`.
+
+### Install on Windows
+
+Use the x64 developer shell from the Windows build procedure.
+Configure the prefix, then install the Release build:
+
+```powershell
+cmake -S . -B build "-DCMAKE_INSTALL_PREFIX=C:/Tools/llvm-obfus"
+cmake --build build --target obf-clang-wrappers --parallel 3
+cmake --install build --config Release
+```
+
+Do not use `DESTDIR` on Windows.
+Use the installed `.cmd` launchers from Command Prompt or PowerShell.
+They find their Python scripts through `%~dp0` and require `python` on `PATH`.
+
+### Installed layout
+
+| Directory | Contents |
+|---|---|
+| `bin/` | `obf-clang`, `obf-clang++`, `obf-opt`, and Windows `.cmd` launchers |
+| `bin/` | `obf-driver`, `obf-native-link`, `obf-checksum-bind`, and matching Clang/opt hosts |
+| `bin/` | Matching optional `ld.lld` on Linux, or `lld-link.exe` and dependent DLLs on Windows |
+| `lib/` | `libobf_runtime.a` on Linux, or `obf_runtime.lib` on Windows |
+| `lib/` | `obf_plugin.so` on Linux, or host-specific `obf_plugin.dll` and `obf_clang_plugin.dll` on Windows |
+| `lib/` | Bundled non-system shared libraries on Linux |
+| `lib/clang/<version>/` | Clang resource headers and compiler runtimes |
+| `include/obf/` | API, runtime, and C++ headers, including the generated ABI header |
+| `libexec/llvm-obfus/<tool>/` | Native Linux LLVM hosts behind loader-aware `bin/` launchers |
+| `share/licenses/llvm-obfus/` | Project license |
+
+Configure directory names with `CMAKE_INSTALL_BINDIR`, `CMAKE_INSTALL_LIBDIR`, `CMAKE_INSTALL_INCLUDEDIR`, `CMAKE_INSTALL_LIBEXECDIR`, and `CMAKE_INSTALL_DATADIR`.
+Use relative paths inside the prefix, with forward slashes.
+Absolute paths and paths that escape the prefix are rejected.
+The installed wrappers use the configured destinations, including nested directory names.
+
+The package includes the exact configured Clang/opt hosts and their non-system dependency closure.
+Windows keeps the canonical `clang.exe` and `opt.exe` names because the plugin DLLs import those images.
+Windows linker discovery accepts reported paths with or without the `.exe` suffix.
+The wrappers set child-process loader paths before compiler, optimizer, and helper calls.
+They find headers and libraries relative to the resolved script location, not the current directory or Python installation.
+Linux host launchers also set loader paths for direct CMake tool probes outside the obfuscator wrapper.
+
+Python 3.10 or later remains required.
+Linux also requires its platform C library, system linker, and C/C++ development environment.
+Windows requires its MSVC and Windows SDK development environment.
+Packages are platform-specific and do not guarantee compatibility with older operating-system or C-library versions.
+
+The installed C/C++ wrappers automatically select the installed API headers and Clang resource directory.
+Keep the runtime archive and plugins from the same build.
+An explicitly set `OBF_PLUGIN` or `OBF_RUNTIME` overrides its default, including when the value is empty.
+Missing or empty overrides fail rather than silently selecting another plugin or runtime.
+On Windows, `OBF_PLUGIN` must select the Clang-host plugin, not the opt-host plugin.
+
+### Use an external project
+
+Compile from any working directory with the installed wrappers:
+
+```sh
+"/path/to/prefix/bin/obf-clang" --obf-config=policy.yaml app.c -o app
+"/path/to/prefix/bin/obf-clang++" --obf-config=policy.yaml app.cpp -o app-cpp
+```
+
+Use `.cmd` suffixes for the corresponding Windows commands.
+The [string-copy API](usage.md#authenticated-cross-dso-string-copies) uses the installed `<obf/string_copy.h>` header.
+It does not require repository headers or separate runtime-link arguments.
+
+For a CMake consumer, select the wrappers when you create its build directory:
+
+```sh
+cmake -S /path/to/consumer -B /path/to/consumer-build -G Ninja \
+  "-DCMAKE_C_COMPILER=/path/to/prefix/bin/obf-clang" \
+  "-DCMAKE_CXX_COMPILER=/path/to/prefix/bin/obf-clang++"
+cmake --build /path/to/consumer-build --parallel 3
+```
+
+Move the entire prefix together.
+Create a fresh consumer build directory after relocation because CMake caches compiler paths.
+No plugin or runtime environment override is required after the move.
+
+### Create an archive
+
+CPack uses the same install rules:
+
+```sh
+cpack --config build/CPackConfig.cmake -B packages
+```
+
+The default generator is TGZ on Linux and ZIP on Windows.
+Archive names identify the matching LLVM version, operating system, and processor.
+Extract the archive and use its complete prefix.
+The package does not install the optional Rust, TinyGo, or standalone bitcode wrappers.
+Those workflows retain their existing build-tree requirements.
+
+Before distribution, preserve the upstream license notices for bundled LLVM and runtime libraries.
 
 ## CMake cache variables
 

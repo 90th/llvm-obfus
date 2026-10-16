@@ -1,4 +1,4 @@
-#!@Python3_EXECUTABLE@
+#!@OBF_WRAPPER_SHEBANG@
 
 import hashlib
 import os
@@ -10,13 +10,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-CLANG = r"@OBF_CLANG@"
-CLANGXX = r"@OBF_CLANGXX@"
-PLUGIN = r"@OBF_CLANG_PLUGIN_PATH@"
-RUNTIME_ARCHIVE = r"@OBF_RUNTIME_ARCHIVE@"
-DRIVER = r"@CMAKE_CURRENT_BINARY_DIR@/obf-driver@CMAKE_EXECUTABLE_SUFFIX@"
-CHECKSUM_BINDER = r"@OBF_CHECKSUM_BIND@"
-NATIVE_LINKER = r"@OBF_NATIVE_LINK@"
+@OBF_WRAPPER_PATHS@
+
+PLUGIN = os.environ.get("OBF_PLUGIN", PLUGIN)
+RUNTIME_ARCHIVE = os.environ.get("OBF_RUNTIME", RUNTIME_ARCHIVE)
 
 _QUERY_ARGS = {
     "--help",
@@ -55,6 +52,17 @@ class _wrapper_error(RuntimeError):
 def _fail(message: str) -> int:
     print(f"obf-clang: {message}", file=sys.stderr)
     return 2
+
+
+def _child_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    if LIBRARY_DIRS:
+        variable = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
+        paths = [*LIBRARY_DIRS]
+        if env.get(variable):
+            paths.append(env[variable])
+        env[variable] = os.pathsep.join(paths)
+    return env
 
 
 def _parse_args(argv: list[str]) -> tuple[list[str], str | None, int | None]:
@@ -415,6 +423,9 @@ def _resolve_executable(reference: str) -> str | None:
         if found is None:
             return None
         candidate = Path(found)
+    if os.name == "nt" and not candidate.is_file():
+        # Clang can report an absolute sibling linker without its .exe suffix.
+        candidate = Path(str(candidate) + ".exe")
     if not candidate.is_file() or not os.access(candidate, os.X_OK):
         return None
     # Keep the ld.lld spelling: LLD's symlink name selects its ELF driver.
@@ -431,10 +442,14 @@ def _tool_version(command: str | list[str], pattern: str, env: dict[str, str]) -
 
 
 def _managed_lld(compiler: list[str], env: dict[str, str]) -> str:
-    completed = _capture([*compiler, "-print-prog-name=ld.lld"], env)
-    reported = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+    reported = MANAGED_LLD
+    query_failed = False
+    if reported is None:
+        completed = _capture([*compiler, "-print-prog-name=ld.lld"], env)
+        reported = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+        query_failed = completed.returncode != 0
     resolved = _resolve_executable(reported) if reported else None
-    if completed.returncode != 0 or resolved is None:
+    if query_failed or resolved is None:
         raise _wrapper_error(
             "managed obfuscation LTO requires the configured ELF ld.lld; "
             f"clang reported an unavailable linker: {reported or '<none>'}"
@@ -931,7 +946,7 @@ def _validate_lto_inputs(inputs: list[Path], env: dict[str, str]) -> None:
 def _managed_link_main(linker_args: list[str]) -> int:
     marker = "--obf-managed-lto-linker"
     args = [arg for arg in _expand_linker_response_args(linker_args) if arg != marker]
-    env = os.environ.copy()
+    env = _child_environment()
     managed_lld = env.pop("OBF_MANAGED_LLD", "")
     if not managed_lld or _resolve_executable(managed_lld) is None:
         return _fail("managed LTO linker dispatch is missing the configured ELF LLD")
@@ -1167,7 +1182,7 @@ def main() -> int:
     clang_args, config_path, early_exit = _parse_args(sys.argv[1:])
     if early_exit is not None:
         return early_exit
-    env = os.environ.copy()
+    env = _child_environment()
     if config_path is not None:
         env["OBF_CONFIG"] = config_path
     # Never inherit a stale frontend phase from another wrapper invocation.
@@ -1191,6 +1206,10 @@ def main() -> int:
             # tokens as driver operands, never expanding -Xlinker responses.
             clang_args = response_args
         compiler = _compiler_invocation(sys.argv[0], response_args)
+        if PUBLIC_INCLUDE_DIR:
+            compiler.extend(["-isystem", PUBLIC_INCLUDE_DIR])
+        if CLANG_RESOURCE_DIR:
+            compiler.extend(["-resource-dir", CLANG_RESOURCE_DIR])
         query_action = any(arg in _QUERY_ARGS or arg.startswith(_QUERY_ARG_PREFIXES) for arg in response_args)
         if query_action:
             return subprocess.run([*compiler, *clang_args], env=env).returncode

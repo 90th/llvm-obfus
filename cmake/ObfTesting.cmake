@@ -43,3 +43,27 @@ add_test(
 )
 set_tests_properties(obf-runtime-decode-concurrency-tests obf-mba-lifetime-tests
   PROPERTIES TIMEOUT 120)
+
+if(OBF_PLUGIN_IS_LOADABLE AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32))
+  foreach(_obf_package_mode IN ITEMS install package)
+    set(_obf_package_arguments "")
+    if(_obf_package_mode STREQUAL "package")
+      set(_obf_package_arguments --package --cpack "${CMAKE_CPACK_COMMAND}")
+    endif()
+    add_test(
+      NAME obf-${_obf_package_mode}-consumer
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/tests/lit/Inputs/install_consumer.py"
+              --build "${CMAKE_CURRENT_BINARY_DIR}"
+              --cmake "${CMAKE_COMMAND}"
+              ${_obf_package_arguments}
+              --bindir "${CMAKE_INSTALL_BINDIR}"
+              --libdir "${CMAKE_INSTALL_LIBDIR}"
+              --includedir "${CMAKE_INSTALL_INCLUDEDIR}"
+              --forbid-root "${PROJECT_SOURCE_DIR}"
+              --forbid-root "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+    set_tests_properties(obf-${_obf_package_mode}-consumer
+      PROPERTIES RUN_SERIAL TRUE TIMEOUT 600)
+  endforeach()
+endif()

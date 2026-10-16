@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+bindir = Path(__file__).resolve().parent
+library_dir = str((bindir / @OBF_HOST_LIBRARY_RELATIVE@).resolve())
+executable = str((bindir / @OBF_HOST_EXECUTABLE_RELATIVE@).resolve())
+previous = os.environ.get("LD_LIBRARY_PATH")
+os.environ["LD_LIBRARY_PATH"] = library_dir + (os.pathsep + previous if previous else "")
+arguments = sys.argv[1:]
+if not arguments or not arguments[0].startswith("-cc1"):
+    arguments[:0] = @OBF_HOST_ARGUMENTS@
+os.execv(executable, [executable, *arguments])

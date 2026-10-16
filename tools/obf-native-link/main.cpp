@@ -1903,10 +1903,26 @@ class validator {
     }
     for (const auto& identity : resolution.selected) {
       if (resolve(identity, false) || non_owning_identities.contains(identity)) { continue; }
-      if (coff && std::any_of(resolution.contributions.begin(),
-                              resolution.contributions.end(),
-                              [&](const auto& value) { return value.first == identity; })) {
-        fail("missing authoritative MAP Lib:Object binding for selected input " + identity);
+      if (coff) {
+        bool has_contribution = false;
+        bool resources_only = true;
+        for (const auto& [owner, section] : resolution.contributions) {
+          if (owner != identity) { continue; }
+          has_contribution = true;
+          if (section != ".rsrc" && !StringRef(section).starts_with(".rsrc$")) {
+            resources_only = false;
+            break;
+          }
+        }
+        if (has_contribution && resources_only) {
+          // Linker-generated resources have no disk object or MAP provider.
+          // A required static-provider lookup still rejects this identity.
+          non_owning_identities.insert(identity);
+          continue;
+        }
+        if (has_contribution) {
+          fail("missing authoritative MAP Lib:Object binding for selected input " + identity);
+        }
       }
     }
   }
