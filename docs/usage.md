@@ -498,6 +498,11 @@ If the required backend does not run, the final link fails.
 This also applies to shared-library links that retain the guard.
 Do not define the guard or suppress the link error to bypass validation.
 
+The pending guard takes the retained function's address to preserve its ABI during interprocedural LTO optimization.
+This protects internal VM implementations, thunks, and internalized entry wrappers without requiring `--export-dynamic`.
+The backend checks the VM ABI and hidden token before it removes the guard.
+Dead boundaries can still be discarded because the address use stays inside the function.
+
 Use the same effective configuration, seed, and protection options at pre-link compilation and final linking.
 Rebuild protected bitcode after you change those settings.
 The backend rejects incompatible retained configuration or seed identities.

@@ -80,7 +80,42 @@ def check_backend_ir(case, args, *, entry="protected_calc", parameters=("i32",),
         raise RuntimeError("post-LTO VM implementation lost table-backed execution")
 
 
+def split_forward_matrix(args, inputs, work):
+    for mode in ("full", "thin"):
+        for optimization in ("0", "2"):
+            case = work / f"split-{mode}-{optimization}"
+            case.mkdir()
+            policy = case / "policy.yaml"
+            policy.write_text(
+                "seed: 4\ndefault_level: none\ntargets:\n"
+                "  - match: package_calc\n    level: vm\n"
+                "vm:\n  max_mba_depth: 0\n"
+            )
+            config = f"--obf-config={policy}"
+            target = case / "target.o"
+            binary = case / "program"
+            run([args.wrapper, config, f"-O{optimization}", f"-flto={mode}",
+                 "-x", "ir", "-c", "lto-split-forward.ir", "-o", str(target)], cwd=inputs)
+            retained = run([args.dis, str(target), "-o", "-"]).stdout
+            if '"vm.entry.thunk.shape.split"' not in retained:
+                raise RuntimeError("ABI regression did not select the direct split-forward thunk")
+            # No --export-dynamic: LTO must preserve an internalized interface,
+            # its unused source argument, and the direct-call implementation ABI.
+            run([args.wrapper, config, f"-O{optimization}", f"-flto={mode}",
+                 "-Wl,--save-temps", str(target), "-o", str(binary)])
+            for arguments in ([], ["extra"], ["extra", "arguments"]):
+                run([str(binary), *arguments])
+            undefined = run([args.nm, "--undefined-only", str(binary)]).stdout
+            if "__obf_lto_finalize_required" in undefined:
+                raise RuntimeError("split-forward finalization guard survived the native link")
+            dynamic = run([args.nm, "--dynamic", "--defined-only", str(binary)]).stdout
+            if "package_calc" in dynamic or "__obf_" in dynamic:
+                raise RuntimeError(f"split-forward executable unexpectedly exports its VM boundary: {dynamic}")
+            print(f"passed split-forward {mode} O{optimization}: private ABI, native, guard")
+
+
 def contract_matrix(args, inputs, work):
+    split_forward_matrix(args, inputs, work)
 
     for mode in ("full", "thin"):
         for optimization in ("0", "2"):

@@ -884,7 +884,9 @@ void validate_lto_shapes(llvm::Function& function) {
 }
 
 llvm::Function& get_lto_finalize_guard(llvm::Module& module) {
-  auto* type = llvm::FunctionType::get(llvm::Type::getVoidTy(module.getContext()), false);
+  auto* type = llvm::FunctionType::get(llvm::Type::getVoidTy(module.getContext()),
+                                       {llvm::PointerType::getUnqual(module.getContext())},
+                                       false);
   llvm::GlobalValue* existing = module.getNamedValue(kLtoFinalizeGuard);
   auto* guard = llvm::dyn_cast_or_null<llvm::Function>(existing);
   if (existing != nullptr &&
@@ -937,7 +939,8 @@ bool function_has_pending_lto_finalize_guard(const llvm::Function& function,
   for (const llvm::BasicBlock& block : function) {
     for (const llvm::Instruction& instruction : block) {
       const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-      if (call != nullptr && call->getCalledFunction() == &guard && call->arg_size() == 0) {
+      if (call != nullptr && call->getCalledFunction() == &guard && call->arg_size() == 1 &&
+          call->getArgOperand(0)->stripPointerCasts() == &function) {
         return true;
       }
     }
@@ -980,7 +983,8 @@ bool prepare_retained_native_orchestrator_promotions(
     if (guard == nullptr) { guard = &get_lto_finalize_guard(module); }
     if (!function_has_pending_lto_finalize_guard(*function, *guard)) {
       llvm::IRBuilder<> builder(&*function->getEntryBlock().getFirstInsertionPt());
-      builder.CreateCall(guard);
+      builder.CreateCall(
+          guard, {builder.CreatePointerCast(function, guard->getFunctionType()->getParamType(0))});
     }
 
     fam.invalidate(*function, llvm::PreservedAnalyses::none());
@@ -1111,7 +1115,10 @@ void retain_lto_contracts(llvm::Module& module,
     if (!contract.record.requires_finalization) { continue; }
     if (guard == nullptr) { guard = &get_lto_finalize_guard(module); }
     llvm::IRBuilder<> builder(&*function->getEntryBlock().getFirstInsertionPt());
-    builder.CreateCall(guard);
+    // An unknown address use pins the ABI during interprocedural LTO passes.
+    // Keep it in the body so dead boundaries can still be discarded.
+    builder.CreateCall(
+        guard, {builder.CreatePointerCast(function, guard->getFunctionType()->getParamType(0))});
   }
 }
 
@@ -1308,7 +1315,8 @@ bool release_lto_contracts(llvm::Module& module) {
     }
     for (llvm::User* user : guard->users()) {
       auto* call = llvm::dyn_cast<llvm::CallInst>(user);
-      if (call == nullptr || call->getCalledFunction() != guard || call->arg_size() != 0) {
+      if (call == nullptr || call->getCalledFunction() != guard || call->arg_size() != 1 ||
+          call->getArgOperand(0)->stripPointerCasts() != call->getFunction()) {
         report_coverage_finalization_failure(module, "invalid pending LTO finalization guard use");
       }
       const lto_obligation_record record = read_lto_obligation(*call->getFunction());

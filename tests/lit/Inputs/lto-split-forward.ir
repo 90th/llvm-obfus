@@ -1,0 +1,21 @@
+source_filename = "lto-split-forward"
+
+; The unused argument permits dead-argument elimination if LTO loses the ABI pin.
+; Keep the entry private to the executable: the link does not export its symbols.
+define i64 @package_calc(i64 %value, i64 %unused) noinline {
+entry:
+  %mixed = mul i64 %value, 37
+  %result = add i64 %mixed, 11
+  ret i64 %result
+}
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  %input = zext i32 %argc to i64
+  %actual = call i64 @package_calc(i64 %input, i64 99)
+  %mixed = mul i64 %input, 37
+  %expected = add i64 %mixed, 11
+  %wrong = icmp ne i64 %actual, %expected
+  %exit = zext i1 %wrong to i32
+  ret i32 %exit
+}
